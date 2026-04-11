@@ -1,0 +1,19 @@
+[package]
+name = "proofbridge-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+sha3 = { workspace = true }
+stellar-strkey = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils", "alloc"] }
+hex = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+rand = { workspace = true }

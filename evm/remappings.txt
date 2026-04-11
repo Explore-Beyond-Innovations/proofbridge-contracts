@@ -1,0 +1,5 @@
+@poseidon2/=lib/poseidon2-evm/
+forge-std=lib/forge-std/src/
+@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/
+solady=lib/solady/src/
+@solidity-mmr=lib/solidity-mmr/src/

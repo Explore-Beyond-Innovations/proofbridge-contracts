@@ -1,0 +1,12 @@
+# Rust's output directory
+target
+
+# Local settings
+.soroban
+.stellar
+
+node_modules/
+temp-mmr-db/
+*.bin
+test_params.json
+vk

@@ -1,0 +1,35 @@
+# Compiled outputs
+dist/
+*.js
+*.d.ts
+*.js.map
+
+# Config files with sensitive data
+deploy/config.json
+
+# Node modules
+node_modules/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keep template files
+!deploy/config.template.json
+!**/*.config.js

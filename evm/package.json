@@ -1,0 +1,29 @@
+{
+  "name": "contracts",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "deploy": "npx tsx js-scripts/deploy/deploy.ts",
+    "deploy:help": "npx tsx js-scripts/deploy/deploy.ts --help"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.10.0",
+  "dependencies": {
+    "@noble/curves": "^2.0.0",
+    "@zkpassport/poseidon2": "^0.6.2",
+    "dotenv": "^17.2.2",
+    "ethereum-cryptography": "^3.2.0",
+    "ethers": "^6.15.0",
+    "hex": "^0.1.0",
+    "proofbridge-mmr": "1.0.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}

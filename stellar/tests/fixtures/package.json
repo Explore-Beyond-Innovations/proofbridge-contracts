@@ -1,0 +1,20 @@
+{
+  "name": "stellar-test-fixtures",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "generate": "npx tsx generate_fixtures.ts"
+  },
+  "dependencies": {
+    "@aztec/bb.js": "0.87.0",
+    "@noir-lang/noir_js": "1.0.0-beta.9",
+    "@zkpassport/poseidon2": "^0.6.2",
+    "ethers": "^6.15.0",
+    "proofbridge-mmr": "1.0.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

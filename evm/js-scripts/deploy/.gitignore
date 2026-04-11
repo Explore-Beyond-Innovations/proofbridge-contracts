@@ -1,0 +1,17 @@
+# Configuration
+config.json
+
+# Deployment records
+deployments.json
+deployments-*.json
+
+# Environment
+.env
+.env.local
+
+# Node modules
+node_modules/
+
+# Build artifacts
+*.js
+*.js.map
