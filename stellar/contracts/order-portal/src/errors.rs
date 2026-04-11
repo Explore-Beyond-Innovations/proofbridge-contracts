@@ -10,7 +10,6 @@ pub enum OrderPortalError {
     // ==========================================================================
     // Validation Errors (1-20)
     // ==========================================================================
-
     /// Token address is zero
     TokenZeroAddress = 1,
     /// Amount is zero
@@ -27,7 +26,6 @@ pub enum OrderPortalError {
     // ==========================================================================
     // Chain/Route Errors (10-20)
     // ==========================================================================
-
     /// Destination chain is not supported
     AdChainNotSupported = 10,
     /// AdManager address doesn't match configuration
@@ -40,7 +38,6 @@ pub enum OrderPortalError {
     // ==========================================================================
     // Order Errors (20-30)
     // ==========================================================================
-
     /// Order already exists for this hash
     OrderExists = 20,
     /// Order is not open
@@ -53,7 +50,6 @@ pub enum OrderPortalError {
     // ==========================================================================
     // Auth Errors (30-40)
     // ==========================================================================
-
     /// Address is zero
     ZeroAddress = 30,
     /// Message hash is invalid (zero)
@@ -72,7 +68,6 @@ pub enum OrderPortalError {
     // ==========================================================================
     // External Call Errors (40-50)
     // ==========================================================================
-
     /// MerkleManager append failed
     MerkleAppendFailed = 40,
     /// Verifier call failed
@@ -81,7 +76,6 @@ pub enum OrderPortalError {
     // ==========================================================================
     // Initialization Errors (50-60)
     // ==========================================================================
-
     /// Contract is already initialized
     AlreadyInitialized = 50,
     /// Contract is not initialized
@@ -89,11 +83,25 @@ pub enum OrderPortalError {
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
-    fn token_zero_address() -> Self { Self::TokenZeroAddress }
-    fn merkle_append_failed() -> Self { Self::MerkleAppendFailed }
-    fn invalid_proof() -> Self { Self::InvalidProof }
-    fn invalid_message() -> Self { Self::InvalidMessage }
-    fn token_already_used() -> Self { Self::TokenAlreadyUsed }
-    fn request_token_expired() -> Self { Self::RequestTokenExpired }
-    fn invalid_signer() -> Self { Self::InvalidSigner }
+    fn token_zero_address() -> Self {
+        Self::TokenZeroAddress
+    }
+    fn merkle_append_failed() -> Self {
+        Self::MerkleAppendFailed
+    }
+    fn invalid_proof() -> Self {
+        Self::InvalidProof
+    }
+    fn invalid_message() -> Self {
+        Self::InvalidMessage
+    }
+    fn token_already_used() -> Self {
+        Self::TokenAlreadyUsed
+    }
+    fn request_token_expired() -> Self {
+        Self::RequestTokenExpired
+    }
+    fn invalid_signer() -> Self {
+        Self::InvalidSigner
+    }
 }

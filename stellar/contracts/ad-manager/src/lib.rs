@@ -110,7 +110,14 @@ impl AdManagerContract {
             &contract_bytes,
         );
 
-        Self::verify_request(&env, &message, &auth_token, time_to_expire, &signature, &public_key)?;
+        Self::verify_request(
+            &env,
+            &message,
+            &auth_token,
+            time_to_expire,
+            &signature,
+            &public_key,
+        )?;
 
         storage::set_manager(&env, &manager, status);
         storage::set_request_hash_used(&env, &message);
@@ -149,7 +156,14 @@ impl AdManagerContract {
             &contract_bytes,
         );
 
-        Self::verify_request(&env, &message, &auth_token, time_to_expire, &signature, &public_key)?;
+        Self::verify_request(
+            &env,
+            &message,
+            &auth_token,
+            time_to_expire,
+            &signature,
+            &public_key,
+        )?;
 
         let chain_info = ChainInfo {
             supported,
@@ -191,7 +205,14 @@ impl AdManagerContract {
             &contract_bytes,
         );
 
-        Self::verify_request(&env, &message, &auth_token, time_to_expire, &signature, &public_key)?;
+        Self::verify_request(
+            &env,
+            &message,
+            &auth_token,
+            time_to_expire,
+            &signature,
+            &public_key,
+        )?;
 
         storage::remove_chain(&env, order_chain_id);
         storage::set_request_hash_used(&env, &message);
@@ -241,7 +262,14 @@ impl AdManagerContract {
             &contract_bytes,
         );
 
-        Self::verify_request(&env, &message, &auth_token, time_to_expire, &signature, &public_key)?;
+        Self::verify_request(
+            &env,
+            &message,
+            &auth_token,
+            time_to_expire,
+            &signature,
+            &public_key,
+        )?;
 
         storage::set_token_route(&env, &ad_token, order_chain_id, &order_token);
         storage::set_request_hash_used(&env, &message);
@@ -283,7 +311,14 @@ impl AdManagerContract {
             &contract_bytes,
         );
 
-        Self::verify_request(&env, &message, &auth_token, time_to_expire, &signature, &public_key)?;
+        Self::verify_request(
+            &env,
+            &message,
+            &auth_token,
+            time_to_expire,
+            &signature,
+            &public_key,
+        )?;
 
         storage::remove_token_route(&env, &ad_token, order_chain_id);
         storage::set_request_hash_used(&env, &message);
@@ -349,7 +384,12 @@ impl AdManagerContract {
         );
 
         let signer = Self::verify_request(
-            &env, &message, &auth_token, time_to_expire, &signature, &public_key,
+            &env,
+            &message,
+            &auth_token,
+            time_to_expire,
+            &signature,
+            &public_key,
         )?;
 
         token::transfer_from_user_bytes32(
@@ -418,7 +458,12 @@ impl AdManagerContract {
         );
 
         let signer = Self::verify_request(
-            &env, &message, &auth_token, time_to_expire, &signature, &public_key,
+            &env,
+            &message,
+            &auth_token,
+            time_to_expire,
+            &signature,
+            &public_key,
         )?;
 
         if ad.maker != signer {
@@ -485,7 +530,12 @@ impl AdManagerContract {
         );
 
         let signer = Self::verify_request(
-            &env, &message, &auth_token, time_to_expire, &signature, &public_key,
+            &env,
+            &message,
+            &auth_token,
+            time_to_expire,
+            &signature,
+            &public_key,
         )?;
 
         if ad.maker != signer {
@@ -540,7 +590,12 @@ impl AdManagerContract {
         );
 
         let signer = Self::verify_request(
-            &env, &message, &auth_token, time_to_expire, &signature, &public_key,
+            &env,
+            &message,
+            &auth_token,
+            time_to_expire,
+            &signature,
+            &public_key,
         )?;
 
         if ad.maker != signer {
@@ -618,7 +673,12 @@ impl AdManagerContract {
         );
 
         let signer = Self::verify_request(
-            &env, &message, &auth_token, time_to_expire, &signature, &public_key,
+            &env,
+            &message,
+            &auth_token,
+            time_to_expire,
+            &signature,
+            &public_key,
         )?;
 
         if ad.maker != signer {
@@ -687,7 +747,14 @@ impl AdManagerContract {
             &contract_bytes,
         );
 
-        Self::verify_request(&env, &message, &auth_token, time_to_expire, &signature, &public_key)?;
+        Self::verify_request(
+            &env,
+            &message,
+            &auth_token,
+            time_to_expire,
+            &signature,
+            &public_key,
+        )?;
 
         // Build public inputs and verify ZK proof
         let public_inputs = cross_contract::build_public_inputs(
@@ -750,7 +817,10 @@ impl AdManagerContract {
     /// Get the latest merkle root.
     pub fn get_latest_merkle_root(env: Env) -> Result<BytesN<32>, AdManagerError> {
         let config = storage::get_config(&env)?;
-        Ok(cross_contract::get_merkle_root(&env, &config.merkle_manager))
+        Ok(cross_contract::get_merkle_root(
+            &env,
+            &config.merkle_manager,
+        ))
     }
 
     /// Get historical root at index.
@@ -766,7 +836,10 @@ impl AdManagerContract {
     /// Get merkle leaf count.
     pub fn get_merkle_leaf_count(env: Env) -> Result<u128, AdManagerError> {
         let config = storage::get_config(&env)?;
-        Ok(cross_contract::get_merkle_width(&env, &config.merkle_manager))
+        Ok(cross_contract::get_merkle_width(
+            &env,
+            &config.merkle_manager,
+        ))
     }
 
     /// Get ad details.
@@ -818,7 +891,14 @@ impl AdManagerContract {
             return Err(AdManagerError::RequestHashProcessed);
         }
 
-        auth::pre_auth_validations(env, message, auth_token, time_to_expire, signature, public_key)
+        auth::pre_auth_validations(
+            env,
+            message,
+            auth_token,
+            time_to_expire,
+            signature,
+            public_key,
+        )
     }
 }
 

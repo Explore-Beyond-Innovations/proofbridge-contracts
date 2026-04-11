@@ -33,7 +33,13 @@ mod contract_tests {
         let w_native_token = Address::generate(&env);
         let chain_id: u128 = 2_000_000_002;
 
-        client.initialize(&admin, &verifier, &merkle_manager, &w_native_token, &chain_id);
+        client.initialize(
+            &admin,
+            &verifier,
+            &merkle_manager,
+            &w_native_token,
+            &chain_id,
+        );
 
         assert!(client.is_initialized());
         assert!(client.is_manager(&admin));
@@ -49,7 +55,13 @@ mod contract_tests {
         let w_native_token = Address::generate(&env);
         let chain_id: u128 = 2_000_000_002;
 
-        client.initialize(&admin, &verifier, &merkle_manager, &w_native_token, &chain_id);
+        client.initialize(
+            &admin,
+            &verifier,
+            &merkle_manager,
+            &w_native_token,
+            &chain_id,
+        );
 
         let result = client.try_initialize(
             &admin,
@@ -70,7 +82,13 @@ mod contract_tests {
         let w_native_token = Address::generate(&env);
         let chain_id: u128 = 42;
 
-        client.initialize(&admin, &verifier, &merkle_manager, &w_native_token, &chain_id);
+        client.initialize(
+            &admin,
+            &verifier,
+            &merkle_manager,
+            &w_native_token,
+            &chain_id,
+        );
 
         assert_eq!(client.get_chain_id(), 42);
         assert!(client.is_manager(&admin));
@@ -279,10 +297,22 @@ mod auth_tests {
         let contract_addr = BytesN::from_array(&env, &[0xCC; 32]);
 
         let hash1 = auth::create_order_request_hash(
-            &env, &ad_id, &order_hash, &auth_token, 9999, 42, &contract_addr,
+            &env,
+            &ad_id,
+            &order_hash,
+            &auth_token,
+            9999,
+            42,
+            &contract_addr,
         );
         let hash2 = auth::create_order_request_hash(
-            &env, &ad_id, &order_hash, &auth_token, 9999, 42, &contract_addr,
+            &env,
+            &ad_id,
+            &order_hash,
+            &auth_token,
+            9999,
+            42,
+            &contract_addr,
         );
         assert_eq!(hash1, hash2);
     }
@@ -297,7 +327,13 @@ mod auth_tests {
         let contract_addr = BytesN::from_array(&env, &[0xCC; 32]);
 
         let create_hash = auth::create_order_request_hash(
-            &env, &ad_id, &order_hash, &auth_token, 9999, 42, &contract_addr,
+            &env,
+            &ad_id,
+            &order_hash,
+            &auth_token,
+            9999,
+            42,
+            &contract_addr,
         );
         let unlock_hash = auth::unlock_order_request_hash(
             &env,

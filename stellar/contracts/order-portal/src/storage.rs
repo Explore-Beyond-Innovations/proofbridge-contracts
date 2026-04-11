@@ -66,7 +66,9 @@ pub fn get_chain(env: &Env, chain_id: u128) -> Option<ChainInfo> {
 
 /// Set chain configuration
 pub fn set_chain(env: &Env, chain_id: u128, info: &ChainInfo) {
-    env.storage().persistent().set(&(KEY_CHAINS, chain_id), info);
+    env.storage()
+        .persistent()
+        .set(&(KEY_CHAINS, chain_id), info);
 }
 
 /// Remove chain configuration
@@ -79,14 +81,23 @@ pub fn remove_chain(env: &Env, chain_id: u128) {
 // =============================================================================
 
 /// Get token route: order_token -> (ad_chain_id) -> ad_token
-pub fn get_token_route(env: &Env, order_token: &BytesN<32>, ad_chain_id: u128) -> Option<BytesN<32>> {
+pub fn get_token_route(
+    env: &Env,
+    order_token: &BytesN<32>,
+    ad_chain_id: u128,
+) -> Option<BytesN<32>> {
     env.storage()
         .persistent()
         .get(&(KEY_ROUTES, order_token.clone(), ad_chain_id))
 }
 
 /// Set token route
-pub fn set_token_route(env: &Env, order_token: &BytesN<32>, ad_chain_id: u128, ad_token: &BytesN<32>) {
+pub fn set_token_route(
+    env: &Env,
+    order_token: &BytesN<32>,
+    ad_chain_id: u128,
+    ad_token: &BytesN<32>,
+) {
     env.storage()
         .persistent()
         .set(&(KEY_ROUTES, order_token.clone(), ad_chain_id), ad_token);

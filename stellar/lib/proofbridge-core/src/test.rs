@@ -118,25 +118,13 @@ mod auth_tests {
         let auth_token = BytesN::from_array(&env, &[0xAA; 32]);
         let contract_addr = BytesN::from_array(&env, &[0xBB; 32]);
 
-        let hash1 = auth::hash_request(
-            &env,
-            &auth_token,
-            1000,
-            "createAd",
-            &[],
-            42,
-            &contract_addr,
+        let hash1 =
+            auth::hash_request(&env, &auth_token, 1000, "createAd", &[], 42, &contract_addr);
+        let hash2 = auth::hash_request(&env, &auth_token, 1000, "fundAd", &[], 42, &contract_addr);
+        assert_ne!(
+            hash1, hash2,
+            "Different actions must produce different hashes"
         );
-        let hash2 = auth::hash_request(
-            &env,
-            &auth_token,
-            1000,
-            "fundAd",
-            &[],
-            42,
-            &contract_addr,
-        );
-        assert_ne!(hash1, hash2, "Different actions must produce different hashes");
     }
 
     #[test]

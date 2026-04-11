@@ -12,9 +12,8 @@ use crate::errors::ProofBridgeError;
 /// Native token placeholder address (all 0xEE bytes)
 /// Equivalent to EVM's 0xEeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
 pub const NATIVE_TOKEN_ADDRESS: [u8; 32] = [
-    0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
-    0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
-    0xEE, 0xEE,
+    0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
+    0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
 ];
 
 // =============================================================================
@@ -99,7 +98,14 @@ pub fn transfer_from_user_bytes32<E: ProofBridgeError>(
     amount: u128,
 ) -> Result<(), E> {
     let contract_addr = env.current_contract_address();
-    transfer_tokens(env, token_bytes, w_native_addr, from, &contract_addr, amount)
+    transfer_tokens(
+        env,
+        token_bytes,
+        w_native_addr,
+        from,
+        &contract_addr,
+        amount,
+    )
 }
 
 /// Transfer tokens from contract to user using BytesN<32> token address
@@ -124,5 +130,12 @@ pub fn transfer_to_recipient_bytes32<E: ProofBridgeError>(
 ) -> Result<(), E> {
     let contract_addr = env.current_contract_address();
     let recipient = bytes32_to_account_address(env, recipient_bytes);
-    transfer_tokens(env, token_bytes, w_native_addr, &contract_addr, &recipient, amount)
+    transfer_tokens(
+        env,
+        token_bytes,
+        w_native_addr,
+        &contract_addr,
+        &recipient,
+        amount,
+    )
 }

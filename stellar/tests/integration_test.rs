@@ -425,7 +425,11 @@ fn setup() -> TestSetup<'static> {
     env.register_at(&ad_token_addr, TokenContract, (admin_addr.clone(), 0i128));
 
     let order_token_addr = contract_address(&env, &tp.order_chain_token);
-    env.register_at(&order_token_addr, TokenContract, (admin_addr.clone(), 0i128));
+    env.register_at(
+        &order_token_addr,
+        TokenContract,
+        (admin_addr.clone(), 0i128),
+    );
 
     // w_native_token is required by the constructor but not used for non-native tokens
     let w_native_token = ad_token_addr.clone();

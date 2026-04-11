@@ -100,13 +100,22 @@ pub fn remove_chain(env: &Env, chain_id: u128) {
 // =============================================================================
 
 /// Get token route: (ad_token, order_chain_id) -> order_token
-pub fn get_token_route(env: &Env, ad_token: &BytesN<32>, order_chain_id: u128) -> Option<BytesN<32>> {
+pub fn get_token_route(
+    env: &Env,
+    ad_token: &BytesN<32>,
+    order_chain_id: u128,
+) -> Option<BytesN<32>> {
     let key = (KEY_ROUTES, ad_token.clone(), order_chain_id);
     env.storage().persistent().get(&key)
 }
 
 /// Set token route
-pub fn set_token_route(env: &Env, ad_token: &BytesN<32>, order_chain_id: u128, order_token: &BytesN<32>) {
+pub fn set_token_route(
+    env: &Env,
+    ad_token: &BytesN<32>,
+    order_chain_id: u128,
+    order_token: &BytesN<32>,
+) {
     let key = (KEY_ROUTES, ad_token.clone(), order_chain_id);
     env.storage().persistent().set(&key, order_token);
 }
@@ -242,4 +251,3 @@ pub fn extend_instance_ttl(env: &Env) {
         .instance()
         .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 }
-

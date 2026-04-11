@@ -44,8 +44,8 @@ pub fn validate_order(env: &Env, ad: &Ad, params: &OrderParams) -> Result<(), Ad
     }
 
     // Check source chain is supported
-    let chain_info = storage::get_chain(env, params.order_chain_id)
-        .ok_or(AdManagerError::ChainNotSupported)?;
+    let chain_info =
+        storage::get_chain(env, params.order_chain_id).ok_or(AdManagerError::ChainNotSupported)?;
     if !chain_info.supported {
         return Err(AdManagerError::ChainNotSupported);
     }

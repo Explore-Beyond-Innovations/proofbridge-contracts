@@ -14,10 +14,10 @@ mod cross_chain_tests {
     use crate::eip712::{
         abi_encode_string, abi_encode_uint256, hash_typed_data_v4, keccak256, struct_hash_order,
     };
+    use crate::types::OrderParams;
     use proofbridge_core::eip712::{
         domain_separator_proofbridge, DOMAIN_TYPEHASH_MIN, NAME_HASH, VERSION_HASH,
     };
-    use crate::types::OrderParams;
     use soroban_sdk::{BytesN, Env, String as SorobanString};
 
     fn hex_to_bytes32(env: &Env, hex_str: &str) -> BytesN<32> {
@@ -95,19 +95,12 @@ mod cross_chain_tests {
                 "5555555555555555555555555555555555555555",
             ),
             ad_id: SorobanString::from_str(&env, "test-ad-123"),
-            ad_creator: evm_address_to_bytes32(
-                &env,
-                "7777777777777777777777777777777777777777",
-            ),
-            ad_recipient: evm_address_to_bytes32(
-                &env,
-                "8888888888888888888888888888888888888888",
-            ),
+            ad_creator: evm_address_to_bytes32(&env, "7777777777777777777777777777777777777777"),
+            ad_recipient: evm_address_to_bytes32(&env, "8888888888888888888888888888888888888888"),
             salt: 12345,
         };
         let ad_chain_id: u128 = 2_000_000_002;
-        let ad_manager =
-            evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
+        let ad_manager = evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
         let struct_hash = struct_hash_order(&order_params, ad_chain_id, &ad_manager);
         assert_eq!(struct_hash.len(), 32);
         assert_ne!(struct_hash, [0u8; 32]);
@@ -137,19 +130,12 @@ mod cross_chain_tests {
                 "5555555555555555555555555555555555555555",
             ),
             ad_id: SorobanString::from_str(&env, "test-ad-123"),
-            ad_creator: evm_address_to_bytes32(
-                &env,
-                "7777777777777777777777777777777777777777",
-            ),
-            ad_recipient: evm_address_to_bytes32(
-                &env,
-                "8888888888888888888888888888888888888888",
-            ),
+            ad_creator: evm_address_to_bytes32(&env, "7777777777777777777777777777777777777777"),
+            ad_recipient: evm_address_to_bytes32(&env, "8888888888888888888888888888888888888888"),
             salt: 12345,
         };
         let ad_chain_id: u128 = 2_000_000_002;
-        let ad_manager =
-            evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
+        let ad_manager = evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
         let struct_hash = struct_hash_order(&order_params, ad_chain_id, &ad_manager);
         let order_hash = hash_typed_data_v4(&struct_hash);
         assert_eq!(order_hash.len(), 32);
@@ -180,19 +166,12 @@ mod cross_chain_tests {
                 "5555555555555555555555555555555555555555",
             ),
             ad_id: SorobanString::from_str(&env, "test-ad-123"),
-            ad_creator: evm_address_to_bytes32(
-                &env,
-                "7777777777777777777777777777777777777777",
-            ),
-            ad_recipient: evm_address_to_bytes32(
-                &env,
-                "8888888888888888888888888888888888888888",
-            ),
+            ad_creator: evm_address_to_bytes32(&env, "7777777777777777777777777777777777777777"),
+            ad_recipient: evm_address_to_bytes32(&env, "8888888888888888888888888888888888888888"),
             salt: 0,
         };
         let ad_chain_id: u128 = 2_000_000_002;
-        let ad_manager =
-            evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
+        let ad_manager = evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
         let struct_hash = struct_hash_order(&order_params, ad_chain_id, &ad_manager);
         let order_hash = hash_typed_data_v4(&struct_hash);
         assert_ne!(order_hash, [0u8; 32]);
@@ -269,22 +248,14 @@ mod cross_chain_tests {
                 "5555555555555555555555555555555555555555",
             ),
             ad_id: SorobanString::from_str(&env, "test-ad-123"),
-            ad_creator: evm_address_to_bytes32(
-                &env,
-                "7777777777777777777777777777777777777777",
-            ),
-            ad_recipient: evm_address_to_bytes32(
-                &env,
-                "8888888888888888888888888888888888888888",
-            ),
+            ad_creator: evm_address_to_bytes32(&env, "7777777777777777777777777777777777777777"),
+            ad_recipient: evm_address_to_bytes32(&env, "8888888888888888888888888888888888888888"),
             salt: 12345,
         };
         let ad_chain_id: u128 = 2_000_000_002;
-        let ad_manager =
-            evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
+        let ad_manager = evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
 
-        let hash1 =
-            hash_typed_data_v4(&struct_hash_order(&base_params, ad_chain_id, &ad_manager));
+        let hash1 = hash_typed_data_v4(&struct_hash_order(&base_params, ad_chain_id, &ad_manager));
 
         let mut different_salt = base_params.clone();
         different_salt.salt = 12346;
@@ -353,7 +324,13 @@ mod contract_tests {
         let w_native_token = Address::generate(&env);
         let chain_id: u128 = 2_000_000_002;
 
-        client.initialize(&admin, &verifier, &merkle_manager, &w_native_token, &chain_id);
+        client.initialize(
+            &admin,
+            &verifier,
+            &merkle_manager,
+            &w_native_token,
+            &chain_id,
+        );
 
         let stored_chain_id = client.get_chain_id();
         assert_eq!(stored_chain_id, chain_id);
@@ -371,7 +348,13 @@ mod contract_tests {
         let w_native_token = Address::generate(&env);
         let chain_id: u128 = 2_000_000_002;
 
-        client.initialize(&admin, &verifier, &merkle_manager, &w_native_token, &chain_id);
+        client.initialize(
+            &admin,
+            &verifier,
+            &merkle_manager,
+            &w_native_token,
+            &chain_id,
+        );
 
         let result = client.try_initialize(
             &admin,
@@ -733,15 +716,8 @@ mod auth_tests {
             42,
             &contract_addr,
         );
-        let fund_hash = auth::fund_ad_request_hash(
-            &env,
-            &ad_id,
-            1000,
-            &auth_token,
-            9999,
-            42,
-            &contract_addr,
-        );
+        let fund_hash =
+            auth::fund_ad_request_hash(&env, &ad_id, 1000, &auth_token, 9999, 42, &contract_addr);
         assert_ne!(
             create_hash, fund_hash,
             "Different request types must produce different hashes"
@@ -936,9 +912,7 @@ mod ad_lifecycle_tests {
     use crate::storage;
     use crate::types::{Ad, ChainInfo, ContractConfig};
     use crate::{AdManagerContract, AdManagerContractClient};
-    use soroban_sdk::{
-        testutils::Address as _, Address, BytesN, Env, String as SorobanString,
-    };
+    use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String as SorobanString};
 
     /// Helper: set up an initialized contract with a maker that has an open ad,
     /// all done through direct storage writes to bypass auth.
@@ -987,9 +961,7 @@ mod ad_lifecycle_tests {
             storage::set_ad_id_used(&env, &ad_id);
         });
 
-        let ad = env.as_contract(&contract_id, || {
-            storage::get_ad(&env, &ad_id).unwrap()
-        });
+        let ad = env.as_contract(&contract_id, || storage::get_ad(&env, &ad_id).unwrap());
 
         (env, contract_id, ad_id, ad)
     }
@@ -1398,7 +1370,13 @@ mod order_lifecycle_tests {
         let w_native_token = Address::generate(&env);
         let chain_id: u128 = 42;
 
-        client.initialize(&admin, &verifier, &merkle_manager, &w_native_token, &chain_id);
+        client.initialize(
+            &admin,
+            &verifier,
+            &merkle_manager,
+            &w_native_token,
+            &chain_id,
+        );
 
         // get_chain_id
         assert_eq!(client.get_chain_id(), 42);

@@ -261,8 +261,7 @@ pub fn get_peaks(env: &Env) -> Vec<BytesN<32>> {
     let mut peaks: Vec<BytesN<32>> = Vec::new(env);
     for i in 0..peak_idxs.len() {
         let idx = peak_idxs.get(i).unwrap();
-        let hash =
-            storage::get_node_hash(env, idx).unwrap_or(BytesN::from_array(env, &[0u8; 32]));
+        let hash = storage::get_node_hash(env, idx).unwrap_or(BytesN::from_array(env, &[0u8; 32]));
         peaks.push_back(hash);
     }
     peaks

@@ -171,8 +171,8 @@ impl OrderPortalContract {
             return Err(OrderPortalError::RoutesZeroAddress);
         }
 
-        let chain_info = storage::get_chain(&env, ad_chain_id)
-            .ok_or(OrderPortalError::AdChainNotSupported)?;
+        let chain_info =
+            storage::get_chain(&env, ad_chain_id).ok_or(OrderPortalError::AdChainNotSupported)?;
         if !chain_info.supported {
             return Err(OrderPortalError::AdChainNotSupported);
         }
@@ -253,7 +253,12 @@ impl OrderPortalContract {
         );
 
         let _signer = Self::verify_request(
-            &env, &message, &auth_token, time_to_expire, &signature, &public_key,
+            &env,
+            &message,
+            &auth_token,
+            time_to_expire,
+            &signature,
+            &public_key,
         )?;
 
         // Transfer tokens from bridger to contract
@@ -333,7 +338,14 @@ impl OrderPortalContract {
             &contract_bytes,
         );
 
-        Self::verify_request(&env, &message, &auth_token, time_to_expire, &signature, &public_key)?;
+        Self::verify_request(
+            &env,
+            &message,
+            &auth_token,
+            time_to_expire,
+            &signature,
+            &public_key,
+        )?;
 
         // Build public inputs and verify ZK proof
         let public_inputs = cross_contract::build_public_inputs(
@@ -387,7 +399,10 @@ impl OrderPortalContract {
     /// Get the latest merkle root.
     pub fn get_latest_merkle_root(env: Env) -> Result<BytesN<32>, OrderPortalError> {
         let config = storage::get_config(&env)?;
-        Ok(cross_contract::get_merkle_root(&env, &config.merkle_manager))
+        Ok(cross_contract::get_merkle_root(
+            &env,
+            &config.merkle_manager,
+        ))
     }
 
     /// Get historical root at index.
@@ -403,7 +418,10 @@ impl OrderPortalContract {
     /// Get merkle leaf count.
     pub fn get_merkle_leaf_count(env: Env) -> Result<u128, OrderPortalError> {
         let config = storage::get_config(&env)?;
-        Ok(cross_contract::get_merkle_width(&env, &config.merkle_manager))
+        Ok(cross_contract::get_merkle_width(
+            &env,
+            &config.merkle_manager,
+        ))
     }
 
     /// Get order status.
@@ -455,7 +473,14 @@ impl OrderPortalContract {
             return Err(OrderPortalError::RequestHashProcessed);
         }
 
-        auth::pre_auth_validations(env, message, auth_token, time_to_expire, signature, public_key)
+        auth::pre_auth_validations(
+            env,
+            message,
+            auth_token,
+            time_to_expire,
+            signature,
+            public_key,
+        )
     }
 }
 
