@@ -109,7 +109,7 @@
     [],
     [
       [
-        "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH",
+        "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH",
         {
           "function": {
             "contract_fn": {
@@ -117,7 +117,7 @@
               "function_name": "initialize",
               "args": [
                 {
-                  "address": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH"
+                  "address": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH"
                 },
                 {
                   "address": "CBKMUZNFQIAL775XBB2W2GP5CNHBM5YGH6C3XB7AY6SUVO2IBU3VYK2V"
@@ -141,7 +141,7 @@
     [],
     [
       [
-        "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH",
+        "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH",
         {
           "function": {
             "contract_fn": {
@@ -163,7 +163,7 @@
     ],
     [
       [
-        "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH",
+        "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH",
         {
           "function": {
             "contract_fn": {
@@ -186,7 +186,7 @@
     [],
     [
       [
-        "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH",
+        "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH",
         {
           "function": {
             "contract_fn": {
@@ -212,7 +212,7 @@
     [],
     [
       [
-        "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH",
+        "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH",
         {
           "function": {
             "contract_fn": {
@@ -238,7 +238,7 @@
     [],
     [
       [
-        "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH",
+        "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH",
         {
           "function": {
             "contract_fn": {
@@ -246,7 +246,7 @@
               "function_name": "transfer",
               "args": [
                 {
-                  "address": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH"
+                  "address": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH"
                 },
                 {
                   "address": "CCQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ2DINBUGQ2CNSG"
@@ -281,7 +281,7 @@
           "data": {
             "contract_data": {
               "ext": "v0",
-              "contract": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH",
+              "contract": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH",
               "key": {
                 "ledger_key_nonce": {
                   "nonce": "1194852393571756375"
@@ -301,7 +301,7 @@
           "data": {
             "contract_data": {
               "ext": "v0",
-              "contract": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH",
+              "contract": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH",
               "key": {
                 "ledger_key_nonce": {
                   "nonce": "2032731177588607455"
@@ -321,7 +321,7 @@
           "data": {
             "contract_data": {
               "ext": "v0",
-              "contract": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH",
+              "contract": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH",
               "key": {
                 "ledger_key_nonce": {
                   "nonce": "4270020994084947596"
@@ -341,7 +341,7 @@
           "data": {
             "contract_data": {
               "ext": "v0",
-              "contract": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH",
+              "contract": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH",
               "key": {
                 "ledger_key_nonce": {
                   "nonce": "5806905060045992000"
@@ -361,7 +361,7 @@
           "data": {
             "contract_data": {
               "ext": "v0",
-              "contract": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH",
+              "contract": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH",
               "key": {
                 "ledger_key_nonce": {
                   "nonce": "6277191135259896685"
@@ -381,7 +381,7 @@
           "data": {
             "contract_data": {
               "ext": "v0",
-              "contract": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH",
+              "contract": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH",
               "key": {
                 "ledger_key_nonce": {
                   "nonce": "8370022561469687789"
@@ -576,7 +576,7 @@
                         "symbol": "admin"
                       },
                       "val": {
-                        "address": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH"
+                        "address": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH"
                       }
                     },
                     {
@@ -667,7 +667,7 @@
                         "symbol": "admin"
                       },
                       "val": {
-                        "address": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH"
+                        "address": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH"
                       }
                     },
                     {
@@ -827,7 +827,7 @@
                       "symbol": "maker"
                     },
                     "val": {
-                      "address": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH"
+                      "address": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH"
                     }
                   },
                   {
@@ -919,7 +919,7 @@
                     "symbol": "mgrs"
                   },
                   {
-                    "address": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH"
+                    "address": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH"
                   }
                 ]
               },
@@ -1232,7 +1232,7 @@
                               "symbol": "admin"
                             },
                             "val": {
-                              "address": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH"
+                              "address": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH"
                             }
                           },
                           {
@@ -1344,7 +1344,7 @@
                     "symbol": "mgrs"
                   },
                   {
-                    "address": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH"
+                    "address": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH"
                   }
                 ]
               },
@@ -1414,7 +1414,7 @@
                               "symbol": "admin"
                             },
                             "val": {
-                              "address": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH"
+                              "address": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH"
                             }
                           },
                           {
@@ -1482,7 +1482,7 @@
                     "symbol": "Balance"
                   },
                   {
-                    "address": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH"
+                    "address": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH"
                   }
                 ]
               },
@@ -1545,7 +1545,7 @@
                     "symbol": "Balance"
                   },
                   {
-                    "address": "GAKL2BMU2QVVL27VTOGIPWNQBCPIJH2IGTKWQRXXSQXRY6XQB2MA7OIH"
+                    "address": "GC4JA5QJNYZQ354GQBTSTST6KS5YVQMARDAKHFIUNDEXALDYAZTIC4BH"
                   }
                 ]
               },
