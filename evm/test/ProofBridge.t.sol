@@ -164,9 +164,9 @@ contract ProofBridge is Test {
         adId = "native-ad";
         (authToken, timeToLive, signature) = generateCreateAdRequestParams(adId, NATIVE_TOKEN_ADDRESS);
         vm.deal(maker, initAmt);
-        adManager.createAd{
-            value: initAmt
-        }(signature, authToken, timeToLive, adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, adRecipient);
+        adManager.createAd{value: initAmt}(
+            signature, authToken, timeToLive, adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, adRecipient
+        );
 
         vm.stopPrank();
 

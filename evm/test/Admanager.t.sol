@@ -402,9 +402,9 @@ contract AdManagerTest is Test {
         vm.prank(maker);
         vm.expectEmit(true, true, true, true);
         emit AdManager.AdCreated(adId, maker, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId);
-        adManager.createAd{
-            value: initAmt
-        }(signature, authToken, timeToLive, adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, adRecipient);
+        adManager.createAd{value: initAmt}(
+            signature, authToken, timeToLive, adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, adRecipient
+        );
 
         (
             uint256 linkedOrderChainId,

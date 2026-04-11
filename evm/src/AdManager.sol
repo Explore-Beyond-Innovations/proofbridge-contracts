@@ -505,13 +505,11 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
      * @param adId Ad id to fund.
      * @param amount Amount to deposit.
      */
-    function fundAd(
-        bytes memory signature,
-        bytes32 authToken,
-        uint256 timeToExpire,
-        string memory adId,
-        uint256 amount
-    ) external payable nonReentrant {
+    function fundAd(bytes memory signature, bytes32 authToken, uint256 timeToExpire, string memory adId, uint256 amount)
+        external
+        payable
+        nonReentrant
+    {
         Ad storage ad = __getAdOwned(adId, msg.sender);
         if (!ad.open) revert AdManager__AdClosed();
         if (amount == 0) revert AdManager__ZeroAmount();
