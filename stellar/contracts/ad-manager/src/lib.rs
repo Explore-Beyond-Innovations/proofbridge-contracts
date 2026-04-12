@@ -88,11 +88,7 @@ impl AdManagerContract {
     // =========================================================================
 
     /// Set or unset an address as a manager.
-    pub fn set_manager(
-        env: Env,
-        manager: Address,
-        status: bool,
-    ) -> Result<(), AdManagerError> {
+    pub fn set_manager(env: Env, manager: Address, status: bool) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
 

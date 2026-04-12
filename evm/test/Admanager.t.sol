@@ -332,7 +332,9 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__TokenZeroAddress.selector);
-        adManager.createAd(signature, authToken, timeToLive, adId, address(0), initAmt, orderChainId, _b32(address(0xDEAD)));
+        adManager.createAd(
+            signature, authToken, timeToLive, adId, address(0), initAmt, orderChainId, _b32(address(0xDEAD))
+        );
     }
 
     // Test that createAd rejects when no route exists for the chain
@@ -368,7 +370,9 @@ contract AdManagerTest is Test {
         vm.prank(maker);
         vm.expectEmit(true, true, true, true);
         emit AdManager.AdCreated("1", maker, address(adToken), initAmt, orderChainId);
-        adManager.createAd(signature, authToken, timeToLive, adId, address(adToken), initAmt, orderChainId, _b32(adRecipient));
+        adManager.createAd(
+            signature, authToken, timeToLive, adId, address(adToken), initAmt, orderChainId, _b32(adRecipient)
+        );
 
         (
             uint256 linkedOrderChainId,
@@ -591,7 +595,9 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(
-            abi.encodeWithSelector(AdManager.AdManager__OrderPortalMismatch.selector, _b32(orderPortal), p.srcOrderPortal)
+            abi.encodeWithSelector(
+                AdManager.AdManager__OrderPortalMismatch.selector, _b32(orderPortal), p.srcOrderPortal
+            )
         );
         adManager.lockForOrder(signature, authToken, timeToLive, p);
     }

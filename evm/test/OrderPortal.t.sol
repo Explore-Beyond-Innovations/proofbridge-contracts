@@ -587,7 +587,11 @@ contract OrderPortalTest is Test {
         assertEq(uint256(status), uint256(OrderPortal.Status.Open), "status changed unexpectedly");
 
         assertEq(orderToken.balanceOf(address(portal)), balPortalBefore, "portal balance changed");
-        assertEq(orderToken.balanceOf(address(uint160(uint256(p.adRecipient)))), balRecipientBefore, "recipient balance changed");
+        assertEq(
+            orderToken.balanceOf(address(uint160(uint256(p.adRecipient)))),
+            balRecipientBefore,
+            "recipient balance changed"
+        );
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -619,7 +623,11 @@ contract OrderPortalTest is Test {
 
         // Funds transferred from portal to dstRecipient
         assertEq(orderToken.balanceOf(address(portal)), balPortalBefore - p.amount, "portal not debited");
-        assertEq(orderToken.balanceOf(address(uint160(uint256(p.adRecipient)))), balRecipientBefore + p.amount, "recipient not credited");
+        assertEq(
+            orderToken.balanceOf(address(uint160(uint256(p.adRecipient)))),
+            balRecipientBefore + p.amount,
+            "recipient not credited"
+        );
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -669,6 +677,8 @@ contract OrderPortalTest is Test {
 
         // Funds transferred from portal to dstRecipient
         assertEq(_wNativeToken.balanceOf(address(portal)), balPortalBefore - p.amount, "portal not debited");
-        assertEq(address(uint160(uint256(p.adRecipient))).balance, balRecipientBefore + p.amount, "recipient not credited");
+        assertEq(
+            address(uint160(uint256(p.adRecipient))).balance, balRecipientBefore + p.amount, "recipient not credited"
+        );
     }
 }

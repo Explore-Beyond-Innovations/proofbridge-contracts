@@ -158,7 +158,9 @@ contract ProofBridge is Test {
         // Approve with initial tokens
         adToken.approve(address(adManager), initAmt);
         // Create the ad
-        adManager.createAd(signature, authToken, timeToLive, adId, address(adToken), initAmt, orderChainId, _b32(adRecipient));
+        adManager.createAd(
+            signature, authToken, timeToLive, adId, address(adToken), initAmt, orderChainId, _b32(adRecipient)
+        );
         // Set last id to the created ad
         adManager.setLastId(adId);
         // Approve the ad with tokens
