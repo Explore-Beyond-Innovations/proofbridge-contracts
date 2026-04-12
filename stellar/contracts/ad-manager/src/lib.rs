@@ -216,12 +216,20 @@ impl AdManagerContract {
     // =========================================================================
 
     /// Create a new liquidity ad.
+    ///
+    /// `creator` is the ad creator's Stellar account. The ed25519 `signature`
+    /// is a manager's pre-authorization, not the creator's — mirroring the EVM
+    /// contract where `msg.sender` is the creator and `signer` from
+    /// `preAuthValidations` is merely a manager-role check. `creator.require_auth()`
+    /// is called at the root so the SAC `transfer(creator → contract)` sub-invocation
+    /// has proper authorization on live networks.
     pub fn create_ad(
         env: Env,
         signature: BytesN<64>,
         public_key: BytesN<32>,
         auth_token: BytesN<32>,
         time_to_expire: u64,
+        creator: Address,
         ad_id: String,
         ad_token: BytesN<32>,
         initial_amount: u128,
@@ -246,6 +254,9 @@ impl AdManagerContract {
             return Err(AdManagerError::UsedAdId);
         }
 
+        // Creator authorizes the call (and the downstream SAC transfer).
+        creator.require_auth();
+
         let contract_bytes = eip712::contract_address_to_bytes32(&env);
         let message = auth::create_ad_request_hash(
             &env,
@@ -260,7 +271,8 @@ impl AdManagerContract {
             &contract_bytes,
         );
 
-        let signer = Self::verify_request(
+        // Manager role check (signer is only validated as a registered manager).
+        Self::verify_request(
             &env,
             &message,
             &auth_token,
@@ -273,14 +285,14 @@ impl AdManagerContract {
             &env,
             &ad_token,
             &config.w_native_token,
-            &signer,
+            &creator,
             initial_amount,
         )?;
 
         let ad = Ad {
             order_chain_id,
             ad_recipient: ad_recipient.clone(),
-            maker: signer.clone(),
+            maker: creator.clone(),
             token: ad_token.clone(),
             balance: initial_amount,
             locked: 0,
@@ -292,7 +304,7 @@ impl AdManagerContract {
 
         events::AdCreated {
             ad_id: ad_id.clone(),
-            maker: signer.clone(),
+            maker: creator.clone(),
             token: ad_token.clone(),
             init_amount: initial_amount,
             order_chain_id,
@@ -304,6 +316,9 @@ impl AdManagerContract {
     }
 
     /// Fund an existing ad with additional liquidity.
+    ///
+    /// The ad's maker must authorize the call. `signer` from `verify_request`
+    /// is only used to confirm a registered manager pre-authorized the action.
     pub fn fund_ad(
         env: Env,
         signature: BytesN<64>,
@@ -323,6 +338,9 @@ impl AdManagerContract {
             return Err(AdManagerError::ZeroAmount);
         }
 
+        // Maker authorizes the call (and the downstream SAC transfer).
+        ad.maker.require_auth();
+
         let contract_bytes = eip712::contract_address_to_bytes32(&env);
         let message = auth::fund_ad_request_hash(
             &env,
@@ -334,7 +352,8 @@ impl AdManagerContract {
             &contract_bytes,
         );
 
-        let signer = Self::verify_request(
+        // Manager role check.
+        Self::verify_request(
             &env,
             &message,
             &auth_token,
@@ -343,15 +362,11 @@ impl AdManagerContract {
             &public_key,
         )?;
 
-        if ad.maker != signer {
-            return Err(AdManagerError::NotMaker);
-        }
-
         token::transfer_from_user_bytes32(
             &env,
             &ad.token,
             &config.w_native_token,
-            &signer,
+            &ad.maker,
             amount,
         )?;
 
@@ -361,7 +376,7 @@ impl AdManagerContract {
 
         events::AdFunded {
             ad_id: ad_id.clone(),
-            maker: signer.clone(),
+            maker: ad.maker.clone(),
             amount,
             new_balance: ad.balance,
         }
@@ -394,6 +409,9 @@ impl AdManagerContract {
             return Err(AdManagerError::InsufficientLiquidity);
         }
 
+        // Maker authorizes the withdrawal.
+        ad.maker.require_auth();
+
         let contract_bytes = eip712::contract_address_to_bytes32(&env);
         let message = auth::withdraw_from_ad_request_hash(
             &env,
@@ -406,7 +424,8 @@ impl AdManagerContract {
             &contract_bytes,
         );
 
-        let signer = Self::verify_request(
+        // Manager role check.
+        Self::verify_request(
             &env,
             &message,
             &auth_token,
@@ -414,10 +433,6 @@ impl AdManagerContract {
             &signature,
             &public_key,
         )?;
-
-        if ad.maker != signer {
-            return Err(AdManagerError::NotMaker);
-        }
 
         ad.balance -= amount;
         storage::set_ad(&env, &ad_id, &ad);
@@ -428,7 +443,7 @@ impl AdManagerContract {
 
         events::AdWithdrawn {
             ad_id: ad_id.clone(),
-            maker: signer.clone(),
+            maker: ad.maker.clone(),
             amount,
             new_balance: ad.balance,
         }
@@ -455,6 +470,9 @@ impl AdManagerContract {
             return Err(AdManagerError::ActiveLocks);
         }
 
+        // Maker authorizes the close.
+        ad.maker.require_auth();
+
         let contract_bytes = eip712::contract_address_to_bytes32(&env);
         let message = auth::close_ad_request_hash(
             &env,
@@ -466,7 +484,8 @@ impl AdManagerContract {
             &contract_bytes,
         );
 
-        let signer = Self::verify_request(
+        // Manager role check.
+        Self::verify_request(
             &env,
             &message,
             &auth_token,
@@ -475,12 +494,9 @@ impl AdManagerContract {
             &public_key,
         )?;
 
-        if ad.maker != signer {
-            return Err(AdManagerError::NotMaker);
-        }
-
         let remaining = ad.balance;
         let ad_token = ad.token.clone();
+        let maker = ad.maker.clone();
 
         ad.balance = 0;
         ad.open = false;
@@ -500,7 +516,7 @@ impl AdManagerContract {
 
         events::AdClosed {
             ad_id: ad_id.clone(),
-            maker: signer.clone(),
+            maker,
         }
         .publish(&env);
 
@@ -532,6 +548,9 @@ impl AdManagerContract {
             return Err(AdManagerError::InsufficientLiquidity);
         }
 
+        // Maker authorizes the lock.
+        ad.maker.require_auth();
+
         let contract_bytes = eip712::contract_address_to_bytes32(&env);
         let order_hash = eip712::hash_order(&env, &params, config.chain_id, &contract_bytes);
 
@@ -549,7 +568,8 @@ impl AdManagerContract {
             &contract_bytes,
         );
 
-        let signer = Self::verify_request(
+        // Manager role check.
+        Self::verify_request(
             &env,
             &message,
             &auth_token,
@@ -558,10 +578,8 @@ impl AdManagerContract {
             &public_key,
         )?;
 
-        if ad.maker != signer {
-            return Err(AdManagerError::NotMaker);
-        }
-
+        let maker = ad.maker.clone();
+        let ad_token = ad.token.clone();
         ad.locked += params.amount;
         storage::set_ad(&env, &params.ad_id, &ad);
         storage::set_order_status(&env, &order_hash, Status::Open);
@@ -573,8 +591,8 @@ impl AdManagerContract {
         events::OrderLocked {
             order_hash: order_hash.clone(),
             ad_id: params.ad_id.clone(),
-            maker: signer.clone(),
-            token: ad.token.clone(),
+            maker,
+            token: ad_token,
             amount: params.amount,
             bridger: params.bridger.clone(),
             recipient: params.order_recipient.clone(),
@@ -603,6 +621,12 @@ impl AdManagerContract {
     ) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
 
+        // The order recipient on this (ad) chain authorizes the unlock —
+        // mirrors the OrderPortal side where the ad recipient authorizes.
+        let order_recipient_addr =
+            proofbridge_core::token::bytes32_to_account_address(&env, &params.order_recipient);
+        order_recipient_addr.require_auth();
+
         let contract_bytes = eip712::contract_address_to_bytes32(&env);
         let order_hash = eip712::hash_order(&env, &params, config.chain_id, &contract_bytes);
 
@@ -624,6 +648,7 @@ impl AdManagerContract {
             &contract_bytes,
         );
 
+        // Manager role check.
         Self::verify_request(
             &env,
             &message,

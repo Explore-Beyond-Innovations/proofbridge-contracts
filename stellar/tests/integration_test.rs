@@ -516,6 +516,7 @@ fn setup() -> TestSetup<'static> {
             &admin_pubkey,
             &auth_token_bn,
             &time_to_expire,
+            &admin_addr,
             &SorobanString::from_str(&env, &tp.ad_id),
             &bytes32_to_bytesn(&env, &tp.ad_chain_token),
             &tp.amount,

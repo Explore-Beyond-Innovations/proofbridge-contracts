@@ -263,6 +263,13 @@ impl OrderPortalContract {
 
         // Transfer tokens from bridger to contract
         let bridger_addr = token::bytes32_to_account_address(&env, &params.bridger);
+
+        // Root-level auth for the SAC transfer sub-invocation that will call
+        // `from.require_auth()` internally. When the bridger is also the tx
+        // source account this is auto-satisfied; otherwise the bridger must
+        // supply an explicit auth entry for this invocation.
+        bridger_addr.require_auth();
+
         token::transfer_from_user_bytes32(
             &env,
             &params.order_chain_token,
@@ -317,6 +324,12 @@ impl OrderPortalContract {
     ) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
 
+        // The ad recipient on this (order) chain authorizes the unlock —
+        // mirrors AdManager's unlock where the order recipient authorizes.
+        let ad_recipient_addr =
+            proofbridge_core::token::bytes32_to_account_address(&env, &params.ad_recipient);
+        ad_recipient_addr.require_auth();
+
         let contract_bytes = eip712::contract_address_to_bytes32(&env);
         let order_hash = eip712::hash_order(&env, &params, config.chain_id, &contract_bytes);
 
@@ -338,6 +351,7 @@ impl OrderPortalContract {
             &contract_bytes,
         );
 
+        // Manager role check.
         Self::verify_request(
             &env,
             &message,
