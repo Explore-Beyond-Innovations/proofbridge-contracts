@@ -23,19 +23,19 @@ export const MERKLE_MANAGER_ABI = [
 ];
 
 export const AD_MANAGER_ABI = [
-  "function setChain(uint256 orderChainId, address orderPortal, bool supported) external",
-  "function setTokenRoute(address adToken, address orderToken, uint256 orderChainId) external",
-  "function chains(uint256) external view returns (bool supported, address orderPortal)",
-  "function tokenRoute(address, uint256) external view returns (address)",
+  "function setChain(uint256 orderChainId, bytes32 orderPortal, bool supported) external",
+  "function setTokenRoute(address adToken, bytes32 orderToken, uint256 orderChainId) external",
+  "function chains(uint256) external view returns (bool supported, bytes32 orderPortal)",
+  "function tokenRoute(address, uint256) external view returns (bytes32)",
   "function i_merkleManager() external view returns (address)",
   "function i_verifier() external view returns (address)",
 ];
 
 export const ORDER_PORTAL_ABI = [
-  "function setChain(uint256 adChainId, address adManager, bool supported) external",
-  "function setTokenRoute(address orderToken, uint256 adChainId, address adToken) external",
-  "function chains(uint256) external view returns (bool supported, address adManager)",
-  "function tokenRoute(address, uint256) external view returns (address)",
+  "function setChain(uint256 adChainId, bytes32 adManager, bool supported) external",
+  "function setTokenRoute(address orderToken, uint256 adChainId, bytes32 adToken) external",
+  "function chains(uint256) external view returns (bool supported, bytes32 adManager)",
+  "function tokenRoute(address, uint256) external view returns (bytes32)",
   "function i_merkleManager() external view returns (address)",
   "function i_verifier() external view returns (address)",
 ];

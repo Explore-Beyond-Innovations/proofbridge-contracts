@@ -15,18 +15,18 @@ export const domain = {
 // ----------------------------
 export const orderTypes: Record<string, { name: string; type: string }[]> = {
   Order: [
-    { name: "orderChainToken", type: "address" },
-    { name: "adChainToken", type: "address" },
+    { name: "orderChainToken", type: "bytes32" },
+    { name: "adChainToken", type: "bytes32" },
     { name: "amount", type: "uint256" },
-    { name: "bridger", type: "address" },
+    { name: "bridger", type: "bytes32" },
     { name: "orderChainId", type: "uint256" },
-    { name: "orderPortal", type: "address" },
-    { name: "orderRecipient", type: "address" },
+    { name: "orderPortal", type: "bytes32" },
+    { name: "orderRecipient", type: "bytes32" },
     { name: "adChainId", type: "uint256" },
-    { name: "adManager", type: "address" },
+    { name: "adManager", type: "bytes32" },
     { name: "adId", type: "string" },
-    { name: "adCreator", type: "address" },
-    { name: "adRecipient", type: "address" },
+    { name: "adCreator", type: "bytes32" },
+    { name: "adRecipient", type: "bytes32" },
     { name: "salt", type: "uint256" },
   ],
 };

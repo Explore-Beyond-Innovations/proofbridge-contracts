@@ -50,7 +50,7 @@ mod eip712_tests {
 
     #[test]
     fn test_order_typehash() {
-        let type_string = "Order(address orderChainToken,address adChainToken,uint256 amount,address bridger,uint256 orderChainId,address orderPortal,address orderRecipient,uint256 adChainId,address adManager,string adId,address adCreator,address adRecipient,uint256 salt)";
+        let type_string = "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt)";
         let computed = keccak256(type_string.as_bytes());
         assert_eq!(computed, ORDER_TYPEHASH);
     }

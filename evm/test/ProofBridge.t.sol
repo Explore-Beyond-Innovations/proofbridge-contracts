@@ -79,19 +79,27 @@ contract ProofBridge is Test {
     uint256 timeToLive;
 
     struct Order {
-        address orderToken;
-        address adToken;
+        bytes32 orderToken;
+        bytes32 adToken;
         uint256 amount;
-        address bridger;
+        bytes32 bridger;
         uint256 orderChainId;
-        address orderPortal;
-        address orderRecipient;
+        bytes32 orderPortal;
+        bytes32 orderRecipient;
         uint256 adChainId;
-        address adManager;
+        bytes32 adManager;
         string adId;
-        address adCreator;
-        address adRecipient;
+        bytes32 adCreator;
+        bytes32 adRecipient;
         uint256 salt;
+    }
+
+    function _b32(address a) internal pure returns (bytes32) {
+        return bytes32(uint256(uint160(a)));
+    }
+
+    function _toAddr(bytes32 b) internal pure returns (address) {
+        return address(uint160(uint256(b)));
     }
 
     function setUp() public {
@@ -134,11 +142,11 @@ contract ProofBridge is Test {
         // Set up AdManager configs
         vm.startPrank(admin);
         // Register the order chain
-        adManager.setChain(orderChainId, address(orderPortal), true);
+        adManager.setChain(orderChainId, _b32(address(orderPortal)), true);
         // Set token route
-        adManager.setTokenRoute(address(adToken), address(orderToken), orderChainId);
+        adManager.setTokenRoute(address(adToken), _b32(address(orderToken)), orderChainId);
         // Set native token route
-        adManager.setTokenRoute(NATIVE_TOKEN_ADDRESS, address(orderToken), orderChainId);
+        adManager.setTokenRoute(NATIVE_TOKEN_ADDRESS, _b32(address(orderToken)), orderChainId);
         vm.stopPrank();
 
         // Setup Ads
@@ -150,7 +158,7 @@ contract ProofBridge is Test {
         // Approve with initial tokens
         adToken.approve(address(adManager), initAmt);
         // Create the ad
-        adManager.createAd(signature, authToken, timeToLive, adId, address(adToken), initAmt, orderChainId, adRecipient);
+        adManager.createAd(signature, authToken, timeToLive, adId, address(adToken), initAmt, orderChainId, _b32(adRecipient));
         // Set last id to the created ad
         adManager.setLastId(adId);
         // Approve the ad with tokens
@@ -165,7 +173,7 @@ contract ProofBridge is Test {
         (authToken, timeToLive, signature) = generateCreateAdRequestParams(adId, NATIVE_TOKEN_ADDRESS);
         vm.deal(maker, initAmt);
         adManager.createAd{value: initAmt}(
-            signature, authToken, timeToLive, adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, adRecipient
+            signature, authToken, timeToLive, adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, _b32(adRecipient)
         );
 
         vm.stopPrank();
@@ -176,8 +184,8 @@ contract ProofBridge is Test {
         orderToken.mint(bridger, minted);
         // Set up OrderPortal configs
         vm.startPrank(admin);
-        orderPortal.setChain(adChainId, address(adManager), true);
-        orderPortal.setTokenRoute(address(orderToken), adChainId, address(adToken));
+        orderPortal.setChain(adChainId, _b32(address(adManager)), true);
+        orderPortal.setTokenRoute(address(orderToken), adChainId, _b32(address(adToken)));
         vm.stopPrank();
 
         vm.chainId(neutral);
@@ -191,16 +199,16 @@ contract ProofBridge is Test {
         view
         returns (AdManager.OrderParams memory p)
     {
-        p.orderChainToken = address(orderToken);
-        p.adChainToken = adTokenAddr;
+        p.orderChainToken = _b32(address(orderToken));
+        p.adChainToken = _b32(adTokenAddr);
         p.amount = amount;
-        p.bridger = bridger;
+        p.bridger = _b32(bridger);
         p.orderChainId = orderChainId;
-        p.srcOrderPortal = address(orderPortal);
-        p.orderRecipient = orderRecipient;
+        p.srcOrderPortal = _b32(address(orderPortal));
+        p.orderRecipient = _b32(orderRecipient);
         p.adId = adId;
-        p.adCreator = maker;
-        p.adRecipient = adRecipient;
+        p.adCreator = _b32(maker);
+        p.adRecipient = _b32(adRecipient);
         p.salt = salt;
     }
 
@@ -209,16 +217,16 @@ contract ProofBridge is Test {
         view
         returns (OrderPortal.OrderParams memory p)
     {
-        p.orderChainToken = address(orderToken);
-        p.adChainToken = adTokenAddr;
+        p.orderChainToken = _b32(address(orderToken));
+        p.adChainToken = _b32(adTokenAddr);
         p.amount = amount;
-        p.bridger = bridger;
-        p.orderRecipient = orderRecipient;
+        p.bridger = _b32(bridger);
+        p.orderRecipient = _b32(orderRecipient);
         p.adChainId = adChainId;
-        p.adManager = address(adManager);
+        p.adManager = _b32(address(adManager));
         p.adId = adId;
-        p.adCreator = maker;
-        p.adRecipient = adRecipient;
+        p.adCreator = _b32(maker);
+        p.adRecipient = _b32(adRecipient);
         p.salt = salt;
     }
 
@@ -243,7 +251,7 @@ contract ProofBridge is Test {
         token = bytes32(vm.randomBytes(32));
         ttl = block.timestamp + 1 hours;
         bytes32 message =
-            adManager.createAdRequestHash(adId, adTokenAddr, initAmt, orderChainId, adRecipient, token, ttl);
+            adManager.createAdRequestHash(adId, adTokenAddr, initAmt, orderChainId, _b32(adRecipient), token, ttl);
 
         sig = ethSign(message, adminPk);
     }

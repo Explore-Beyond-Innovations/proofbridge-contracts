@@ -38,7 +38,7 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
      * @notice EIP-712 typehash for `Order` structs.
      */
     bytes32 public constant ORDER_TYPEHASH = keccak256(
-        "Order(address orderChainToken,address adChainToken,uint256 amount,address bridger,uint256 orderChainId,address orderPortal,address orderRecipient,uint256 adChainId,address adManager,string adId,address adCreator,address adRecipient,uint256 salt)"
+        "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt)"
     );
 
     /// @notice Admin role identifier.
@@ -63,18 +63,18 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
     /**
      * @notice Source-chain configuration (where orders originate).
      * @param supported Whether orders from this chain are accepted.
-     * @param orderPortal Address of the counterpart OrderPortal on the source chain.
+     * @param orderPortal Counterpart OrderPortal id on the source chain (32-byte cross-chain representation).
      */
     struct ChainInfo {
         bool supported;
-        address orderPortal;
+        bytes32 orderPortal;
     }
 
     /**
      * @notice Liquidity ad created by a maker on the ad chain (this chain).
      * @param orderChainId Source chain id this ad serves.
-     * @param adRecipient Maker-controlled recipient on the order chain.
-     * @param maker Owner of the ad.
+     * @param adRecipient Maker-controlled recipient id on the order chain (32-byte cross-chain representation).
+     * @param maker Owner of the ad (local EVM address).
      * @param token ERC20 token escrowed for payouts on this chain.
      * @param balance Total token balance deposited into the ad.
      * @param locked Portion of {balance} currently reserved for open orders.
@@ -82,7 +82,7 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
      */
     struct Ad {
         uint256 orderChainId;
-        address adRecipient;
+        bytes32 adRecipient;
         address maker;
         address token;
         uint256 balance;
@@ -92,34 +92,33 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
 
     /**
      * @notice Parameters describing a cross-chain order to be locked/unlocked.
-     * @dev
-     * - `orderChainToken` lives on the source (order) chain.
-     * - `adChainToken` lives on this (ad) chain and MUST equal the ad's {token}.
-     * - `orderChainId` and `srcOrderPortal` bind the order to its source.
-     * - `adId`, `adCreator`, and `adRecipient` bind to the chosen ad on this chain.
-     * @param orderChainToken Source-chain token address.
-     * @param adChainToken Destination (this chain) token address.
+     * @dev All address-like fields are 32 bytes for cross-chain parity with
+     *      chains (e.g. Stellar) whose native addresses are wider than 20 bytes.
+     *      For EVM-local values, pass `bytes32(uint256(uint160(addr)))` — the low
+     *      20 bytes are the EVM address and the top 12 must be zero.
+     * @param orderChainToken Source-chain token id (32-byte cross-chain representation).
+     * @param adChainToken Destination (this chain) token id as 32-byte cross-chain representation (left-padded EVM address for local ad chain).
      * @param amount Amount to reserve/release.
-     * @param bridger Source-chain user initiating the bridge.
+     * @param bridger Source-chain user id initiating the bridge.
      * @param orderChainId Source chain id.
-     * @param srcOrderPortal Source chain OrderPortal.
-     * @param orderRecipient Recipient on the ad chain to receive payout upon unlock.
+     * @param srcOrderPortal Source chain OrderPortal id.
+     * @param orderRecipient Recipient id on the ad chain to receive payout upon unlock (low 20 bytes used for local transfer).
      * @param adId Target ad id on this chain.
-     * @param adCreator Expected maker (ad owner).
-     * @param adRecipient Expected maker-defined recipient on the order chain.
+     * @param adCreator Expected maker id (ad owner; low 20 bytes equal local EVM address).
+     * @param adRecipient Expected maker-defined recipient id on the order chain.
      * @param salt Unique nonce to avoid hash collisions / replay.
      */
     struct OrderParams {
-        address orderChainToken;
-        address adChainToken;
+        bytes32 orderChainToken;
+        bytes32 adChainToken;
         uint256 amount;
-        address bridger;
+        bytes32 bridger;
         uint256 orderChainId;
-        address srcOrderPortal;
-        address orderRecipient;
+        bytes32 srcOrderPortal;
+        bytes32 orderRecipient;
         string adId;
-        address adCreator;
-        address adRecipient;
+        bytes32 adCreator;
+        bytes32 adRecipient;
         uint256 salt;
     }
 
@@ -133,8 +132,8 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
     /// @notice Source-chain configs.
     mapping(uint256 => ChainInfo) public chains;
 
-    /// @notice Supported token routes: ad token → (orderChainId → Order token)
-    mapping(address => mapping(uint256 => address)) public tokenRoute;
+    /// @notice Supported token routes: ad token (local address) → (orderChainId → Order token id as 32-byte cross-chain representation).
+    mapping(address => mapping(uint256 => bytes32)) public tokenRoute;
 
     /// @notice Ads by id.
     mapping(string => Ad) public ads;
@@ -164,25 +163,26 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
     /**
      * @notice Emitted when a source chain configuration is set/updated.
      * @param chainId Source chain id.
-     * @param orderPortal Source chain OrderPortal address.
+     * @param orderPortal Source chain OrderPortal id (32-byte cross-chain representation).
      * @param supported Whether orders from this chain are accepted.
      */
-    event ChainSet(uint256 indexed chainId, address indexed orderPortal, bool supported);
+    event ChainSet(uint256 indexed chainId, bytes32 indexed orderPortal, bool supported);
 
     /**
      * @notice Emitted when a token route is configured.
-     * @param orderChainToken Token on the order (source) chain.
-     * @param adChainId Destination chain id (equals `block.chainid` for this deployment).
-     * @param adChainToken Token on this (ad) chain.
+     * @param adToken Token on this (ad) chain.
+     * @param orderChainId Source chain id.
+     * @param orderChainToken Token id on the order (source) chain (32-byte cross-chain representation).
      */
-    event TokenRouteSet(address indexed orderChainToken, uint256 indexed adChainId, address indexed adChainToken);
+    event TokenRouteSet(address indexed adToken, uint256 indexed orderChainId, bytes32 indexed orderChainToken);
 
     /**
      * @notice Emitted when a token route is removed.
-     * @param orderChainToken Token on the order (source) chain.
-     * @param adChainId Destination chain id (this chain).
+     * @param adToken Token on this (ad) chain.
+     * @param orderChainToken Token id on the order (source) chain.
+     * @param orderChainId Source chain id.
      */
-    event TokenRouteRemoved(address indexed adToken, address indexed orderChainToken, uint256 indexed adChainId);
+    event TokenRouteRemoved(address indexed adToken, bytes32 indexed orderChainToken, uint256 indexed orderChainId);
 
     /**
      * @notice Emitted when an ad is created.
@@ -237,17 +237,17 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
         address maker,
         address token,
         uint256 amount,
-        address bridger,
-        address recipient
+        bytes32 bridger,
+        bytes32 recipient
     );
 
     /**
      * @notice Emitted when an order is unlocked by a valid proof.
      * @param orderHash EIP-712 order hash.
-     * @param recipient Recipient paid on this chain.
+     * @param recipient Recipient id paid on this chain (low 20 bytes = local EVM address).
      * @param nullifierHash Consumed nullifier to prevent reuse.
      */
-    event OrderUnlocked(bytes32 indexed orderHash, address indexed recipient, bytes32 nullifierHash);
+    event OrderUnlocked(bytes32 indexed orderHash, bytes32 indexed recipient, bytes32 nullifierHash);
 
     /**
      * @notice Emitted when a manager's status is updated
@@ -282,18 +282,20 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
     /// @notice Source chain not supported.
     error AdManager__ChainNotSupported(uint256 chainId);
     /// @notice Provided OrderPortal does not match configured source-chain portal.
-    error AdManager__OrderPortalMismatch(address expected, address provided);
+    error AdManager__OrderPortalMismatch(bytes32 expected, bytes32 provided);
     /// @notice Provided orderChainId does not match the ad's configured orderChainId.
     error AdManager__OrderChainMismatch(uint256 expected, uint256 provided);
 
     /// @notice No token route exists for (adToken, orderChainId).
-    error AdManager__MissingRoute(address orderChainToken, uint256 adChainId);
+    error AdManager__MissingRoute(bytes32 orderChainToken, uint256 adChainId);
     /// @notice Source token mismatches the configured route.
-    error AdManager__OrderTokenMismatch(address expected, address provided);
+    error AdManager__OrderTokenMismatch(bytes32 expected, bytes32 provided);
     /// @notice Destination (ad-chain) token mismatches the ad's token.
-    error AdManager__AdTokenMismatch(address expected, address provided);
+    error AdManager__AdTokenMismatch(bytes32 expected, bytes32 provided);
     /// @notice Provided adRecipient mismatches the ad's configured adRecipient.
-    error AdManager__AdRecipientMismatch(address expected, address provided);
+    error AdManager__AdRecipientMismatch(bytes32 expected, bytes32 provided);
+    /// @notice A bytes32 value intended to be an EVM address has non-zero upper 12 bytes.
+    error AdManager__NotEvmAddress(bytes32 value);
 
     /// @notice Order already opened for the computed hash.
     error AdManager__OrderExists(bytes32 orderHash);
@@ -376,10 +378,10 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
     /**
      * @notice Add or update a source-chain configuration.
      * @param orderChainId Source chain id.
-     * @param orderPortal Counterpart OrderPortal on the source chain.
+     * @param orderPortal Counterpart OrderPortal id on the source chain (32-byte cross-chain representation).
      * @param supported Whether the chain is supported.
      */
-    function setChain(uint256 orderChainId, address orderPortal, bool supported) external onlyRole(ADMIN_ROLE) {
+    function setChain(uint256 orderChainId, bytes32 orderPortal, bool supported) external onlyRole(ADMIN_ROLE) {
         chains[orderChainId] = ChainInfo({supported: supported, orderPortal: orderPortal});
         emit ChainSet(orderChainId, orderPortal, supported);
     }
@@ -390,7 +392,7 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
      */
     function removeChain(uint256 orderChainId) external onlyRole(ADMIN_ROLE) {
         delete chains[orderChainId];
-        emit ChainSet(orderChainId, address(0), false);
+        emit ChainSet(orderChainId, bytes32(0), false);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -401,14 +403,14 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
      * @notice Configure a token route mapping from a source chain to this chain.
      * @dev Sets `tokenRoute[adToken][orderChainId] = orderToken`.
      * @param adToken Token on this (ad) chain.
-     * @param orderToken Token on the source (order) chain.
+     * @param orderToken Token id on the source (order) chain (32-byte cross-chain representation).
      * @param orderChainId Source chain id.
      */
-    function setTokenRoute(address adToken, address orderToken, uint256 orderChainId) external onlyRole(ADMIN_ROLE) {
-        if (orderToken == address(0) || adToken == address(0)) revert AdManager__TokenZeroAddress();
+    function setTokenRoute(address adToken, bytes32 orderToken, uint256 orderChainId) external onlyRole(ADMIN_ROLE) {
+        if (orderToken == bytes32(0) || adToken == address(0)) revert AdManager__TokenZeroAddress();
         if (!chains[orderChainId].supported) revert AdManager__ChainNotSupported(orderChainId);
         tokenRoute[adToken][orderChainId] = orderToken;
-        emit TokenRouteSet(orderToken, orderChainId, adToken);
+        emit TokenRouteSet(adToken, orderChainId, orderToken);
     }
 
     /**
@@ -417,7 +419,7 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
      * @param orderChainId Source chain id.
      */
     function removeTokenRoute(address adToken, uint256 orderChainId) external onlyRole(ADMIN_ROLE) {
-        address orderToken = tokenRoute[adToken][orderChainId];
+        bytes32 orderToken = tokenRoute[adToken][orderChainId];
         delete tokenRoute[adToken][orderChainId];
         emit TokenRouteRemoved(adToken, orderToken, orderChainId);
     }
@@ -445,13 +447,13 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
         address adToken,
         uint256 initialAmount,
         uint256 orderChainId,
-        address adRecipient
+        bytes32 adRecipient
     ) external payable nonReentrant {
         if (adToken == address(0)) revert AdManager__TokenZeroAddress();
-        if (adRecipient == address(0)) revert AdManager__RecipientZero();
+        if (adRecipient == bytes32(0)) revert AdManager__RecipientZero();
         if (initialAmount == 0) revert AdManager__ZeroAmount();
 
-        if (tokenRoute[adToken][orderChainId] == address(0)) {
+        if (tokenRoute[adToken][orderChainId] == bytes32(0)) {
             revert AdManager__ChainNotSupported(orderChainId);
         }
 
@@ -737,10 +739,12 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
         Ad storage ad = ads[params.adId];
         ad.locked -= params.amount;
 
+        address orderRecipientAddr = toAddressChecked(params.orderRecipient);
+
         if (isNativeToken(ad.token)) {
-            wNativeToken.safeWithdrawTo(params.amount, params.orderRecipient);
+            wNativeToken.safeWithdrawTo(params.amount, orderRecipientAddr);
         } else {
-            IERC20(ad.token).safeTransfer(params.orderRecipient, params.amount);
+            IERC20(ad.token).safeTransfer(orderRecipientAddr, params.amount);
         }
 
         emit OrderUnlocked(orderHash, params.orderRecipient, nullifierHash);
@@ -901,18 +905,18 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
     {
         bytes32[] memory buf = EfficientHashLib.malloc(14);
         EfficientHashLib.set(buf, 0, ORDER_TYPEHASH);
-        EfficientHashLib.set(buf, 1, toBytes32(p.orderChainToken));
-        EfficientHashLib.set(buf, 2, toBytes32(p.adChainToken));
+        EfficientHashLib.set(buf, 1, p.orderChainToken);
+        EfficientHashLib.set(buf, 2, p.adChainToken);
         EfficientHashLib.set(buf, 3, p.amount);
-        EfficientHashLib.set(buf, 4, toBytes32(p.bridger));
+        EfficientHashLib.set(buf, 4, p.bridger);
         EfficientHashLib.set(buf, 5, p.orderChainId);
-        EfficientHashLib.set(buf, 6, toBytes32(p.srcOrderPortal));
-        EfficientHashLib.set(buf, 7, toBytes32(p.orderRecipient));
+        EfficientHashLib.set(buf, 6, p.srcOrderPortal);
+        EfficientHashLib.set(buf, 7, p.orderRecipient);
         EfficientHashLib.set(buf, 8, adChainId);
         EfficientHashLib.set(buf, 9, toBytes32(dstAdManager));
         EfficientHashLib.set(buf, 10, keccak256(bytes(p.adId)));
-        EfficientHashLib.set(buf, 11, toBytes32(p.adCreator));
-        EfficientHashLib.set(buf, 12, toBytes32(p.adRecipient));
+        EfficientHashLib.set(buf, 11, p.adCreator);
+        EfficientHashLib.set(buf, 12, p.adRecipient);
         EfficientHashLib.set(buf, 13, p.salt);
         return EfficientHashLib.hash(buf);
     }
@@ -924,6 +928,17 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
      */
     function toBytes32(address value) internal pure returns (bytes32 out) {
         return bytes32(uint256(uint160(value)));
+    }
+
+    /**
+     * @notice Extract an EVM address from a bytes32 cross-chain id.
+     * @dev Reverts if the upper 12 bytes are non-zero (i.e. not a valid EVM address).
+     * @param value Cross-chain id.
+     * @return addr Local EVM address (low 20 bytes of `value`).
+     */
+    function toAddressChecked(bytes32 value) internal pure returns (address addr) {
+        if (uint256(value) >> 160 != 0) revert AdManager__NotEvmAddress(value);
+        return address(uint160(uint256(value)));
     }
 
     /**
@@ -963,7 +978,7 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
         address adToken,
         uint256 initialAmount,
         uint256 orderChainId,
-        address adRecipient,
+        bytes32 adRecipient,
         bytes32 authToken,
         uint256 timeToExpire
     ) public view returns (bytes32 message) {
@@ -1139,13 +1154,13 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
     function validateOrder(Ad memory ad, OrderParams calldata params) internal view returns (bytes32 orderHash) {
         if (!ad.open) revert AdManager__AdClosed();
         if (params.amount == 0) revert AdManager__ZeroAmount();
-        if (params.bridger == address(0)) revert AdManager__BridgerZero();
-        if (params.orderRecipient == address(0)) revert AdManager__RecipientZero();
+        if (params.bridger == bytes32(0)) revert AdManager__BridgerZero();
+        if (params.orderRecipient == bytes32(0)) revert AdManager__RecipientZero();
 
         // Source chain must be supported and portal must match (if configured).
         ChainInfo memory ci = chains[params.orderChainId];
         if (!ci.supported) revert AdManager__ChainNotSupported(params.orderChainId);
-        if (ci.orderPortal != address(0) && ci.orderPortal != params.srcOrderPortal) {
+        if (ci.orderPortal != bytes32(0) && ci.orderPortal != params.srcOrderPortal) {
             revert AdManager__OrderPortalMismatch(ci.orderPortal, params.srcOrderPortal);
         }
 
@@ -1155,13 +1170,17 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
         }
 
         // Token route: adChainToken (this chain) + orderChainId -> orderChainToken (source).
-        address routed = tokenRoute[params.adChainToken][params.orderChainId];
-        if (routed == address(0)) revert AdManager__MissingRoute(params.orderChainToken, block.chainid);
+        // The local ad token (address) is the canonical route key; params.adChainToken is the
+        // cross-chain 32-byte representation and is enforced to match below.
+        bytes32 routed = tokenRoute[ad.token][params.orderChainId];
+        if (routed == bytes32(0)) revert AdManager__MissingRoute(params.orderChainToken, block.chainid);
         if (routed != params.orderChainToken) revert AdManager__OrderTokenMismatch(routed, params.orderChainToken);
 
         // Identity and token checks.
-        if (params.adCreator != ad.maker) revert AdManager__NotMaker();
-        if (params.adChainToken != ad.token) revert AdManager__AdTokenMismatch(ad.token, params.adChainToken);
+        if (params.adCreator != toBytes32(ad.maker)) revert AdManager__NotMaker();
+        if (params.adChainToken != toBytes32(ad.token)) {
+            revert AdManager__AdTokenMismatch(toBytes32(ad.token), params.adChainToken);
+        }
         if (params.adRecipient != ad.adRecipient) {
             revert AdManager__AdRecipientMismatch(ad.adRecipient, params.adRecipient);
         }

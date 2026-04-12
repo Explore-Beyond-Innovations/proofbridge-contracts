@@ -454,31 +454,12 @@ fn setup() -> TestSetup<'static> {
     ad_merkle.set_manager(&ad_manager_addr, &true);
     order_merkle.set_manager(&order_portal_addr, &true);
 
-    // --- Ad-manager: set_chain (ed25519 signed) ---
-    {
-        let auth_token = auth_counter.next();
-        let time_to_expire = u64::MAX;
-        let message_hash = hash_request(
-            &auth_token,
-            time_to_expire,
-            "setChain",
-            &[],
-            tp.ad_chain_id,
-            &tp.ad_manager_id,
-        );
-        let signature = ed25519_sign(&env, &signing_key, &message_hash);
-        let auth_token_bn = BytesN::from_array(&env, &auth_token);
-
-        ad_manager.set_chain(
-            &signature,
-            &admin_pubkey,
-            &auth_token_bn,
-            &time_to_expire,
-            &tp.order_chain_id,
-            &bytes32_to_bytesn(&env, &tp.order_portal_id),
-            &true,
-        );
-    }
+    // --- Ad-manager: set_chain (uses require_auth, mocked) ---
+    ad_manager.set_chain(
+        &tp.order_chain_id,
+        &bytes32_to_bytesn(&env, &tp.order_portal_id),
+        &true,
+    );
 
     // --- Order-portal: set_chain (uses require_auth, mocked) ---
     order_portal.set_chain(
@@ -487,31 +468,12 @@ fn setup() -> TestSetup<'static> {
         &true,
     );
 
-    // --- Ad-manager: set_token_route (ed25519 signed) ---
-    {
-        let auth_token = auth_counter.next();
-        let time_to_expire = u64::MAX;
-        let message_hash = hash_request(
-            &auth_token,
-            time_to_expire,
-            "setTokenRoute",
-            &[],
-            tp.ad_chain_id,
-            &tp.ad_manager_id,
-        );
-        let signature = ed25519_sign(&env, &signing_key, &message_hash);
-        let auth_token_bn = BytesN::from_array(&env, &auth_token);
-
-        ad_manager.set_token_route(
-            &signature,
-            &admin_pubkey,
-            &auth_token_bn,
-            &time_to_expire,
-            &bytes32_to_bytesn(&env, &tp.ad_chain_token),
-            &bytes32_to_bytesn(&env, &tp.order_chain_token),
-            &tp.order_chain_id,
-        );
-    }
+    // --- Ad-manager: set_token_route (uses require_auth, mocked) ---
+    ad_manager.set_token_route(
+        &bytes32_to_bytesn(&env, &tp.ad_chain_token),
+        &bytes32_to_bytesn(&env, &tp.order_chain_token),
+        &tp.order_chain_id,
+    );
 
     // --- Order-portal: set_token_route (uses require_auth, mocked) ---
     order_portal.set_token_route(

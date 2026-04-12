@@ -45,7 +45,11 @@ contract OrderPortalTest is Test {
 
     // Common addresses
     address internal adManager = makeAddr("adManager");
-    address internal adToken = makeAddr("adToken");
+    bytes32 internal adToken = bytes32(uint256(uint160(makeAddr("adToken"))));
+
+    function _b32(address a) internal pure returns (bytes32) {
+        return bytes32(uint256(uint160(a)));
+    }
 
     uint256 internal adChainId = 111_55111; // e.g., Sepolia-style id
     uint256 internal orderChainId; // block.chainid at runtime
@@ -83,16 +87,16 @@ contract OrderPortalTest is Test {
            HELPER
     //////////////////////////////////////////////////////////////*/
     function _defaultParams() internal view returns (OrderPortal.OrderParams memory p) {
-        p.orderChainToken = address(orderToken);
+        p.orderChainToken = _b32(address(orderToken));
         p.adChainToken = adToken;
         p.amount = 100 ether;
-        p.bridger = bridger;
-        p.orderRecipient = orderRecipient;
+        p.bridger = _b32(bridger);
+        p.orderRecipient = _b32(orderRecipient);
         p.adChainId = adChainId;
-        p.adManager = adManager;
+        p.adManager = _b32(adManager);
         p.adId = "777";
-        p.adCreator = address(0xACAC);
-        p.adRecipient = adRecipient;
+        p.adCreator = _b32(address(0xACAC));
+        p.adRecipient = _b32(adRecipient);
         p.salt = 12345;
     }
 
@@ -131,18 +135,18 @@ contract OrderPortalTest is Test {
     function test_setChain_onlyAdmin() public {
         vm.prank(nonAdmin);
         vm.expectRevert();
-        portal.setChain(adChainId, adManager, true);
+        portal.setChain(adChainId, _b32(adManager), true);
     }
 
     function test_setChain_setsAndEmits() public {
         vm.prank(admin);
         vm.expectEmit(true, true, true, true);
-        emit OrderPortal.ChainSet(adChainId, adManager, true);
-        portal.setChain(adChainId, adManager, true);
+        emit OrderPortal.ChainSet(adChainId, _b32(adManager), true);
+        portal.setChain(adChainId, _b32(adManager), true);
 
-        (bool supported, address storedManager) = portal.chains(adChainId);
+        (bool supported, bytes32 storedManager) = portal.chains(adChainId);
         assertTrue(supported, "chain not supported");
-        assertEq(storedManager, adManager, "adManager mismatch");
+        assertEq(storedManager, _b32(adManager), "adManager mismatch");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -150,7 +154,7 @@ contract OrderPortalTest is Test {
     //////////////////////////////////////////////////////////////*/
     function test_removeChain_onlyAdmin() public {
         vm.startPrank(admin);
-        portal.setChain(adChainId, adManager, true);
+        portal.setChain(adChainId, _b32(adManager), true);
         vm.stopPrank();
 
         vm.prank(nonAdmin);
@@ -160,16 +164,16 @@ contract OrderPortalTest is Test {
 
     function test_removeChain_clearsAndEmits() public {
         vm.startPrank(admin);
-        portal.setChain(adChainId, adManager, true);
+        portal.setChain(adChainId, _b32(adManager), true);
         vm.expectEmit(true, true, true, true);
-        // Contract emits ChainSet(chainId, address(0), false) on removal
-        emit OrderPortal.ChainSet(adChainId, address(0), false);
+        // Contract emits ChainSet(chainId, bytes32(0), false) on removal
+        emit OrderPortal.ChainSet(adChainId, bytes32(0), false);
         portal.removeChain(adChainId);
         vm.stopPrank();
 
-        (bool supported, address storedManager) = portal.chains(adChainId);
+        (bool supported, bytes32 storedManager) = portal.chains(adChainId);
         assertFalse(supported, "chain still supported");
-        assertEq(storedManager, address(0), "adManager not cleared");
+        assertEq(storedManager, bytes32(0), "adManager not cleared");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -190,9 +194,9 @@ contract OrderPortalTest is Test {
 
         vm.prank(admin);
         vm.expectRevert(
-            abi.encodeWithSelector(OrderPortal.OrderPortal__RoutesZeroAddress.selector, address(orderToken), address(0))
+            abi.encodeWithSelector(OrderPortal.OrderPortal__RoutesZeroAddress.selector, address(orderToken), bytes32(0))
         );
-        portal.setTokenRoute(address(orderToken), adChainId, address(0));
+        portal.setTokenRoute(address(orderToken), adChainId, bytes32(0));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -211,14 +215,14 @@ contract OrderPortalTest is Test {
 
     function test_setTokenRoute_setsAndEmits_whenSupported() public {
         vm.startPrank(admin);
-        portal.setChain(adChainId, adManager, true);
+        portal.setChain(adChainId, _b32(adManager), true);
 
         vm.expectEmit(true, true, true, true);
         emit OrderPortal.TokenRouteSet(address(orderToken), adChainId, adToken);
         portal.setTokenRoute(address(orderToken), adChainId, adToken);
         vm.stopPrank();
 
-        address routed = portal.tokenRoute(address(orderToken), adChainId);
+        bytes32 routed = portal.tokenRoute(address(orderToken), adChainId);
         assertEq(routed, adToken, "route not set");
     }
 
@@ -228,14 +232,14 @@ contract OrderPortalTest is Test {
 
     function test_setNativeTokenRoute_setsAndEmits_whenSupported() public {
         vm.startPrank(admin);
-        portal.setChain(adChainId, adManager, true);
+        portal.setChain(adChainId, _b32(adManager), true);
 
         vm.expectEmit(true, true, true, true);
         emit OrderPortal.TokenRouteSet(NATIVE_TOKEN_ADDRESS, adChainId, adToken);
         portal.setTokenRoute(NATIVE_TOKEN_ADDRESS, adChainId, adToken);
         vm.stopPrank();
 
-        address routed = portal.tokenRoute(NATIVE_TOKEN_ADDRESS, adChainId);
+        bytes32 routed = portal.tokenRoute(NATIVE_TOKEN_ADDRESS, adChainId);
         assertEq(routed, adToken, "route not set");
     }
 
@@ -244,7 +248,7 @@ contract OrderPortalTest is Test {
     //////////////////////////////////////////////////////////////*/
     function test_removeTokenRoute_onlyAdmin() public {
         vm.startPrank(admin);
-        portal.setChain(adChainId, adManager, true);
+        portal.setChain(adChainId, _b32(adManager), true);
         portal.setTokenRoute(address(orderToken), adChainId, adToken);
         vm.stopPrank();
 
@@ -255,7 +259,7 @@ contract OrderPortalTest is Test {
 
     function test_removeTokenRoute_clearsAndEmits() public {
         vm.startPrank(admin);
-        portal.setChain(adChainId, adManager, true);
+        portal.setChain(adChainId, _b32(adManager), true);
         portal.setTokenRoute(address(orderToken), adChainId, adToken);
 
         vm.expectEmit(true, true, true, true);
@@ -263,8 +267,8 @@ contract OrderPortalTest is Test {
         portal.removeTokenRoute(address(orderToken), adChainId);
         vm.stopPrank();
 
-        address routed = portal.tokenRoute(address(orderToken), adChainId);
-        assertEq(routed, address(0), "route not removed");
+        bytes32 routed = portal.tokenRoute(address(orderToken), adChainId);
+        assertEq(routed, bytes32(0), "route not removed");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -306,7 +310,7 @@ contract OrderPortalTest is Test {
         test_setTokenRoute_setsAndEmits_whenSupported();
         OrderPortal.OrderParams memory p = _defaultParams();
         address otherAdMgr = makeAddr("otherAdMgr");
-        p.adManager = otherAdMgr; // differs from configured dstAdMgr
+        p.adManager = _b32(otherAdMgr); // differs from configured dstAdMgr
 
         bytes32 orderHash = portal.hashOrderPublic(p);
         (authToken, timeToLive, signature) = generateCreateOrderRequestParams(p.adId, orderHash);
@@ -323,7 +327,7 @@ contract OrderPortalTest is Test {
         test_setTokenRoute_setsAndEmits_whenSupported();
         // No tokenRoute set yet
         OrderPortal.OrderParams memory p = _defaultParams();
-        p.orderChainToken = other;
+        p.orderChainToken = _b32(other);
 
         bytes32 orderHash = portal.hashOrderPublic(p);
         (authToken, timeToLive, signature) = generateCreateOrderRequestParams(p.adId, orderHash);
@@ -340,7 +344,7 @@ contract OrderPortalTest is Test {
         test_setTokenRoute_setsAndEmits_whenSupported();
         // Route points to token2Other, but params.token2 is token2
         vm.prank(admin);
-        portal.setTokenRoute(address(orderToken), adChainId, other);
+        portal.setTokenRoute(address(orderToken), adChainId, _b32(other));
 
         OrderPortal.OrderParams memory p = _defaultParams();
 
@@ -372,8 +376,8 @@ contract OrderPortalTest is Test {
         vm.expectEmit(true, true, true, true);
         emit OrderPortal.OrderCreated(
             expectedHash,
-            bridger,
-            address(orderToken),
+            _b32(bridger),
+            _b32(address(orderToken)),
             p.amount,
             p.adChainId,
             p.adChainToken,
@@ -408,7 +412,7 @@ contract OrderPortalTest is Test {
         test_setNativeTokenRoute_setsAndEmits_whenSupported();
 
         OrderPortal.OrderParams memory p = _defaultParams();
-        p.orderChainToken = NATIVE_TOKEN_ADDRESS;
+        p.orderChainToken = _b32(NATIVE_TOKEN_ADDRESS);
 
         vm.deal(bridger, p.amount);
 
@@ -423,8 +427,8 @@ contract OrderPortalTest is Test {
         vm.expectEmit(true, true, true, true);
         emit OrderPortal.OrderCreated(
             expectedHash,
-            bridger,
-            NATIVE_TOKEN_ADDRESS,
+            _b32(bridger),
+            _b32(NATIVE_TOKEN_ADDRESS),
             p.amount,
             p.adChainId,
             p.adChainToken,
@@ -499,7 +503,7 @@ contract OrderPortalTest is Test {
         p = _defaultParams();
         p.amount = _amount;
         p.salt = _salt;
-        p.orderChainToken = NATIVE_TOKEN_ADDRESS;
+        p.orderChainToken = _b32(NATIVE_TOKEN_ADDRESS);
         vm.deal(bridger, _amount);
 
         bytes32 exHash = portal.hashOrderPublic(p);
@@ -566,7 +570,7 @@ contract OrderPortalTest is Test {
 
         // Balances before
         uint256 balPortalBefore = orderToken.balanceOf(address(portal));
-        uint256 balRecipientBefore = orderToken.balanceOf(p.adRecipient);
+        uint256 balRecipientBefore = orderToken.balanceOf(address(uint160(uint256(p.adRecipient))));
 
         // Fail regardless of inputs
         verifier.setResult(false); // not strict, return false
@@ -583,7 +587,7 @@ contract OrderPortalTest is Test {
         assertEq(uint256(status), uint256(OrderPortal.Status.Open), "status changed unexpectedly");
 
         assertEq(orderToken.balanceOf(address(portal)), balPortalBefore, "portal balance changed");
-        assertEq(orderToken.balanceOf(p.adRecipient), balRecipientBefore, "recipient balance changed");
+        assertEq(orderToken.balanceOf(address(uint160(uint256(p.adRecipient)))), balRecipientBefore, "recipient balance changed");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -595,7 +599,7 @@ contract OrderPortalTest is Test {
         (OrderPortal.OrderParams memory p, bytes32 orderHash) = _openOrder(65 ether, 123);
 
         uint256 balPortalBefore = orderToken.balanceOf(address(portal));
-        uint256 balRecipientBefore = orderToken.balanceOf(p.adRecipient);
+        uint256 balRecipientBefore = orderToken.balanceOf(address(uint160(uint256(p.adRecipient))));
 
         bytes memory proof = hex"ABCD";
         bytes32 nullifier = bytes32("NOK");
@@ -615,7 +619,7 @@ contract OrderPortalTest is Test {
 
         // Funds transferred from portal to dstRecipient
         assertEq(orderToken.balanceOf(address(portal)), balPortalBefore - p.amount, "portal not debited");
-        assertEq(orderToken.balanceOf(p.adRecipient), balRecipientBefore + p.amount, "recipient not credited");
+        assertEq(orderToken.balanceOf(address(uint160(uint256(p.adRecipient)))), balRecipientBefore + p.amount, "recipient not credited");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -645,7 +649,7 @@ contract OrderPortalTest is Test {
         (OrderPortal.OrderParams memory p, bytes32 orderHash) = _openOrderWithNativeToken(55 ether, 456);
 
         uint256 balPortalBefore = _wNativeToken.balanceOf(address(portal));
-        uint256 balRecipientBefore = p.adRecipient.balance;
+        uint256 balRecipientBefore = address(uint160(uint256(p.adRecipient))).balance;
 
         bytes memory proof = hex"ABCD";
         bytes32 nullifier = bytes32("NATIVE");
@@ -665,6 +669,6 @@ contract OrderPortalTest is Test {
 
         // Funds transferred from portal to dstRecipient
         assertEq(_wNativeToken.balanceOf(address(portal)), balPortalBefore - p.amount, "portal not debited");
-        assertEq(p.adRecipient.balance, balRecipientBefore + p.amount, "recipient not credited");
+        assertEq(address(uint160(uint256(p.adRecipient))).balance, balRecipientBefore + p.amount, "recipient not credited");
     }
 }

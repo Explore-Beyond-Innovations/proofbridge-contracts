@@ -90,37 +90,13 @@ impl AdManagerContract {
     /// Set or unset an address as a manager.
     pub fn set_manager(
         env: Env,
-        signature: BytesN<64>,
-        public_key: BytesN<32>,
-        auth_token: BytesN<32>,
-        time_to_expire: u64,
         manager: Address,
         status: bool,
     ) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
-
-        let contract_bytes = eip712::contract_address_to_bytes32(&env);
-        let message = auth::hash_request(
-            &env,
-            &auth_token,
-            time_to_expire,
-            "setManager",
-            &[],
-            config.chain_id,
-            &contract_bytes,
-        );
-
-        Self::verify_request(
-            &env,
-            &message,
-            &auth_token,
-            time_to_expire,
-            &signature,
-            &public_key,
-        )?;
+        config.admin.require_auth();
 
         storage::set_manager(&env, &manager, status);
-        storage::set_request_hash_used(&env, &message);
 
         events::ManagerUpdated {
             manager: manager.clone(),
@@ -135,42 +111,22 @@ impl AdManagerContract {
     /// Add or update a source chain configuration.
     pub fn set_chain(
         env: Env,
-        signature: BytesN<64>,
-        public_key: BytesN<32>,
-        auth_token: BytesN<32>,
-        time_to_expire: u64,
         order_chain_id: u128,
         order_portal: BytesN<32>,
         supported: bool,
     ) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
+        config.admin.require_auth();
 
-        let contract_bytes = eip712::contract_address_to_bytes32(&env);
-        let message = auth::hash_request(
-            &env,
-            &auth_token,
-            time_to_expire,
-            "setChain",
-            &[],
-            config.chain_id,
-            &contract_bytes,
-        );
-
-        Self::verify_request(
-            &env,
-            &message,
-            &auth_token,
-            time_to_expire,
-            &signature,
-            &public_key,
-        )?;
+        if supported && auth::is_zero_bytes32(&order_portal) {
+            return Err(AdManagerError::ZeroAddress);
+        }
 
         let chain_info = ChainInfo {
             supported,
             order_portal: order_portal.clone(),
         };
         storage::set_chain(&env, order_chain_id, &chain_info);
-        storage::set_request_hash_used(&env, &message);
 
         events::ChainSet {
             chain_id: order_chain_id,
@@ -184,38 +140,11 @@ impl AdManagerContract {
     }
 
     /// Remove a source chain configuration.
-    pub fn remove_chain(
-        env: Env,
-        signature: BytesN<64>,
-        public_key: BytesN<32>,
-        auth_token: BytesN<32>,
-        time_to_expire: u64,
-        order_chain_id: u128,
-    ) -> Result<(), AdManagerError> {
+    pub fn remove_chain(env: Env, order_chain_id: u128) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
-
-        let contract_bytes = eip712::contract_address_to_bytes32(&env);
-        let message = auth::hash_request(
-            &env,
-            &auth_token,
-            time_to_expire,
-            "removeChain",
-            &[],
-            config.chain_id,
-            &contract_bytes,
-        );
-
-        Self::verify_request(
-            &env,
-            &message,
-            &auth_token,
-            time_to_expire,
-            &signature,
-            &public_key,
-        )?;
+        config.admin.require_auth();
 
         storage::remove_chain(&env, order_chain_id);
-        storage::set_request_hash_used(&env, &message);
 
         events::ChainSet {
             chain_id: order_chain_id,
@@ -231,15 +160,12 @@ impl AdManagerContract {
     /// Set a token route mapping.
     pub fn set_token_route(
         env: Env,
-        signature: BytesN<64>,
-        public_key: BytesN<32>,
-        auth_token: BytesN<32>,
-        time_to_expire: u64,
         ad_token: BytesN<32>,
         order_token: BytesN<32>,
         order_chain_id: u128,
     ) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
+        config.admin.require_auth();
 
         if auth::is_zero_bytes32(&ad_token) || auth::is_zero_bytes32(&order_token) {
             return Err(AdManagerError::TokenZeroAddress);
@@ -251,28 +177,7 @@ impl AdManagerContract {
             return Err(AdManagerError::ChainNotSupported);
         }
 
-        let contract_bytes = eip712::contract_address_to_bytes32(&env);
-        let message = auth::hash_request(
-            &env,
-            &auth_token,
-            time_to_expire,
-            "setTokenRoute",
-            &[],
-            config.chain_id,
-            &contract_bytes,
-        );
-
-        Self::verify_request(
-            &env,
-            &message,
-            &auth_token,
-            time_to_expire,
-            &signature,
-            &public_key,
-        )?;
-
         storage::set_token_route(&env, &ad_token, order_chain_id, &order_token);
-        storage::set_request_hash_used(&env, &message);
 
         events::TokenRouteSet {
             ad_token: ad_token.clone(),
@@ -288,40 +193,16 @@ impl AdManagerContract {
     /// Remove a token route mapping.
     pub fn remove_token_route(
         env: Env,
-        signature: BytesN<64>,
-        public_key: BytesN<32>,
-        auth_token: BytesN<32>,
-        time_to_expire: u64,
         ad_token: BytesN<32>,
         order_chain_id: u128,
     ) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
+        config.admin.require_auth();
 
         let order_token = storage::get_token_route(&env, &ad_token, order_chain_id)
             .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]));
 
-        let contract_bytes = eip712::contract_address_to_bytes32(&env);
-        let message = auth::hash_request(
-            &env,
-            &auth_token,
-            time_to_expire,
-            "removeTokenRoute",
-            &[],
-            config.chain_id,
-            &contract_bytes,
-        );
-
-        Self::verify_request(
-            &env,
-            &message,
-            &auth_token,
-            time_to_expire,
-            &signature,
-            &public_key,
-        )?;
-
         storage::remove_token_route(&env, &ad_token, order_chain_id);
-        storage::set_request_hash_used(&env, &message);
 
         events::TokenRouteRemoved {
             ad_token: ad_token.clone(),

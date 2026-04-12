@@ -15,6 +15,20 @@ import {
 } from "./utils";
 
 /**
+ * Left-pad an EVM address to bytes32 for cross-chain parity.
+ */
+function addrToBytes32(addr: string): string {
+  return ethers.zeroPadValue(ethers.getAddress(addr), 32);
+}
+
+/**
+ * Compare a bytes32 returned from chain with an EVM address (case-insensitive).
+ */
+function b32EqAddr(b32: string, addr: string): boolean {
+  return b32.toLowerCase() === addrToBytes32(addr).toLowerCase();
+}
+
+/**
  * Generic function to call a contract function
  * Used by specialized scenarios for custom contract interactions
  */
@@ -103,14 +117,13 @@ export async function linkChains(
     const chain1Info = await adManager1.chains(chain2Config.chainId);
     if (
       chain1Info.supported &&
-      chain1Info.orderPortal.toLowerCase() ===
-        chain2Contracts.orderPortal!.toLowerCase()
+      b32EqAddr(chain1Info.orderPortal, chain2Contracts.orderPortal!)
     ) {
       console.log("  ✓ Already configured");
     } else {
       const tx1 = await adManager1.setChain(
         chain2Config.chainId,
-        chain2Contracts.orderPortal!,
+        addrToBytes32(chain2Contracts.orderPortal!),
         true
       );
       console.log(`  Tx: ${tx1.hash}`);
@@ -141,14 +154,13 @@ export async function linkChains(
 
     if (
       chain1OrderPortalInfo.supported &&
-      chain1OrderPortalInfo.adManager.toLowerCase() ===
-        chain2Contracts.adManager!.toLowerCase()
+      b32EqAddr(chain1OrderPortalInfo.adManager, chain2Contracts.adManager!)
     ) {
       console.log("  ✓ Already configured");
     } else {
       const tx2 = await orderPortal1.setChain(
         chain2Config.chainId,
-        chain2Contracts.adManager!,
+        addrToBytes32(chain2Contracts.adManager!),
         true
       );
       console.log(`  Tx: ${tx2.hash}`);
@@ -177,14 +189,13 @@ export async function linkChains(
     const chain2Info = await adManager2.chains(chain1Config.chainId);
     if (
       chain2Info.supported &&
-      chain2Info.orderPortal.toLowerCase() ===
-        chain1Contracts.orderPortal!.toLowerCase()
+      b32EqAddr(chain2Info.orderPortal, chain1Contracts.orderPortal!)
     ) {
       console.log("  ✓ Already configured");
     } else {
       const tx3 = await adManager2.setChain(
         chain1Config.chainId,
-        chain1Contracts.orderPortal!,
+        addrToBytes32(chain1Contracts.orderPortal!),
         true
       );
       console.log(`  Tx: ${tx3.hash}`);
@@ -214,14 +225,13 @@ export async function linkChains(
     );
     if (
       chain2OrderPortalInfo.supported &&
-      chain2OrderPortalInfo.adManager.toLowerCase() ===
-        chain1Contracts.adManager!.toLowerCase()
+      b32EqAddr(chain2OrderPortalInfo.adManager, chain1Contracts.adManager!)
     ) {
       console.log("  ✓ Already configured");
     } else {
       const tx4 = await orderPortal2.setChain(
         chain1Config.chainId,
-        chain1Contracts.adManager!,
+        addrToBytes32(chain1Contracts.adManager!),
         true
       );
       console.log(`  Tx: ${tx4.hash}`);
@@ -328,12 +338,12 @@ export async function configureTokenRoutes(
         chain2Config.chainId
       );
 
-      if (existingRoute1.toLowerCase() === routeToken2.toLowerCase()) {
+      if (b32EqAddr(existingRoute1, routeToken2)) {
         console.log("    ✓ Already configured");
       } else {
         const tx1 = await adManager1.setTokenRoute(
           routeToken1, // adToken on chain1
-          routeToken2, // orderToken on chain2
+          addrToBytes32(routeToken2), // orderToken on chain2 as bytes32
           chain2Config.chainId // orderChainId
         );
         console.log(`    Tx: ${tx1.hash}`);
@@ -349,13 +359,13 @@ export async function configureTokenRoutes(
         chain1Config.chainId
       );
 
-      if (existingRoute2.toLowerCase() === routeToken1.toLowerCase()) {
+      if (b32EqAddr(existingRoute2, routeToken1)) {
         console.log("    ✓ Already configured");
       } else {
         const tx2 = await orderPortal2.setTokenRoute(
           routeToken2, // orderToken on chain2
           chain1Config.chainId, // adChainId
-          routeToken1 // adToken on chain1
+          addrToBytes32(routeToken1) // adToken on chain1 as bytes32
         );
         console.log(`    Tx: ${tx2.hash}`);
         await waitForTransaction(tx2);
@@ -370,12 +380,12 @@ export async function configureTokenRoutes(
         chain1Config.chainId
       );
 
-      if (existingRoute3.toLowerCase() === routeToken1.toLowerCase()) {
+      if (b32EqAddr(existingRoute3, routeToken1)) {
         console.log("    ✓ Already configured");
       } else {
         const tx3 = await adManager2.setTokenRoute(
           routeToken2, // adToken on chain2
-          routeToken1, // orderToken on chain1
+          addrToBytes32(routeToken1), // orderToken on chain1 as bytes32
           chain1Config.chainId // orderChainId
         );
         console.log(`    Tx: ${tx3.hash}`);
@@ -391,13 +401,13 @@ export async function configureTokenRoutes(
         chain2Config.chainId
       );
 
-      if (existingRoute4.toLowerCase() === routeToken2.toLowerCase()) {
+      if (b32EqAddr(existingRoute4, routeToken2)) {
         console.log("    ✓ Already configured");
       } else {
         const tx4 = await orderPortal1.setTokenRoute(
           routeToken1, // orderToken on chain1
           chain2Config.chainId, // adChainId
-          routeToken2 // adToken on chain2
+          addrToBytes32(routeToken2) // adToken on chain2 as bytes32
         );
         console.log(`    Tx: ${tx4.hash}`);
         await waitForTransaction(tx4);
