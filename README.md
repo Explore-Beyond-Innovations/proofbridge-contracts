@@ -54,7 +54,7 @@ Replay is prevented via:
 * **Bidirectional chain linking** ensures contracts only accept proofs from configured counterparts.
 * **Manager permissions** on MerkleManager restrict who can append order hashes.
 
-NATIVE TOKENS are denoted by the all-`0xEE` sentinel address on both EVM and Stellar.
+NATIVE TOKENS are denoted by the all-`0xEE` sentinel address on EVM.
 
 ## Contracts
 
@@ -65,8 +65,8 @@ The destination chain contract where liquidity providers (makers) manage their a
 **Core Functions:**
 
 * **createAd**: Creates a new liquidity advertisement with specified parameters
-* **fundAd** (EVM only): Deposits tokens into an existing ad to increase available liquidity
-* **withdrawFromAd** (EVM only): Withdraws unused tokens from an ad
+* **fundAd**: Deposits tokens into an existing ad to increase available liquidity
+* **withdrawFromAd**: Withdraws unused tokens from an ad
 * **closeAd**: Permanently closes an ad and withdraws all remaining funds
 * **lockForOrder**: Reserves liquidity for a specific EIP-712 order hash, appends to MMR
 * **unlock**: Verifies ZK proof, consumes nullifier, transfers ad token to the **orderRecipient**
