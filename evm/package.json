@@ -4,9 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "deploy": "npx tsx js-scripts/deploy/deploy.ts",
-    "deploy:help": "npx tsx js-scripts/deploy/deploy.ts --help"
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
