@@ -507,6 +507,24 @@ mod validation_tests {
     }
 
     #[test]
+    fn test_bytes32_to_account_address_rejects_zero() {
+        let env = Env::default();
+        let zero = zero_bytes32(&env);
+        let result: Result<Address, AdManagerError> =
+            proofbridge_core::token::bytes32_to_account_address(&env, &zero);
+        assert_eq!(result, Err(AdManagerError::InvalidAccountAddress));
+    }
+
+    #[test]
+    fn test_bytes32_to_account_address_decodes_non_zero() {
+        let env = Env::default();
+        let bytes = make_bytes32(&env, 0xAB);
+        let result: Result<Address, AdManagerError> =
+            proofbridge_core::token::bytes32_to_account_address(&env, &bytes);
+        assert!(result.is_ok(), "any non-zero 32-byte pubkey must decode");
+    }
+
+    #[test]
     fn test_validate_order_recipient_zero() {
         let env = setup_validation_env();
         env.as_contract(&env.register(AdManagerContract, ()), || {

@@ -191,6 +191,26 @@ mod validation_tests {
     }
 
     #[test]
+    fn test_bytes32_to_account_address_rejects_zero() {
+        let env = Env::default();
+        let zero = zero_bytes32(&env);
+        // Direct call into the refactored helper — zero bytes must surface as
+        // the typed contract-specific error, not a panic.
+        let result: Result<Address, OrderPortalError> =
+            proofbridge_core::token::bytes32_to_account_address(&env, &zero);
+        assert_eq!(result, Err(OrderPortalError::InvalidAccountAddress));
+    }
+
+    #[test]
+    fn test_bytes32_to_account_address_decodes_non_zero() {
+        let env = Env::default();
+        let bytes = make_bytes32(&env, 0xAB);
+        let result: Result<Address, OrderPortalError> =
+            proofbridge_core::token::bytes32_to_account_address(&env, &bytes);
+        assert!(result.is_ok(), "any non-zero 32-byte pubkey must decode");
+    }
+
+    #[test]
     fn test_validate_order_invalid_ad_recipient() {
         let env = Env::default();
         env.as_contract(&env.register(OrderPortalContract, ()), || {

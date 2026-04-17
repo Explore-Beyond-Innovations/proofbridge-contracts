@@ -487,8 +487,12 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient {
         if (params.bridger != msg.sender.toBytes32()) revert OrderPortal__BridgerMustBeSender();
         if (params.adRecipient == bytes32(0)) revert OrderPortal__ZeroAddress();
 
+        // validate recipient address
+        params.adRecipient.assertEvmAddress();
+
         // Cap both signed decimals; adDecimals is checked here (not just at scale time on
         // the ad chain) so invalid routes fail fast at create-time too.
+
         DecimalScaling.assertInRange(params.orderDecimals);
         DecimalScaling.assertInRange(params.adDecimals);
 

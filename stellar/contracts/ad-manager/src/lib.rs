@@ -216,13 +216,6 @@ impl AdManagerContract {
     // =========================================================================
 
     /// Create a new liquidity ad.
-    ///
-    /// `creator` is the ad creator's Stellar account. The ed25519 `signature`
-    /// is a manager's pre-authorization, not the creator's — mirroring the EVM
-    /// contract where `msg.sender` is the creator and `signer` from
-    /// `preAuthValidations` is merely a manager-role check. `creator.require_auth()`
-    /// is called at the root so the SAC `transfer(creator → contract)` sub-invocation
-    /// has proper authorization on live networks.
     pub fn create_ad(
         env: Env,
         signature: BytesN<64>,
@@ -316,9 +309,6 @@ impl AdManagerContract {
     }
 
     /// Fund an existing ad with additional liquidity.
-    ///
-    /// The ad's maker must authorize the call. `signer` from `verify_request`
-    /// is only used to confirm a registered manager pre-authorized the action.
     pub fn fund_ad(
         env: Env,
         signature: BytesN<64>,
@@ -633,8 +623,9 @@ impl AdManagerContract {
 
         // The order recipient on this (ad) chain authorizes the unlock —
         // mirrors the OrderPortal side where the ad recipient authorizes.
-        let order_recipient_addr =
-            proofbridge_core::token::bytes32_to_account_address(&env, &params.order_recipient);
+        let order_recipient_addr = proofbridge_core::token::bytes32_to_account_address::<
+            AdManagerError,
+        >(&env, &params.order_recipient)?;
         order_recipient_addr.require_auth();
 
         Self::assert_ad_decimals(&env, &params, &config.w_native_token)?;

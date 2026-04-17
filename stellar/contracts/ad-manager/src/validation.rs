@@ -7,6 +7,7 @@ use soroban_sdk::Env;
 
 use proofbridge_core::decimal_scaling;
 use proofbridge_core::errors::map_decimal_scaling_error;
+use proofbridge_core::token;
 
 use crate::auth;
 use crate::errors::AdManagerError;
@@ -37,9 +38,6 @@ pub fn validate_order(env: &Env, ad: &Ad, params: &OrderParams) -> Result<(), Ad
     }
 
     // Decimal range checks (both sides must be within supported bounds).
-    // On-chain decimals *match* is checked separately in the contract entrypoint
-    // (requires a live SAC / wrapped-native contract, not available in pure
-    // validation unit tests).
     decimal_scaling::assert_in_range(params.order_decimals)
         .map_err(map_decimal_scaling_error::<AdManagerError>)?;
     decimal_scaling::assert_in_range(params.ad_decimals)
@@ -50,10 +48,13 @@ pub fn validate_order(env: &Env, ad: &Ad, params: &OrderParams) -> Result<(), Ad
         return Err(AdManagerError::BridgerZero);
     }
 
-    // Check recipient not zero
+    // order_recipient is paid out on this (ad) chain = Stellar
     if auth::is_zero_bytes32(&params.order_recipient) {
         return Err(AdManagerError::RecipientZero);
     }
+
+    // validate recipient
+    let _ = token::bytes32_to_account_address::<AdManagerError>(env, &params.order_recipient)?;
 
     // Check source chain is supported
     let chain_info =

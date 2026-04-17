@@ -264,7 +264,8 @@ impl OrderPortalContract {
         )?;
 
         // Transfer tokens from bridger to contract
-        let bridger_addr = token::bytes32_to_account_address(&env, &params.bridger);
+        let bridger_addr =
+            token::bytes32_to_account_address::<OrderPortalError>(&env, &params.bridger)?;
 
         // Root-level auth for the SAC transfer sub-invocation that will call
         // `from.require_auth()` internally. When the bridger is also the tx
@@ -328,8 +329,9 @@ impl OrderPortalContract {
 
         // The ad recipient on this (order) chain authorizes the unlock —
         // mirrors AdManager's unlock where the order recipient authorizes.
-        let ad_recipient_addr =
-            proofbridge_core::token::bytes32_to_account_address(&env, &params.ad_recipient);
+        let ad_recipient_addr = proofbridge_core::token::bytes32_to_account_address::<
+            OrderPortalError,
+        >(&env, &params.ad_recipient)?;
         ad_recipient_addr.require_auth();
 
         Self::assert_order_decimals(&env, &params, &config.w_native_token)?;

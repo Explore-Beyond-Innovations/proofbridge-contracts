@@ -10,6 +10,7 @@ import {IMerkleManager} from "src/MerkleManager.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
+import {AddressCast} from "src/libraries/AddressCast.sol";
 
 // Expose internal hash for assertions
 contract MockOrderPortal is OrderPortal {
@@ -354,6 +355,28 @@ contract OrderPortalTest is Test {
 
         vm.prank(bridger);
         vm.expectRevert(OrderPortal.OrderPortal__AdTokenMismatch.selector);
+        portal.createOrder(signature, authToken, timeToLive, p);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+      createOrder: rejects adRecipient with dirty upper 12 bytes
+    //////////////////////////////////////////////////////////////*/
+    function test_createOrder_rejects_adRecipient_dirtyUpperBytes() public {
+        test_setTokenRoute_setsAndEmits_whenSupported();
+        OrderPortal.OrderParams memory p = _defaultParams();
+
+        // Keep the low-20 the same as a valid recipient but set a non-zero
+        // byte above the EVM-address range. validateOrder must reject via
+        // assertEvmAddress so a bad bytes32 never sits in a signed order.
+        bytes32 dirty = _b32(adRecipient);
+        dirty |= bytes32(uint256(1) << 160);
+        p.adRecipient = dirty;
+
+        bytes32 orderHash = portal.hashOrderPublic(p);
+        (authToken, timeToLive, signature) = generateCreateOrderRequestParams(p.adId, orderHash);
+
+        vm.prank(bridger);
+        vm.expectRevert(abi.encodeWithSelector(AddressCast.AddressCast__NotEvmAddress.selector, dirty));
         portal.createOrder(signature, authToken, timeToLive, p);
     }
 

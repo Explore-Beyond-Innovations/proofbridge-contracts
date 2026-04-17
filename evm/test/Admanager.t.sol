@@ -10,6 +10,7 @@ import {IMerkleManager} from "src/MerkleManager.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
+import {AddressCast} from "src/libraries/AddressCast.sol";
 
 contract MockAdManager is AdManager {
     constructor(address admin, IVerifier v, IMerkleManager m, IwNativeToken t) AdManager(admin, v, m, t) {}
@@ -756,6 +757,29 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__RecipientZero.selector);
+        adManager.lockForOrder(signature, authToken, timeToLive, p);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // lockForOrder: rejects orderRecipient with dirty upper 12 bytes
+    // ─────────────────────────────────────────────────────────────
+    function test_lock_rejects_orderRecipient_dirtyUpperBytes() public {
+        test_fundAd_makerOnly();
+        string memory adId = lastAdId;
+        AdManager.OrderParams memory p = _defaultParams(adId);
+
+        // Keep the low-20 the same as a valid recipient but set a non-zero
+        // byte above the EVM-address range. validateOrder must reject via
+        // assertEvmAddress so the bad bytes32 never sits in a signed order.
+        bytes32 dirty = _b32(recipient);
+        dirty |= bytes32(uint256(1) << 160);
+        p.orderRecipient = dirty;
+
+        bytes32 orderHash = adManager.hashOrderPublic(p);
+        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
+
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(AddressCast.AddressCast__NotEvmAddress.selector, dirty));
         adManager.lockForOrder(signature, authToken, timeToLive, p);
     }
 

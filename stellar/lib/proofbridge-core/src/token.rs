@@ -45,16 +45,28 @@ pub fn bytes32_to_token_address(env: &Env, bytes: &BytesN<32>) -> Option<Address
     Some(Address::from_string(&soroban_str))
 }
 
-/// Convert BytesN<32> account address (Ed25519 public key) to Soroban Address
-pub fn bytes32_to_account_address(env: &Env, bytes: &BytesN<32>) -> Address {
+/// Convert BytesN<32> account address (Ed25519 public key) to Soroban Address.
+///
+/// Returns the contract-specific `invalid_account_address()` error when the
+/// input bytes cannot produce a usable Stellar account address.
+pub fn bytes32_to_account_address<E: ProofBridgeError>(
+    env: &Env,
+    bytes: &BytesN<32>,
+) -> Result<Address, E> {
     use stellar_strkey::ed25519::PublicKey;
+
+    if bytes.to_array().iter().all(|&b| b == 0) {
+        return Err(E::invalid_account_address());
+    }
 
     let pubkey = PublicKey(bytes.to_array());
     let strkey = pubkey.to_string();
 
-    let strkey_bytes = strkey.as_bytes();
-    let soroban_str = SorobanString::from_str(env, core::str::from_utf8(strkey_bytes).unwrap());
-    Address::from_string(&soroban_str)
+    let strkey_str = core::str::from_utf8(strkey.as_bytes())
+        .map_err(|_| E::account_validation_invalid_strkey())?;
+
+    let soroban_str = SorobanString::from_str(env, strkey_str);
+    Ok(Address::from_string(&soroban_str))
 }
 
 // =============================================================================
@@ -121,10 +133,6 @@ pub fn transfer_to_user_bytes32<E: ProofBridgeError>(
 }
 
 /// Query the `decimals()` view of a token referenced by BytesN<32>.
-///
-/// For the native token marker, reads from the wrapped-native token contract.
-/// Returns [`ProofBridgeError::token_zero_address`] if the bytes32 does not
-/// resolve to a contract address.
 pub fn token_decimals_bytes32<E: ProofBridgeError>(
     env: &Env,
     token_bytes: &BytesN<32>,
@@ -150,7 +158,7 @@ pub fn transfer_to_recipient_bytes32<E: ProofBridgeError>(
     amount: u128,
 ) -> Result<(), E> {
     let contract_addr = env.current_contract_address();
-    let recipient = bytes32_to_account_address(env, recipient_bytes);
+    let recipient = bytes32_to_account_address::<E>(env, recipient_bytes)?;
     transfer_tokens(
         env,
         token_bytes,

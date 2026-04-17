@@ -94,6 +94,14 @@ pub enum OrderPortalError {
     OrderDecimalsMismatch = 63,
     /// Signed adDecimals does not match on-chain token decimals
     AdDecimalsMismatch = 64,
+
+    // ==========================================================================
+    // Address Decode Errors (70-80)
+    // ==========================================================================
+    /// Recipient bytes do not decode to a valid Stellar account address
+    InvalidAccountAddress = 70,
+    /// Strkey produced by account-address validation was not valid ASCII
+    AccountValidationInvalidStrkey = 71,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
@@ -132,5 +140,11 @@ impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
     }
     fn ad_decimals_mismatch() -> Self {
         Self::AdDecimalsMismatch
+    }
+    fn invalid_account_address() -> Self {
+        Self::InvalidAccountAddress
+    }
+    fn account_validation_invalid_strkey() -> Self {
+        Self::AccountValidationInvalidStrkey
     }
 }

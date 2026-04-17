@@ -775,6 +775,9 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
         if (params.bridger == bytes32(0)) revert AdManager__BridgerZero();
         if (params.orderRecipient == bytes32(0)) revert AdManager__RecipientZero();
 
+        // validate recipient address
+        params.orderRecipient.assertEvmAddress();
+
         // Cap both signed decimals to keep the scale factor well inside uint256 headroom.
         DecimalScaling.assertInRange(params.orderDecimals);
         DecimalScaling.assertInRange(params.adDecimals);

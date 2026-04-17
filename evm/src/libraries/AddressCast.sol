@@ -27,8 +27,18 @@ library AddressCast {
      * @dev Reverts with `AddressCast__NotEvmAddress` if the top 12 bytes are set.
      */
     function toAddressChecked(bytes32 value) internal pure returns (address) {
-        if (uint256(value) >> 160 != 0) revert AddressCast__NotEvmAddress(value);
+        assertEvmAddress(value);
         return address(uint160(uint256(value)));
+    }
+
+    /**
+     * @notice Assert `value` is a valid EVM address (top 12 bytes are zero).
+     * @dev Same check as `toAddressChecked` but without the narrowing cast.
+     *      Use at validation sites where the address itself isn't needed yet,
+     *      so callers don't have to discard an unused return value.
+     */
+    function assertEvmAddress(bytes32 value) internal pure {
+        if (uint256(value) >> 160 != 0) revert AddressCast__NotEvmAddress(value);
     }
 
     /// @notice Whether `token` is the native-token sentinel.
