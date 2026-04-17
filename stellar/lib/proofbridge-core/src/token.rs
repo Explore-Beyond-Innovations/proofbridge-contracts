@@ -45,10 +45,13 @@ pub fn bytes32_to_token_address(env: &Env, bytes: &BytesN<32>) -> Option<Address
     Some(Address::from_string(&soroban_str))
 }
 
-/// Convert BytesN<32> account address (Ed25519 public key) to Soroban Address.
+/// Re-encode a BytesN<32> Ed25519 pubkey as a Soroban `G...` account `Address`.
 ///
-/// Returns the contract-specific `invalid_account_address()` error when the
-/// input bytes cannot produce a usable Stellar account address.
+/// Rejects the all-zero 32-byte pubkey with `E::invalid_account_address()`.
+/// Any other 32-byte value is deterministically strkey-encoded and wrapped as
+/// an `Address`; this does NOT verify the key corresponds to a funded or
+/// existing Stellar account, and it only produces account (`G...`) addresses —
+/// Soroban contract (`C...`) addresses are not supported here.
 pub fn bytes32_to_account_address<E: ProofBridgeError>(
     env: &Env,
     bytes: &BytesN<32>,
@@ -59,13 +62,8 @@ pub fn bytes32_to_account_address<E: ProofBridgeError>(
         return Err(E::invalid_account_address());
     }
 
-    let pubkey = PublicKey(bytes.to_array());
-    let strkey = pubkey.to_string();
-
-    let strkey_str = core::str::from_utf8(strkey.as_bytes())
-        .map_err(|_| E::account_validation_invalid_strkey())?;
-
-    let soroban_str = SorobanString::from_str(env, strkey_str);
+    let strkey = PublicKey(bytes.to_array()).to_string();
+    let soroban_str = SorobanString::from_str(env, strkey.as_str());
     Ok(Address::from_string(&soroban_str))
 }
 

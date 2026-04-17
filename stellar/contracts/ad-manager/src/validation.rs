@@ -48,12 +48,12 @@ pub fn validate_order(env: &Env, ad: &Ad, params: &OrderParams) -> Result<(), Ad
         return Err(AdManagerError::BridgerZero);
     }
 
-    // order_recipient is paid out on this (ad) chain = Stellar
+    // Validate order_recipient (paid out on this ad chain = Stellar): must be
+    // non-zero and decode to a Stellar account address. Soroban contract
+    // (`C...`) addresses are not supported here.
     if auth::is_zero_bytes32(&params.order_recipient) {
         return Err(AdManagerError::RecipientZero);
     }
-
-    // validate recipient
     let _ = token::bytes32_to_account_address::<AdManagerError>(env, &params.order_recipient)?;
 
     // Check source chain is supported

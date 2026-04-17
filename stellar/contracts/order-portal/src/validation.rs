@@ -28,12 +28,11 @@ pub fn validate_order(env: &Env, params: &OrderParams) -> Result<(), OrderPortal
         return Err(OrderPortalError::ZeroAmount);
     }
 
-    // validate recipient
+    // Validate recipient: must be non-zero and decode to a Stellar account
+    // address. Soroban contract (`C...`) addresses are not supported here.
     if auth::is_zero_bytes32(&params.ad_recipient) {
         return Err(OrderPortalError::InvalidAdRecipient);
     }
-
-    // validate recipient
     let _ = token::bytes32_to_account_address::<OrderPortalError>(env, &params.ad_recipient)?;
 
     // Decimal range checks (both sides must be within supported bounds).

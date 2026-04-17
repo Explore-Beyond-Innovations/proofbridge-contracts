@@ -100,8 +100,6 @@ pub enum OrderPortalError {
     // ==========================================================================
     /// Recipient bytes do not decode to a valid Stellar account address
     InvalidAccountAddress = 70,
-    /// Strkey produced by account-address validation was not valid ASCII
-    AccountValidationInvalidStrkey = 71,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
@@ -143,8 +141,5 @@ impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
     }
     fn invalid_account_address() -> Self {
         Self::InvalidAccountAddress
-    }
-    fn account_validation_invalid_strkey() -> Self {
-        Self::AccountValidationInvalidStrkey
     }
 }
