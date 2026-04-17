@@ -542,9 +542,19 @@ impl AdManagerContract {
         let mut ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
 
         validation::validate_order(&env, &ad, &params)?;
+        Self::assert_ad_decimals(&env, &params, &config.w_native_token)?;
+
+        // Scale the signed order-chain amount into ad-chain precision for
+        // pool accounting and transfers on this chain.
+        let ad_amount = proofbridge_core::decimal_scaling::scale(
+            params.amount,
+            params.order_decimals,
+            params.ad_decimals,
+        )
+        .map_err(proofbridge_core::errors::map_decimal_scaling_error::<AdManagerError>)?;
 
         let available = ad.balance - ad.locked;
-        if params.amount > available {
+        if ad_amount > available {
             return Err(AdManagerError::InsufficientLiquidity);
         }
 
@@ -580,7 +590,7 @@ impl AdManagerContract {
 
         let maker = ad.maker.clone();
         let ad_token = ad.token.clone();
-        ad.locked += params.amount;
+        ad.locked += ad_amount;
         storage::set_ad(&env, &params.ad_id, &ad);
         storage::set_order_status(&env, &order_hash, Status::Open);
 
@@ -593,7 +603,7 @@ impl AdManagerContract {
             ad_id: params.ad_id.clone(),
             maker,
             token: ad_token,
-            amount: params.amount,
+            amount: ad_amount,
             bridger: params.bridger.clone(),
             recipient: params.order_recipient.clone(),
         }
@@ -626,6 +636,8 @@ impl AdManagerContract {
         let order_recipient_addr =
             proofbridge_core::token::bytes32_to_account_address(&env, &params.order_recipient);
         order_recipient_addr.require_auth();
+
+        Self::assert_ad_decimals(&env, &params, &config.w_native_token)?;
 
         let contract_bytes = eip712::contract_address_to_bytes32(&env);
         let order_hash = eip712::hash_order(&env, &params, config.chain_id, &contract_bytes);
@@ -672,11 +684,18 @@ impl AdManagerContract {
         storage::set_order_status(&env, &order_hash, Status::Filled);
         storage::set_request_hash_used(&env, &message);
 
-        // Update ad and transfer tokens
+        // Update ad and transfer tokens (scale signed amount to ad-chain precision)
+        let ad_amount = proofbridge_core::decimal_scaling::scale(
+            params.amount,
+            params.order_decimals,
+            params.ad_decimals,
+        )
+        .map_err(proofbridge_core::errors::map_decimal_scaling_error::<AdManagerError>)?;
+
         let mut ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
         let ad_token = ad.token.clone();
-        ad.locked -= params.amount;
-        ad.balance -= params.amount;
+        ad.locked -= ad_amount;
+        ad.balance -= ad_amount;
         storage::set_ad(&env, &params.ad_id, &ad);
 
         token::transfer_to_recipient_bytes32(
@@ -684,7 +703,7 @@ impl AdManagerContract {
             &ad_token,
             &config.w_native_token,
             &params.order_recipient,
-            params.amount,
+            ad_amount,
         )?;
 
         events::OrderUnlocked {
@@ -778,6 +797,25 @@ impl AdManagerContract {
     // =========================================================================
     // Internal Helpers
     // =========================================================================
+
+    /// Verify the signed `ad_decimals` matches the ad-chain token's on-chain
+    /// decimals. Guards against decimal spoofing that would otherwise let a
+    /// malicious relayer forge a scale factor.
+    fn assert_ad_decimals(
+        env: &Env,
+        params: &OrderParams,
+        w_native_addr: &Address,
+    ) -> Result<(), AdManagerError> {
+        let on_chain = proofbridge_core::token::token_decimals_bytes32::<AdManagerError>(
+            env,
+            &params.ad_chain_token,
+            w_native_addr,
+        )?;
+        if on_chain != params.ad_decimals {
+            return Err(AdManagerError::AdDecimalsMismatch);
+        }
+        Ok(())
+    }
 
     /// Verify a pre-authorized request: check hash uniqueness, then validate
     /// signature and manager status. Returns the signer address on success.

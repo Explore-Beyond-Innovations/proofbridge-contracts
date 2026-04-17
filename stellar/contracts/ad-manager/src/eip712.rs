@@ -26,8 +26,8 @@ pub fn struct_hash_order(
     ad_chain_id: u128,
     ad_manager: &BytesN<32>,
 ) -> [u8; 32] {
-    // Total size: 14 fields * 32 bytes = 448 bytes
-    let mut data = [0u8; 448];
+    // Total size: 16 fields * 32 bytes = 512 bytes (typehash + 15 fields)
+    let mut data = [0u8; 512];
     let mut offset = 0;
 
     // ORDER_TYPEHASH
@@ -85,6 +85,15 @@ pub fn struct_hash_order(
 
     // salt
     data[offset..offset + 32].copy_from_slice(&abi_encode_uint256(params.salt));
+    offset += 32;
+
+    // orderDecimals (uint8 padded to uint256)
+    data[offset..offset + 32]
+        .copy_from_slice(&abi_encode_uint256(params.order_decimals as u128));
+    offset += 32;
+
+    // adDecimals (uint8 padded to uint256)
+    data[offset..offset + 32].copy_from_slice(&abi_encode_uint256(params.ad_decimals as u128));
 
     keccak256(&data)
 }

@@ -98,6 +98,8 @@ mod cross_chain_tests {
             ad_creator: evm_address_to_bytes32(&env, "7777777777777777777777777777777777777777"),
             ad_recipient: evm_address_to_bytes32(&env, "8888888888888888888888888888888888888888"),
             salt: 12345,
+            order_decimals: 7,
+            ad_decimals: 7,
         };
         let ad_chain_id: u128 = 2_000_000_002;
         let ad_manager = evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
@@ -133,6 +135,8 @@ mod cross_chain_tests {
             ad_creator: evm_address_to_bytes32(&env, "7777777777777777777777777777777777777777"),
             ad_recipient: evm_address_to_bytes32(&env, "8888888888888888888888888888888888888888"),
             salt: 12345,
+            order_decimals: 7,
+            ad_decimals: 7,
         };
         let ad_chain_id: u128 = 2_000_000_002;
         let ad_manager = evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
@@ -169,6 +173,8 @@ mod cross_chain_tests {
             ad_creator: evm_address_to_bytes32(&env, "7777777777777777777777777777777777777777"),
             ad_recipient: evm_address_to_bytes32(&env, "8888888888888888888888888888888888888888"),
             salt: 0,
+            order_decimals: 7,
+            ad_decimals: 7,
         };
         let ad_chain_id: u128 = 2_000_000_002;
         let ad_manager = evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
@@ -213,6 +219,8 @@ mod cross_chain_tests {
                 "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
             ),
             salt: u128::MAX,
+            order_decimals: 30,
+            ad_decimals: 30,
         };
         let ad_chain_id: u128 = u128::MAX;
         let ad_manager = hex_to_bytes32(
@@ -251,6 +259,8 @@ mod cross_chain_tests {
             ad_creator: evm_address_to_bytes32(&env, "7777777777777777777777777777777777777777"),
             ad_recipient: evm_address_to_bytes32(&env, "8888888888888888888888888888888888888888"),
             salt: 12345,
+            order_decimals: 7,
+            ad_decimals: 7,
         };
         let ad_chain_id: u128 = 2_000_000_002;
         let ad_manager = evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
@@ -427,6 +437,8 @@ mod validation_tests {
             ad_creator: make_bytes32(env, 0x77),
             ad_recipient: ad_recipient.clone(),
             salt: 42,
+            order_decimals: 7,
+            ad_decimals: 7,
         };
 
         (ad, params)

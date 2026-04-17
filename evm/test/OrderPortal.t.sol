@@ -98,6 +98,8 @@ contract OrderPortalTest is Test {
         p.adCreator = _b32(address(0xACAC));
         p.adRecipient = _b32(adRecipient);
         p.salt = 12345;
+        p.orderDecimals = 18;
+        p.adDecimals = 18;
     }
 
     function generateCreateOrderRequestParams(string memory adId, bytes32 orderHash)

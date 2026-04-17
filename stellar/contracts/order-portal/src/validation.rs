@@ -5,6 +5,9 @@
 
 use soroban_sdk::Env;
 
+use proofbridge_core::decimal_scaling;
+use proofbridge_core::errors::map_decimal_scaling_error;
+
 use crate::auth;
 use crate::errors::OrderPortalError;
 use crate::storage;
@@ -28,6 +31,15 @@ pub fn validate_order(env: &Env, params: &OrderParams) -> Result<(), OrderPortal
     if auth::is_zero_bytes32(&params.ad_recipient) {
         return Err(OrderPortalError::InvalidAdRecipient);
     }
+
+    // Decimal range checks (both sides must be within supported bounds).
+    // On-chain decimals *match* is checked separately in the contract entrypoint
+    // (requires a live SAC / wrapped-native contract, not available in pure
+    // validation unit tests).
+    decimal_scaling::assert_in_range(params.order_decimals)
+        .map_err(map_decimal_scaling_error::<OrderPortalError>)?;
+    decimal_scaling::assert_in_range(params.ad_decimals)
+        .map_err(map_decimal_scaling_error::<OrderPortalError>)?;
 
     // Check chain is supported
     let chain_info =

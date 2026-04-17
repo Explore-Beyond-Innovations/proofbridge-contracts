@@ -103,10 +103,10 @@ const DOMAIN_TYPEHASH_MIN = keccak256(
 const NAME_HASH = keccak256(Buffer.from("Proofbridge"));
 // keccak256("1")
 const VERSION_HASH = keccak256(Buffer.from("1"));
-// keccak256("Order(bytes32 orderChainToken,...)")
+// keccak256("Order(bytes32 orderChainToken,...,uint8 orderDecimals,uint8 adDecimals)")
 const ORDER_TYPEHASH = keccak256(
   Buffer.from(
-    "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt)"
+    "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt,uint8 orderDecimals,uint8 adDecimals)"
   )
 );
 
@@ -169,6 +169,8 @@ function structHashOrder(params: {
   adCreator: string;
   adRecipient: string;
   salt: bigint;
+  orderDecimals: number;
+  adDecimals: number;
 }): Buffer {
   const data = Buffer.concat([
     ORDER_TYPEHASH,
@@ -185,6 +187,8 @@ function structHashOrder(params: {
     abiEncodeAddress(params.adCreator),
     abiEncodeAddress(params.adRecipient),
     abiEncodeUint256(params.salt),
+    abiEncodeUint256(BigInt(params.orderDecimals)),
+    abiEncodeUint256(BigInt(params.adDecimals)),
   ]);
   return keccak256(data);
 }
@@ -263,6 +267,8 @@ async function main() {
   const adChainId = BigInt(2);
   const adId = "test-ad-1";
   const salt = BigInt(12345);
+  const orderDecimals = 7;
+  const adDecimals = 7;
 
   // ----- Compute order hash using Stellar-compatible EIP-712 -----
   // Ad-manager computes: hash_order(params, config.chain_id, contract_address_to_bytes32)
@@ -283,6 +289,8 @@ async function main() {
     adCreator: adCreatorHex,
     adRecipient: adRecipientHex,
     salt,
+    orderDecimals,
+    adDecimals,
   };
 
   const structHash = structHashOrder(orderParamsHex);
@@ -435,6 +443,8 @@ async function main() {
       adCreator,
       adRecipient,
       salt: salt.toString(),
+      orderDecimals,
+      adDecimals,
     },
     chainIds: {
       orderChainId: Number(orderChainId),

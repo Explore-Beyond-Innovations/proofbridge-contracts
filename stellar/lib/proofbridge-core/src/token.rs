@@ -120,6 +120,26 @@ pub fn transfer_to_user_bytes32<E: ProofBridgeError>(
     transfer_tokens(env, token_bytes, w_native_addr, &contract_addr, to, amount)
 }
 
+/// Query the `decimals()` view of a token referenced by BytesN<32>.
+///
+/// For the native token marker, reads from the wrapped-native token contract.
+/// Returns [`ProofBridgeError::token_zero_address`] if the bytes32 does not
+/// resolve to a contract address.
+pub fn token_decimals_bytes32<E: ProofBridgeError>(
+    env: &Env,
+    token_bytes: &BytesN<32>,
+    w_native_addr: &Address,
+) -> Result<u32, E> {
+    if is_native_token(token_bytes) {
+        let token_client = token::Client::new(env, w_native_addr);
+        return Ok(token_client.decimals());
+    }
+
+    let token_addr = bytes32_to_token_address(env, token_bytes).ok_or_else(E::token_zero_address)?;
+    let token_client = token::Client::new(env, &token_addr);
+    Ok(token_client.decimals())
+}
+
 /// Transfer tokens from contract to recipient using BytesN<32> addresses
 pub fn transfer_to_recipient_bytes32<E: ProofBridgeError>(
     env: &Env,

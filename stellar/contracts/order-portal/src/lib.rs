@@ -229,8 +229,10 @@ impl OrderPortalContract {
     ) -> Result<BytesN<32>, OrderPortalError> {
         let config = storage::get_config(&env)?;
 
-        // Validate order parameters
+        // Validate order parameters (incl. decimal range ≤ MAX).
         validation::validate_order(&env, &params)?;
+        // Verify signed orderDecimals matches on-chain token decimals.
+        Self::assert_order_decimals(&env, &params, &config.w_native_token)?;
 
         // Compute order hash
         let contract_bytes = eip712::contract_address_to_bytes32(&env);
@@ -329,6 +331,8 @@ impl OrderPortalContract {
         let ad_recipient_addr =
             proofbridge_core::token::bytes32_to_account_address(&env, &params.ad_recipient);
         ad_recipient_addr.require_auth();
+
+        Self::assert_order_decimals(&env, &params, &config.w_native_token)?;
 
         let contract_bytes = eip712::contract_address_to_bytes32(&env);
         let order_hash = eip712::hash_order(&env, &params, config.chain_id, &contract_bytes);
@@ -472,6 +476,25 @@ impl OrderPortalContract {
     // =========================================================================
     // Internal Helpers
     // =========================================================================
+
+    /// Verify the signed `order_decimals` matches the order-chain token's
+    /// on-chain decimals. Guards against decimal spoofing that would otherwise
+    /// let a malicious relayer forge a scale factor.
+    fn assert_order_decimals(
+        env: &Env,
+        params: &OrderParams,
+        w_native_addr: &Address,
+    ) -> Result<(), OrderPortalError> {
+        let on_chain = proofbridge_core::token::token_decimals_bytes32::<OrderPortalError>(
+            env,
+            &params.order_chain_token,
+            w_native_addr,
+        )?;
+        if on_chain != params.order_decimals {
+            return Err(OrderPortalError::OrderDecimalsMismatch);
+        }
+        Ok(())
+    }
 
     /// Verify a pre-authorized request: check hash uniqueness, then validate
     /// signature and manager status. Returns the signer address on success.

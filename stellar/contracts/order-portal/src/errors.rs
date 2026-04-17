@@ -80,6 +80,20 @@ pub enum OrderPortalError {
     AlreadyInitialized = 50,
     /// Contract is not initialized
     NotInitialized = 51,
+
+    // ==========================================================================
+    // Decimal Scaling Errors (60-70)
+    // ==========================================================================
+    /// Decimals value is outside the supported range
+    DecimalsOutOfRange = 60,
+    /// Downscaling would lose precision (amount not exactly divisible)
+    NonExactDownscale = 61,
+    /// Overflow while scaling amount between decimal precisions
+    DecimalOverflow = 62,
+    /// Signed orderDecimals does not match on-chain token decimals
+    OrderDecimalsMismatch = 63,
+    /// Signed adDecimals does not match on-chain token decimals
+    AdDecimalsMismatch = 64,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
@@ -103,5 +117,20 @@ impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
     }
     fn invalid_signer() -> Self {
         Self::InvalidSigner
+    }
+    fn decimals_out_of_range() -> Self {
+        Self::DecimalsOutOfRange
+    }
+    fn non_exact_downscale() -> Self {
+        Self::NonExactDownscale
+    }
+    fn decimal_overflow() -> Self {
+        Self::DecimalOverflow
+    }
+    fn order_decimals_mismatch() -> Self {
+        Self::OrderDecimalsMismatch
+    }
+    fn ad_decimals_mismatch() -> Self {
+        Self::AdDecimalsMismatch
     }
 }

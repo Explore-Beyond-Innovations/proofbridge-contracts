@@ -13,12 +13,18 @@ pub struct TokenContract;
 
 #[contractimpl]
 impl TokenContract {
-    /// Mint `initial_supply` to `owner` on deploy.
-    pub fn __constructor(e: &Env, owner: Address, initial_supply: i128) {
+    pub fn __constructor(
+        e: &Env,
+        owner: Address,
+        initial_supply: i128,
+        decimals: u32,
+        name: String,
+        symbol: String,
+    ) {
+        Base::set_metadata(e, decimals, name, symbol);
         Base::mint(e, &owner, initial_supply);
     }
 
-    /// Mint additional tokens to `to`. No auth — intended for tests only.
     pub fn mint(e: &Env, to: Address, amount: i128) {
         Base::mint(e, &to, amount);
     }

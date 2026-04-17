@@ -10,6 +10,7 @@ extern crate alloc;
 
 pub mod auth;
 pub mod cross_contract;
+pub mod decimal_scaling;
 pub mod eip712;
 pub mod errors;
 pub mod token;

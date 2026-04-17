@@ -49,4 +49,8 @@ pub struct OrderParams {
     pub ad_recipient: BytesN<32>,
     /// Unique nonce to avoid hash collisions / replay
     pub salt: u128,
+    /// Decimals of `order_chain_token` on this chain
+    pub order_decimals: u32,
+    /// Decimals of `ad_chain_token` on the destination chain
+    pub ad_decimals: u32,
 }

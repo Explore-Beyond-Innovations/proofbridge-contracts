@@ -39,7 +39,15 @@ pub struct TokenContract;
 
 #[contractimpl]
 impl TokenContract {
-    pub fn __constructor(e: &Env, owner: Address, initial_supply: i128) {
+    pub fn __constructor(
+        e: &Env,
+        owner: Address,
+        initial_supply: i128,
+        decimals: u32,
+        name: SorobanString,
+        symbol: SorobanString,
+    ) {
+        Base::set_metadata(e, decimals, name, symbol);
         Base::mint(e, &owner, initial_supply);
     }
 
@@ -128,6 +136,8 @@ struct OrderParamsJson {
     ad_creator: String,
     ad_recipient: String,
     salt: String,
+    order_decimals: u32,
+    ad_decimals: u32,
 }
 
 #[derive(Deserialize)]
@@ -156,6 +166,8 @@ struct TestParams {
     ad_recipient: [u8; 32],
     salt: u128,
     ad_id: std::string::String,
+    order_decimals: u32,
+    ad_decimals: u32,
     // Chain IDs
     order_chain_id: u128,
     ad_chain_id: u128,
@@ -205,6 +217,8 @@ fn load_test_params() -> TestParams {
         ad_recipient: strkey_to_array(&json.order_params.ad_recipient),
         salt: json.order_params.salt.parse().unwrap(),
         ad_id: json.order_params.ad_id,
+        order_decimals: json.order_params.order_decimals,
+        ad_decimals: json.order_params.ad_decimals,
         order_chain_id: json.chain_ids.order_chain_id,
         ad_chain_id: json.chain_ids.ad_chain_id,
     }
@@ -421,14 +435,32 @@ fn setup() -> TestSetup<'static> {
 
     // Deploy SAC-convention tokens at deterministic addresses matching fixture params.
     // Both contracts resolve BytesN<32> → Contract address → token::Client
+    let token_name = SorobanString::from_str(&env, "TestToken");
+    let token_symbol = SorobanString::from_str(&env, "TT");
     let ad_token_addr = contract_address(&env, &tp.ad_chain_token);
-    env.register_at(&ad_token_addr, TokenContract, (admin_addr.clone(), 0i128));
+    env.register_at(
+        &ad_token_addr,
+        TokenContract,
+        (
+            admin_addr.clone(),
+            0i128,
+            tp.ad_decimals,
+            token_name.clone(),
+            token_symbol.clone(),
+        ),
+    );
 
     let order_token_addr = contract_address(&env, &tp.order_chain_token);
     env.register_at(
         &order_token_addr,
         TokenContract,
-        (admin_addr.clone(), 0i128),
+        (
+            admin_addr.clone(),
+            0i128,
+            tp.order_decimals,
+            token_name.clone(),
+            token_symbol.clone(),
+        ),
     );
 
     // w_native_token is required by the constructor but not used for non-native tokens
@@ -582,6 +614,8 @@ fn ad_manager_order_params(env: &Env, tp: &TestParams) -> ad_manager_contract::O
         ad_creator: bytes32_to_bytesn(env, &tp.ad_creator),
         ad_recipient: bytes32_to_bytesn(env, &tp.ad_recipient),
         salt: tp.salt,
+        order_decimals: tp.order_decimals,
+        ad_decimals: tp.ad_decimals,
     }
 }
 
@@ -598,6 +632,8 @@ fn order_portal_order_params(env: &Env, tp: &TestParams) -> order_portal_contrac
         ad_creator: bytes32_to_bytesn(env, &tp.ad_creator),
         ad_recipient: bytes32_to_bytesn(env, &tp.ad_recipient),
         salt: tp.salt,
+        order_decimals: tp.order_decimals,
+        ad_decimals: tp.ad_decimals,
     }
 }
 

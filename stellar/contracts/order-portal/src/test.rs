@@ -148,6 +148,8 @@ mod validation_tests {
             ad_creator: make_bytes32(env, 0x77),
             ad_recipient,
             salt: 42,
+            order_decimals: 7,
+            ad_decimals: 7,
         }
     }
 

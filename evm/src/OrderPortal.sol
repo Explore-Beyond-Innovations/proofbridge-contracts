@@ -9,6 +9,7 @@ pragma solidity ^0.8.24;
  *         order identifier across components. Signatures are verified off-chain by a verifier.
  */
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -20,6 +21,7 @@ import {MerkleManager} from "./MerkleManager.sol";
 import {IVerifier} from "./Verifier.sol";
 import {IMerkleManager} from "./MerkleManager.sol";
 import {IwNativeToken, SafeNativeToken} from "./wNativeToken.sol";
+import {DecimalScaling} from "./libraries/DecimalScaling.sol";
 
 contract OrderPortal is AccessControl, ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
@@ -41,7 +43,7 @@ contract OrderPortal is AccessControl, ReentrancyGuard, EIP712 {
      * @notice Primary EIP-712 typehash for orders
      */
     bytes32 public constant ORDER_TYPEHASH = keccak256(
-        "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt)"
+        "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt,uint8 orderDecimals,uint8 adDecimals)"
     );
 
     /// @notice Admin role
@@ -90,6 +92,8 @@ contract OrderPortal is AccessControl, ReentrancyGuard, EIP712 {
      * @param adCreator Maker id (ad side notion).
      * @param adRecipient Recipient id of ad creator on this (order) chain; low 20 bytes used for local ERC20 transfer.
      * @param salt  Unique nonce to avoid hash collisions / replay.
+     * @param orderDecimals Decimals of `orderChainToken` on this chain; `amount` is denominated in this.
+     * @param adDecimals Decimals of `adChainToken` on the ad chain; consumed by the counterpart AdManager to scale.
      */
     struct OrderParams {
         bytes32 orderChainToken;
@@ -103,6 +107,8 @@ contract OrderPortal is AccessControl, ReentrancyGuard, EIP712 {
         bytes32 adCreator;
         bytes32 adRecipient;
         uint256 salt;
+        uint8 orderDecimals;
+        uint8 adDecimals;
     }
 
     /// @notice Order lifecycle.
@@ -249,6 +255,8 @@ contract OrderPortal is AccessControl, ReentrancyGuard, EIP712 {
     error OrderPortal__MerkleManagerAppendFailed();
     /// @notice Thrown when there is insufficient liquidity in deposits
     error OrderPortal__InsufficientLiquidity();
+    /// @notice Thrown when signed `orderDecimals` does not match the on-chain token metadata.
+    error OrderPortal__OrderDecimalsMismatch(uint8 expected, uint8 provided);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -593,6 +601,11 @@ contract OrderPortal is AccessControl, ReentrancyGuard, EIP712 {
         if (params.bridger != toBytes32(msg.sender)) revert OrderPortal__BridgerMustBeSender();
         if (params.adRecipient == bytes32(0)) revert OrderPortal__ZeroAddress();
 
+        // Cap both signed decimals; adDecimals is checked here (not just at scale time on
+        // the ad chain) so invalid routes fail fast at create-time too.
+        DecimalScaling.assertInRange(params.orderDecimals);
+        DecimalScaling.assertInRange(params.adDecimals);
+
         ChainInfo memory ci = chains[params.adChainId];
         if (!ci.supported) revert OrderPortal__AdChainNotSupported(params.adChainId);
         if (ci.adManager == bytes32(0) || ci.adManager != params.adManager) {
@@ -606,7 +619,21 @@ contract OrderPortal is AccessControl, ReentrancyGuard, EIP712 {
         if (route == bytes32(0)) revert OrderPortal__MissingRoute();
         if (route != params.adChainToken) revert OrderPortal__AdTokenMismatch();
 
+        // Defense-in-depth: verify the signed orderDecimals agrees with the on-chain token.
+        // A malicious/buggy signer could otherwise sign a wrong scale factor; AdManager only
+        // sees the counterpart token, so verification has to happen here for the order side.
+        _assertOrderDecimals(orderTokenAddr, params.orderDecimals);
+
         orderHash = _hashOrder(params, getChainID(), address(this));
+    }
+
+    /**
+     * @notice Assert the signed order-chain decimals match the token's actual `decimals()`.
+     * @dev Native token is always 18.
+     */
+    function _assertOrderDecimals(address token, uint8 signed) internal view {
+        uint8 actual = isNativeToken(token) ? 18 : IERC20Metadata(token).decimals();
+        if (actual != signed) revert OrderPortal__OrderDecimalsMismatch(actual, signed);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -653,8 +680,8 @@ contract OrderPortal is AccessControl, ReentrancyGuard, EIP712 {
         pure
         returns (bytes32)
     {
-        // Efficient hashing via Solady buffer (14 elements).
-        bytes32[] memory buf = EfficientHashLib.malloc(14);
+        // Efficient hashing via Solady buffer (16 elements: typehash + 15 fields).
+        bytes32[] memory buf = EfficientHashLib.malloc(16);
         EfficientHashLib.set(buf, 0, ORDER_TYPEHASH);
         EfficientHashLib.set(buf, 1, p.orderChainToken);
         EfficientHashLib.set(buf, 2, p.adChainToken);
@@ -669,6 +696,8 @@ contract OrderPortal is AccessControl, ReentrancyGuard, EIP712 {
         EfficientHashLib.set(buf, 11, p.adCreator);
         EfficientHashLib.set(buf, 12, p.adRecipient);
         EfficientHashLib.set(buf, 13, p.salt);
+        EfficientHashLib.set(buf, 14, uint256(p.orderDecimals));
+        EfficientHashLib.set(buf, 15, uint256(p.adDecimals));
         return EfficientHashLib.hash(buf);
     }
 

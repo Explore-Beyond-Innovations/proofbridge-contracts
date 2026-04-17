@@ -92,6 +92,8 @@ contract ProofBridge is Test {
         bytes32 adCreator;
         bytes32 adRecipient;
         uint256 salt;
+        uint8 orderDecimals;
+        uint8 adDecimals;
     }
 
     function _b32(address a) internal pure returns (bytes32) {
@@ -212,6 +214,8 @@ contract ProofBridge is Test {
         p.adCreator = _b32(maker);
         p.adRecipient = _b32(adRecipient);
         p.salt = salt;
+        p.orderDecimals = 18;
+        p.adDecimals = 18;
     }
 
     function _defaultOrderChainParams(string memory adId, address adTokenAddr, uint256 amount, uint256 salt)
@@ -230,6 +234,8 @@ contract ProofBridge is Test {
         p.adCreator = _b32(maker);
         p.adRecipient = _b32(adRecipient);
         p.salt = salt;
+        p.orderDecimals = 18;
+        p.adDecimals = 18;
     }
 
     function _adId() internal returns (string memory adId) {
@@ -372,7 +378,7 @@ contract ProofBridge is Test {
     }
 
     function getTypedHash(Order memory order) public returns (bytes32 typedHash) {
-        string[] memory inputs = new string[](16);
+        string[] memory inputs = new string[](18);
 
         inputs[0] = "npx";
         inputs[1] = "tsx";
@@ -390,6 +396,8 @@ contract ProofBridge is Test {
         inputs[13] = vm.toString(order.adCreator);
         inputs[14] = vm.toString(order.adRecipient);
         inputs[15] = vm.toString(order.salt);
+        inputs[16] = vm.toString(uint256(order.orderDecimals));
+        inputs[17] = vm.toString(uint256(order.adDecimals));
 
         bytes memory result = vm.ffi(inputs);
 
@@ -468,7 +476,9 @@ contract ProofBridge is Test {
             adId: orderChainParams.adId,
             adCreator: orderChainParams.adCreator,
             adRecipient: orderChainParams.adRecipient,
-            salt: orderChainParams.salt
+            salt: orderChainParams.salt,
+            orderDecimals: orderChainParams.orderDecimals,
+            adDecimals: orderChainParams.adDecimals
         });
 
         // get on-chain hashes

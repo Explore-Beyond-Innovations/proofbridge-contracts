@@ -7,6 +7,7 @@ pragma solidity ^0.8.24;
  *         and bridgers unlock on this chain with a proof checked by an external verifier.
  */
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -17,6 +18,7 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 import {IVerifier} from "./Verifier.sol";
 import {IMerkleManager} from "./MerkleManager.sol";
 import {IwNativeToken, SafeNativeToken} from "./wNativeToken.sol";
+import {DecimalScaling} from "./libraries/DecimalScaling.sol";
 
 contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
@@ -38,7 +40,7 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
      * @notice EIP-712 typehash for `Order` structs.
      */
     bytes32 public constant ORDER_TYPEHASH = keccak256(
-        "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt)"
+        "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt,uint8 orderDecimals,uint8 adDecimals)"
     );
 
     /// @notice Admin role identifier.
@@ -107,6 +109,8 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
      * @param adCreator Expected maker id (ad owner; low 20 bytes equal local EVM address).
      * @param adRecipient Expected maker-defined recipient id on the order chain.
      * @param salt Unique nonce to avoid hash collisions / replay.
+     * @param orderDecimals Decimals of `orderChainToken` on the order chain. `amount` is denominated in this.
+     * @param adDecimals Decimals of `adChainToken` on this (ad) chain; used to convert `amount` before locking.
      */
     struct OrderParams {
         bytes32 orderChainToken;
@@ -120,6 +124,8 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
         bytes32 adCreator;
         bytes32 adRecipient;
         uint256 salt;
+        uint8 orderDecimals;
+        uint8 adDecimals;
     }
 
     /// @notice Order lifecycle status.
@@ -325,6 +331,8 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
     error AdManager__MerkleManagerAppendFailed();
     /// @notice Used Ad Id
     error AdManager__UsedAdId();
+    /// @notice Signed `adDecimals` does not match the ad token's on-chain `decimals()`.
+    error AdManager__AdDecimalsMismatch(uint8 expected, uint8 provided);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -652,12 +660,16 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
     {
         Ad storage ad = __getAdOwned(params.adId, msg.sender);
 
-        // Liquidity check.
-        uint256 available = ad.balance - ad.locked;
-        if (params.amount > available) revert AdManager__InsufficientLiquidity();
-
-        // Open order.
+        // validateOrder performs identity/route checks plus decimal range + adDecimals verification
+        // against the on-chain token metadata. Safe to scale once it returns.
         orderHash = validateOrder(ad, params);
+
+        // Convert signed `amount` (in orderDecimals) → ad-chain units for pool accounting.
+        uint256 adAmount = DecimalScaling.scale(params.amount, params.orderDecimals, params.adDecimals);
+
+        // Liquidity check in ad-chain units.
+        uint256 available = ad.balance - ad.locked;
+        if (adAmount > available) revert AdManager__InsufficientLiquidity();
 
         if (orders[orderHash] != Status.None) revert AdManager__OrderExists(orderHash);
 
@@ -672,7 +684,7 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
             revert Admanager__InvalidSigner();
         }
 
-        ad.locked += params.amount;
+        ad.locked += adAmount;
         orders[orderHash] = Status.Open;
 
         // append order hash
@@ -682,8 +694,10 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
 
         requestHashes[message] = true;
 
+        // Event emits the ad-chain amount (what actually moved in the pool). The signed
+        // order-chain amount is recoverable from the orderHash via indexer join.
         emit OrderLocked(
-            params.adId, orderHash, ad.maker, ad.token, params.amount, params.bridger, params.orderRecipient
+            params.adId, orderHash, ad.maker, ad.token, adAmount, params.bridger, params.orderRecipient
         );
     }
 
@@ -736,15 +750,17 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
         requestHashes[message] = true;
 
         // Pay recipient on this chain from the ad's escrowed token.
+        // Scale to ad-chain units to match what was reserved in lockForOrder.
         Ad storage ad = ads[params.adId];
-        ad.locked -= params.amount;
+        uint256 adAmount = DecimalScaling.scale(params.amount, params.orderDecimals, params.adDecimals);
+        ad.locked -= adAmount;
 
         address orderRecipientAddr = toAddressChecked(params.orderRecipient);
 
         if (isNativeToken(ad.token)) {
-            wNativeToken.safeWithdrawTo(params.amount, orderRecipientAddr);
+            wNativeToken.safeWithdrawTo(adAmount, orderRecipientAddr);
         } else {
-            IERC20(ad.token).safeTransfer(orderRecipientAddr, params.amount);
+            IERC20(ad.token).safeTransfer(orderRecipientAddr, adAmount);
         }
 
         emit OrderUnlocked(orderHash, params.orderRecipient, nullifierHash);
@@ -903,7 +919,7 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
         pure
         returns (bytes32 structHash)
     {
-        bytes32[] memory buf = EfficientHashLib.malloc(14);
+        bytes32[] memory buf = EfficientHashLib.malloc(16);
         EfficientHashLib.set(buf, 0, ORDER_TYPEHASH);
         EfficientHashLib.set(buf, 1, p.orderChainToken);
         EfficientHashLib.set(buf, 2, p.adChainToken);
@@ -918,6 +934,8 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
         EfficientHashLib.set(buf, 11, p.adCreator);
         EfficientHashLib.set(buf, 12, p.adRecipient);
         EfficientHashLib.set(buf, 13, p.salt);
+        EfficientHashLib.set(buf, 14, uint256(p.orderDecimals));
+        EfficientHashLib.set(buf, 15, uint256(p.adDecimals));
         return EfficientHashLib.hash(buf);
     }
 
@@ -1157,6 +1175,10 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
         if (params.bridger == bytes32(0)) revert AdManager__BridgerZero();
         if (params.orderRecipient == bytes32(0)) revert AdManager__RecipientZero();
 
+        // Cap both signed decimals to keep the scale factor well inside uint256 headroom.
+        DecimalScaling.assertInRange(params.orderDecimals);
+        DecimalScaling.assertInRange(params.adDecimals);
+
         // Source chain must be supported and portal must match (if configured).
         ChainInfo memory ci = chains[params.orderChainId];
         if (!ci.supported) revert AdManager__ChainNotSupported(params.orderChainId);
@@ -1185,7 +1207,20 @@ contract AdManager is AccessControl, ReentrancyGuard, EIP712 {
             revert AdManager__AdRecipientMismatch(ad.adRecipient, params.adRecipient);
         }
 
+        // Defense-in-depth: the signed adDecimals must match the on-chain ad token.
+        // A forged scale factor would otherwise let the relayer reserve the wrong quantity.
+        _assertAdDecimals(ad.token, params.adDecimals);
+
         orderHash = _hashOrder(params, getChainID(), address(this));
+    }
+
+    /**
+     * @notice Assert the signed ad-chain decimals match the ad token's actual `decimals()`.
+     * @dev Native token is always 18.
+     */
+    function _assertAdDecimals(address token, uint8 signed) internal view {
+        uint8 actual = isNativeToken(token) ? 18 : IERC20Metadata(token).decimals();
+        if (actual != signed) revert AdManager__AdDecimalsMismatch(actual, signed);
     }
 
     /**

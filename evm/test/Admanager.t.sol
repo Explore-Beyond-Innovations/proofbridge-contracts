@@ -102,6 +102,8 @@ contract AdManagerTest is Test {
         p.adCreator = _b32(maker);
         p.adRecipient = _b32(adRecipient);
         p.salt = 123;
+        p.orderDecimals = 18;
+        p.adDecimals = 18;
     }
 
     function generateCreateAdRequestParams(string memory adId, address adTokenAddr)
