@@ -548,7 +548,6 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
         requestHashes[message] = true;
 
         // Pay recipient on this chain from the ad's escrowed token.
-        // Scale to ad-chain units to match what was reserved in lockForOrder.
         Ad storage ad = ads[params.adId];
         uint256 adAmount = DecimalScaling.scale(params.amount, params.orderDecimals, params.adDecimals);
         ad.locked -= adAmount;
