@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.34;
+
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {AddressCast} from "./AddressCast.sol";
 
 /**
  * @title DecimalScaling
+ * @author Proofbridge
+ * @custom:security-contact security@proofbridge.xyz
  * @notice Shared helper for converting a token amount between two decimal
  *         representations. Used by both OrderPortal and AdManager so they can
  *         never disagree on the scaling math for a given signed OrderParams.
@@ -19,9 +24,12 @@ pragma solidity ^0.8.24;
  */
 library DecimalScaling {
     uint8 internal constant MAX_DECIMALS = 30;
+    /// @notice Hard-coded decimals for the native-token sentinel.
+    uint8 internal constant NATIVE_DECIMALS = 18;
 
     error DecimalScaling__DecimalsOutOfRange(uint8 value);
     error DecimalScaling__NonExactDownscale(uint256 amount, uint8 fromDec, uint8 toDec);
+    error DecimalScaling__DecimalsMismatch(uint8 expected, uint8 provided);
 
     /**
      * @notice Convert `amount` from `fromDec` decimals to `toDec` decimals.
@@ -43,5 +51,17 @@ library DecimalScaling {
 
     function assertInRange(uint8 decimals) internal pure {
         if (decimals > MAX_DECIMALS) revert DecimalScaling__DecimalsOutOfRange(decimals);
+    }
+
+    /**
+     * @notice Assert a signed decimals value matches the on-chain token.
+     * @dev Native sentinel is treated as {NATIVE_DECIMALS} (18). Every other
+     *      token is queried via `IERC20Metadata.decimals()`. Defence-in-depth
+     *      against a signer choosing a mismatched scaling factor for a real
+     *      token.
+     */
+    function assertMatchesOnChain(address token, uint8 signed) internal view {
+        uint8 actual = AddressCast.isNative(token) ? NATIVE_DECIMALS : IERC20Metadata(token).decimals();
+        if (actual != signed) revert DecimalScaling__DecimalsMismatch(actual, signed);
     }
 }

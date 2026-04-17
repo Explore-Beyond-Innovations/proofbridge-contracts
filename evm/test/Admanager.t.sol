@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.34;
 
-import {Test, console} from "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 import {AdManager} from "src/AdManager.sol";
 import {MockVerifier} from "src/mocks/MockVerifier.sol";
 import {MerkleManager} from "src/MerkleManager.sol";

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.34;
 
 import {Test, console} from "forge-std/Test.sol";
 import {OrderPortal} from "src/OrderPortal.sol";
@@ -9,7 +9,6 @@ import {IVerifier} from "src/Verifier.sol";
 import {IMerkleManager} from "src/MerkleManager.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
 
 // Expose internal hash for assertions
@@ -17,7 +16,7 @@ contract MockOrderPortal is OrderPortal {
     constructor(address admin, IVerifier v, IMerkleManager m, IwNativeToken t) OrderPortal(admin, v, m, t) {}
 
     function hashOrderPublic(OrderParams calldata p) external view returns (bytes32) {
-        return _hashOrder(p, getChainID(), address(this));
+        return _hashOrder(p, block.chainid, address(this));
     }
 }
 
