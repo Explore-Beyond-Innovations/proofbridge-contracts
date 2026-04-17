@@ -13,6 +13,7 @@ remappings = [
 optimizer = true
 optimizer_runs = 1
 bytecode_hash = "none"
+solc_version = "0.8.34"
 
 [rpc_endpoints]
 testnet = "${RPC_URL}"
