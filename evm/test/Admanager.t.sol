@@ -1215,4 +1215,118 @@ contract AdManagerTest is Test {
         uint256 contractBalAfter = _wNativeToken.balanceOf(address(adManager));
         assertEq(contractBalBefore - contractBalAfter, p.amount, "contract balance not reduced");
     }
+
+    /*//////////////////////////////////////////////////////////////
+     * unlock: must decrement ad.balance alongside ad.locked.
+     *
+     * Regression for the pool accounting bug where `unlock` only
+     * decremented `ad.locked` — ad.balance stayed at the pre-payout
+     * figure, so `availableLiquidity = balance - locked` over-reported
+     * by the paid-out amount and the ad creator could withdraw/close
+     * against funds that had already left the contract.
+     //////////////////////////////////////////////////////////////*/
+    function test_unlock_decrementsBalance_keepsPoolInvariant() public {
+        test_fundAd_makerOnly();
+        string memory adId = lastAdId;
+
+        uint256 lockAmt = 60 ether;
+        (AdManager.OrderParams memory p, bytes32 orderHash) =
+            _openOrder(adId, address(adToken), lockAmt, 111, bridger, recipient);
+
+        (,,,, uint256 balanceBefore, uint256 lockedBefore,) = adManager.ads(p.adId);
+        uint256 contractBalBefore = adToken.balanceOf(address(adManager));
+
+        bytes32 targetRoot = bytes32(uint256(5));
+        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, targetRoot);
+
+        vm.prank(bridger);
+        adManager.unlock(signature, authToken, timeToLive, p, bytes32("NBAL"), targetRoot, hex"");
+
+        (,,,, uint256 balanceAfter, uint256 lockedAfter,) = adManager.ads(p.adId);
+        uint256 contractBalAfter = adToken.balanceOf(address(adManager));
+
+        assertEq(lockedAfter, lockedBefore - lockAmt, "locked not reduced");
+        assertEq(balanceAfter, balanceBefore - lockAmt, "balance not reduced on unlock");
+        assertEq(contractBalBefore - contractBalAfter, lockAmt, "contract ERC20 not reduced by payout");
+        // Pool invariant: ad.balance == contract's escrowed balance for this token
+        // (assuming a single ad holding this token — which is the setup here).
+        assertEq(balanceAfter, contractBalAfter, "ad.balance diverged from escrow");
+        assertEq(adManager.availableLiquidity(adId), balanceAfter, "available out of sync");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+     * unlock: prevents drain via withdraw against already-paid funds.
+     *
+     * With the pre-fix accounting, `ad.balance` did not drop on unlock,
+     * so the maker could still `withdrawFromAd` the full deposited
+     * amount — draining funds that had already been paid to the
+     * bridger's recipient. This test pins that exact exploit path shut.
+     //////////////////////////////////////////////////////////////*/
+    function test_unlock_blocksDrainViaWithdraw() public {
+        test_fundAd_makerOnly();
+        string memory adId = lastAdId;
+
+        uint256 totalDeposited = initAmt + fundAmt;
+        uint256 lockAmt = 60 ether;
+
+        (AdManager.OrderParams memory p, bytes32 orderHash) =
+            _openOrder(adId, address(adToken), lockAmt, 222, bridger, recipient);
+
+        bytes32 targetRoot = bytes32(uint256(7));
+        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, targetRoot);
+
+        vm.prank(bridger);
+        adManager.unlock(signature, authToken, timeToLive, p, bytes32("NDRN"), targetRoot, hex"");
+
+        uint256 remaining = totalDeposited - lockAmt;
+
+        // One wei more than what is left in escrow must revert.
+        (authToken, timeToLive, signature) = generateWithdrawFromAdRequestParams(adId, remaining + 1, recipient);
+        vm.prank(maker);
+        vm.expectRevert(AdManager.AdManager__InsufficientLiquidity.selector);
+        adManager.withdrawFromAd(signature, authToken, timeToLive, adId, remaining + 1, recipient);
+
+        // The exact remaining must succeed and zero out the pool.
+        (authToken, timeToLive, signature) = generateWithdrawFromAdRequestParams(adId, remaining, recipient);
+        vm.prank(maker);
+        adManager.withdrawFromAd(signature, authToken, timeToLive, adId, remaining, recipient);
+
+        (,,,, uint256 balanceFinal,,) = adManager.ads(adId);
+        assertEq(balanceFinal, 0, "ad.balance should be zero after full withdraw");
+        assertEq(adToken.balanceOf(address(adManager)), 0, "escrow should be zero");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+     * unlock: closeAd-after-unlock respects paid-out amount.
+     *
+     * Companion to the withdraw drain test: closeAd sweeps ad.balance
+     * to `to`. Pre-fix it would sweep the full deposit even though the
+     * unlocked portion was already paid, letting the maker double-spend.
+     //////////////////////////////////////////////////////////////*/
+    function test_unlock_closeAd_sweepsOnlyRemaining() public {
+        test_fundAd_makerOnly();
+        string memory adId = lastAdId;
+
+        uint256 totalDeposited = initAmt + fundAmt;
+        uint256 lockAmt = 60 ether;
+
+        (AdManager.OrderParams memory p, bytes32 orderHash) =
+            _openOrder(adId, address(adToken), lockAmt, 333, bridger, recipient);
+
+        bytes32 targetRoot = bytes32(uint256(9));
+        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, targetRoot);
+
+        vm.prank(bridger);
+        adManager.unlock(signature, authToken, timeToLive, p, bytes32("NCLS"), targetRoot, hex"");
+
+        uint256 closeRecipientBalBefore = adToken.balanceOf(other);
+
+        (authToken, timeToLive, signature) = generateCloseAdRequestParams(adId, other);
+        vm.prank(maker);
+        adManager.closeAd(signature, authToken, timeToLive, adId, other);
+
+        uint256 sweptAmount = adToken.balanceOf(other) - closeRecipientBalBefore;
+        assertEq(sweptAmount, totalDeposited - lockAmt, "closeAd swept more than what remained in escrow");
+        assertEq(adToken.balanceOf(address(adManager)), 0, "escrow leaked");
+    }
 }

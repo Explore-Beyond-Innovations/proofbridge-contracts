@@ -413,7 +413,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
         string memory adId,
         uint256 amount,
         address to
-    ) external payable nonReentrant {
+    ) external nonReentrant {
         Ad storage ad = __getAdOwned(adId, msg.sender);
 
         bytes32 message = withdrawFromAdRequestHash(adId, amount, to, authToken, timeToExpire);
@@ -444,7 +444,6 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
      */
     function closeAd(bytes memory signature, bytes32 authToken, uint256 timeToExpire, string memory adId, address to)
         external
-        payable
         nonReentrant
     {
         Ad storage ad = __getAdOwned(adId, msg.sender);
@@ -525,7 +524,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
         bytes32 nullifierHash,
         bytes32 targetRoot,
         bytes calldata proof
-    ) external payable nonReentrant {
+    ) external nonReentrant {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
 
         if (orders[orderHash] != Status.Open) revert AdManager__OrderNotOpen(orderHash);
@@ -551,6 +550,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
         // Scale to ad-chain units to match what was reserved in lockForOrder.
         Ad storage ad = ads[params.adId];
         uint256 adAmount = DecimalScaling.scale(params.amount, params.orderDecimals, params.adDecimals);
+        ad.balance -= adAmount;
         ad.locked -= adAmount;
 
         address orderRecipientAddr = params.orderRecipient.toAddressChecked();

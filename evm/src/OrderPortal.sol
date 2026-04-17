@@ -285,6 +285,7 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient {
             if (msg.value < params.amount) revert OrderPortal__InsufficientLiquidity();
             wNativeToken.safeDeposit(params.amount);
         } else {
+            if (msg.value != 0) revert OrderPortal__InsufficientLiquidity();
             IERC20(orderTokenAddr).safeTransferFrom(msg.sender, address(this), params.amount);
         }
 
@@ -323,7 +324,7 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient {
         bytes32 nullifierHash,
         bytes32 targetRoot,
         bytes calldata proof
-    ) external payable nonReentrant {
+    ) external nonReentrant {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
 
         if (nullifierUsed[nullifierHash]) revert OrderPortal__NullifierUsed(nullifierHash);

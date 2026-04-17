@@ -30,6 +30,7 @@ library DecimalScaling {
     error DecimalScaling__DecimalsOutOfRange(uint8 value);
     error DecimalScaling__NonExactDownscale(uint256 amount, uint8 fromDec, uint8 toDec);
     error DecimalScaling__DecimalsMismatch(uint8 expected, uint8 provided);
+    error DecimalScaling__DecimalsUnavailable(address token);
 
     /**
      * @notice Convert `amount` from `fromDec` decimals to `toDec` decimals.
@@ -56,12 +57,23 @@ library DecimalScaling {
     /**
      * @notice Assert a signed decimals value matches the on-chain token.
      * @dev Native sentinel is treated as {NATIVE_DECIMALS} (18). Every other
-     *      token is queried via `IERC20Metadata.decimals()`. Defence-in-depth
+     *      token is queried via `IERC20Metadata.decimals()`. `decimals()` is
+     *      optional per EIP-20, so the call is wrapped in a try/catch that
+     *      surfaces a typed error rather than a bubbled low-level revert —
+     *      protocol tokens are admin-admitted, but this gives operators a
+     *      clear diagnostic if a bad token slips through. Defence-in-depth
      *      against a signer choosing a mismatched scaling factor for a real
      *      token.
      */
     function assertMatchesOnChain(address token, uint8 signed) internal view {
-        uint8 actual = AddressCast.isNative(token) ? NATIVE_DECIMALS : IERC20Metadata(token).decimals();
-        if (actual != signed) revert DecimalScaling__DecimalsMismatch(actual, signed);
+        if (AddressCast.isNative(token)) {
+            if (NATIVE_DECIMALS != signed) revert DecimalScaling__DecimalsMismatch(NATIVE_DECIMALS, signed);
+            return;
+        }
+        try IERC20Metadata(token).decimals() returns (uint8 actual) {
+            if (actual != signed) revert DecimalScaling__DecimalsMismatch(actual, signed);
+        } catch {
+            revert DecimalScaling__DecimalsUnavailable(token);
+        }
     }
 }
