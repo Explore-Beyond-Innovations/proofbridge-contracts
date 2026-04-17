@@ -507,9 +507,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
 
         requestHashes[message] = true;
 
-        emit OrderLocked(
-            params.adId, orderHash, ad.maker, ad.token, adAmount, params.bridger, params.orderRecipient
-        );
+        emit OrderLocked(params.adId, orderHash, ad.maker, ad.token, adAmount, params.bridger, params.orderRecipient);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -539,9 +537,8 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
 
         _consumeAuth(message, authToken, timeToExpire, signature);
 
-        bytes32[] memory publicInputs = RequestAuth.buildPublicInputs(
-            i_merkleManager, nullifierHash, targetRoot, orderHash, _PUBLIC_INPUT_SIDE_AD
-        );
+        bytes32[] memory publicInputs =
+            RequestAuth.buildPublicInputs(i_merkleManager, nullifierHash, targetRoot, orderHash, _PUBLIC_INPUT_SIDE_AD);
 
         if (!i_verifier.verify(proof, publicInputs)) revert AdManager__InvalidProof();
 
@@ -630,9 +627,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
         params[2] = abi.encode(initialAmount);
         params[3] = abi.encode(orderChainId);
         params[4] = abi.encode(adRecipient);
-        message = RequestAuth.hashRequest(
-            authToken, timeToExpire, "createAd", params, block.chainid, address(this)
-        );
+        message = RequestAuth.hashRequest(authToken, timeToExpire, "createAd", params, block.chainid, address(this));
     }
 
     /**
@@ -646,9 +641,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
         bytes[] memory params = new bytes[](2);
         params[0] = abi.encode(adId);
         params[1] = abi.encode(amount);
-        message = RequestAuth.hashRequest(
-            authToken, timeToExpire, "fundAd", params, block.chainid, address(this)
-        );
+        message = RequestAuth.hashRequest(authToken, timeToExpire, "fundAd", params, block.chainid, address(this));
     }
 
     /**
@@ -665,9 +658,8 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
         params[0] = abi.encode(adId);
         params[1] = abi.encode(amount);
         params[2] = abi.encode(to);
-        message = RequestAuth.hashRequest(
-            authToken, timeToExpire, "withdrawFromAd", params, block.chainid, address(this)
-        );
+        message =
+            RequestAuth.hashRequest(authToken, timeToExpire, "withdrawFromAd", params, block.chainid, address(this));
     }
 
     /**
@@ -681,9 +673,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
         bytes[] memory params = new bytes[](2);
         params[0] = abi.encode(adId);
         params[1] = abi.encode(to);
-        message = RequestAuth.hashRequest(
-            authToken, timeToExpire, "closeAd", params, block.chainid, address(this)
-        );
+        message = RequestAuth.hashRequest(authToken, timeToExpire, "closeAd", params, block.chainid, address(this));
     }
 
     /**
@@ -697,9 +687,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
         bytes[] memory params = new bytes[](2);
         params[0] = abi.encode(adId);
         params[1] = abi.encode(orderHash);
-        message = RequestAuth.hashRequest(
-            authToken, timeToExpire, "lockForOrder", params, block.chainid, address(this)
-        );
+        message = RequestAuth.hashRequest(authToken, timeToExpire, "lockForOrder", params, block.chainid, address(this));
     }
 
     /**
@@ -716,9 +704,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
         params[0] = abi.encode(adId);
         params[1] = abi.encode(orderHash);
         params[2] = abi.encode(_targetRoot);
-        message = RequestAuth.hashRequest(
-            authToken, timeToExpire, "unlockOrder", params, block.chainid, address(this)
-        );
+        message = RequestAuth.hashRequest(authToken, timeToExpire, "unlockOrder", params, block.chainid, address(this));
     }
 
     /*//////////////////////////////////////////////////////////////

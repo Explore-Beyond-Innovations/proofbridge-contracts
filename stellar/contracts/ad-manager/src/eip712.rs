@@ -88,8 +88,7 @@ pub fn struct_hash_order(
     offset += 32;
 
     // orderDecimals (uint8 padded to uint256)
-    data[offset..offset + 32]
-        .copy_from_slice(&abi_encode_uint256(params.order_decimals as u128));
+    data[offset..offset + 32].copy_from_slice(&abi_encode_uint256(params.order_decimals as u128));
     offset += 32;
 
     // adDecimals (uint8 padded to uint256)

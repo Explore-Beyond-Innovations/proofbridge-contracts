@@ -135,7 +135,8 @@ pub fn token_decimals_bytes32<E: ProofBridgeError>(
         return Ok(token_client.decimals());
     }
 
-    let token_addr = bytes32_to_token_address(env, token_bytes).ok_or_else(E::token_zero_address)?;
+    let token_addr =
+        bytes32_to_token_address(env, token_bytes).ok_or_else(E::token_zero_address)?;
     let token_client = token::Client::new(env, &token_addr);
     Ok(token_client.decimals())
 }

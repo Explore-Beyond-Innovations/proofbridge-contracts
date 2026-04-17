@@ -411,9 +411,7 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient {
         bytes[] memory params = new bytes[](2);
         params[0] = abi.encode(adId);
         params[1] = abi.encode(orderHash);
-        message = RequestAuth.hashRequest(
-            authToken, timeToExpire, "createOrder", params, block.chainid, address(this)
-        );
+        message = RequestAuth.hashRequest(authToken, timeToExpire, "createOrder", params, block.chainid, address(this));
     }
 
     /**
@@ -430,9 +428,7 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient {
         params[0] = abi.encode(adId);
         params[1] = abi.encode(orderHash);
         params[2] = abi.encode(_targetRoot);
-        message = RequestAuth.hashRequest(
-            authToken, timeToExpire, "unlockOrder", params, block.chainid, address(this)
-        );
+        message = RequestAuth.hashRequest(authToken, timeToExpire, "unlockOrder", params, block.chainid, address(this));
     }
 
     /*//////////////////////////////////////////////////////////////
