@@ -27,5 +27,5 @@ export {
   getSecret,
   deploySAC,
   strkeyToHex,
-  base32Decode,
+  decodeEd25519Secret,
 } from "./stellar-cli.js";

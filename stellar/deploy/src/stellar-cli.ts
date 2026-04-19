@@ -1,22 +1,13 @@
 /** Shell wrappers around the `stellar` CLI — canonical path for contract deploy / invoke / asset deploy. */
 
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
+import { StrKey } from "@stellar/stellar-sdk";
 
 const NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
 const SOURCE = process.env.STELLAR_SOURCE_ACCOUNT ?? "admin";
 
-/** Quote a single positional/value arg for POSIX sh, leaving flags untouched. */
-function shQuote(arg: string): string {
-  if (arg.startsWith("--")) return arg;
-  return `'${arg.replace(/'/g, `'\\''`)}'`;
-}
-
-function joinArgs(args: string[]): string {
-  return args.map(shQuote).join(" ");
-}
-
-function exec(cmd: string): string {
-  return execSync(cmd, {
+function exec(args: string[]): string {
+  return execFileSync("stellar", args, {
     encoding: "utf8",
     stdio: ["pipe", "pipe", "pipe"],
     timeout: 180_000,
@@ -24,10 +15,9 @@ function exec(cmd: string): string {
 }
 
 /** Run `stellar <args>`, echoing the command for debug visibility. */
-export function stellar(args: string): string {
-  const cmd = `stellar ${args}`;
-  console.log(`  [stellar] ${cmd}`);
-  return exec(cmd);
+export function stellar(args: string[]): string {
+  console.log(`  [stellar] stellar ${args.join(" ")}`);
+  return exec(args);
 }
 
 /** Deploy a contract WASM. Returns the contract id (C...). */
@@ -35,11 +25,18 @@ export function deployContract(
   wasmPath: string,
   constructorArgs: string[] = [],
 ): string {
-  const ctor =
-    constructorArgs.length > 0 ? `-- ${joinArgs(constructorArgs)}` : "";
-  const out = stellar(
-    `contract deploy --wasm "${wasmPath}" --source "${SOURCE}" --network "${NETWORK}" ${ctor}`,
-  );
+  const args = [
+    "contract",
+    "deploy",
+    "--wasm",
+    wasmPath,
+    "--source",
+    SOURCE,
+    "--network",
+    NETWORK,
+  ];
+  if (constructorArgs.length > 0) args.push("--", ...constructorArgs);
+  const out = stellar(args);
   const lines = out.split("\n").filter((l) => l.trim());
   const id = lines[lines.length - 1].trim();
   if (!id.startsWith("C")) {
@@ -55,61 +52,84 @@ export function invokeContract(
   args: string[] = [],
   options: { send?: boolean; source?: string } = {},
 ): string {
-  const send = options.send === false ? "--send no" : "--send yes";
   const source = options.source ?? SOURCE;
-  const argsStr = args.length > 0 ? joinArgs(args) : "";
-  return stellar(
-    `contract invoke --id "${contractId}" --source-account "${source}" --network "${NETWORK}" ${send} -- ${fn} ${argsStr}`,
-  );
+  const cli = [
+    "contract",
+    "invoke",
+    "--id",
+    contractId,
+    "--source-account",
+    source,
+    "--network",
+    NETWORK,
+    "--send",
+    options.send === false ? "no" : "yes",
+    "--",
+    fn,
+    ...args,
+  ];
+  return stellar(cli);
 }
 
 export function getAddress(name: string = SOURCE): string {
-  return stellar(`keys address "${name}"`);
+  return stellar(["keys", "address", name]);
 }
 
 export function getSecret(name: string = SOURCE): string {
-  return stellar(`keys secret "${name}"`);
+  return stellar(["keys", "secret", name]);
 }
 
 /** Deploy or look up a SAC (native XLM via `asset=native`); falls back to `contract id asset` if already deployed. */
 export function deploySAC(asset: string = "native"): string {
   try {
-    return stellar(
-      `contract asset deploy --asset "${asset}" --source "${SOURCE}" --network "${NETWORK}"`,
-    );
+    return stellar([
+      "contract",
+      "asset",
+      "deploy",
+      "--asset",
+      asset,
+      "--source",
+      SOURCE,
+      "--network",
+      NETWORK,
+    ]);
   } catch {
-    return stellar(
-      `contract id asset --asset "${asset}" --source "${SOURCE}" --network "${NETWORK}"`,
-    );
+    return stellar([
+      "contract",
+      "id",
+      "asset",
+      "--asset",
+      asset,
+      "--source",
+      SOURCE,
+      "--network",
+      NETWORK,
+    ]);
   }
 }
 
 // ── address encoding ────────────────────────────────────────────────
 
-const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-
-export function base32Decode(str: string): Uint8Array {
-  const lookup: Record<string, number> = {};
-  for (let i = 0; i < BASE32_ALPHABET.length; i++) {
-    lookup[BASE32_ALPHABET[i]] = i;
+/** Decode a Stellar strkey (C.../G...) to `0x` + 64-hex (32 bytes). Throws on bad checksum / wrong version. */
+export function strkeyToHex(strkey: string): string {
+  let payload: Buffer;
+  if (StrKey.isValidContract(strkey)) {
+    payload = StrKey.decodeContract(strkey);
+  } else if (StrKey.isValidEd25519PublicKey(strkey)) {
+    payload = StrKey.decodeEd25519PublicKey(strkey);
+  } else {
+    throw new Error(`invalid Stellar strkey: ${strkey}`);
   }
-  let bits = 0;
-  let value = 0;
-  const bytes: number[] = [];
-  for (const ch of str) {
-    value = (value << 5) | (lookup[ch] ?? 0);
-    bits += 5;
-    if (bits >= 8) {
-      bytes.push((value >>> (bits - 8)) & 0xff);
-      bits -= 8;
-    }
+  if (payload.length !== 32) {
+    throw new Error(`expected 32-byte strkey payload, got ${payload.length}`);
   }
-  return new Uint8Array(bytes);
+  return "0x" + payload.toString("hex");
 }
 
-/** Decode a Stellar strkey (C.../G...) to `0x` + 64-hex (32 bytes). */
-export function strkeyToHex(strkey: string): string {
-  const decoded = base32Decode(strkey);
-  const payload = decoded.slice(1, 33); // skip 1-byte version, drop 2-byte checksum
-  return "0x" + Buffer.from(payload).toString("hex");
+/** Decode a Stellar ed25519 secret seed (S...) to its raw 32-byte seed. Throws on invalid. */
+export function decodeEd25519Secret(secret: string): Buffer {
+  if (!StrKey.isValidEd25519SecretSeed(secret)) {
+    throw new Error("invalid Stellar ed25519 secret seed");
+  }
+  return StrKey.decodeEd25519SecretSeed(secret);
 }

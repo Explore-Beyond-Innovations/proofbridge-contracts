@@ -105,22 +105,25 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     }
 
     // Direction A: local is ad-side.
+    // AdManager.setTokenRoute(address adToken, bytes32 orderToken, uint256 orderChainId)
     {
       const tx = await adManager.getFunction("setTokenRoute")(
-        localTok.address,
-        peerTok.addressBytes32,
-        peerChainId,
+        localTok.address, // adToken
+        peerTok.addressBytes32, // orderToken (bytes32)
+        peerChainId, // orderChainId
         { nonce: nonces.next() },
       );
       await tx.wait();
       routeTxs++;
     }
     // Direction B: local is order-side.
+    // OrderPortal.setTokenRoute(address orderToken, uint256 adChainId, bytes32 adToken)
+    // Args 2/3 swap vs AdManager — mis-ordering here would silently mis-wire routes.
     {
       const tx = await orderPortal.getFunction("setTokenRoute")(
-        localTok.address,
-        peerChainId,
-        peerTok.addressBytes32,
+        localTok.address, // orderToken
+        peerChainId, // adChainId
+        peerTok.addressBytes32, // adToken (bytes32)
         { nonce: nonces.next() },
       );
       await tx.wait();

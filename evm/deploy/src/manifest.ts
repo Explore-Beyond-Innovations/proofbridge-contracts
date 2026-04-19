@@ -1,5 +1,4 @@
 import * as path from "path";
-import { promises as fs } from "fs";
 import {
   type ChainDeploymentManifest,
   type ContractEntry,
@@ -12,7 +11,12 @@ import {
 import { deploymentsDir, evmAddressToBytes32 } from "./common.js";
 
 export function manifestPath(chainId: bigint | string): string {
-  return path.join(deploymentsDir(), `${String(chainId)}.json`);
+  const id = String(chainId);
+  // Reject non-decimal inputs so a caller-supplied string can't path-traverse out of deployments/.
+  if (!/^\d+$/.test(id)) {
+    throw new Error(`invalid chainId for manifest path: ${id}`);
+  }
+  return path.join(deploymentsDir(), `${id}.json`);
 }
 
 export function evmContractEntry(address: string): ContractEntry {
@@ -104,12 +108,13 @@ export async function patchManifest(
 export async function loadOrNull(
   filePath: string,
 ): Promise<ChainDeploymentManifest | null> {
+  // Only "file doesn't exist" maps to null — permission / I/O errors bubble up.
   try {
-    await fs.access(filePath);
-  } catch {
-    return null;
+    return await readManifest(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
   }
-  return readManifest(filePath);
 }
 
 export { readManifest, writeManifest };

@@ -22,7 +22,8 @@
     "deploy-test-tokens": "tsx bin/cli.ts deploy-test-tokens"
   },
   "dependencies": {
-    "@proofbridge/deployment-manifest": "workspace:*"
+    "@proofbridge/deployment-manifest": "workspace:*",
+    "@stellar/stellar-sdk": "^15.0.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",
