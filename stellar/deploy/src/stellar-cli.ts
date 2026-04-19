@@ -79,7 +79,18 @@ export function getSecret(name: string = SOURCE): string {
   return stellar(["keys", "secret", name]);
 }
 
-/** Deploy or look up a SAC (native XLM via `asset=native`); falls back to `contract id asset` if already deployed. */
+/**
+ * "Asset already deployed" / already-initialized detection for `stellar contract asset deploy`.
+ * Update the pattern if you bump the Stellar CLI version and the wording shifts.
+ */
+function isAlreadyDeployedSacError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /already\s*(deployed|initialized|exists)|AlreadyInitializedError|error\s*code\s*3\b/i.test(
+    msg,
+  );
+}
+
+/** Deploy or look up a SAC (native XLM via `asset=native`); only falls back to `contract id asset` when the deploy failed with "already deployed". */
 export function deploySAC(asset: string = "native"): string {
   try {
     return stellar([
@@ -93,7 +104,8 @@ export function deploySAC(asset: string = "native"): string {
       "--network",
       NETWORK,
     ]);
-  } catch {
+  } catch (err) {
+    if (!isAlreadyDeployedSacError(err)) throw err;
     return stellar([
       "contract",
       "id",
