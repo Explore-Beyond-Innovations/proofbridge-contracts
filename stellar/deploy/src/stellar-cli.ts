@@ -106,14 +106,13 @@ export function deploySAC(asset: string = "native"): string {
     ]);
   } catch (err) {
     if (!isAlreadyDeployedSacError(err)) throw err;
+    // `contract id asset` is a pure passphrase-based derivation — no --source.
     return stellar([
       "contract",
       "id",
       "asset",
       "--asset",
       asset,
-      "--source",
-      SOURCE,
       "--network",
       NETWORK,
     ]);
