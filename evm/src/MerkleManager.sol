@@ -9,7 +9,7 @@ interface IMerkleManager {
     function getRoot() external view returns (bytes32);
     function getRootAtIndex(uint256 leafIndex) external view returns (bytes32);
     function getWidth() external view returns (uint256);
-    function appendOrderHash(bytes32 orderHash) external returns (bool);
+    function appendOrderHash(bytes32 orderHash, uint256 side) external returns (bool);
     function getSize() external view returns (uint256);
     function getNode(uint256 index) external view returns (bytes32);
     function getMerkleProof(uint256 index)
@@ -23,7 +23,7 @@ interface IMerkleManager {
         bytes32 valueHash,
         bytes32[] calldata peakBag,
         bytes32[] calldata siblings
-    ) external pure returns (bool);
+    ) external view returns (bool);
     function fieldMod(bytes32 orderHash) external pure returns (bytes32 orderHashMod);
 }
 
@@ -45,34 +45,48 @@ contract MerkleManager is IMerkleManager, AccessControl, ReentrancyGuard {
     // Errors
     error MerkleManager__ZeroAddress();
 
-    // Emitted event after each successful `append` operation
+    // Emitted after each successful `append`; `side` (the leaf's ad_contract / unlock side) lets mirrors recompute the leaf
     event DepositHashAppended(
-        uint256 indexed index, bytes32 indexed orderHash, uint256 width, uint256 size, bytes32 rootHash
+        uint256 indexed index, bytes32 indexed orderHash, uint256 side, uint256 width, uint256 size, bytes32 rootHash
     );
 
-    // Role definition for admin
-    constructor(address admin) {
-        if (admin == address(0)) {
+    // Role definition for admin and setting poseidon2Yul hasher
+    constructor(address admin, address poseidon2Yul) {
+        if (admin == address(0) || poseidon2Yul == address(0)) {
             revert MerkleManager__ZeroAddress();
         }
         _grantRole(ADMIN_ROLE, admin);
         _setRoleAdmin(MANAGER_ROLE, ADMIN_ROLE);
+        _tree.setHasher(poseidon2Yul);
     }
 
     /**
-     * @dev Appends a new deposit order to the tree.
-     * Updates peaks, root, and mappings. Emits DepositHashAppended.
+     * @dev Appends a new deposit order to the tree. The appended leaf is the side-bound value
+     * poseidon2(orderHash, side) (see _encodeLeaf). Updates peaks, root, and mappings. Emits DepositHashAppended.
      * @param orderHash The hash of the order to append.
+     * @param side The leaf's `ad_contract` - the side it is unlocked on (1 = ad, 0 = order); set by the caller.
      */
-    function appendOrderHash(bytes32 orderHash) external nonReentrant onlyRole(MANAGER_ROLE) returns (bool) {
-        uint256 leafIndex = _tree.append(orderHash);
+    function appendOrderHash(bytes32 orderHash, uint256 side) external nonReentrant onlyRole(MANAGER_ROLE) returns (bool) {
+        uint256 leafIndex = _tree.append(_encodeLeaf(orderHash, side));
         bytes32 newRoot = _tree.getRoot();
         uint256 width = _tree.getWidth();
 
         rootHistory[width] = newRoot;
 
-        emit DepositHashAppended(leafIndex, orderHash, width, _tree.getSize(), newRoot);
+        emit DepositHashAppended(leafIndex, orderHash, side, width, _tree.getSize(), newRoot);
         return true;
+    }
+
+    /**
+     * @dev Leaf-side binding: value = poseidon2(orderHash mod p, side). `side` is the leaf's `ad_contract` -
+     * the side it is unlocked on (1 = ad / 0 = order), NOT the contract that appends it (orders unlock on the
+     * ad side, locks on the order side). MUST stay byte-identical to the circuit (`main.nr`) and the SDK
+     * `encodeLeaf`, or roots diverge.
+     */
+    function _encodeLeaf(bytes32 orderHash, uint256 side) private view returns (bytes32) {
+        (bool ok, bytes memory ret) = _tree.hasher.staticcall(abi.encode(MMRPoseidon2._fieldMod(orderHash), side));
+        require(ok, "MerkleManager:encodeLeaf");
+        return abi.decode(ret, (bytes32));
     }
 
     // ========== READERS (VIEW) ==========
@@ -132,8 +146,8 @@ contract MerkleManager is IMerkleManager, AccessControl, ReentrancyGuard {
         bytes32 valueHash,
         bytes32[] calldata peakBag,
         bytes32[] calldata siblings
-    ) external pure returns (bool) {
-        return MMRPoseidon2.verifyInclusion(root_, width_, index, valueHash, peakBag, siblings);
+    ) external view returns (bool) {
+        return MMRPoseidon2.verifyInclusion(_tree.hasher, root_, width_, index, valueHash, peakBag, siblings);
     }
 
     function fieldMod(bytes32 orderHash) external pure returns (bytes32 orderHashMod) {

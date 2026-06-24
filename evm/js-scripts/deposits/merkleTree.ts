@@ -1,10 +1,9 @@
 import { Fr } from "@aztec/bb.js";
-const fs = require("fs");
-const path = require("path");
 import {
   MerkleMountainRange as MMR,
   LevelDB,
   Poseidon2Hasher,
+  encodeLeaf,
 } from "proofbridge-mmr";
 
 export class MerkleTree {
@@ -12,43 +11,43 @@ export class MerkleTree {
   private mmr: MMR;
   private elementIndexMap: Map<string, number> = new Map();
   private hasher = new Poseidon2Hasher();
+  private side = 0; // 1 = ad, 0 = order; drives the leaf-side binding
 
   constructor() {
     this.db = new LevelDB("./merkle_tree_db");
   }
 
-  async init(id: string, defaultLeaves: string[] = []) {
+  async init(id: string, side: number, defaultLeaves: string[] = []) {
     await this.db.init();
-
+    this.side = side;
     this.mmr = new MMR(id, this.db, this.hasher);
-
     for (const leaf of defaultLeaves) {
       await this.append(leaf);
     }
   }
 
-  async append(value: string) {
-    const x = this.mod(value);
-    const elementIndex = await this.mmr.append(x.toString());
-    this.elementIndexMap.set(x.toString(), elementIndex);
-    return { elementIndex, x };
+  // leaf-side binding: the appended value is poseidon2(orderHash, side)
+  async append(orderHash: string) {
+    const leaf = encodeLeaf(orderHash, this.side, this.hasher);
+    const elementIndex = await this.mmr.append(leaf);
+    this.elementIndexMap.set(this.mod(orderHash).toString(), elementIndex);
+    return { elementIndex };
   }
 
-  getIndex(value: string) {
-    const x = this.mod(value);
-    const idx = this.elementIndexMap.get(x.toString());
+  getIndex(orderHash: string) {
+    const idx = this.elementIndexMap.get(this.mod(orderHash).toString());
     if (idx === undefined) throw new Error("Element not found in tree");
     return idx;
   }
 
   async genProof(elementIndex: number, orderHash: string) {
-    const x = this.mod(orderHash);
+    const value = "0x" + encodeLeaf(orderHash, this.side, this.hasher).toString("hex");
     const proof = await this.mmr.getMerkleProof(elementIndex);
     const isValid = this.mmr.verify(
       proof.root,
       proof.width,
       elementIndex,
-      orderHash,
+      value,
       proof.peaks,
       proof.siblings
     );
@@ -68,15 +67,11 @@ export class MerkleTree {
   }
 }
 
-export async function merkleTree(leaves: string[]) {
+export async function merkleTree(leaves: string[], side: number) {
   const tree = new MerkleTree();
-
   const id = Math.random().toString(36).substring(2, 15);
 
-  // Initialize tree with no leaves (all zeros)
-  await tree.init(id);
-
-  // Insert some leaves (from input)
+  await tree.init(id, side);
   for (const leaf of leaves) {
     await tree.append(leaf);
   }

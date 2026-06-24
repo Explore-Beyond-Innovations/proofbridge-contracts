@@ -11,6 +11,7 @@ import {IMerkleManager, MerkleManager} from "src/MerkleManager.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
+import {Poseidon2Yul} from "@poseidon2/src/Poseidon2Yul.sol";
 
 contract DeployProofbridge is Script {
     uint256 constant W_DECIMALS = 18;
@@ -54,7 +55,10 @@ contract DeployProofbridge is Script {
         IMerkleManager merkleManager;
 
         if (merkleManagerMaybe == address(0)) {
-            merkleManager = new MerkleManager(admin);
+            // deploy the shared Poseidon2 Yul hasher once, then wire it into the manager
+            Poseidon2Yul poseidon2Yul = new Poseidon2Yul();
+            console2.log("Deployed Poseidon2Yul     :", address(poseidon2Yul));
+            merkleManager = new MerkleManager(admin, address(poseidon2Yul));
             console2.log("Deployed MerkleManager    :", address(merkleManager));
         } else {
             merkleManager = IMerkleManager(merkleManagerMaybe);

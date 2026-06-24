@@ -11,6 +11,7 @@ import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
+import {Poseidon2Yul} from "@poseidon2/src/Poseidon2Yul.sol";
 
 contract MockAdManager is AdManager {
     constructor(address admin, IVerifier v, IMerkleManager m, IwNativeToken t) AdManager(admin, v, m, t) {}
@@ -116,7 +117,7 @@ contract ProofBridge is Test {
         // AdChain contracts
         vm.chainId(adChainId);
         adChainVerifier = new HonkVerifier();
-        adChainMerkleManager = new MerkleManager(admin);
+        adChainMerkleManager = new MerkleManager(admin, address(new Poseidon2Yul()));
         adChainWNativeToken = new wNativeToken("Wrapped Native Token", "WNATIVE", W_DECIMALS);
         adManager = new MockAdManager(admin, adChainVerifier, adChainMerkleManager, adChainWNativeToken);
         adToken = new ERC20Mock();
@@ -128,7 +129,7 @@ contract ProofBridge is Test {
         // Order chain Contracts
         vm.chainId(orderChainId);
         orderChainVerifier = new HonkVerifier();
-        orderChainMerkleManager = new MerkleManager(admin);
+        orderChainMerkleManager = new MerkleManager(admin, address(new Poseidon2Yul()));
         orderChainWNativeToken = new wNativeToken("Wrapped Native Token", "WNATIVE", W_DECIMALS);
         orderPortal = new MockOrderPortal(admin, orderChainVerifier, orderChainMerkleManager, orderChainWNativeToken);
         orderToken = new ERC20Mock();

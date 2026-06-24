@@ -46,3 +46,6 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# benchmarks
+mmr-bench/

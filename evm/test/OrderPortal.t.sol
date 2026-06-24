@@ -11,6 +11,7 @@ import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
 import {AddressCast} from "src/libraries/AddressCast.sol";
+import {Poseidon2Yul} from "@poseidon2/src/Poseidon2Yul.sol";
 
 // Expose internal hash for assertions
 contract MockOrderPortal is OrderPortal {
@@ -66,7 +67,7 @@ contract OrderPortalTest is Test {
     function setUp() public {
         (admin, adminPk) = makeAddrAndKey("admin");
         verifier = new MockVerifier(true);
-        merkleManager = new MerkleManager(admin);
+        merkleManager = new MerkleManager(admin, address(new Poseidon2Yul()));
         _wNativeToken = new wNativeToken("Wrapped Native Token", "WNT", W_DECIMALS);
         portal = new MockOrderPortal(
             admin,

@@ -502,7 +502,8 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
         ad.locked += adAmount;
         orders[orderHash] = Status.Open;
 
-        if (!i_merkleManager.appendOrderHash(orderHash)) revert AdManager__MerkleManagerAppendFailed();
+        // locks are unlocked on the order side (ad_contract = 0), so bind the leaf with side 0
+        if (!i_merkleManager.appendOrderHash(orderHash, 0)) revert AdManager__MerkleManagerAppendFailed();
 
         requestHashes[message] = true;
 

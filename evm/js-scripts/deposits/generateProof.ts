@@ -13,45 +13,48 @@ const circuitPath = path.resolve(
 
 const circuit = JSON.parse(fs.readFileSync(circuitPath, "utf8"));
 
+const padBool = (arr: boolean[], n: number): boolean[] => [
+  ...arr,
+  ...Array(n - arr.length).fill(false),
+];
+
 export default async function generateProof(): Promise<string> {
   const inputs = process.argv.slice(2);
 
   // extract inputs
   const nullifierHash = inputs[0];
   const orderHash = inputs[1];
-  const isAdContract = inputs[2];
+  const isAdContract = inputs[2] === "true";
   const secret = inputs[3];
-
   const leaves = inputs.slice(4);
 
-  const tree = await merkleTree(leaves);
+  // single-side tree: every leaf carries this side (1 = ad, 0 = order)
+  const side = isAdContract ? 1 : 0;
+
+  const tree = await merkleTree(leaves, side);
   const elementIndex = tree.getIndex(orderHash);
-
-  if (elementIndex === undefined) {
-    throw new Error("orderHash not found in provided leaves");
-  }
-
   const merkleProof = await tree.genProof(elementIndex, orderHash);
-  const targetRoot = await tree.getRoot();
 
   try {
     const noir = new Noir(circuit);
     const honk = new UltraHonkBackend(circuit.bytecode, { threads: 2 });
 
+    // lean circuit: navigation is supplied as untrusted hints (directions / parent indices / chosen peak)
     const input = {
       nullifier_hash: nullifierHash,
       order_hash: modOrderHash(orderHash).toString(),
-      target_root: targetRoot,
-      ad_contract: isAdContract == "true" ? true : false,
+      target_root: merkleProof.root,
+      ad_contract: isAdContract,
       secret: secret,
-      target_index: elementIndex,
-      tree_width: merkleProof.width.toString(),
-      target_sibling_hashes_len: merkleProof.siblings.length.toString(),
-      target_sibling_hashes: padArray(
-        merkleProof.siblings.map((i) => i.toString())
-      ),
-      target_peak_hashes_len: merkleProof.peaks.length.toString(),
-      target_peak_hashes: padArray(merkleProof.peaks.map((i) => i.toString())),
+      leaf_index: merkleProof.elementIndex.toString(),
+      width: merkleProof.width.toString(),
+      path_len: merkleProof.siblings.length.toString(),
+      siblings: padArray(merkleProof.siblings, 32),
+      sib_is_left: padBool(merkleProof.directions, 32),
+      parent_index: padArray(merkleProof.parentIndices.map(String), 32),
+      peaks: padArray(merkleProof.peaks, 32),
+      peaks_len: merkleProof.peaks.length.toString(),
+      chosen_peak: merkleProof.chosenPeak.toString(),
     };
 
     const { witness } = await noir.execute(input);

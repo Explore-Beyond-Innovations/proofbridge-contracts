@@ -289,7 +289,8 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient {
             IERC20(orderTokenAddr).safeTransferFrom(msg.sender, address(this), params.amount);
         }
 
-        if (!i_merkleManager.appendOrderHash(orderHash)) revert OrderPortal__MerkleManagerAppendFailed();
+        // orders are unlocked on the ad side (ad_contract = 1), so bind the leaf with side 1
+        if (!i_merkleManager.appendOrderHash(orderHash, 1)) revert OrderPortal__MerkleManagerAppendFailed();
 
         orders[orderHash] = Status.Open;
 

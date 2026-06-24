@@ -11,6 +11,7 @@ import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
 import {AddressCast} from "src/libraries/AddressCast.sol";
+import {Poseidon2Yul} from "@poseidon2/src/Poseidon2Yul.sol";
 
 contract MockAdManager is AdManager {
     constructor(address admin, IVerifier v, IMerkleManager m, IwNativeToken t) AdManager(admin, v, m, t) {}
@@ -68,7 +69,7 @@ contract AdManagerTest is Test {
     function setUp() public {
         (admin, adminPk) = makeAddrAndKey("admin");
         verifier = new MockVerifier(true);
-        merkleManager = new MerkleManager(admin);
+        merkleManager = new MerkleManager(admin, address(new Poseidon2Yul()));
         _wNativeToken = new wNativeToken("Wrapped Native Token", "WNATIVE", W_DECIMALS);
 
         adManager = new MockAdManager(
