@@ -1,7 +1,7 @@
 //! Order validation logic for the AdManager contract.
 //!
 //! Validates order parameters against ad configuration, chain configuration,
-//! and token routes. Mirrors the EVM `validateOrder` function.
+//! and token routes.
 
 use soroban_sdk::Env;
 
@@ -27,12 +27,10 @@ use crate::types::{Ad, OrderParams};
 /// 8. Ad token matches
 /// 9. Ad recipient matches
 pub fn validate_order(env: &Env, ad: &Ad, params: &OrderParams) -> Result<(), AdManagerError> {
-    // Check ad is open
     if !ad.open {
         return Err(AdManagerError::AdClosed);
     }
 
-    // Check amount > 0
     if params.amount == 0 {
         return Err(AdManagerError::ZeroAmount);
     }
@@ -43,7 +41,6 @@ pub fn validate_order(env: &Env, ad: &Ad, params: &OrderParams) -> Result<(), Ad
     decimal_scaling::assert_in_range(params.ad_decimals)
         .map_err(map_decimal_scaling_error::<AdManagerError>)?;
 
-    // Check bridger not zero
     if auth::is_zero_bytes32(&params.bridger) {
         return Err(AdManagerError::BridgerZero);
     }
@@ -56,38 +53,33 @@ pub fn validate_order(env: &Env, ad: &Ad, params: &OrderParams) -> Result<(), Ad
     }
     let _ = token::bytes32_to_account_address::<AdManagerError>(env, &params.order_recipient)?;
 
-    // Check source chain is supported
     let chain_info =
         storage::get_chain(env, params.order_chain_id).ok_or(AdManagerError::ChainNotSupported)?;
     if !chain_info.supported {
         return Err(AdManagerError::ChainNotSupported);
     }
 
-    // Check order portal matches (if configured)
+    // Order portal only enforced when configured.
     if !auth::is_zero_bytes32(&chain_info.order_portal)
         && chain_info.order_portal != params.src_order_portal
     {
         return Err(AdManagerError::OrderPortalMismatch);
     }
 
-    // Check order chain matches ad's chain
     if params.order_chain_id != ad.order_chain_id {
         return Err(AdManagerError::OrderChainMismatch);
     }
 
-    // Check token route exists and matches
     let routed = storage::get_token_route(env, &params.ad_chain_token, params.order_chain_id)
         .ok_or(AdManagerError::MissingRoute)?;
     if routed != params.order_chain_token {
         return Err(AdManagerError::OrderTokenMismatch);
     }
 
-    // Check ad token matches
     if params.ad_chain_token != ad.token {
         return Err(AdManagerError::AdTokenMismatch);
     }
 
-    // Check ad recipient matches
     if params.ad_recipient != ad.ad_recipient {
         return Err(AdManagerError::AdRecipientMismatch);
     }

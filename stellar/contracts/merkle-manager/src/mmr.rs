@@ -1,7 +1,6 @@
 //! Merkle Mountain Range (MMR) implementation with Poseidon2 hashing.
 //!
-//! This is a port of the Solidity MMRPoseidon2.sol library.
-//! Indexing is 1-based (not 0-based) to match the EVM implementation.
+//! Indexing is 1-based (not 0-based).
 
 use soroban_poseidon::poseidon2_hash;
 use soroban_sdk::{
@@ -11,13 +10,18 @@ use soroban_sdk::{
 
 use crate::storage;
 
+/// keccak256("ProofBridge.MMR.v1") mod p - domain/version tag bound into the root;
+pub const DOMAIN_TAG: [u8; 32] = [
+    0x10, 0x07, 0xfd, 0x40, 0xca, 0xf0, 0xe3, 0x9d, 0x3f, 0xfb, 0xec, 0xd9, 0x1e, 0x2d, 0x94, 0x69,
+    0xb3, 0xf2, 0x29, 0x4a, 0x67, 0x94, 0xc3, 0x72, 0xeb, 0x54, 0x06, 0xa4, 0x96, 0xb6, 0xe4, 0xec,
+];
+
 // =============================================================================
 // Field Operations
 // =============================================================================
 
 /// Apply BN254 field modulus to a hash.
-/// Reduces dataHash into the BN254 scalar field using the SDK's Fr type,
-/// mirroring Solidity's `_fieldMod`: `bytes32(uint256(dataHash) % Field.PRIME)`.
+/// Reduces dataHash into the BN254 scalar field using the SDK's Fr type.
 pub fn field_mod(_env: &Env, data_hash: &BytesN<32>) -> BytesN<32> {
     Fr::from_bytes(data_hash.clone()).to_bytes()
 }
@@ -27,10 +31,10 @@ pub fn field_mod(_env: &Env, data_hash: &BytesN<32>) -> BytesN<32> {
 // =============================================================================
 //
 // All hashes use T=4 (rate=3) regardless of input count. This is intentional
-// for cross-chain compatibility: the EVM Poseidon2Lib (ported from Noir) uses a
-// fixed T=4 permutation for hash_1, hash_2, and hash_3 alike. Different T
-// values produce different round constants and matrix diagonals, so using T=3
-// for 2-input hashes would break EVM parity.
+// for cross-chain compatibility: the same fixed T=4 permutation is used for
+// hash_1, hash_2, and hash_3 alike. Different T values produce different round
+// constants and matrix diagonals, so using T=3 for 2-input hashes would break
+// cross-chain parity.
 
 /// Hash a leaf node: Poseidon2(index, dataHash)
 pub fn hash_leaf(env: &Env, index: u128, data_hash: &BytesN<32>) -> BytesN<32> {
@@ -53,6 +57,17 @@ pub fn hash_branch(env: &Env, index: u128, left: &BytesN<32>, right: &BytesN<32>
     u256_to_bytes32(env, &result)
 }
 
+/// Leaf-side binding: value = poseidon2(field_mod(orderHash), side). side = 1 (ad) / 0 (order),
+/// i.e. the side the leaf is unlocked on. Must match the circuit and the SDK.
+pub fn encode_leaf(env: &Env, order_hash: &BytesN<32>, side: u32) -> BytesN<32> {
+    let mut inputs: Vec<U256> = Vec::new(env);
+    inputs.push_back(bytes32_to_u256(env, &field_mod(env, order_hash)));
+    inputs.push_back(u128_to_u256(env, side as u128));
+
+    let result: U256 = poseidon2_hash::<4, BnScalar>(env, &inputs);
+    u256_to_bytes32(env, &result)
+}
+
 /// Compute peak bagging: fold peaks into a single root.
 pub fn peak_bagging(env: &Env, width: u128, peaks: &Vec<BytesN<32>>) -> BytesN<32> {
     if width == 0 {
@@ -61,12 +76,11 @@ pub fn peak_bagging(env: &Env, width: u128, peaks: &Vec<BytesN<32>>) -> BytesN<3
 
     let size = calc_size(width);
     assert!(num_of_peaks(width) == peaks.len(), "MMR: bad peak count");
-    let size_u256 = u128_to_u256(env, size);
 
-    // Fold: acc = H(acc, peak[i])
-    let mut acc: U256 = size_u256.clone();
+    // single size-bind: fold the peaks seeded by the first peak (not size)
+    let mut acc: U256 = bytes32_to_u256(env, &peaks.get(0).unwrap());
 
-    for i in 0..peaks.len() {
+    for i in 1..peaks.len() {
         let peak = peaks.get(i).unwrap();
         let mut inputs: Vec<U256> = Vec::new(env);
         inputs.push_back(acc.clone());
@@ -74,9 +88,11 @@ pub fn peak_bagging(env: &Env, width: u128, peaks: &Vec<BytesN<32>>) -> BytesN<3
         acc = poseidon2_hash::<4, BnScalar>(&env, &inputs);
     }
 
-    // Final bind: H(size, acc)
+    // bind size + domain once: root = H_3(DOMAIN_TAG, size, acc)
+    let domain = bytes32_to_u256(env, &BytesN::from_array(env, &DOMAIN_TAG));
     let mut final_inputs: Vec<U256> = Vec::new(env);
-    final_inputs.push_back(size_u256);
+    final_inputs.push_back(domain);
+    final_inputs.push_back(u128_to_u256(env, size));
     final_inputs.push_back(acc);
     let result = poseidon2_hash::<4, BnScalar>(&env, &final_inputs);
     u256_to_bytes32(env, &result)
@@ -186,26 +202,18 @@ fn mountain_height(size: u128) -> u8 {
 /// Append a new leaf to the MMR.
 /// Returns the new leaf index.
 pub fn append(env: &Env, data_hash: &BytesN<32>) -> u128 {
-    // Apply field modulus
     let data_hash_mod = field_mod(env, data_hash);
 
-    // Increment width
     let width = storage::get_width(env) + 1;
     storage::set_width(env, width);
 
-    // Calculate leaf index
     let leaf_index = get_leaf_index(width);
 
-    // Hash leaf node: Poseidon2(index, value)
     let leaf_node = hash_leaf(env, leaf_index, &data_hash_mod);
-
-    // Store leaf hash
     storage::set_node_hash(env, leaf_index, &leaf_node);
 
-    // Get peak indexes
     let peak_indexes = get_peak_indexes(env, width);
 
-    // Update size
     let size = calc_size(width);
     storage::set_size(env, size);
 
@@ -217,11 +225,8 @@ pub fn append(env: &Env, data_hash: &BytesN<32>) -> u128 {
         peaks.push_back(peak_hash);
     }
 
-    // Compute new root via peak bagging
     let new_root = peak_bagging(env, width, &peaks);
     storage::set_root(env, &new_root);
-
-    // Store root in history
     storage::set_root_at_width(env, width, &new_root);
 
     leaf_index
@@ -232,7 +237,6 @@ pub fn append(env: &Env, data_hash: &BytesN<32>) -> u128 {
 fn get_or_create_node(env: &Env, index: u128, size: u128) -> BytesN<32> {
     assert!(index <= size, "Index out of bounds");
 
-    // Check if already cached
     if let Some(cached) = storage::get_node_hash(env, index) {
         if cached != BytesN::from_array(env, &[0u8; 32]) {
             return cached;
@@ -326,7 +330,7 @@ pub fn get_merkle_proof(
     (root, width, peak_bag, siblings)
 }
 
-/// Stateless inclusion proof verification (mirrors EVM `verifyInclusion`).
+/// Stateless inclusion proof verification.
 pub fn verify_inclusion(
     env: &Env,
     root: &BytesN<32>,
@@ -357,8 +361,8 @@ pub fn verify_inclusion(
     let zero = BytesN::from_array(env, &[0u8; 32]);
     assert!(target_peak != zero, "MMR: no peak for index");
 
-    // Walk DOWN from peak to leaf, recording path
-    // Mirrors EVM: h starts at siblings.length + 1, pre-decrements each iteration
+    // Walk DOWN from peak to leaf, recording path.
+    // h starts at siblings.length + 1 and pre-decrements each iteration.
     let sib_len = siblings.len();
     let path_len = sib_len + 1;
     let mut path: Vec<u128> = Vec::new(env);
@@ -366,9 +370,9 @@ pub fn verify_inclusion(
         path.push_back(0);
     }
 
-    let mut h = path_len; // EVM: uint8 h = uint8(siblings.length) + 1
+    let mut h = path_len;
     loop {
-        h -= 1; // EVM: path[--h] = cursor
+        h -= 1;
         path.set(h, cursor);
         if cursor == index {
             break;

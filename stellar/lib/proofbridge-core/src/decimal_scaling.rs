@@ -4,8 +4,6 @@
 //! precisions (e.g. EVM wETH with 18 decimals vs. Stellar wETH SAC with 7),
 //! the signed `amount` in `OrderParams` must be rescaled before being used for
 //! pool accounting or transfers on the ad chain.
-//!
-//! Mirrors `contracts/evm/src/libraries/DecimalScaling.sol`.
 
 /// Maximum decimals accepted on either side. Any value ≥ this is treated as
 /// invalid and will reject the order. Keeping the cap at 30 bounds the

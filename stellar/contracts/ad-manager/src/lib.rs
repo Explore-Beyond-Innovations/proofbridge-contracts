@@ -6,8 +6,8 @@
 //!
 //! ## Cross-Chain Compatibility
 //!
-//! This contract is designed to be interoperable with the EVM AdManager contract.
-//! Order hashes are computed using EIP-712 encoding to ensure compatibility.
+//! Order hashes are computed using EIP-712 encoding to ensure cross-chain
+//! compatibility.
 
 #![no_std]
 
@@ -584,7 +584,7 @@ impl AdManagerContract {
         storage::set_ad(&env, &params.ad_id, &ad);
         storage::set_order_status(&env, &order_hash, Status::Open);
 
-        cross_contract::append_to_merkle(&env, &config.merkle_manager, &order_hash)?;
+        cross_contract::append_to_merkle(&env, &config.merkle_manager, &order_hash, 0)?;
 
         storage::set_request_hash_used(&env, &message);
 
@@ -661,7 +661,6 @@ impl AdManagerContract {
             &public_key,
         )?;
 
-        // Build public inputs and verify ZK proof
         let public_inputs = cross_contract::build_public_inputs(
             &env,
             &config.merkle_manager,

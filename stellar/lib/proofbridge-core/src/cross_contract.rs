@@ -15,7 +15,7 @@ use crate::errors::ProofBridgeError;
 #[allow(dead_code)]
 #[contractclient(name = "MerkleManagerClient")]
 pub trait MerkleManagerInterface {
-    fn append_order_hash(env: Env, manager: Address, order_hash: BytesN<32>) -> bool;
+    fn append_order_hash(env: Env, manager: Address, order_hash: BytesN<32>, side: u32) -> bool;
     fn get_root(env: Env) -> BytesN<32>;
     fn get_root_at_index(env: Env, leaf_index: u128) -> BytesN<32>;
     fn get_width(env: Env) -> u128;
@@ -38,10 +38,11 @@ pub fn append_to_merkle<E: ProofBridgeError>(
     env: &Env,
     merkle_manager: &Address,
     order_hash: &BytesN<32>,
+    side: u32,
 ) -> Result<(), E> {
     let client = MerkleManagerClient::new(env, merkle_manager);
     client
-        .try_append_order_hash(&env.current_contract_address(), order_hash)
+        .try_append_order_hash(&env.current_contract_address(), order_hash, &side)
         .map_err(|_| E::merkle_append_failed())?
         .map_err(|_| E::merkle_append_failed())?;
     Ok(())
@@ -92,7 +93,7 @@ pub fn verify_proof<E: ProofBridgeError>(
 
 /// Build public inputs for the ZK proof verification.
 ///
-/// The public inputs are ordered as (matching EVM buildPublicInputs):
+/// The public inputs are ordered as:
 /// - nullifier_hash (32 bytes)
 /// - order_hash_mod (32 bytes) - order hash with BN254 field modulus applied
 /// - target_root (32 bytes)
@@ -107,7 +108,6 @@ pub fn build_public_inputs(
     order_hash: &BytesN<32>,
     chain_flag_value: u8,
 ) -> Bytes {
-    // Apply field modulus to order hash (same as EVM)
     let order_hash_mod = get_field_mod(env, merkle_manager, order_hash);
 
     // Chain flag as bytes32 (big-endian)
@@ -115,17 +115,9 @@ pub fn build_public_inputs(
     chain_flag[31] = chain_flag_value;
 
     let mut inputs = Bytes::new(env);
-
-    // Append nullifier_hash (32 bytes)
     inputs.append(&Bytes::from_slice(env, &nullifier_hash.to_array()));
-
-    // Append order_hash_mod (32 bytes)
     inputs.append(&Bytes::from_slice(env, &order_hash_mod.to_array()));
-
-    // Append target_root (32 bytes)
     inputs.append(&Bytes::from_slice(env, &target_root.to_array()));
-
-    // Append chain_flag (32 bytes)
     inputs.append(&Bytes::from_slice(env, &chain_flag));
 
     inputs

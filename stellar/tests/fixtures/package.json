@@ -10,7 +10,7 @@
     "@noir-lang/noir_js": "1.0.0-beta.9",
     "@zkpassport/poseidon2": "^0.6.2",
     "ethers": "^6.15.0",
-    "proofbridge-mmr": "1.0.8"
+    "proofbridge-mmr": "1.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

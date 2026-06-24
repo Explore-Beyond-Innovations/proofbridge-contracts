@@ -43,6 +43,9 @@
                 },
                 {
                   "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                },
+                {
+                  "u32": 0
                 }
               ]
             }
@@ -65,6 +68,9 @@
                 },
                 {
                   "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
+                },
+                {
+                  "u32": 0
                 }
               ]
             }
@@ -104,7 +110,7 @@
               },
               "durability": "persistent",
               "val": {
-                "bytes": "1e05013a2f40c60dc58cfe36bfa4d7e94676c43436922368628342bc5144d103"
+                "bytes": "046596b5e0dff202d89a2bab042f210cecffa0559430a487c7d7034c5a45a006"
               }
             }
           },
@@ -131,7 +137,7 @@
               },
               "durability": "persistent",
               "val": {
-                "bytes": "176ad1cae93876a4632bc6431edd92ba205845f7e9aa369840c790f261640d1a"
+                "bytes": "07ecf3ffc7edd2088da8c32235039601708d243b2dfebfa8bcd00b25f70de1a9"
               }
             }
           },
@@ -158,7 +164,7 @@
               },
               "durability": "persistent",
               "val": {
-                "bytes": "130231d3704d025bff3eed008478ecb19a3478c04463fc776bf2a1074b8aad33"
+                "bytes": "17ea97286610e7edcb5e3388b0801a5dd550823585052debe762477c2f569449"
               }
             }
           },
@@ -185,7 +191,7 @@
               },
               "durability": "persistent",
               "val": {
-                "bytes": "25ce2a4516dd56369f466556bed3380b5d0bfa4357636f1e5da349d391673cfd"
+                "bytes": "01cd981304de23eee83a9176da822b2747b36d1e8c1fb6476a6977a93abae095"
               }
             }
           },
@@ -212,7 +218,7 @@
               },
               "durability": "persistent",
               "val": {
-                "bytes": "25bc625c9e859a07490bc3b2257bd28984f2d32df5cc77f370ce1097c52227bd"
+                "bytes": "2b5282158f7ef340f50a3d3ce5d967a89532e006322d4c424c1c28d46d0e4c9a"
               }
             }
           },
@@ -283,7 +289,7 @@
                         "symbol": "root"
                       },
                       "val": {
-                        "bytes": "25bc625c9e859a07490bc3b2257bd28984f2d32df5cc77f370ce1097c52227bd"
+                        "bytes": "2b5282158f7ef340f50a3d3ce5d967a89532e006322d4c424c1c28d46d0e4c9a"
                       }
                     },
                     {

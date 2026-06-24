@@ -16,8 +16,9 @@ pub fn append_to_merkle(
     env: &Env,
     merkle_manager: &Address,
     order_hash: &BytesN<32>,
+    side: u32,
 ) -> Result<(), AdManagerError> {
-    proofbridge_core::cross_contract::append_to_merkle(env, merkle_manager, order_hash)
+    proofbridge_core::cross_contract::append_to_merkle(env, merkle_manager, order_hash, side)
 }
 
 /// Verify a ZK proof via cross-contract call to the Verifier contract.

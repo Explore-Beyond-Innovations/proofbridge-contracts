@@ -211,7 +211,7 @@ fn test_append_order_hash() {
 
     // Append first order hash
     let hash1 = BytesN::from_array(&env, &[1u8; 32]);
-    let result = client.append_order_hash(&manager, &hash1);
+    let result = client.append_order_hash(&manager, &hash1, &0);
     assert!(result);
 
     // Check state after first append
@@ -228,7 +228,7 @@ fn test_append_order_hash() {
 
     // Append second order hash
     let hash2 = BytesN::from_array(&env, &[2u8; 32]);
-    client.append_order_hash(&manager, &hash2);
+    client.append_order_hash(&manager, &hash2, &0);
 
     // Check state after second append
     assert_eq!(client.get_width(), 2);
@@ -250,7 +250,7 @@ fn test_append_not_manager_fails() {
     // Don't set manager
 
     let hash = BytesN::from_array(&env, &[1u8; 32]);
-    let result = client.try_append_order_hash(&manager, &hash);
+    let result = client.try_append_order_hash(&manager, &hash, &0);
     assert!(result.is_err());
 }
 
@@ -398,7 +398,7 @@ fn test_multiple_appends_cross_chain() {
     // Append 10 elements (matching testMerkle.ts pattern)
     for i in 0..10u64 {
         let hash = padded_int_to_bytes32(&env, i);
-        client.append_order_hash(&manager, &hash);
+        client.append_order_hash(&manager, &hash, &0);
 
         let root = client.get_root();
         assert_ne!(
@@ -453,8 +453,8 @@ fn test_deterministic_roots() {
     for i in 0..5u64 {
         let hash1 = padded_int_to_bytes32(&env1, i);
         let hash2 = padded_int_to_bytes32(&env2, i);
-        client1.append_order_hash(&manager1, &hash1);
-        client2.append_order_hash(&manager2, &hash2);
+        client1.append_order_hash(&manager1, &hash1, &0);
+        client2.append_order_hash(&manager2, &hash2, &0);
     }
 
     // Roots should be identical
@@ -488,14 +488,14 @@ fn test_root_depends_on_order() {
     // Append in order: 0, 1
     let hash0_1 = padded_int_to_bytes32(&env1, 0);
     let hash1_1 = padded_int_to_bytes32(&env1, 1);
-    client1.append_order_hash(&manager1, &hash0_1);
-    client1.append_order_hash(&manager1, &hash1_1);
+    client1.append_order_hash(&manager1, &hash0_1, &0);
+    client1.append_order_hash(&manager1, &hash1_1, &0);
 
     // Append in reverse order: 1, 0
     let hash1_2 = padded_int_to_bytes32(&env2, 1);
     let hash0_2 = padded_int_to_bytes32(&env2, 0);
-    client2.append_order_hash(&manager2, &hash1_2);
-    client2.append_order_hash(&manager2, &hash0_2);
+    client2.append_order_hash(&manager2, &hash1_2, &0);
+    client2.append_order_hash(&manager2, &hash0_2, &0);
 
     // Roots should be different
     let root1 = client1.get_root();
@@ -541,19 +541,20 @@ fn test_cross_chain_mmr_evm_compatibility() {
         "0157eb7606c8121d046231c4fa78714a91ab2fd0690e9b1b0c848468ebd13dbc", // poseidon2(0x00...04)
     ];
 
-    // Expected roots after each append from EVM testMerkle.ts
+    // Expected roots after each append, computed by the SDK (proofbridge-mmr) for the same
+    // leaf-side-bound sequence (side = 0): leaf = poseidon2(orderHash, 0), single size-bind + domain tag.
     let evm_roots = [
-        "29ae820c971a4cfb1efa6ff17005b852121928021a9148ae0e972ba1b791babe", // after append 0
-        "0c36410360add62088d4fe9b1b93a762b940c0554118e8371b3f70c200557292", // after append 1
-        "103de6d9d2c45dc7e4975424e2a9926747527d428801f7bbba5408f443ea1d6d", // after append 2
-        "0c753a881c3884ccd9a19d5f837aacd3a3598dac0311766ad9e1e97ecde6c552", // after append 3
-        "01cdf4db8698b886693a0d948ce7ef7859e1cf4f9594b4efa4d070d1db0a436b", // after append 4
+        "1385de9da8c9ac87e444f902bea4ac2674e1bfed8a867d8878a27e01124c115d", // after append 0
+        "16767796c2a7919517d75e7d56973eea638207b65b22dd8c2046c22818a35108", // after append 1
+        "2572f30de47c299a69fea66b57ff3698bd2b65c0a536ed9a6f6f8281889d7456", // after append 2
+        "12676b33700e9f0b14d6ca1fc4e5126a912d87e4d42dfa88c6bf26ec7a13fc58", // after append 3
+        "0e43054556ce99a204dc12dbcbf48db464fb882322e8998a1c7be93ea32f4139", // after append 4
     ];
 
     // Append each hash and verify root matches EVM
     for (i, (hash_hex, expected_root_hex)) in evm_hashes.iter().zip(evm_roots.iter()).enumerate() {
         let order_hash = hex_to_bytes32(&env, hash_hex);
-        client.append_order_hash(&manager, &order_hash);
+        client.append_order_hash(&manager, &order_hash, &0);
 
         let actual_root = client.get_root();
         let expected_root = hex_to_bytes32(&env, expected_root_hex);
@@ -611,7 +612,7 @@ fn test_merkle_proof_round_trip() {
         (0..10u64).map(|i| padded_int_to_bytes32(&env, i)).collect();
 
     for hash in &hashes {
-        client.append_order_hash(&manager, hash);
+        client.append_order_hash(&manager, hash, &0);
     }
 
     assert_eq!(client.get_width(), 10);
@@ -621,8 +622,8 @@ fn test_merkle_proof_round_trip() {
     for (i, &leaf_idx) in leaf_indexes.iter().enumerate() {
         let (root, width, peak_bag, siblings) = client.get_merkle_proof(&leaf_idx);
 
-        // The value_hash is field_mod(original_hash) since append applies field_mod
-        let value_hash = client.field_mod(&hashes[i]);
+        // The leaf value is the side-bound encoding poseidon2(orderHash, side)
+        let value_hash = mmr::encode_leaf(&env, &hashes[i], 0);
 
         let valid =
             client.verify_inclusion(&root, &width, &leaf_idx, &value_hash, &peak_bag, &siblings);
@@ -646,7 +647,7 @@ fn test_proof_fails_with_wrong_value() {
     client.set_manager(&manager, &true);
 
     let hash = padded_int_to_bytes32(&env, 42);
-    client.append_order_hash(&manager, &hash);
+    client.append_order_hash(&manager, &hash, &0);
 
     let (root, width, peak_bag, siblings) = client.get_merkle_proof(&1);
 

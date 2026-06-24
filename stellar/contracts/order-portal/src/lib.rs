@@ -5,8 +5,8 @@
 //!
 //! ## Cross-Chain Compatibility
 //!
-//! This contract is designed to be interoperable with the EVM OrderPortal contract.
-//! Order hashes are computed using EIP-712 encoding to ensure compatibility.
+//! Order hashes are computed using EIP-712 encoding to ensure cross-chain
+//! compatibility.
 
 #![no_std]
 
@@ -234,16 +234,13 @@ impl OrderPortalContract {
         // Verify signed orderDecimals matches on-chain token decimals.
         Self::assert_order_decimals(&env, &params, &config.w_native_token)?;
 
-        // Compute order hash
         let contract_bytes = eip712::contract_address_to_bytes32(&env);
         let order_hash = eip712::hash_order(&env, &params, config.chain_id, &contract_bytes);
 
-        // Check order doesn't exist
         if storage::get_order_status(&env, &order_hash) != Status::None {
             return Err(OrderPortalError::OrderExists);
         }
 
-        // Build request hash
         let message = auth::create_order_request_hash(
             &env,
             &params.ad_id,
@@ -263,7 +260,6 @@ impl OrderPortalContract {
             &public_key,
         )?;
 
-        // Transfer tokens from bridger to contract
         let bridger_addr =
             token::bytes32_to_account_address::<OrderPortalError>(&env, &params.bridger)?;
 
@@ -281,10 +277,8 @@ impl OrderPortalContract {
             params.amount,
         )?;
 
-        // Append to merkle tree
-        cross_contract::append_to_merkle(&env, &config.merkle_manager, &order_hash)?;
+        cross_contract::append_to_merkle(&env, &config.merkle_manager, &order_hash, 1)?;
 
-        // Set order status
         storage::set_order_status(&env, &order_hash, Status::Open);
         storage::set_request_hash_used(&env, &message);
 
@@ -367,7 +361,6 @@ impl OrderPortalContract {
             &public_key,
         )?;
 
-        // Build public inputs and verify ZK proof
         let public_inputs = cross_contract::build_public_inputs(
             &env,
             &config.merkle_manager,

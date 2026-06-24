@@ -35,6 +35,7 @@ pub struct MmrAppend {
     #[topic]
     leaf_index: u128,
     order_hash: BytesN<32>,
+    side: u32,
     width: u128,
     size: u128,
     root: BytesN<32>,
@@ -127,6 +128,7 @@ impl ProofBridgeMerkleManagerContract {
         env: Env,
         manager: Address,
         order_hash: BytesN<32>,
+        side: u32,
     ) -> Result<bool, MerkleError> {
         if !storage::is_initialized(&env) {
             return Err(MerkleError::NotInitialized);
@@ -140,8 +142,10 @@ impl ProofBridgeMerkleManagerContract {
             return Err(MerkleError::NotManager);
         }
 
-        // Append to MMR
-        let leaf_index = mmr::append(&env, &order_hash);
+        // Leaf-side binding: the appended value is poseidon2(orderHash, side); matches the circuit + SDK.
+        // `side` is the side the leaf is unlocked on (1 = ad, 0 = order), not the appending contract.
+        let leaf = mmr::encode_leaf(&env, &order_hash, side);
+        let leaf_index = mmr::append(&env, &leaf);
 
         // Get updated state for event
         let width = storage::get_width(&env);
@@ -152,6 +156,7 @@ impl ProofBridgeMerkleManagerContract {
         MmrAppend {
             leaf_index,
             order_hash,
+            side,
             width,
             size,
             root,
@@ -223,8 +228,7 @@ impl ProofBridgeMerkleManagerContract {
 
     /// Stateless inclusion proof verification.
     ///
-    /// Mirrors the EVM `MMRPoseidon2.verifyInclusion`. Returns true if the
-    /// proof is valid; panics on invalid proof.
+    /// Returns true if the proof is valid; panics on invalid proof.
     pub fn verify_inclusion(
         env: Env,
         root: BytesN<32>,
