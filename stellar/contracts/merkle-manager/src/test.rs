@@ -655,3 +655,30 @@ fn test_proof_fails_with_wrong_value() {
     let wrong_value = padded_int_to_bytes32(&env, 999);
     client.verify_inclusion(&root, &width, &1, &wrong_value, &peak_bag, &siblings);
 }
+
+// Append metering snapshot (CPU instructions + memory bytes) for the Yul-equivalent Poseidon2 path.
+// Mirrors the EVM AppendGas probe. Run: cargo test -p merkle-manager test_append_metering -- --nocapture
+#[test]
+fn test_append_metering() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, manager) = setup_contract(&env);
+    client.initialize(&admin);
+    client.set_manager(&manager, &true);
+
+    for i in 1..=64u64 {
+        let hash = padded_int_to_bytes32(&env, i);
+        env.cost_estimate().budget().reset_unlimited();
+        client.append_order_hash(&manager, &hash, &0);
+        if i == 1 || i == 8 || i == 32 || i == 64 {
+            let b = env.cost_estimate().budget();
+            std::println!(
+                "width {} append: cpu {} insns, mem {} bytes",
+                i,
+                b.cpu_instruction_cost(),
+                b.memory_bytes_cost()
+            );
+        }
+    }
+}
