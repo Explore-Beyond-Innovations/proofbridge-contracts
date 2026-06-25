@@ -1,10 +1,5 @@
 import { ethers } from "ethers";
-import {
-  MANAGER_ROLE,
-  connect,
-  envOrDefault,
-  requireEnv,
-} from "./common.js";
+import { MANAGER_ROLE, connect, envOrDefault, requireEnv } from "./common.js";
 import { contractFactory, attachContract } from "./artifacts.js";
 import {
   buildManifest,
@@ -51,22 +46,26 @@ export async function deployCore(
   opts: DeployCoreOptions = {},
 ): Promise<DeployCoreResult> {
   const rpcUrl = opts.rpcUrl ?? requireEnv("EVM_RPC_URL");
-  const privateKey =
-    opts.privateKey ?? requireEnv("EVM_ADMIN_PRIVATE_KEY");
+  const privateKey = opts.privateKey ?? requireEnv("EVM_ADMIN_PRIVATE_KEY");
 
-  const { signer, nonces, chainId, address: deployer } = await connect(
-    rpcUrl,
-    privateKey,
-  );
+  const {
+    signer,
+    nonces,
+    chainId,
+    address: deployer,
+  } = await connect(rpcUrl, privateKey);
 
   const admin = opts.admin ?? envOrDefault("ADMIN", deployer);
   const env = opts.env ?? envOrDefault("DEPLOY_ENV", "local");
   const commit = opts.commit ?? envOrDefault("GIT_COMMIT", "unknown");
   const chainName =
     opts.chainName ?? envOrDefault("CHAIN_NAME", `evm-${chainId}`);
-  const wName = opts.wNative?.name ?? envOrDefault("WNATIVE_NAME", "Wrapped Native");
-  const wSym = opts.wNative?.symbol ?? envOrDefault("WNATIVE_SYMBOL", "WNATIVE");
-  const wDec = opts.wNative?.decimals ?? Number(envOrDefault("WNATIVE_DECIMALS", "18"));
+  const wName =
+    opts.wNative?.name ?? envOrDefault("WNATIVE_NAME", "Wrapped Native");
+  const wSym =
+    opts.wNative?.symbol ?? envOrDefault("WNATIVE_SYMBOL", "WNATIVE");
+  const wDec =
+    opts.wNative?.decimals ?? Number(envOrDefault("WNATIVE_DECIMALS", "18"));
 
   const outPath = opts.manifestOut ?? manifestPath(chainId);
   const reuse = opts.reuseExisting ?? true;
@@ -110,8 +109,14 @@ export async function deployCore(
     "MerkleManager",
     existing?.contracts.merkleManager.address,
     async () => {
+      const yulF = contractFactory("Poseidon2Yul", "Poseidon2Yul", signer);
+      const yul = await yulF.deploy({ nonce: nonces.next() });
+      await yul.deploymentTransaction()?.wait();
+      const yulAddr = await yul.getAddress();
+      console.log(`  [deploy] Poseidon2Yul: ${yulAddr}`);
+
       const f = contractFactory("MerkleManager", "MerkleManager", signer);
-      const c = await f.deploy(admin, { nonce: nonces.next() });
+      const c = await f.deploy(admin, yulAddr, { nonce: nonces.next() });
       await c.deploymentTransaction()?.wait();
       return c as ethers.Contract;
     },
