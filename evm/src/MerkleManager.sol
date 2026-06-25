@@ -66,7 +66,12 @@ contract MerkleManager is IMerkleManager, AccessControl, ReentrancyGuard {
      * @param orderHash The hash of the order to append.
      * @param side The leaf's `ad_contract` - the side it is unlocked on (1 = ad, 0 = order); set by the caller.
      */
-    function appendOrderHash(bytes32 orderHash, uint256 side) external nonReentrant onlyRole(MANAGER_ROLE) returns (bool) {
+    function appendOrderHash(bytes32 orderHash, uint256 side)
+        external
+        nonReentrant
+        onlyRole(MANAGER_ROLE)
+        returns (bool)
+    {
         uint256 leafIndex = _tree.append(_encodeLeaf(orderHash, side));
         bytes32 newRoot = _tree.getRoot();
         uint256 width = _tree.getWidth();
