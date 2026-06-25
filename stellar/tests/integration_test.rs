@@ -102,7 +102,8 @@ struct TestParamsJson {
     secret: String,
     order_hash: String,
     order_hash_mod: String,
-    target_root: String,
+    ad_root: String,
+    order_root: String,
     bridger_nullifier: String,
     ad_creator_nullifier: String,
     element_index: u64,
@@ -150,7 +151,8 @@ struct ChainIdsJson {
 /// Parsed test parameters with raw byte arrays ready for use.
 struct TestParams {
     order_hash: [u8; 32],
-    target_root: [u8; 32],
+    ad_root: [u8; 32],
+    order_root: [u8; 32],
     bridger_nullifier: [u8; 32],
     ad_creator_nullifier: [u8; 32],
     // Contract addresses
@@ -200,7 +202,8 @@ fn load_test_params() -> TestParams {
     TestParams {
         // These remain 0x hex (proof-derived values)
         order_hash: hex_to_array(&json.order_hash),
-        target_root: hex_to_array(&json.target_root),
+        ad_root: hex_to_array(&json.ad_root),
+        order_root: hex_to_array(&json.order_root),
         bridger_nullifier: hex_to_array(&json.bridger_nullifier),
         ad_creator_nullifier: hex_to_array(&json.ad_creator_nullifier),
         // Contract addresses (C... strkey format)
@@ -666,12 +669,12 @@ fn test_ad_manager_lock_for_order() {
         "Ad-manager order hash must match fixture"
     );
 
-    // Verify merkle root matches
+    // Ad-manager appends side 0 ⇒ its own root is the ad-chain root.
     let root = s.ad_manager.get_latest_merkle_root();
     assert_eq!(
         root,
-        bytes32_to_bytesn(&s.env, &s.tp.target_root),
-        "Merkle root must match fixture"
+        bytes32_to_bytesn(&s.env, &s.tp.ad_root),
+        "Ad-manager merkle root must match ad_root"
     );
 
     // Verify order status is Open
@@ -692,8 +695,8 @@ fn test_ad_manager_unlock_with_bridger_proof() {
     s.ad_manager
         .lock_for_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
 
-    // Unlock with bridger proof
-    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.target_root);
+    // Bridger proves inclusion in the counterparty (order-chain) root.
+    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.order_root);
     let (sig, tok, exp) = s.sign_ad_manager_request("unlockOrder", &unlock_params);
 
     s.ad_manager.unlock(
@@ -703,7 +706,7 @@ fn test_ad_manager_unlock_with_bridger_proof() {
         &exp,
         &params,
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
-        &bytes32_to_bytesn(&s.env, &s.tp.target_root),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
         &Bytes::from_slice(&s.env, PROOF_BRIDGER),
     );
 
@@ -747,8 +750,8 @@ fn test_order_portal_create_and_unlock() {
         order_portal_contract::Status::Open,
     );
 
-    // Unlock with ad-creator proof
-    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.target_root);
+    // Ad-creator proves inclusion in the counterparty (ad-chain) root.
+    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.ad_root);
     let (sig, tok, exp) = s.sign_order_portal_request("unlockOrder", &unlock_params);
 
     s.order_portal.unlock(
@@ -758,7 +761,7 @@ fn test_order_portal_create_and_unlock() {
         &exp,
         &params,
         &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
-        &bytes32_to_bytesn(&s.env, &s.tp.target_root),
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
         &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
     );
 
@@ -805,8 +808,11 @@ fn test_full_cross_chain_flow() {
         "Order hash must be identical on both chains"
     );
 
-    // ----- AD CHAIN: bridger unlocks with proof -----
-    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.target_root);
+    // ----- AD CHAIN: bridger unlocks proving the order-chain (counterparty) root -----
+    let bridger_target_root = s.order_portal.get_latest_merkle_root();
+    let bridger_target_root_arr = bridger_target_root.to_array();
+    let unlock_params =
+        unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &bridger_target_root_arr);
     let (sig, tok, exp) = s.sign_ad_manager_request("unlockOrder", &unlock_params);
 
     s.ad_manager.unlock(
@@ -816,7 +822,7 @@ fn test_full_cross_chain_flow() {
         &exp,
         &ad_params,
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
-        &s.ad_manager.get_latest_merkle_root(),
+        &bridger_target_root,
         &Bytes::from_slice(&s.env, PROOF_BRIDGER),
     );
 
@@ -825,10 +831,11 @@ fn test_full_cross_chain_flow() {
         ad_manager_contract::Status::Filled,
     );
 
-    // ----- ORDER CHAIN: ad creator unlocks with proof -----
-    let order_target_root = s.order_portal.get_latest_merkle_root();
-    let order_target_root_arr = order_target_root.to_array();
-    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &order_target_root_arr);
+    // ----- ORDER CHAIN: ad creator unlocks proving the ad-chain (counterparty) root -----
+    let adcreator_target_root = s.ad_manager.get_latest_merkle_root();
+    let adcreator_target_root_arr = adcreator_target_root.to_array();
+    let unlock_params =
+        unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &adcreator_target_root_arr);
     let (sig, tok, exp) = s.sign_order_portal_request("unlockOrder", &unlock_params);
 
     s.order_portal.unlock(
@@ -838,7 +845,7 @@ fn test_full_cross_chain_flow() {
         &exp,
         &order_params,
         &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
-        &order_target_root,
+        &adcreator_target_root,
         &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
     );
 
@@ -859,8 +866,8 @@ fn test_nullifier_prevents_double_unlock() {
     s.ad_manager
         .lock_for_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
 
-    // First unlock succeeds
-    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.target_root);
+    // First unlock succeeds (bridger proves the order-chain root)
+    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.order_root);
     let (sig, tok, exp) = s.sign_ad_manager_request("unlockOrder", &unlock_params);
 
     s.ad_manager.unlock(
@@ -870,12 +877,12 @@ fn test_nullifier_prevents_double_unlock() {
         &exp,
         &params,
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
-        &bytes32_to_bytesn(&s.env, &s.tp.target_root),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
         &Bytes::from_slice(&s.env, PROOF_BRIDGER),
     );
 
     // Second unlock should fail (order already filled)
-    let unlock_params2 = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.target_root);
+    let unlock_params2 = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.order_root);
     let (sig2, tok2, exp2) = s.sign_ad_manager_request("unlockOrder", &unlock_params2);
 
     let result = s.ad_manager.try_unlock(
@@ -885,7 +892,7 @@ fn test_nullifier_prevents_double_unlock() {
         &exp2,
         &params,
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
-        &bytes32_to_bytesn(&s.env, &s.tp.target_root),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
         &Bytes::from_slice(&s.env, PROOF_BRIDGER),
     );
 

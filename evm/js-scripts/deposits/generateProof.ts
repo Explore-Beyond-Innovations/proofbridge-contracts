@@ -4,7 +4,8 @@ import { Noir } from "@noir-lang/noir_js";
 import path from "path";
 import fs from "fs";
 import { merkleTree } from "./merkleTree";
-import { modOrderHash, padArray } from "../utils";
+import { modOrderHash } from "../utils";
+import { leanInputs } from "proofbridge-mmr";
 
 const circuitPath = path.resolve(
   __dirname,
@@ -12,11 +13,6 @@ const circuitPath = path.resolve(
 );
 
 const circuit = JSON.parse(fs.readFileSync(circuitPath, "utf8"));
-
-const padBool = (arr: boolean[], n: number): boolean[] => [
-  ...arr,
-  ...Array(n - arr.length).fill(false),
-];
 
 export default async function generateProof(): Promise<string> {
   const inputs = process.argv.slice(2);
@@ -46,15 +42,7 @@ export default async function generateProof(): Promise<string> {
       target_root: merkleProof.root,
       ad_contract: isAdContract,
       secret: secret,
-      leaf_index: merkleProof.elementIndex.toString(),
-      width: merkleProof.width.toString(),
-      path_len: merkleProof.siblings.length.toString(),
-      siblings: padArray(merkleProof.siblings, 32),
-      sib_is_left: padBool(merkleProof.directions, 32),
-      parent_index: padArray(merkleProof.parentIndices.map(String), 32),
-      peaks: padArray(merkleProof.peaks, 32),
-      peaks_len: merkleProof.peaks.length.toString(),
-      chosen_peak: merkleProof.chosenPeak.toString(),
+      ...leanInputs(merkleProof),
     };
 
     const { witness } = await noir.execute(input);

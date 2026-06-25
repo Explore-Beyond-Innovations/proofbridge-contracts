@@ -21,6 +21,8 @@ import {
   MerkleMountainRange as MMR,
   LevelDB,
   Poseidon2Hasher,
+  encodeLeaf,
+  leanInputs,
 } from "proofbridge-mmr";
 import { keccak256 as ethersKeccak256 } from "ethers";
 import * as fs from "fs";
@@ -125,10 +127,21 @@ function modOrderHash(orderHash: string): Fr {
   return Fr.fromBufferReduce(buff);
 }
 
-function padArray(arr: string[], targetLen = 20): string[] {
-  const ZERO = `0x${"0".repeat(64)}`;
-  return [...arr.map(String), ...Array(targetLen - arr.length).fill(ZERO)];
+// Build a single-leaf MMR for one side and return its proof + root.
+async function buildSideTree(orderHashMod: string, side: number) {
+  const dbPath = path.join("/tmp", `proofbridge-fixture-mmr-${side}-${Date.now()}`);
+  const db = new LevelDB(dbPath);
+  await db.init();
+  const hasher = new Poseidon2Hasher();
+  const mmr = new MMR(`fixture-${side}-${Date.now()}`, db, hasher);
+  const leaf = encodeLeaf(orderHashMod, side, hasher);
+  const elementIndex = await mmr.append(leaf);
+  const merkleProof = await mmr.getMerkleProof(elementIndex);
+  const root = mmr.getHexRoot();
+  fs.rmSync(dbPath, { recursive: true, force: true });
+  return { elementIndex, merkleProof, root };
 }
+
 
 function hexToBytes32(hex: string): Buffer {
   const clean = hex.replace(/^0x/i, "").padStart(64, "0");
@@ -301,25 +314,15 @@ async function main() {
   const orderHashMod = modOrderHash(orderHash);
   console.log("Order hash (field mod):", orderHashMod.toString());
 
-  // ----- Build MMR and append order hash -----
-  console.log("Building MMR...");
-  const dbPath = path.join("/tmp", "proofbridge-fixture-mmr-" + Date.now());
-  const db = new LevelDB(dbPath);
-  await db.init();
-  const hasher = new Poseidon2Hasher();
-  const mmrId = "fixture-" + Date.now();
-  const mmr = new MMR(mmrId, db, hasher);
-
-  // Append order hash (field_mod applied internally by MMR)
-  const elementIndex = await mmr.append(orderHashMod.toString());
-  console.log("Element index:", elementIndex);
-
-  const merkleProof = await mmr.getMerkleProof(elementIndex);
-  const targetRoot = await mmr.getHexRoot();
-  console.log("Target root:", targetRoot);
-  console.log("Width:", merkleProof.width);
-  console.log("Peaks:", merkleProof.peaks.length);
-  console.log("Siblings:", merkleProof.siblings.length);
+  // ----- Build two side-bound MMRs (must match on-chain side-bound roots) -----
+  // side 0 = AD chain (ad-manager appends), side 1 = ORDER chain (order-portal appends)
+  console.log("Building side-bound MMRs...");
+  const adTree = await buildSideTree(orderHashMod.toString(), 0);
+  const orderTree = await buildSideTree(orderHashMod.toString(), 1);
+  const adRoot = adTree.root;
+  const orderRoot = orderTree.root;
+  console.log("Ad root (side 0):", adRoot);
+  console.log("Order root (side 1):", orderRoot);
 
   // ----- Compute nullifiers -----
   const bridgerNullifier = await bb.poseidon2Hash([leftField, orderHashMod]);
@@ -335,24 +338,15 @@ async function main() {
   const commonInput = {
     order_hash: orderHashMod.toString(),
     secret: secretHex,
-    target_index: elementIndex.toString(),
-    tree_width: merkleProof.width.toString(),
-    target_sibling_hashes_len: merkleProof.siblings.length.toString(),
-    target_sibling_hashes: padArray(
-      merkleProof.siblings.map((s: any) => s.toString())
-    ),
-    target_peak_hashes_len: merkleProof.peaks.length.toString(),
-    target_peak_hashes: padArray(
-      merkleProof.peaks.map((p: any) => p.toString())
-    ),
   };
 
-  // Bridger proof (ad_contract = true, chain_flag = 1)
-  console.log("\nGenerating bridger proof (ad chain, chain_flag=1)...");
+  // Bridger proof: ad_contract=true ⇒ leaf side 1 ⇒ ORDER chain tree/root (chain_flag=1)
+  console.log("\nGenerating bridger proof (order chain, chain_flag=1)...");
   const { witness: bridgerWitness } = await noir.execute({
     ...commonInput,
+    ...leanInputs(orderTree.merkleProof),
     nullifier_hash: bridgerNullifier.toString(),
-    target_root: targetRoot,
+    target_root: orderRoot,
     ad_contract: true,
   });
   const bridgerResult = await honk.generateProof(bridgerWitness, {
@@ -360,12 +354,13 @@ async function main() {
   });
   console.log("Bridger proof size:", bridgerResult.proof.length, "bytes");
 
-  // Ad creator proof (ad_contract = false, chain_flag = 0)
-  console.log("Generating ad creator proof (order chain, chain_flag=0)...");
+  // Ad creator proof: ad_contract=false ⇒ leaf side 0 ⇒ AD chain tree/root (chain_flag=0)
+  console.log("Generating ad creator proof (ad chain, chain_flag=0)...");
   const { witness: adCreatorWitness } = await noir.execute({
     ...commonInput,
+    ...leanInputs(adTree.merkleProof),
     nullifier_hash: adCreatorNullifier.toString(),
-    target_root: targetRoot,
+    target_root: adRoot,
     ad_contract: false,
   });
   const adCreatorResult = await honk.generateProof(adCreatorWitness, {
@@ -377,13 +372,13 @@ async function main() {
   const bridgerPubInputs = buildPublicInputs(
     bridgerNullifier.toString(),
     orderHashMod.toString(),
-    targetRoot,
+    orderRoot,
     1
   );
   const adCreatorPubInputs = buildPublicInputs(
     adCreatorNullifier.toString(),
     orderHashMod.toString(),
-    targetRoot,
+    adRoot,
     0
   );
 
@@ -418,11 +413,12 @@ async function main() {
     secret: secretHex,
     orderHash,
     orderHashMod: orderHashMod.toString(),
-    targetRoot,
+    adRoot,
+    orderRoot,
     bridgerNullifier: bridgerNullifier.toString(),
     adCreatorNullifier: adCreatorNullifier.toString(),
-    elementIndex,
-    width: merkleProof.width,
+    elementIndex: adTree.elementIndex,
+    width: adTree.merkleProof.width,
     // Contract addresses (Stellar C... format, must match register_at in Rust test)
     contractAddresses: {
       adManager: adManagerAddr,
@@ -456,9 +452,6 @@ async function main() {
     path.join(OUTPUT_DIR, "test_params.json"),
     JSON.stringify(testParams, null, 2)
   );
-
-  // Cleanup
-  fs.rmSync(dbPath, { recursive: true, force: true });
 
   console.log("\nFixtures generated successfully!");
   console.log("  proof_bridger.bin:", bridgerResult.proof.length, "bytes");

@@ -17,7 +17,7 @@
     "ethereum-cryptography": "^3.2.0",
     "ethers": "^6.15.0",
     "hex": "^0.1.0",
-    "proofbridge-mmr": "1.1.0"
+    "proofbridge-mmr": "1.2.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
