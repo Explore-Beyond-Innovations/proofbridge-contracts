@@ -36,6 +36,7 @@ export interface DeployCoreResult {
   contracts: {
     verifier: string;
     merkleManager: string;
+    poseidon2Yul: string;
     wNativeToken: string;
     adManager: string;
     orderPortal: string;
@@ -105,18 +106,25 @@ export async function deployCore(
     },
   );
 
+  // Poseidon2 (Yul) hasher — deployed before MerkleManager (its constructor takes the address)
+  // and recorded in the manifest so the authentic hasher is auditable.
+  const poseidon2YulAddr = await deployIfMissing(
+    "Poseidon2Yul",
+    existing?.contracts.poseidon2Yul?.address,
+    async () => {
+      const f = contractFactory("Poseidon2Yul", "Poseidon2Yul", signer);
+      const c = await f.deploy({ nonce: nonces.next() });
+      await c.deploymentTransaction()?.wait();
+      return c as ethers.Contract;
+    },
+  );
+
   const merkleManagerAddr = await deployIfMissing(
     "MerkleManager",
     existing?.contracts.merkleManager.address,
     async () => {
-      const yulF = contractFactory("Poseidon2Yul", "Poseidon2Yul", signer);
-      const yul = await yulF.deploy({ nonce: nonces.next() });
-      await yul.deploymentTransaction()?.wait();
-      const yulAddr = await yul.getAddress();
-      console.log(`  [deploy] Poseidon2Yul: ${yulAddr}`);
-
       const f = contractFactory("MerkleManager", "MerkleManager", signer);
-      const c = await f.deploy(admin, yulAddr, { nonce: nonces.next() });
+      const c = await f.deploy(admin, poseidon2YulAddr, { nonce: nonces.next() });
       await c.deploymentTransaction()?.wait();
       return c as ethers.Contract;
     },
@@ -203,6 +211,7 @@ export async function deployCore(
     contracts: {
       verifier: verifierAddr,
       merkleManager: merkleManagerAddr,
+      poseidon2Yul: poseidon2YulAddr,
       wNativeToken: wNativeAddr,
       adManager: adManagerAddr,
       orderPortal: orderPortalAddr,
@@ -220,6 +229,7 @@ export async function deployCore(
     contracts: {
       verifier: verifierAddr,
       merkleManager: merkleManagerAddr,
+      poseidon2Yul: poseidon2YulAddr,
       wNativeToken: wNativeAddr,
       adManager: adManagerAddr,
       orderPortal: orderPortalAddr,

@@ -59,6 +59,7 @@ export interface BuildManifestInput {
   contracts: {
     verifier: string;
     merkleManager: string;
+    poseidon2Yul: string;
     wNativeToken: string;
     adManager: string;
     orderPortal: string;
@@ -79,6 +80,7 @@ export function buildManifest(
     contracts: {
       verifier: evmContractEntry(input.contracts.verifier),
       merkleManager: evmContractEntry(input.contracts.merkleManager),
+      poseidon2Yul: evmContractEntry(input.contracts.poseidon2Yul),
       wNativeToken: evmContractEntry(input.contracts.wNativeToken),
       adManager: evmContractEntry(input.contracts.adManager),
       orderPortal: evmContractEntry(input.contracts.orderPortal),
