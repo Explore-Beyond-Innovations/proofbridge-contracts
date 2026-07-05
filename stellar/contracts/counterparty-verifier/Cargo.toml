@@ -1,19 +1,19 @@
 [package]
-name = "bls-key-registry"
+name = "counterparty-verifier"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 doctest = false
 
 [dependencies]
 soroban-sdk = { workspace = true }
-proofbridge-core = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils", "alloc"] }
+bls-key-registry = { path = "../bls-key-registry", features = ["testutils"] }
 hex = { workspace = true }
 serde_json = "1"
 stellar-strkey = { workspace = true }
