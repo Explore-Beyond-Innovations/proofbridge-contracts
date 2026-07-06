@@ -33,15 +33,9 @@ contract CounterpartyVerifier is IRootVerifier {
     }
 
     function isRootValid(uint256 sourceChainId, bytes32 root, bytes calldata metadata) external view returns (bool) {
-        (bytes32 maker, bytes32 bridger, bytes memory moduleData) =
-            abi.decode(metadata, (bytes32, bytes32, bytes));
-        (
-            uint8 version,
-            SettlementAuth memory auth,
-            bytes memory pkMaker,
-            bytes memory pkBridger,
-            bytes memory aggSig
-        ) = abi.decode(moduleData, (uint8, SettlementAuth, bytes, bytes, bytes));
+        (bytes32 maker, bytes32 bridger, bytes memory moduleData) = abi.decode(metadata, (bytes32, bytes32, bytes));
+        (uint8 version, SettlementAuth memory auth, bytes memory pkMaker, bytes memory pkBridger, bytes memory aggSig) =
+            abi.decode(moduleData, (uint8, SettlementAuth, bytes, bytes, bytes));
 
         if (version != METADATA_VERSION) return false;
         if (pkMaker.length != 128 || pkBridger.length != 128 || aggSig.length != 256) return false;

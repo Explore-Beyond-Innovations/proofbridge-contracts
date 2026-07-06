@@ -3,6 +3,8 @@ pragma solidity ^0.8.20;
 
 import {MMRPoseidon2} from "@solidity-mmr/MMRPoseidon2.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 interface IMerkleManager {
@@ -31,7 +33,7 @@ interface IMerkleManager {
  * @title MerkleManager
  * @dev Manages all order hashes for ProofBridge protocol per chain
  */
-contract MerkleManager is IMerkleManager, AccessControl, ReentrancyGuard {
+contract MerkleManager is IMerkleManager, TwoStepAdmin, Pausable, ReentrancyGuard {
     using MMRPoseidon2 for MMRPoseidon2.Tree;
     MMRPoseidon2.Tree _tree;
 
@@ -55,9 +57,17 @@ contract MerkleManager is IMerkleManager, AccessControl, ReentrancyGuard {
         if (admin == address(0) || poseidon2Yul == address(0)) {
             revert MerkleManager__ZeroAddress();
         }
-        _grantRole(ADMIN_ROLE, admin);
+        _initAdmin(admin);
         _setRoleAdmin(MANAGER_ROLE, ADMIN_ROLE);
         _tree.setHasher(poseidon2Yul);
+    }
+
+    function pause() external onlyRole(ADMIN_ROLE) {
+        _pause();
+    }
+
+    function unpause() external onlyRole(ADMIN_ROLE) {
+        _unpause();
     }
 
     /**
@@ -70,6 +80,7 @@ contract MerkleManager is IMerkleManager, AccessControl, ReentrancyGuard {
         external
         nonReentrant
         onlyRole(MANAGER_ROLE)
+        whenNotPaused
         returns (bool)
     {
         uint256 leafIndex = _tree.append(_encodeLeaf(orderHash, side));

@@ -80,6 +80,57 @@ impl OrderPortalContract {
     // =========================================================================
 
     /// Set or unset a manager.
+
+    pub fn pause(env: Env) -> Result<(), OrderPortalError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        storage::set_paused(&env, true);
+        events::Paused {
+            admin: config.admin,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn unpause(env: Env) -> Result<(), OrderPortalError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        storage::set_paused(&env, false);
+        events::Unpaused {
+            admin: config.admin,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn transfer_admin(env: Env, to: Address) -> Result<(), OrderPortalError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        storage::set_pending_admin(&env, &to);
+        events::AdminTransferStarted {
+            from: config.admin,
+            to,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn accept_admin(env: Env) -> Result<(), OrderPortalError> {
+        let pending = storage::get_pending_admin(&env).ok_or(OrderPortalError::NotPendingAdmin)?;
+        pending.require_auth();
+        let mut config = storage::get_config(&env)?;
+        let old = config.admin.clone();
+        config.admin = pending.clone();
+        storage::set_config(&env, &config);
+        storage::clear_pending_admin(&env);
+        events::AdminTransferred {
+            from: old,
+            to: pending,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     pub fn set_manager(env: Env, manager: Address, status: bool) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
@@ -239,6 +290,9 @@ impl OrderPortalContract {
         time_to_expire: u64,
         params: OrderParams,
     ) -> Result<BytesN<32>, OrderPortalError> {
+        if storage::is_paused(&env) {
+            return Err(OrderPortalError::ContractPaused);
+        }
         let config = storage::get_config(&env)?;
 
         // Validate order parameters (incl. decimal range ≤ MAX).
@@ -342,6 +396,9 @@ impl OrderPortalContract {
         proof: Bytes,
         cosig_data: Bytes,
     ) -> Result<(), OrderPortalError> {
+        if storage::is_paused(&env) {
+            return Err(OrderPortalError::ContractPaused);
+        }
         let config = storage::get_config(&env)?;
 
         // The ad recipient on this (order) chain authorizes the unlock —

@@ -78,9 +78,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
     function test_gate2_mockFalse_reverts() public {
         _prepareUnlock(address(new MockRootVerifier(false)), bytes32(uint256(5)));
         vm.expectRevert(
-            abi.encodeWithSelector(
-                RootVerifierRegistry.RootNotValid.selector, orderChainId, bytes32(uint256(5))
-            )
+            abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, orderChainId, bytes32(uint256(5)))
         );
         adManager.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), bytes32(uint256(5)), hex"", hex"");
     }
@@ -88,9 +86,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
     function test_gate2_rootNotInSignedAuth_reverts() public {
         bytes32 junkRoot = bytes32(uint256(0xbad));
         _prepareUnlock(address(cVerifier), junkRoot);
-        vm.expectRevert(
-            abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, orderChainId, junkRoot)
-        );
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, orderChainId, junkRoot));
         adManager.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), junkRoot, hex"", _cosigData());
     }
 
@@ -98,9 +94,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         // right root, real aggregate - but the order's parties are local test
         // addresses, not the registered vector signers
         _prepareUnlock(address(cVerifier), vOrderRoot);
-        vm.expectRevert(
-            abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, orderChainId, vOrderRoot)
-        );
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, orderChainId, vOrderRoot));
         adManager.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), vOrderRoot, hex"", _cosigData());
     }
 
@@ -205,18 +199,14 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
 
     function test_gate2_mockFalse_reverts() public {
         _prepareUnlock(address(new MockRootVerifier(false)), vOrderRoot);
-        vm.expectRevert(
-            abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, vOrderRoot)
-        );
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, vOrderRoot));
         portal.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), vOrderRoot, hex"", hex"");
     }
 
     function test_gate2_rootNotInSignedAuth_reverts() public {
         bytes32 junkRoot = bytes32(uint256(0xbad));
         _prepareUnlock(address(cVerifier), junkRoot);
-        vm.expectRevert(
-            abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, junkRoot)
-        );
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, junkRoot));
         portal.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), junkRoot, hex"", _cosigData());
     }
 
@@ -236,9 +226,7 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
             vjson.readBytes(".settlement.sigMaker.eip2537")
         );
         _prepareUnlock(address(cVerifier), vOrderRoot);
-        vm.expectRevert(
-            abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, vOrderRoot)
-        );
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, vOrderRoot));
         portal.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), vOrderRoot, hex"", cosig);
     }
 
@@ -318,13 +306,14 @@ function _registerOne(string memory vjson, string memory who, bool sep53) {
             )
         );
     }
-    BLSKeyRegistry(0x1111111111111111111111111111111111111111).register(
-        stdJson.readBytes32(vjson, string.concat(base, ".account")),
-        auth,
-        stdJson.readBytes(vjson, string.concat(base, ".pkNative")),
-        stdJson.readBytes(vjson, string.concat(base, ".pop")),
-        0
-    );
+    BLSKeyRegistry(0x1111111111111111111111111111111111111111)
+        .register(
+            stdJson.readBytes32(vjson, string.concat(base, ".account")),
+            auth,
+            stdJson.readBytes(vjson, string.concat(base, ".pkNative")),
+            stdJson.readBytes(vjson, string.concat(base, ".pop")),
+            0
+        );
 }
 
 function _vectorCosig(string memory vjson) view returns (bytes memory) {

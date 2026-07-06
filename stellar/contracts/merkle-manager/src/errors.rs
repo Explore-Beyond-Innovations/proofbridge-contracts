@@ -23,4 +23,6 @@ pub enum MerkleError {
     InvalidPeakCount = 7,
     /// Node not found in storage
     NodeNotFound = 8,
+    ContractPaused = 9,
+    NotPendingAdmin = 10,
 }

@@ -42,11 +42,17 @@ contract BLSKeyRegistry {
 
     address public admin;
     IPositionGuard public positionGuard;
+    address public pendingAdmin;
+    bool public paused;
 
     mapping(bytes32 => bytes32) private commitments; // keccak256(blsPubKey), 0 = unset
     mapping(bytes32 => uint256) public nonceOf;
 
     event KeyRegistered(bytes32 indexed account, bytes blsPubKey, uint256 nonce);
+    event Paused(address account);
+    event Unpaused(address account);
+    event AdminTransferStarted(address indexed from, address indexed to);
+    event AdminTransferred(address indexed from, address indexed to);
     event KeyRevoked(bytes32 indexed account, uint256 nonce);
     event PositionGuardSet(address guard);
 
@@ -58,9 +64,36 @@ contract BLSKeyRegistry {
     error AccountInFlight();
     error BadLength();
     error NotAdmin();
+    error NotPendingAdmin();
+    error EnforcedPause();
 
     constructor(address admin_) {
         admin = admin_;
+    }
+
+    function pause() external {
+        if (msg.sender != admin) revert NotAdmin();
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    function unpause() external {
+        if (msg.sender != admin) revert NotAdmin();
+        paused = false;
+        emit Unpaused(msg.sender);
+    }
+
+    function transferAdmin(address to) external {
+        if (msg.sender != admin) revert NotAdmin();
+        pendingAdmin = to;
+        emit AdminTransferStarted(admin, to);
+    }
+
+    function acceptAdmin() external {
+        if (msg.sender != pendingAdmin) revert NotPendingAdmin();
+        emit AdminTransferred(admin, msg.sender);
+        admin = msg.sender;
+        pendingAdmin = address(0);
     }
 
     function setPositionGuard(address guard) external {
@@ -76,6 +109,7 @@ contract BLSKeyRegistry {
         bytes calldata pop,
         uint256 nonce
     ) external {
+        if (paused) revert EnforcedPause();
         if (blsPubKey.length != 128 || pop.length != 256) revert BadLength();
         if (nonce != nonceOf[account]) revert BadNonce();
         if (keccak256(blsPubKey) == keccak256(new bytes(128))) revert IdentityKey();
@@ -96,6 +130,7 @@ contract BLSKeyRegistry {
     }
 
     function revoke(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external {
+        if (paused) revert EnforcedPause();
         if (commitments[account] == bytes32(0)) revert NotRegistered();
         if (nonce != nonceOf[account]) revert BadNonce();
         if (address(positionGuard) != address(0) && positionGuard.hasOpenPositions(account)) {

@@ -4,6 +4,7 @@ pragma solidity ^0.8.34;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {IVerifier} from "./Verifier.sol";
 import {IMerkleManager} from "./MerkleManager.sol";
@@ -12,6 +13,7 @@ import {DecimalScaling} from "./libraries/DecimalScaling.sol";
 import {OrderHash} from "./libraries/OrderHash.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {RootVerifierRegistry} from "./libraries/RootVerifierRegistry.sol";
+import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
 import {AddressCast} from "./libraries/AddressCast.sol";
 
 /**
@@ -23,7 +25,7 @@ import {AddressCast} from "./libraries/AddressCast.sol";
  *         The contract computes a minimal-domain EIP-712 order hash that serves as the canonical
  *         order identifier across components. Signatures are verified off-chain by a verifier.
  */
-contract OrderPortal is AccessControl, ReentrancyGuardTransient, RootVerifierRegistry {
+contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVerifierRegistry {
     using SafeERC20 for IERC20;
     using SafeNativeToken for IwNativeToken;
     using AddressCast for address;
@@ -196,7 +198,7 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient, RootVerifierReg
         if (admin == address(0) || address(_verifier) == address(0) || address(_merkleManager) == address(0)) {
             revert OrderPortal__ZeroAddress();
         }
-        _grantRole(ADMIN_ROLE, admin);
+        _initAdmin(admin);
         i_verifier = _verifier;
         i_merkleManager = _merkleManager;
         managers[admin] = true;
@@ -210,6 +212,14 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient, RootVerifierReg
     /**
      * @notice Sets or unsets an address as a manager
      */
+    function pause() external onlyRole(ADMIN_ROLE) {
+        _pause();
+    }
+
+    function unpause() external onlyRole(ADMIN_ROLE) {
+        _unpause();
+    }
+
     function setManager(address _manager, bool _status) external onlyRole(ADMIN_ROLE) {
         if (_manager == address(0)) revert OrderPortal__ZeroAddress();
         managers[_manager] = _status;
@@ -279,6 +289,7 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient, RootVerifierReg
         external
         payable
         nonReentrant
+        whenNotPaused
         returns (bytes32 orderHash)
     {
         orderHash = validateOrder(params);
@@ -339,7 +350,7 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient, RootVerifierReg
         bytes32 targetRoot,
         bytes calldata proof,
         bytes calldata cosigData
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
 
         if (nullifierUsed[nullifierHash]) revert OrderPortal__NullifierUsed(nullifierHash);

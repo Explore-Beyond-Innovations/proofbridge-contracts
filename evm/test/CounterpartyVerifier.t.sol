@@ -122,9 +122,7 @@ contract CounterpartyVerifierTest is Test {
             v.readBytes(".keys.bridgerBls.pk.eip2537"),
             v.readBytes(".settlement.aggSig.eip2537")
         );
-        assertFalse(
-            verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, moduleData))
-        );
+        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, moduleData)));
     }
 
     function test_pkNotMatchingCommitmentFails() public view {

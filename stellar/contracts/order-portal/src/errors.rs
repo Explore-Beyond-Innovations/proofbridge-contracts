@@ -96,6 +96,8 @@ pub enum OrderPortalError {
     AdDecimalsMismatch = 64,
     /// Gate 2: the root-verification module rejected the target root.
     RootNotValid = 65,
+    ContractPaused = 71,
+    NotPendingAdmin = 72,
 
     // ==========================================================================
     // Address Decode Errors (70-80)

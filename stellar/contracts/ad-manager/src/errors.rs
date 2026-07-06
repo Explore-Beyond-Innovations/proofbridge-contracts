@@ -102,6 +102,8 @@ pub enum AdManagerError {
     AdDecimalsMismatch = 38,
     /// Gate 2: the root-verification module rejected the target root.
     RootNotValid = 39,
+    ContractPaused = 41,
+    NotPendingAdmin = 42,
 
     // Address decode errors (40-41)
     /// Recipient bytes do not decode to a valid Stellar account address

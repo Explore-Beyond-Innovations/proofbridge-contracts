@@ -4,6 +4,7 @@ pragma solidity ^0.8.34;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {IVerifier} from "./Verifier.sol";
 import {IMerkleManager} from "./MerkleManager.sol";
@@ -13,6 +14,7 @@ import {OrderHash} from "./libraries/OrderHash.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {AddressCast} from "./libraries/AddressCast.sol";
 import {RootVerifierRegistry} from "./libraries/RootVerifierRegistry.sol";
+import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
 
 /**
  * @title AdManager (Proofbridge)
@@ -21,7 +23,7 @@ import {RootVerifierRegistry} from "./libraries/RootVerifierRegistry.sol";
  * @notice Makers (LPs) post/close liquidity ads, lock funds against EIP-712 orders,
  *         and bridgers unlock on this chain with a proof checked by an external verifier.
  */
-contract AdManager is AccessControl, ReentrancyGuardTransient, RootVerifierRegistry {
+contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVerifierRegistry {
     using SafeERC20 for IERC20;
     using SafeNativeToken for IwNativeToken;
     using AddressCast for address;
@@ -258,7 +260,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient, RootVerifierRegis
         ) {
             revert AdManager__ZeroAddress();
         }
-        _grantRole(ADMIN_ROLE, admin);
+        _initAdmin(admin);
         managers[admin] = true;
         i_verifier = _verifier;
         i_merkleManager = _merkleManager;
@@ -272,6 +274,14 @@ contract AdManager is AccessControl, ReentrancyGuardTransient, RootVerifierRegis
     /**
      * @notice Sets or unsets an address as a manager
      */
+    function pause() external onlyRole(ADMIN_ROLE) {
+        _pause();
+    }
+
+    function unpause() external onlyRole(ADMIN_ROLE) {
+        _unpause();
+    }
+
     function setManager(address _manager, bool _status) external onlyRole(ADMIN_ROLE) {
         if (_manager == address(0)) revert AdManager__ZeroAddress();
         managers[_manager] = _status;
@@ -344,7 +354,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient, RootVerifierRegis
         uint256 initialAmount,
         uint256 orderChainId,
         bytes32 adRecipient
-    ) external payable nonReentrant {
+    ) external payable nonReentrant whenNotPaused {
         if (adToken == address(0)) revert AdManager__TokenZeroAddress();
         if (adRecipient == bytes32(0)) revert AdManager__RecipientZero();
         if (initialAmount == 0) revert AdManager__ZeroAmount();
@@ -391,6 +401,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient, RootVerifierRegis
         external
         payable
         nonReentrant
+        whenNotPaused
     {
         Ad storage ad = __getAdOwned(adId, msg.sender);
         if (!ad.open) revert AdManager__AdClosed();
@@ -424,7 +435,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient, RootVerifierRegis
         string memory adId,
         uint256 amount,
         address to
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         Ad storage ad = __getAdOwned(adId, msg.sender);
 
         bytes32 message = withdrawFromAdRequestHash(adId, amount, to, authToken, timeToExpire);
@@ -456,6 +467,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient, RootVerifierRegis
     function closeAd(bytes memory signature, bytes32 authToken, uint256 timeToExpire, string memory adId, address to)
         external
         nonReentrant
+        whenNotPaused
     {
         Ad storage ad = __getAdOwned(adId, msg.sender);
         if (ad.locked != 0) revert Admanager__ActiveLocks();
@@ -490,6 +502,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient, RootVerifierRegis
     function lockForOrder(bytes memory signature, bytes32 authToken, uint256 timeToExpire, OrderParams calldata params)
         external
         nonReentrant
+        whenNotPaused
         returns (bytes32 orderHash)
     {
         Ad storage ad = __getAdOwned(params.adId, msg.sender);
@@ -539,7 +552,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient, RootVerifierRegis
         bytes32 targetRoot,
         bytes calldata proof,
         bytes calldata cosigData
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
 
         if (orders[orderHash] != Status.Open) revert AdManager__OrderNotOpen(orderHash);
@@ -554,9 +567,7 @@ contract AdManager is AccessControl, ReentrancyGuardTransient, RootVerifierRegis
         // Gate 2 — root authenticity. Enforced once the route's module is
         // configured; mandatory at the pre-auth cutover.
         if (address(rootVerifier[params.orderChainId]) != address(0)) {
-            _requireRootValid(
-                params.orderChainId, targetRoot, abi.encode(params.adCreator, params.bridger, cosigData)
-            );
+            _requireRootValid(params.orderChainId, targetRoot, abi.encode(params.adCreator, params.bridger, cosigData));
         }
 
         bytes32[] memory publicInputs =

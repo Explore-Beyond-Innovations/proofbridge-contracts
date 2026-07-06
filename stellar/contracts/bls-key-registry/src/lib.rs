@@ -70,6 +70,44 @@ impl BlsKeyRegistry {
         Ok(())
     }
 
+    pub fn pause(env: Env) -> Result<(), RegistryError> {
+        let admin = storage::get_admin(&env);
+        admin.require_auth();
+        storage::set_paused(&env, true);
+        events::Paused { admin }.publish(&env);
+        Ok(())
+    }
+
+    pub fn unpause(env: Env) -> Result<(), RegistryError> {
+        let admin = storage::get_admin(&env);
+        admin.require_auth();
+        storage::set_paused(&env, false);
+        events::Unpaused { admin }.publish(&env);
+        Ok(())
+    }
+
+    pub fn transfer_admin(env: Env, to: Address) -> Result<(), RegistryError> {
+        let admin = storage::get_admin(&env);
+        admin.require_auth();
+        storage::set_pending_admin(&env, &to);
+        events::AdminTransferStarted { from: admin, to }.publish(&env);
+        Ok(())
+    }
+
+    pub fn accept_admin(env: Env) -> Result<(), RegistryError> {
+        let pending = storage::get_pending_admin(&env).ok_or(RegistryError::NotPendingAdmin)?;
+        pending.require_auth();
+        let old = storage::get_admin(&env);
+        storage::set_admin(&env, &pending);
+        storage::clear_pending_admin(&env);
+        events::AdminTransferred {
+            from: old,
+            to: pending,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     pub fn set_position_guard(env: Env, guard: Address) -> Result<(), RegistryError> {
         if !storage::is_initialized(&env) {
             return Err(RegistryError::NotInitialized);
@@ -90,6 +128,9 @@ impl BlsKeyRegistry {
     ) -> Result<(), RegistryError> {
         if !storage::is_initialized(&env) {
             return Err(RegistryError::NotInitialized);
+        }
+        if storage::is_paused(&env) {
+            return Err(RegistryError::ContractPaused);
         }
         if nonce != storage::get_nonce(&env, &account) {
             return Err(RegistryError::BadNonce);
@@ -141,6 +182,9 @@ impl BlsKeyRegistry {
     ) -> Result<(), RegistryError> {
         if !storage::is_initialized(&env) {
             return Err(RegistryError::NotInitialized);
+        }
+        if storage::is_paused(&env) {
+            return Err(RegistryError::ContractPaused);
         }
         if storage::get_commitment(&env, &account).is_none() {
             return Err(RegistryError::NotRegistered);

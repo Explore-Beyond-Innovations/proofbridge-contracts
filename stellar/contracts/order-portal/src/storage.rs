@@ -10,6 +10,10 @@ use crate::types::{ChainInfo, ContractConfig, Status};
 
 /// Key for contract configuration
 const KEY_CONFIG: Symbol = symbol_short!("config");
+/// Pause flag for every state-changing entry point.
+const KEY_PAUSED: Symbol = symbol_short!("paused");
+/// Pending admin for the two-step handover.
+const KEY_PENDADM: Symbol = symbol_short!("pendadm");
 /// Key for initialization flag
 const KEY_INIT: Symbol = symbol_short!("init");
 
@@ -244,4 +248,24 @@ pub fn set_in_flight(env: &Env, account: &BytesN<32>, count: u64) {
     env.storage()
         .persistent()
         .set(&(KEY_INFLT, account.clone()), &count);
+}
+
+pub fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&KEY_PAUSED).unwrap_or(false)
+}
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&KEY_PAUSED, &paused);
+}
+
+pub fn get_pending_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&KEY_PENDADM)
+}
+
+pub fn set_pending_admin(env: &Env, admin: &Address) {
+    env.storage().instance().set(&KEY_PENDADM, admin);
+}
+
+pub fn clear_pending_admin(env: &Env) {
+    env.storage().instance().remove(&KEY_PENDADM);
 }

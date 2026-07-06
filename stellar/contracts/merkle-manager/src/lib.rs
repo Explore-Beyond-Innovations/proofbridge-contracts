@@ -23,6 +23,30 @@ use soroban_sdk::{contract, contractevent, contractimpl, Address, BytesN, Env, V
 // Events
 // =============================================================================
 
+#[contractevent(topics = ["paused"], data_format = "single-value")]
+pub struct Paused {
+    pub admin: Address,
+}
+
+#[contractevent(topics = ["unpaused"], data_format = "single-value")]
+pub struct Unpaused {
+    pub admin: Address,
+}
+
+#[contractevent(topics = ["adm_start"], data_format = "single-value")]
+pub struct AdminTransferStarted {
+    #[topic]
+    pub from: Address,
+    pub to: Address,
+}
+
+#[contractevent(topics = ["adm_done"], data_format = "single-value")]
+pub struct AdminTransferred {
+    #[topic]
+    pub from: Address,
+    pub to: Address,
+}
+
 #[contractevent(topics = ["mgr_upd"], data_format = "single-value")]
 pub struct ManagerUpdated {
     #[topic]
@@ -91,6 +115,45 @@ impl ProofBridgeMerkleManagerContract {
     ///
     /// Only the admin can call this function. Managers are authorized
     /// to append order hashes to the MMR.
+
+    pub fn pause(env: Env) -> Result<(), MerkleError> {
+        let admin = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
+        admin.require_auth();
+        storage::set_paused(&env, true);
+        Paused { admin }.publish(&env);
+        Ok(())
+    }
+
+    pub fn unpause(env: Env) -> Result<(), MerkleError> {
+        let admin = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
+        admin.require_auth();
+        storage::set_paused(&env, false);
+        Unpaused { admin }.publish(&env);
+        Ok(())
+    }
+
+    pub fn transfer_admin(env: Env, to: Address) -> Result<(), MerkleError> {
+        let admin = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
+        admin.require_auth();
+        storage::set_pending_admin(&env, &to);
+        AdminTransferStarted { from: admin, to }.publish(&env);
+        Ok(())
+    }
+
+    pub fn accept_admin(env: Env) -> Result<(), MerkleError> {
+        let pending = storage::get_pending_admin(&env).ok_or(MerkleError::NotPendingAdmin)?;
+        pending.require_auth();
+        let old = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
+        storage::set_admin(&env, &pending);
+        storage::clear_pending_admin(&env);
+        AdminTransferred {
+            from: old,
+            to: pending,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     pub fn set_manager(env: Env, manager: Address, status: bool) -> Result<(), MerkleError> {
         if !storage::is_initialized(&env) {
             return Err(MerkleError::NotInitialized);
@@ -130,6 +193,9 @@ impl ProofBridgeMerkleManagerContract {
         order_hash: BytesN<32>,
         side: u32,
     ) -> Result<bool, MerkleError> {
+        if storage::is_paused(&env) {
+            return Err(MerkleError::ContractPaused);
+        }
         if !storage::is_initialized(&env) {
             return Err(MerkleError::NotInitialized);
         }

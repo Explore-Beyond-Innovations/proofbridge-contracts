@@ -19,4 +19,6 @@ pub enum RegistryError {
     NotRegistered = 7,
     /// Revoke while the account has locked funds / open orders.
     AccountInFlight = 8,
+    ContractPaused = 9,
+    NotPendingAdmin = 10,
 }

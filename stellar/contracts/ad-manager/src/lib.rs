@@ -88,6 +88,57 @@ impl AdManagerContract {
     // =========================================================================
 
     /// Set or unset an address as a manager.
+
+    pub fn pause(env: Env) -> Result<(), AdManagerError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        storage::set_paused(&env, true);
+        events::Paused {
+            admin: config.admin,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn unpause(env: Env) -> Result<(), AdManagerError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        storage::set_paused(&env, false);
+        events::Unpaused {
+            admin: config.admin,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn transfer_admin(env: Env, to: Address) -> Result<(), AdManagerError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        storage::set_pending_admin(&env, &to);
+        events::AdminTransferStarted {
+            from: config.admin,
+            to,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn accept_admin(env: Env) -> Result<(), AdManagerError> {
+        let pending = storage::get_pending_admin(&env).ok_or(AdManagerError::NotPendingAdmin)?;
+        pending.require_auth();
+        let mut config = storage::get_config(&env)?;
+        let old = config.admin.clone();
+        config.admin = pending.clone();
+        storage::set_config(&env, &config);
+        storage::clear_pending_admin(&env);
+        events::AdminTransferred {
+            from: old,
+            to: pending,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     pub fn set_manager(env: Env, manager: Address, status: bool) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
@@ -241,6 +292,9 @@ impl AdManagerContract {
         order_chain_id: u128,
         ad_recipient: BytesN<32>,
     ) -> Result<(), AdManagerError> {
+        if storage::is_paused(&env) {
+            return Err(AdManagerError::ContractPaused);
+        }
         let config = storage::get_config(&env)?;
 
         if auth::is_zero_bytes32(&ad_token) {
@@ -330,6 +384,9 @@ impl AdManagerContract {
         ad_id: String,
         amount: u128,
     ) -> Result<(), AdManagerError> {
+        if storage::is_paused(&env) {
+            return Err(AdManagerError::ContractPaused);
+        }
         let config = storage::get_config(&env)?;
 
         let mut ad = storage::get_ad(&env, &ad_id).ok_or(AdManagerError::AdNotFound)?;
@@ -399,6 +456,9 @@ impl AdManagerContract {
         amount: u128,
         to: Address,
     ) -> Result<(), AdManagerError> {
+        if storage::is_paused(&env) {
+            return Err(AdManagerError::ContractPaused);
+        }
         let config = storage::get_config(&env)?;
 
         let mut ad = storage::get_ad(&env, &ad_id).ok_or(AdManagerError::AdNotFound)?;
@@ -465,6 +525,9 @@ impl AdManagerContract {
         ad_id: String,
         to: Address,
     ) -> Result<(), AdManagerError> {
+        if storage::is_paused(&env) {
+            return Err(AdManagerError::ContractPaused);
+        }
         let config = storage::get_config(&env)?;
 
         let mut ad = storage::get_ad(&env, &ad_id).ok_or(AdManagerError::AdNotFound)?;
@@ -539,6 +602,9 @@ impl AdManagerContract {
         time_to_expire: u64,
         params: OrderParams,
     ) -> Result<BytesN<32>, AdManagerError> {
+        if storage::is_paused(&env) {
+            return Err(AdManagerError::ContractPaused);
+        }
         let config = storage::get_config(&env)?;
 
         let mut ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
@@ -642,6 +708,9 @@ impl AdManagerContract {
         proof: Bytes,
         cosig_data: Bytes,
     ) -> Result<(), AdManagerError> {
+        if storage::is_paused(&env) {
+            return Err(AdManagerError::ContractPaused);
+        }
         let config = storage::get_config(&env)?;
 
         // The order recipient on this (ad) chain authorizes the unlock —

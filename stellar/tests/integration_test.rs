@@ -1079,3 +1079,68 @@ fn test_gate2_portal_mock_false_blocks_unlock() {
     );
     assert!(res.is_err(), "portal unlock must fail gate 2");
 }
+
+// ============================================================================
+// Pause + two-step admin (1.2g)
+// ============================================================================
+
+#[test]
+fn test_pause_blocks_lock_and_unlock_until_unpause() {
+    let mut s = setup();
+
+    s.ad_manager.pause();
+
+    let params = ad_manager_order_params(&s.env, &s.tp);
+    let lock_params = lock_for_order_params(&s.tp.ad_id, &s.tp.order_hash);
+    let (sig, tok, exp) = s.sign_ad_manager_request("lockForOrder", &lock_params);
+    let res = s
+        .ad_manager
+        .try_lock_for_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+    assert!(res.is_err(), "lock must fail while paused");
+
+    s.ad_manager.unpause();
+    let (sig, tok, exp) = s.sign_ad_manager_request("lockForOrder", &lock_params);
+    s.ad_manager
+        .lock_for_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+
+    s.ad_manager.pause();
+    let empty = Bytes::new(&s.env);
+    assert!(
+        !ad_unlock(&mut s, &params, &empty),
+        "unlock must fail while paused"
+    );
+
+    s.ad_manager.unpause();
+    let empty = Bytes::new(&s.env);
+    assert!(ad_unlock(&mut s, &params, &empty));
+}
+
+#[test]
+fn test_pause_blocks_create_order() {
+    let mut s = setup();
+
+    s.order_portal.pause();
+
+    let params = order_portal_order_params(&s.env, &s.tp);
+    let cp = create_order_params(&s.tp.ad_id, &s.tp.order_hash);
+    let (sig, tok, exp) = s.sign_order_portal_request("createOrder", &cp);
+    let res = s
+        .order_portal
+        .try_create_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+    assert!(res.is_err(), "create must fail while paused");
+}
+
+#[test]
+fn test_two_step_admin_transfer() {
+    let s = setup();
+
+    assert!(s.ad_manager.try_accept_admin().is_err());
+
+    use soroban_sdk::testutils::Address as _;
+    let next = Address::generate(&s.env);
+    s.ad_manager.transfer_admin(&next);
+    s.ad_manager.accept_admin();
+
+    s.ad_manager.pause();
+    s.ad_manager.unpause();
+}

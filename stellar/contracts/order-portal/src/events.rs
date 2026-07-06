@@ -76,3 +76,27 @@ pub struct RootVerifierSet {
     pub chain_id: u128,
     pub module: Address,
 }
+
+#[contractevent(topics = ["paused"], data_format = "single-value")]
+pub struct Paused {
+    pub admin: Address,
+}
+
+#[contractevent(topics = ["unpaused"], data_format = "single-value")]
+pub struct Unpaused {
+    pub admin: Address,
+}
+
+#[contractevent(topics = ["adm_start"], data_format = "single-value")]
+pub struct AdminTransferStarted {
+    #[topic]
+    pub from: Address,
+    pub to: Address,
+}
+
+#[contractevent(topics = ["adm_done"], data_format = "single-value")]
+pub struct AdminTransferred {
+    #[topic]
+    pub from: Address,
+    pub to: Address,
+}

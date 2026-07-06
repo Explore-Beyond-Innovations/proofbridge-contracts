@@ -304,3 +304,51 @@ fn revoke_blocked_while_in_flight() {
         Err(Ok(RegistryError::AccountInFlight))
     );
 }
+
+#[test]
+fn pause_blocks_register_and_revoke_until_unpause() {
+    let (env, client, v) = setup();
+    let r = reg(&v, "makerOnStellarTestnet");
+    let account = bn::<32>(&env, &r["account"]);
+    let owner = maker_owner(&env, &v);
+
+    client.pause();
+    assert_eq!(
+        client.try_register(
+            &account,
+            &OwnerAuth::Stellar(owner.clone()),
+            &bn::<96>(&env, &r["pkNative"]),
+            &bn::<192>(&env, &r["pop"]),
+            &0
+        ),
+        Err(Ok(RegistryError::ContractPaused))
+    );
+    assert_eq!(
+        client.try_revoke(&account, &OwnerAuth::Stellar(owner.clone()), &0),
+        Err(Ok(RegistryError::ContractPaused))
+    );
+
+    client.unpause();
+    client.register(
+        &account,
+        &OwnerAuth::Stellar(owner),
+        &bn::<96>(&env, &r["pkNative"]),
+        &bn::<192>(&env, &r["pop"]),
+        &0,
+    );
+}
+
+#[test]
+fn two_step_admin_transfer() {
+    let (env, client, _v) = setup();
+
+    assert_eq!(
+        client.try_accept_admin(),
+        Err(Ok(RegistryError::NotPendingAdmin))
+    );
+
+    let next = Address::generate(&env);
+    client.transfer_admin(&next);
+    client.accept_admin();
+    assert_eq!(client.admin(), next);
+}
