@@ -385,8 +385,8 @@ contract AdManagerTest is Test {
             address token,
             uint256 balance,
             uint256 locked,
-            bool open
-        ,) = adManager.ads(adId);
+            bool open,
+        ) = adManager.ads(adId);
 
         lastAdId = adId;
 
@@ -425,8 +425,8 @@ contract AdManagerTest is Test {
             address token,
             uint256 balance,
             uint256 locked,
-            bool open
-        ,) = adManager.ads(adId);
+            bool open,
+        ) = adManager.ads(adId);
 
         assertEq(linkedOrderChainId, orderChainId);
         assertEq(_adRecipient, _b32(adRecipient));
