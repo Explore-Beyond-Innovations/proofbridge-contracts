@@ -8229,12 +8229,6 @@
                   "u32": 0
                 },
                 {
-                  "u128": "64"
-                },
-                {
-                  "u128": "127"
-                },
-                {
                   "bytes": "22fa5eaddf5cceaf288cac8bed1cf9210e6bfce63c3c9fd8ca887c4e2b4e857d"
                 }
               ]

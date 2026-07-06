@@ -54,14 +54,13 @@ pub struct ManagerUpdated {
     status: bool,
 }
 
+// Self-verifying core; width/size stay readable via the view functions.
 #[contractevent(topics = ["mmr_add"], data_format = "vec")]
 pub struct MmrAppend {
     #[topic]
     leaf_index: u128,
     order_hash: BytesN<32>,
     side: u32,
-    width: u128,
-    size: u128,
     root: BytesN<32>,
 }
 
@@ -213,9 +212,6 @@ impl ProofBridgeMerkleManagerContract {
         let leaf = mmr::encode_leaf(&env, &order_hash, side);
         let leaf_index = mmr::append(&env, &leaf);
 
-        // Get updated state for event
-        let width = storage::get_width(&env);
-        let size = storage::get_size(&env);
         let root = storage::get_root(&env);
 
         // Emit event
@@ -223,8 +219,6 @@ impl ProofBridgeMerkleManagerContract {
             leaf_index,
             order_hash,
             side,
-            width,
-            size,
             root,
         }
         .publish(&env);

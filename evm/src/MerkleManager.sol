@@ -47,10 +47,8 @@ contract MerkleManager is IMerkleManager, TwoStepAdmin, Pausable, ReentrancyGuar
     // Errors
     error MerkleManager__ZeroAddress();
 
-    // Emitted after each successful `append`; `side` (the leaf's ad_contract / unlock side) lets mirrors recompute the leaf
-    event DepositHashAppended(
-        uint256 indexed index, bytes32 indexed orderHash, uint256 side, uint256 width, uint256 size, bytes32 rootHash
-    );
+    // Self-verifying core; width/size stay readable via the view functions.
+    event LeafAppended(uint256 indexed index, bytes32 indexed orderHash, uint256 side, bytes32 newRoot);
 
     // Role definition for admin and setting poseidon2Yul hasher
     constructor(address admin, address poseidon2Yul) {
@@ -72,7 +70,7 @@ contract MerkleManager is IMerkleManager, TwoStepAdmin, Pausable, ReentrancyGuar
 
     /**
      * @dev Appends a new deposit order to the tree. The appended leaf is the side-bound value
-     * poseidon2(orderHash, side) (see _encodeLeaf). Updates peaks, root, and mappings. Emits DepositHashAppended.
+     * poseidon2(orderHash, side) (see _encodeLeaf). Updates peaks, root, and mappings. Emits LeafAppended.
      * @param orderHash The hash of the order to append.
      * @param side The leaf's `ad_contract` - the side it is unlocked on (1 = ad, 0 = order); set by the caller.
      */
@@ -89,7 +87,7 @@ contract MerkleManager is IMerkleManager, TwoStepAdmin, Pausable, ReentrancyGuar
 
         rootHistory[width] = newRoot;
 
-        emit DepositHashAppended(leafIndex, orderHash, side, width, _tree.getSize(), newRoot);
+        emit LeafAppended(leafIndex, orderHash, side, newRoot);
         return true;
     }
 
