@@ -26,7 +26,7 @@ contract LeafAppendedTest is Test {
             Vm.Log[] memory logs = vm.getRecordedLogs();
 
             assertEq(logs.length, 1);
-            assertEq(logs[0].topics[0], keccak256("LeafAppended(uint256,bytes32,uint256,bytes32)"));
+            assertEq(logs[0].topics[0], keccak256("DepositHashAppended(uint256,bytes32,uint256,bytes32)"));
             uint256 index = uint256(logs[0].topics[1]);
             assertGt(index, lastIndex, "index strictly increasing");
             lastIndex = index;
