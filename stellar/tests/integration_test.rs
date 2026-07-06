@@ -1236,3 +1236,52 @@ fn test_payout_falls_back_to_credit_then_claims_once() {
     let res = s.ad_manager.try_claim(&recipient, &token);
     assert!(res.is_err(), "second claim must fail");
 }
+
+#[test]
+fn test_portal_payout_pushes_directly() {
+    let mut s = setup();
+
+    let bridger_addr = {
+        let strkey = stellar_strkey::ed25519::PublicKey(s.tp.bridger).to_string();
+        Address::from_string(&SorobanString::from_str(&s.env, &strkey))
+    };
+    TokenContractClient::new(&s.env, &s.order_token_addr)
+        .mint(&bridger_addr, &(s.tp.amount as i128 * 10));
+
+    let params = order_portal_order_params(&s.env, &s.tp);
+    let cp = create_order_params(&s.tp.ad_id, &s.tp.order_hash);
+    let (sig, tok, exp) = s.sign_order_portal_request("createOrder", &cp);
+    s.order_portal
+        .create_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+
+    let recipient_addr = {
+        let strkey = stellar_strkey::ed25519::PublicKey(s.tp.ad_recipient).to_string();
+        Address::from_string(&SorobanString::from_str(&s.env, &strkey))
+    };
+    let token_client = TokenContractClient::new(&s.env, &s.order_token_addr);
+    let before = token_client.balance(&recipient_addr);
+
+    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.ad_root);
+    let (sig, tok, exp) = s.sign_order_portal_request("unlockOrder", &unlock_params);
+    s.order_portal.unlock(
+        &sig,
+        &s.admin_pubkey,
+        &tok,
+        &exp,
+        &params,
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
+        &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
+        &Bytes::new(&s.env),
+    );
+
+    assert!(
+        token_client.balance(&recipient_addr) > before,
+        "portal payout must push directly"
+    );
+    let res = s.order_portal.try_claim(
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_recipient),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_chain_token),
+    );
+    assert!(res.is_err(), "nothing to claim after a direct payout");
+}

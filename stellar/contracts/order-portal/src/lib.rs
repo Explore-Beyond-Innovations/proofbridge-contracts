@@ -480,20 +480,13 @@ impl OrderPortalContract {
         );
         storage::set_request_hash_used(&env, &message);
 
-        // Transfer tokens to ad_recipient (the maker's recipient on this chain)
-        let owed = storage::get_claimable(&env, &params.ad_recipient, &params.order_chain_token);
-        storage::set_claimable(
+        Self::pay_or_credit(
             &env,
+            &config.w_native_token,
             &params.ad_recipient,
             &params.order_chain_token,
-            owed + params.amount,
+            params.amount,
         );
-        events::PayoutCredited {
-            recipient: params.ad_recipient.clone(),
-            token: params.order_chain_token.clone(),
-            amount: params.amount,
-        }
-        .publish(&env);
 
         events::OrderUnlocked {
             order_hash: order_hash.clone(),
