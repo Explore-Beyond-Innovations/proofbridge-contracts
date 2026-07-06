@@ -112,7 +112,7 @@ export async function deployCore(
     "Poseidon2Yul",
     existing?.contracts.poseidon2Yul?.address,
     async () => {
-      const f = contractFactory("Poseidon2Yul", "Poseidon2Yul", signer);
+      const f = contractFactory("Poseidon2Yul", "Poseidon2Yul_BN254", signer);
       const c = await f.deploy({ nonce: nonces.next() });
       await c.deploymentTransaction()?.wait();
       return c as ethers.Contract;

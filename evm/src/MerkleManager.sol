@@ -98,9 +98,7 @@ contract MerkleManager is IMerkleManager, TwoStepAdmin, Pausable, ReentrancyGuar
      * `encodeLeaf`, or roots diverge.
      */
     function _encodeLeaf(bytes32 orderHash, uint256 side) private view returns (bytes32) {
-        (bool ok, bytes memory ret) = _tree.hasher.staticcall(abi.encode(MMRPoseidon2._fieldMod(orderHash), side));
-        require(ok, "MerkleManager:encodeLeaf");
-        return abi.decode(ret, (bytes32));
+        return MMRPoseidon2.hash_2(_tree.hasher, uint256(MMRPoseidon2._fieldMod(orderHash)), side);
     }
 
     // ========== READERS (VIEW) ==========

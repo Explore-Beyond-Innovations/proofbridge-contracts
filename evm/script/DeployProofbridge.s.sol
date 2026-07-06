@@ -11,7 +11,7 @@ import {IMerkleManager, MerkleManager} from "src/MerkleManager.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
-import {Poseidon2Yul} from "@poseidon2/src/Poseidon2Yul.sol";
+import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
 
 contract DeployProofbridge is Script {
     uint256 constant W_DECIMALS = 18;

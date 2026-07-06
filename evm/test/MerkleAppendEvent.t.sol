@@ -3,7 +3,7 @@ pragma solidity ^0.8.34;
 
 import {Test, Vm} from "forge-std/Test.sol";
 import {MerkleManager} from "src/MerkleManager.sol";
-import {Poseidon2Yul} from "@poseidon2/src/Poseidon2Yul.sol";
+import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
 
 /// Self-verifying event: each append's emitted newRoot equals the tree root.
 /// Emitted indexes are MMR node positions (1, 2, 4, 5, 8...), strictly increasing.
