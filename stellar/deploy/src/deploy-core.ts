@@ -43,6 +43,8 @@ export interface DeployStellarCoreResult {
     wNativeToken: string;
     adManager: string;
     orderPortal: string;
+    blsKeyRegistry: string;
+    counterpartyVerifier: string;
   };
 }
 
@@ -145,6 +147,37 @@ export async function deployCore(
     console.log(`  [reuse] OrderPortal: ${orderPortal}`);
   }
 
+  // ── BLS stack (1.2): key registry + module C verifier ──────────
+  let blsKeyRegistry = reused(existing?.contracts.blsKeyRegistry?.address);
+  if (!blsKeyRegistry) {
+    blsKeyRegistry = deployContract(path.join(wasmBase, "bls_key_registry.wasm"));
+    invokeContract(blsKeyRegistry, "initialize", [
+      "--admin",
+      adminStrkey,
+      "--chain_id",
+      chainId.toString(),
+    ]);
+    console.log(`  [deploy] BLSKeyRegistry: ${blsKeyRegistry}`);
+  } else {
+    console.log(`  [reuse] BLSKeyRegistry: ${blsKeyRegistry}`);
+  }
+
+  let counterpartyVerifier = reused(
+    existing?.contracts.counterpartyVerifier?.address,
+  );
+  if (!counterpartyVerifier) {
+    counterpartyVerifier = deployContract(
+      path.join(wasmBase, "counterparty_verifier.wasm"),
+    );
+    invokeContract(counterpartyVerifier, "initialize", [
+      "--registry",
+      blsKeyRegistry,
+    ]);
+    console.log(`  [deploy] CounterpartyVerifier: ${counterpartyVerifier}`);
+  } else {
+    console.log(`  [reuse] CounterpartyVerifier: ${counterpartyVerifier}`);
+  }
+
   // ── Grant MANAGER permission on MerkleManager (idempotent) ─────
   for (const manager of [adManager, orderPortal]) {
     invokeContract(merkleManager, "set_manager", [
@@ -162,7 +195,15 @@ export async function deployCore(
     env,
     commit,
     deployer: adminStrkey,
-    contracts: { verifier, merkleManager, wNativeToken, adManager, orderPortal },
+    contracts: {
+      verifier,
+      merkleManager,
+      wNativeToken,
+      adManager,
+      orderPortal,
+      blsKeyRegistry,
+      counterpartyVerifier,
+    },
     // Preserve tokens already in the manifest (test / curated). XLM entry is (re)set by deploy-test-tokens.
     tokens: (existing?.tokens.map((t) => ({
       pairKey: t.pairKey,
@@ -183,6 +224,14 @@ export async function deployCore(
     manifestPath: outPath,
     chainId,
     adminStrkey,
-    contracts: { verifier, merkleManager, wNativeToken, adManager, orderPortal },
+    contracts: {
+      verifier,
+      merkleManager,
+      wNativeToken,
+      adManager,
+      orderPortal,
+      blsKeyRegistry,
+      counterpartyVerifier,
+    },
   };
 }

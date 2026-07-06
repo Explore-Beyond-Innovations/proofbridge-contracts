@@ -63,6 +63,9 @@ export interface BuildManifestInput {
     wNativeToken: string;
     adManager: string;
     orderPortal: string;
+    sclEip6565?: string;
+    blsKeyRegistry?: string;
+    counterpartyVerifier?: string;
   };
   tokens: EvmTokenInput[];
 }
@@ -84,6 +87,19 @@ export function buildManifest(
       wNativeToken: evmContractEntry(input.contracts.wNativeToken),
       adManager: evmContractEntry(input.contracts.adManager),
       orderPortal: evmContractEntry(input.contracts.orderPortal),
+      ...(input.contracts.sclEip6565
+        ? { sclEip6565: evmContractEntry(input.contracts.sclEip6565) }
+        : {}),
+      ...(input.contracts.blsKeyRegistry
+        ? { blsKeyRegistry: evmContractEntry(input.contracts.blsKeyRegistry) }
+        : {}),
+      ...(input.contracts.counterpartyVerifier
+        ? {
+            counterpartyVerifier: evmContractEntry(
+              input.contracts.counterpartyVerifier,
+            ),
+          }
+        : {}),
     },
     tokens: input.tokens.map(tokenEntry),
     meta: {

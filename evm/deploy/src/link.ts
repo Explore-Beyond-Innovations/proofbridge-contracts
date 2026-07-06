@@ -13,6 +13,13 @@ export interface LinkOptions {
   localManifest?: string;
   /** Path to the peer chain's manifest. Required. */
   peerManifest: string;
+  /**
+   * Wire the local CounterpartyVerifier as the root-auth module for the peer
+   * chain (setRootVerifier on both escrows). This ENFORCES the BLS co-sign
+   * gate on every unlock referencing the peer chain - only enable once the
+   * relayer submits real cosigData. Default false (transitional pre-auth).
+   */
+  enforceBls?: boolean;
 }
 
 export interface LinkResult {
@@ -90,6 +97,37 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     chainTxs++;
     console.log(
       `  [link] OrderPortal.setChain(${peerChainId}, peerAdManager=${peer.contracts.adManager.address})`,
+    );
+  }
+
+  // ── Root-auth module (module C) ───────────────────────────────────
+  const enforceBls =
+    opts.enforceBls ?? process.env.ENFORCE_BLS === "true";
+  if (enforceBls) {
+    const verifierEntry = local.contracts.counterpartyVerifier;
+    if (!verifierEntry) {
+      throw new Error(
+        "link --enforce-bls: local manifest has no counterpartyVerifier - redeploy core first",
+      );
+    }
+    for (const [name, escrow] of [
+      ["AdManager", adManager],
+      ["OrderPortal", orderPortal],
+    ] as const) {
+      const tx = await escrow.getFunction("setRootVerifier")(
+        peerChainId,
+        verifierEntry.address,
+        { nonce: nonces.next() },
+      );
+      await tx.wait();
+      chainTxs++;
+      console.log(
+        `  [link] ${name}.setRootVerifier(${peerChainId}, ${verifierEntry.address}) - BLS gate ENFORCED for peer roots`,
+      );
+    }
+  } else {
+    console.log(
+      "  [link] BLS gate not wired (transitional pre-auth); rerun with --enforce-bls to enable",
     );
   }
 

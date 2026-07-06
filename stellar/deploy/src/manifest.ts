@@ -62,6 +62,8 @@ export interface BuildStellarManifestInput {
     wNativeToken: string;
     adManager: string;
     orderPortal: string;
+    blsKeyRegistry?: string;
+    counterpartyVerifier?: string;
   };
   tokens: StellarTokenInput[];
 }
@@ -81,6 +83,16 @@ export function buildManifest(
       merkleManager: stellarContractEntry(input.contracts.merkleManager),
       wNativeToken: stellarContractEntry(input.contracts.wNativeToken),
       adManager: stellarContractEntry(input.contracts.adManager),
+      ...(input.contracts.blsKeyRegistry
+        ? { blsKeyRegistry: stellarContractEntry(input.contracts.blsKeyRegistry) }
+        : {}),
+      ...(input.contracts.counterpartyVerifier
+        ? {
+            counterpartyVerifier: stellarContractEntry(
+              input.contracts.counterpartyVerifier,
+            ),
+          }
+        : {}),
       orderPortal: stellarContractEntry(input.contracts.orderPortal),
     },
     tokens: input.tokens.map(tokenEntry),

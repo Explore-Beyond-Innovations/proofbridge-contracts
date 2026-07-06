@@ -13,6 +13,13 @@ export interface StellarLinkOptions {
   peerManifest: string;
   /** Override local chain id (rarely needed — defaults to 1000001). */
   localChainId?: bigint;
+  /**
+   * Wire the local CounterpartyVerifier as the root-auth module for the peer
+   * chain (set_root_verifier on both escrows). This ENFORCES the BLS co-sign
+   * gate on every unlock referencing the peer chain - only enable once the
+   * relayer submits real cosig_data. Default false (transitional pre-auth).
+   */
+  enforceBls?: boolean;
 }
 
 export interface StellarLinkResult {
@@ -78,6 +85,36 @@ export async function link(
   console.log(
     `  [link] OrderPortal.set_chain(${peerChainId}, peerAdManager=${peer.contracts.adManager.address})`,
   );
+
+  // ── Root-auth module (module C) ───────────────────────────────────
+  const enforceBls = opts.enforceBls ?? process.env.ENFORCE_BLS === "true";
+  if (enforceBls) {
+    const verifierEntry = local.contracts.counterpartyVerifier;
+    if (!verifierEntry) {
+      throw new Error(
+        "link --enforce-bls: local manifest has no counterpartyVerifier - redeploy core first",
+      );
+    }
+    for (const [name, escrow] of [
+      ["AdManager", local.contracts.adManager.address],
+      ["OrderPortal", local.contracts.orderPortal.address],
+    ] as const) {
+      invokeContract(escrow, "set_root_verifier", [
+        "--chain_id",
+        peerChainId,
+        "--module",
+        verifierEntry.address,
+      ]);
+      chainTxs++;
+      console.log(
+        `  [link] ${name}.set_root_verifier(${peerChainId}, ${verifierEntry.address}) - BLS gate ENFORCED for peer roots`,
+      );
+    }
+  } else {
+    console.log(
+      "  [link] BLS gate not wired (transitional pre-auth); rerun with --enforce-bls to enable",
+    );
+  }
 
   // ── Per-pair token routes (two directions per pairKey) ────────────
   let routeTxs = 0;

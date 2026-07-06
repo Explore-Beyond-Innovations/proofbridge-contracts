@@ -4,7 +4,7 @@
 // Usage:
 //   evm-deploy deploy             [--out <manifest-path>]
 //   evm-deploy deploy-test-tokens [--out <manifest-path>]
-//   evm-deploy link --peer <peer-manifest> [--in <local-manifest>]
+//   evm-deploy link --peer <peer-manifest> [--in <local-manifest>] [--enforce-bls]
 //
 // Reads EVM_RPC_URL, EVM_ADMIN_PRIVATE_KEY from env. Other knobs:
 //   ADMIN, CHAIN_NAME, DEPLOY_ENV, GIT_COMMIT,
@@ -41,6 +41,7 @@ async function main(): Promise<void> {
       await link({
         peerManifest: peer,
         localManifest: parseFlag(rest, "--in"),
+        enforceBls: rest.includes("--enforce-bls"),
       });
       return;
     }

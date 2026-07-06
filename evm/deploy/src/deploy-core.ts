@@ -1,6 +1,10 @@
 import { ethers } from "ethers";
 import { MANAGER_ROLE, connect, envOrDefault, requireEnv } from "./common.js";
-import { contractFactory, attachContract } from "./artifacts.js";
+import {
+  contractFactory,
+  contractFactoryLinked,
+  attachContract,
+} from "./artifacts.js";
 import {
   buildManifest,
   loadOrNull,
@@ -40,6 +44,9 @@ export interface DeployCoreResult {
     wNativeToken: string;
     adManager: string;
     orderPortal: string;
+    sclEip6565: string;
+    blsKeyRegistry: string;
+    counterpartyVerifier: string;
   };
 }
 
@@ -175,6 +182,42 @@ export async function deployCore(
     },
   );
 
+  // ── BLS stack (1.2): SCL library, key registry, module C verifier ──
+  const sclAddr = await deployIfMissing(
+    "SCL_EIP6565",
+    existing?.contracts.sclEip6565?.address,
+    async () => {
+      const f = contractFactory("libSCL_EIP6565", "SCL_EIP6565", signer);
+      const c = await f.deploy({ nonce: nonces.next() });
+      await c.deploymentTransaction()?.wait();
+      return c as ethers.Contract;
+    },
+  );
+
+  const blsKeyRegistryAddr = await deployIfMissing(
+    "BLSKeyRegistry",
+    existing?.contracts.blsKeyRegistry?.address,
+    async () => {
+      const f = contractFactoryLinked("BLSKeyRegistry", "BLSKeyRegistry", signer, {
+        SCL_EIP6565: sclAddr,
+      });
+      const c = await f.deploy(admin, { nonce: nonces.next() });
+      await c.deploymentTransaction()?.wait();
+      return c as ethers.Contract;
+    },
+  );
+
+  const counterpartyVerifierAddr = await deployIfMissing(
+    "CounterpartyVerifier",
+    existing?.contracts.counterpartyVerifier?.address,
+    async () => {
+      const f = contractFactory("CounterpartyVerifier", "CounterpartyVerifier", signer);
+      const c = await f.deploy(blsKeyRegistryAddr, { nonce: nonces.next() });
+      await c.deploymentTransaction()?.wait();
+      return c as ethers.Contract;
+    },
+  );
+
   // ── grant MANAGER_ROLE to AdManager + OrderPortal ─────────────────
   // Re-granted every run (idempotent); caught in case admin is a multisig that'll grant out of band.
   const merkleManager = attachContract(
@@ -215,6 +258,9 @@ export async function deployCore(
       wNativeToken: wNativeAddr,
       adManager: adManagerAddr,
       orderPortal: orderPortalAddr,
+      sclEip6565: sclAddr,
+      blsKeyRegistry: blsKeyRegistryAddr,
+      counterpartyVerifier: counterpartyVerifierAddr,
     },
     // Preserve tokens already in the manifest (added by deploy-test-tokens / hand-curation).
     tokens: (existing?.tokens ?? []) as BuildManifestInput["tokens"],
@@ -233,6 +279,9 @@ export async function deployCore(
       wNativeToken: wNativeAddr,
       adManager: adManagerAddr,
       orderPortal: orderPortalAddr,
+      sclEip6565: sclAddr,
+      blsKeyRegistry: blsKeyRegistryAddr,
+      counterpartyVerifier: counterpartyVerifierAddr,
     },
   };
 }
