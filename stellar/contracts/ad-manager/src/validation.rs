@@ -70,6 +70,9 @@ pub fn validate_order(env: &Env, ad: &Ad, params: &OrderParams) -> Result<(), Ad
         return Err(AdManagerError::OrderChainMismatch);
     }
 
+    if params.order_chain_token != ad.order_chain_token {
+        return Err(AdManagerError::RouteMismatch);
+    }
     let routed = storage::get_token_route(env, &params.ad_chain_token, params.order_chain_id)
         .ok_or(AdManagerError::MissingRoute)?;
     if routed != params.order_chain_token {

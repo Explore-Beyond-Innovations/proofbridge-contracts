@@ -423,6 +423,7 @@ mod validation_tests {
             balance: 1_000_000,
             locked: 0,
             open: true,
+            order_chain_token: order_chain_token.clone(),
         };
 
         let params = crate::types::OrderParams {
@@ -467,6 +468,74 @@ mod validation_tests {
             setup_chain_and_route(&env, &params);
             let result = validation::validate_order(&env, &ad, &params);
             assert!(result.is_ok());
+        });
+    }
+
+    /// Offered token matches the re-routed table, not the commitment.
+    #[test]
+    fn test_reroute_cannot_redirect_existing_ad() {
+        let env = setup_validation_env();
+        env.as_contract(&env.register(AdManagerContract, ()), || {
+            let (ad, mut params) = valid_ad_and_params(&env);
+            setup_chain_and_route(&env, &params);
+
+            let new_token = make_bytes32(&env, 0x99);
+            storage::set_token_route(
+                &env,
+                &params.ad_chain_token,
+                params.order_chain_id,
+                &new_token,
+            );
+
+            params.order_chain_token = new_token;
+            assert_eq!(
+                validation::validate_order(&env, &ad, &params),
+                Err(AdManagerError::RouteMismatch)
+            );
+        });
+    }
+
+    /// Committed token no longer in the table: frozen, not redirected.
+    #[test]
+    fn test_reroute_freezes_ad_for_committed_token() {
+        let env = setup_validation_env();
+        env.as_contract(&env.register(AdManagerContract, ()), || {
+            let (ad, params) = valid_ad_and_params(&env);
+            setup_chain_and_route(&env, &params);
+
+            let new_token = make_bytes32(&env, 0x99);
+            storage::set_token_route(
+                &env,
+                &params.ad_chain_token,
+                params.order_chain_id,
+                &new_token,
+            );
+
+            assert_eq!(
+                validation::validate_order(&env, &ad, &params),
+                Err(AdManagerError::OrderTokenMismatch)
+            );
+        });
+    }
+
+    /// Passes only when the offer equals commitment AND live corridor.
+    #[test]
+    fn test_order_settles_only_on_the_committed_route() {
+        let env = setup_validation_env();
+        env.as_contract(&env.register(AdManagerContract, ()), || {
+            let (ad, base) = valid_ad_and_params(&env);
+            setup_chain_and_route(&env, &base);
+
+            for fill in [0x00u8, 0x01, 0x42, 0x99, 0xBB, 0xFE] {
+                let mut params = base.clone();
+                params.order_chain_token = make_bytes32(&env, fill);
+                let ok = validation::validate_order(&env, &ad, &params).is_ok();
+                assert_eq!(
+                    ok,
+                    params.order_chain_token == ad.order_chain_token,
+                    "route escape at fill {fill}"
+                );
+            }
         });
     }
 
@@ -833,6 +902,7 @@ mod storage_tests {
                 balance: 1_000_000,
                 locked: 100_000,
                 open: true,
+                order_chain_token: BytesN::from_array(&env, &[0xBB; 32]),
             };
 
             storage::set_ad(&env, &ad_id, &ad);
@@ -986,6 +1056,7 @@ mod ad_lifecycle_tests {
                 balance: 1_000_000,
                 locked: 0,
                 open: true,
+                order_chain_token: BytesN::from_array(&env, &[0xBB; 32]),
             };
             storage::set_ad(&env, &ad_id, &ad);
             storage::set_ad_id_used(&env, &ad_id);
@@ -1149,6 +1220,7 @@ mod ad_lifecycle_tests {
                 balance: 1_000_000,
                 locked: 0,
                 open: true,
+                order_chain_token: BytesN::from_array(&env, &[0xBB; 32]),
             };
             let ad2 = Ad {
                 order_chain_id: 2,
@@ -1158,6 +1230,7 @@ mod ad_lifecycle_tests {
                 balance: 5_000_000,
                 locked: 2_000_000,
                 open: true,
+                order_chain_token: BytesN::from_array(&env, &[0xBB; 32]),
             };
 
             storage::set_ad(&env, &ad1_id, &ad1);
@@ -1227,6 +1300,7 @@ mod order_lifecycle_tests {
                 balance: 1_000_000,
                 locked: 0,
                 open: true,
+                order_chain_token: BytesN::from_array(&env, &[0xBB; 32]),
             };
             storage::set_ad(&env, &ad_id, &ad);
 
@@ -1268,6 +1342,7 @@ mod order_lifecycle_tests {
                 balance: 1_000_000,
                 locked: 0,
                 open: true,
+                order_chain_token: BytesN::from_array(&env, &[0xBB; 32]),
             };
             storage::set_ad(&env, &ad_id, &ad);
 

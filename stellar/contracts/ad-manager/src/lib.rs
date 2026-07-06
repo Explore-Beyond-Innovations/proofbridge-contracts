@@ -306,7 +306,8 @@ impl AdManagerContract {
         if initial_amount == 0 {
             return Err(AdManagerError::ZeroAmount);
         }
-        if storage::get_token_route(&env, &ad_token, order_chain_id).is_none() {
+        let routed_order_token = storage::get_token_route(&env, &ad_token, order_chain_id);
+        if routed_order_token.is_none() {
             return Err(AdManagerError::ChainNotSupported);
         }
         if storage::is_ad_id_used(&env, &ad_id) {
@@ -356,6 +357,7 @@ impl AdManagerContract {
             balance: initial_amount,
             locked: 0,
             open: true,
+            order_chain_token: routed_order_token.unwrap(),
         };
         storage::set_ad(&env, &ad_id, &ad);
         storage::set_ad_id_used(&env, &ad_id);

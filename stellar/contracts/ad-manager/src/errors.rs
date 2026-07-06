@@ -105,6 +105,8 @@ pub enum AdManagerError {
     ContractPaused = 41,
     NotPendingAdmin = 42,
     NothingToClaim = 43,
+    /// Order route does not match the route the ad committed to at creation.
+    RouteMismatch = 44,
 
     // Address decode errors (40-41)
     /// Recipient bytes do not decode to a valid Stellar account address

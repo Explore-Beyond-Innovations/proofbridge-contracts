@@ -88,7 +88,7 @@ contract PayoutFallbackTest is AdManagerTest {
             vm.prank(bridger);
             adManager.unlock(signature, authToken, timeToLive, p, bytes32(uint256(9000 + i)), targetRoot, hex"", hex"");
 
-            (,,,, uint256 adBalance,,) = adManager.ads(adId);
+            (,,,, uint256 adBalance,,,) = adManager.ads(adId);
             uint256 owed = adManager.claimable(address(receiver), NATIVE_TOKEN_ADDRESS);
             assertEq(_wNativeToken.balanceOf(address(adManager)), adBalance + owed, "escrow insolvent");
         }
@@ -100,7 +100,7 @@ contract PayoutFallbackTest is AdManagerTest {
             adManager.claim(address(receiver), NATIVE_TOKEN_ADDRESS);
             assertEq(address(receiver).balance - before, owedFinal, "claim paid wrong amount");
         }
-        (,,,, uint256 adBalanceEnd,,) = adManager.ads(adId);
+        (,,,, uint256 adBalanceEnd,,,) = adManager.ads(adId);
         assertEq(_wNativeToken.balanceOf(address(adManager)), adBalanceEnd, "credits not settled");
     }
 

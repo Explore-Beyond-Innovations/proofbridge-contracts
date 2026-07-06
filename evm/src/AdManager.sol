@@ -74,6 +74,7 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         uint256 balance;
         uint256 locked;
         bool open;
+        bytes32 orderChainToken;
     }
 
     /**
@@ -254,6 +255,7 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
     error AdManager__NullifierUsed(bytes32 nullifierHash);
     error AdManager__InvalidProof();
     error AdManager__NothingToClaim();
+    error AdManager__RouteMismatch(bytes32 committed, bytes32 offered);
     error AdManager__SelfCallOnly();
     error AdManager__ZeroAddress();
 
@@ -377,7 +379,9 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         if (adRecipient == bytes32(0)) revert AdManager__RecipientZero();
         if (initialAmount == 0) revert AdManager__ZeroAmount();
 
-        if (tokenRoute[adToken][orderChainId] == bytes32(0)) {
+        bytes32 routedOrderToken = tokenRoute[adToken][orderChainId];
+
+        if (routedOrderToken == bytes32(0)) {
             revert AdManager__ChainNotSupported(orderChainId);
         }
 
@@ -404,7 +408,8 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
             token: adToken,
             balance: initialAmount,
             locked: 0,
-            open: true
+            open: true,
+            orderChainToken: routedOrderToken
         });
 
         adIds[adId] = true;
@@ -893,7 +898,11 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
             revert AdManager__OrderChainMismatch(ad.orderChainId, params.orderChainId);
         }
 
-        // Token route check.
+        // Route must match the ad's creation-time commitment AND the live table.
+        if (params.orderChainToken != ad.orderChainToken) {
+            revert AdManager__RouteMismatch(ad.orderChainToken, params.orderChainToken);
+        }
+
         bytes32 routed = tokenRoute[ad.token][params.orderChainId];
         if (routed == bytes32(0)) revert AdManager__MissingRoute(params.orderChainToken, block.chainid);
         if (routed != params.orderChainToken) revert AdManager__OrderTokenMismatch(routed, params.orderChainToken);

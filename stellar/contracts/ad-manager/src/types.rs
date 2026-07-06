@@ -33,6 +33,8 @@ pub struct Ad {
     pub locked: u128,
     /// Whether the ad is accepting new orders
     pub open: bool,
+    /// Order-chain token this ad committed to at creation
+    pub order_chain_token: BytesN<32>,
 }
 
 /// Parameters describing a cross-chain order (ad-manager variant)

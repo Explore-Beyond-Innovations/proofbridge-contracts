@@ -88,6 +88,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "order_chain_token"
+                    },
+                    "val": {
+                      "bytes": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "token"
                     },
                     "val": {
@@ -168,6 +176,14 @@
                     },
                     "val": {
                       "u128": "2"
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "order_chain_token"
+                    },
+                    "val": {
+                      "bytes": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                     }
                   },
                   {
