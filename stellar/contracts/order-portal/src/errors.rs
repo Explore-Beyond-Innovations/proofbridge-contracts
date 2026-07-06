@@ -98,6 +98,7 @@ pub enum OrderPortalError {
     RootNotValid = 65,
     ContractPaused = 71,
     NotPendingAdmin = 72,
+    NothingToClaim = 73,
 
     // ==========================================================================
     // Address Decode Errors (70-80)

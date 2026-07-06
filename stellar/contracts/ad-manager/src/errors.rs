@@ -104,6 +104,7 @@ pub enum AdManagerError {
     RootNotValid = 39,
     ContractPaused = 41,
     NotPendingAdmin = 42,
+    NothingToClaim = 43,
 
     // Address decode errors (40-41)
     /// Recipient bytes do not decode to a valid Stellar account address

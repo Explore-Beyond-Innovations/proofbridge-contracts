@@ -35,6 +35,8 @@ const KEY_RHASHES: Symbol = symbol_short!("rhashes");
 const KEY_RVERIF: Symbol = symbol_short!("rverif");
 /// Prefix for in-flight order counts: (KEY_INFLT, account) -> u64
 const KEY_INFLT: Symbol = symbol_short!("inflt");
+/// Prefix for unclaimed payouts: (KEY_CLAIM, recipient, token) -> u128
+const KEY_CLAIM: Symbol = symbol_short!("claim");
 
 // =============================================================================
 // Instance Storage (Contract-level state)
@@ -268,4 +270,17 @@ pub fn set_pending_admin(env: &Env, admin: &Address) {
 
 pub fn clear_pending_admin(env: &Env) {
     env.storage().instance().remove(&KEY_PENDADM);
+}
+
+pub fn get_claimable(env: &Env, recipient: &BytesN<32>, token: &BytesN<32>) -> u128 {
+    env.storage()
+        .persistent()
+        .get(&(KEY_CLAIM, recipient.clone(), token.clone()))
+        .unwrap_or(0)
+}
+
+pub fn set_claimable(env: &Env, recipient: &BytesN<32>, token: &BytesN<32>, amount: u128) {
+    env.storage()
+        .persistent()
+        .set(&(KEY_CLAIM, recipient.clone(), token.clone()), &amount);
 }

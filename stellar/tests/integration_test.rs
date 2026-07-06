@@ -54,11 +54,29 @@ impl TokenContract {
     pub fn mint(e: &Env, to: Address, amount: i128) {
         Base::mint(e, &to, amount);
     }
+
+    pub fn set_fail_transfers(e: &Env, fail: bool) {
+        e.storage()
+            .instance()
+            .set(&soroban_sdk::symbol_short!("fail"), &fail);
+    }
 }
 
 #[contractimpl(contracttrait)]
 impl FungibleToken for TokenContract {
     type ContractType = Base;
+
+    fn transfer(e: &Env, from: Address, to: soroban_sdk::MuxedAddress, amount: i128) {
+        let fail: bool = e
+            .storage()
+            .instance()
+            .get(&soroban_sdk::symbol_short!("fail"))
+            .unwrap_or(false);
+        if fail {
+            panic!("transfers disabled");
+        }
+        Base::transfer(e, &from, &to, amount);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1143,4 +1161,78 @@ fn test_two_step_admin_transfer() {
 
     s.ad_manager.pause();
     s.ad_manager.unpause();
+}
+
+// ============================================================================
+// Pull-payment escrow (1.2h)
+// ============================================================================
+
+#[test]
+fn test_payout_pushes_directly_when_recipient_ok() {
+    let mut s = setup();
+    let params = locked_ad_order(&mut s);
+
+    let recipient_addr = {
+        let strkey = stellar_strkey::ed25519::PublicKey(s.tp.order_recipient).to_string();
+        Address::from_string(&SorobanString::from_str(&s.env, &strkey))
+    };
+    let token_client = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let before = token_client.balance(&recipient_addr);
+
+    let empty = Bytes::new(&s.env);
+    assert!(ad_unlock(&mut s, &params, &empty));
+
+    assert!(
+        token_client.balance(&recipient_addr) > before,
+        "happy path must pay directly"
+    );
+
+    let recipient = bytes32_to_bytesn(&s.env, &s.tp.order_recipient);
+    let token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+    let res = s.ad_manager.try_claim(&recipient, &token);
+    assert!(res.is_err(), "nothing to claim after a direct payout");
+}
+
+#[test]
+fn test_payout_falls_back_to_credit_then_claims_once() {
+    let mut s = setup();
+    let params = locked_ad_order(&mut s);
+
+    let recipient_addr = {
+        let strkey = stellar_strkey::ed25519::PublicKey(s.tp.order_recipient).to_string();
+        Address::from_string(&SorobanString::from_str(&s.env, &strkey))
+    };
+    let token_client = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let before = token_client.balance(&recipient_addr);
+
+    // recipient's token refuses transfers: unlock must still settle
+    token_client.set_fail_transfers(&true);
+    let empty = Bytes::new(&s.env);
+    assert!(
+        ad_unlock(&mut s, &params, &empty),
+        "unlock blocked by payout failure"
+    );
+    assert_eq!(
+        token_client.balance(&recipient_addr),
+        before,
+        "push should have failed"
+    );
+
+    let recipient = bytes32_to_bytesn(&s.env, &s.tp.order_recipient);
+    let token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+
+    // still failing: the credit stays parked
+    assert!(s.ad_manager.try_claim(&recipient, &token).is_err());
+    assert_eq!(token_client.balance(&recipient_addr), before);
+
+    // token recovers: claim pays exactly once
+    token_client.set_fail_transfers(&false);
+    s.ad_manager.claim(&recipient, &token);
+    assert!(
+        token_client.balance(&recipient_addr) > before,
+        "claim did not pay"
+    );
+
+    let res = s.ad_manager.try_claim(&recipient, &token);
+    assert!(res.is_err(), "second claim must fail");
 }

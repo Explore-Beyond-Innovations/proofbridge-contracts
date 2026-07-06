@@ -100,3 +100,19 @@ pub struct AdminTransferred {
     pub from: Address,
     pub to: Address,
 }
+
+#[contractevent(topics = ["pay_cred"], data_format = "vec")]
+pub struct PayoutCredited {
+    #[topic]
+    pub recipient: BytesN<32>,
+    pub token: BytesN<32>,
+    pub amount: u128,
+}
+
+#[contractevent(topics = ["pay_clm"], data_format = "vec")]
+pub struct PayoutClaimed {
+    #[topic]
+    pub recipient: BytesN<32>,
+    pub token: BytesN<32>,
+    pub amount: u128,
+}

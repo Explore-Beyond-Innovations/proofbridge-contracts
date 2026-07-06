@@ -39,6 +39,9 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
     /// @notice Side flag for proof public inputs on the ad-chain side.
     uint256 private constant _PUBLIC_INPUT_SIDE_AD = 1;
 
+    /// @notice Gas forwarded to the best-effort payout attempt in unlock.
+    uint256 private constant _PAYOUT_GAS_LIMIT = 150_000;
+
     /*//////////////////////////////////////////////////////////////
                                  TYPES
     //////////////////////////////////////////////////////////////*/
@@ -146,6 +149,9 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
     /// @notice Open (locked, not yet unlocked) orders per universal account id.
     mapping(bytes32 => uint256) public inFlightOf;
 
+    /// @notice Unlocked payouts awaiting claim: recipient => token => amount.
+    mapping(address => mapping(address => uint256)) public claimable;
+
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -206,6 +212,16 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
     event OrderUnlocked(bytes32 indexed orderHash, bytes32 indexed recipient, bytes32 nullifierHash);
 
     /**
+     * @notice Emitted when an unlock credits a claimable payout.
+     */
+    event PayoutCredited(address indexed recipient, address indexed token, uint256 amount);
+
+    /**
+     * @notice Emitted when a payout is claimed.
+     */
+    event PayoutClaimed(address indexed recipient, address indexed token, uint256 amount);
+
+    /**
      * @notice Emitted when a manager's status is updated
      */
     event UpdateManager(address indexed manager, bool status);
@@ -237,6 +253,8 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
     error AdManager__OrderNotOpen(bytes32 orderHash);
     error AdManager__NullifierUsed(bytes32 nullifierHash);
     error AdManager__InvalidProof();
+    error AdManager__NothingToClaim();
+    error AdManager__SelfCallOnly();
     error AdManager__ZeroAddress();
 
     error AdManager__TokenAlreadyUsed();
@@ -590,14 +608,51 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         ad.locked -= adAmount;
 
         address orderRecipientAddr = params.orderRecipient.toAddressChecked();
-
-        if (ad.token.isNative()) {
-            wNativeToken.safeWithdrawTo(adAmount, orderRecipientAddr);
-        } else {
-            IERC20(ad.token).safeTransfer(orderRecipientAddr, adAmount);
-        }
+        _payOrCredit(orderRecipientAddr, ad.token, adAmount);
 
         emit OrderUnlocked(orderHash, params.orderRecipient, nullifierHash);
+    }
+
+    /**
+     * @notice Pay out a credited unlock. Permissionless: funds can only go to
+     *         the credited recipient.
+     */
+    function claim(address recipient, address token) external nonReentrant whenNotPaused {
+        uint256 amount = claimable[recipient][token];
+        if (amount == 0) revert AdManager__NothingToClaim();
+        claimable[recipient][token] = 0;
+
+        if (token.isNative()) {
+            wNativeToken.safeWithdrawTo(amount, recipient);
+        } else {
+            IERC20(token).safeTransfer(recipient, amount);
+        }
+        emit PayoutClaimed(recipient, token, amount);
+    }
+
+    /**
+     * @notice Best-effort direct transfer; on any failure the payout becomes
+     *         claimable so a recipient can never block settlement.
+     */
+    function _payOrCredit(address recipient, address token, uint256 amount) private {
+        try this.directPayout{gas: _PAYOUT_GAS_LIMIT}(recipient, token, amount) {}
+        catch {
+            claimable[recipient][token] += amount;
+            emit PayoutCredited(recipient, token, amount);
+        }
+    }
+
+    /**
+     * @notice The payout transfer, self-callable only (makes it catchable).
+     */
+    function directPayout(address recipient, address token, uint256 amount) external {
+        if (msg.sender != address(this)) revert AdManager__SelfCallOnly();
+
+        if (token.isNative()) {
+            wNativeToken.safeWithdrawTo(amount, recipient);
+        } else {
+            IERC20(token).safeTransfer(recipient, amount);
+        }
     }
 
     /*//////////////////////////////////////////////////////////////

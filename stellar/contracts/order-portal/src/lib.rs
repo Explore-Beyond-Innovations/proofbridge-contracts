@@ -481,13 +481,19 @@ impl OrderPortalContract {
         storage::set_request_hash_used(&env, &message);
 
         // Transfer tokens to ad_recipient (the maker's recipient on this chain)
-        token::transfer_to_recipient_bytes32(
+        let owed = storage::get_claimable(&env, &params.ad_recipient, &params.order_chain_token);
+        storage::set_claimable(
             &env,
-            &params.order_chain_token,
-            &config.w_native_token,
             &params.ad_recipient,
-            params.amount,
-        )?;
+            &params.order_chain_token,
+            owed + params.amount,
+        );
+        events::PayoutCredited {
+            recipient: params.ad_recipient.clone(),
+            token: params.order_chain_token.clone(),
+            amount: params.amount,
+        }
+        .publish(&env);
 
         events::OrderUnlocked {
             order_hash: order_hash.clone(),
@@ -507,6 +513,63 @@ impl OrderPortalContract {
     /// Get destination token for a route.
     /// BLSKeyRegistry revoke guard: true while the account has an order
     /// created but not yet unlocked.
+
+    /// Best-effort direct transfer; on failure the payout becomes claimable so
+    /// a recipient can never block settlement.
+    fn pay_or_credit(
+        env: &Env,
+        w_native: &Address,
+        recipient: &BytesN<32>,
+        token: &BytesN<32>,
+        amount: u128,
+    ) {
+        if proofbridge_core::token::try_transfer_to_recipient_bytes32(
+            env, token, w_native, recipient, amount,
+        ) {
+            return;
+        }
+        let owed = storage::get_claimable(env, recipient, token);
+        storage::set_claimable(env, recipient, token, owed + amount);
+        events::PayoutCredited {
+            recipient: recipient.clone(),
+            token: token.clone(),
+            amount,
+        }
+        .publish(env);
+    }
+
+    /// Pay out a credited unlock. Permissionless: funds can only go to the
+    /// credited recipient.
+    pub fn claim(
+        env: Env,
+        recipient: BytesN<32>,
+        token: BytesN<32>,
+    ) -> Result<(), OrderPortalError> {
+        if storage::is_paused(&env) {
+            return Err(OrderPortalError::ContractPaused);
+        }
+        let config = storage::get_config(&env)?;
+        let amount = storage::get_claimable(&env, &recipient, &token);
+        if amount == 0 {
+            return Err(OrderPortalError::NothingToClaim);
+        }
+        storage::set_claimable(&env, &recipient, &token, 0);
+        token::transfer_to_recipient_bytes32(
+            &env,
+            &token,
+            &config.w_native_token,
+            &recipient,
+            amount,
+        )?;
+        events::PayoutClaimed {
+            recipient,
+            token,
+            amount,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     pub fn has_open_positions(env: Env, account: BytesN<32>) -> bool {
         storage::get_in_flight(&env, &account) > 0
     }

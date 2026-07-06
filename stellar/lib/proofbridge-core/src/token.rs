@@ -166,3 +166,38 @@ pub fn transfer_to_recipient_bytes32<E: ProofBridgeError>(
         amount,
     )
 }
+
+/// Best-effort variant: returns false instead of panicking when the token
+/// transfer fails, so payout failures can degrade to a claimable credit.
+pub fn try_transfer_to_recipient_bytes32(
+    env: &Env,
+    token_bytes: &BytesN<32>,
+    w_native_addr: &Address,
+    recipient_bytes: &BytesN<32>,
+    amount: u128,
+) -> bool {
+    use stellar_strkey::ed25519::PublicKey;
+
+    if recipient_bytes.to_array().iter().all(|&b| b == 0) {
+        return false;
+    }
+    let strkey = PublicKey(recipient_bytes.to_array()).to_string();
+    let recipient = Address::from_string(&SorobanString::from_str(env, strkey.as_str()));
+
+    let token_addr = if is_native_token(token_bytes) {
+        w_native_addr.clone()
+    } else {
+        match bytes32_to_token_address(env, token_bytes) {
+            Some(a) => a,
+            None => return false,
+        }
+    };
+    let client = token::Client::new(env, &token_addr);
+    client
+        .try_transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &(amount as i128),
+        )
+        .is_ok()
+}

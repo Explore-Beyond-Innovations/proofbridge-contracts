@@ -806,13 +806,13 @@ impl AdManagerContract {
         ad.balance -= ad_amount;
         storage::set_ad(&env, &params.ad_id, &ad);
 
-        token::transfer_to_recipient_bytes32(
+        Self::pay_or_credit(
             &env,
-            &ad_token,
             &config.w_native_token,
             &params.order_recipient,
+            &ad_token,
             ad_amount,
-        )?;
+        );
 
         events::OrderUnlocked {
             order_hash: order_hash.clone(),
@@ -831,6 +831,59 @@ impl AdManagerContract {
 
     /// BLSKeyRegistry revoke guard: true while the account has an order
     /// locked but not yet unlocked.
+
+    /// Best-effort direct transfer; on failure the payout becomes claimable so
+    /// a recipient can never block settlement.
+    fn pay_or_credit(
+        env: &Env,
+        w_native: &Address,
+        recipient: &BytesN<32>,
+        token: &BytesN<32>,
+        amount: u128,
+    ) {
+        if proofbridge_core::token::try_transfer_to_recipient_bytes32(
+            env, token, w_native, recipient, amount,
+        ) {
+            return;
+        }
+        let owed = storage::get_claimable(env, recipient, token);
+        storage::set_claimable(env, recipient, token, owed + amount);
+        events::PayoutCredited {
+            recipient: recipient.clone(),
+            token: token.clone(),
+            amount,
+        }
+        .publish(env);
+    }
+
+    /// Pay out a credited unlock. Permissionless: funds can only go to the
+    /// credited recipient.
+    pub fn claim(env: Env, recipient: BytesN<32>, token: BytesN<32>) -> Result<(), AdManagerError> {
+        if storage::is_paused(&env) {
+            return Err(AdManagerError::ContractPaused);
+        }
+        let config = storage::get_config(&env)?;
+        let amount = storage::get_claimable(&env, &recipient, &token);
+        if amount == 0 {
+            return Err(AdManagerError::NothingToClaim);
+        }
+        storage::set_claimable(&env, &recipient, &token, 0);
+        token::transfer_to_recipient_bytes32(
+            &env,
+            &token,
+            &config.w_native_token,
+            &recipient,
+            amount,
+        )?;
+        events::PayoutClaimed {
+            recipient,
+            token,
+            amount,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     pub fn has_open_positions(env: Env, account: BytesN<32>) -> bool {
         storage::get_in_flight(&env, &account) > 0
     }

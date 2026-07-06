@@ -41,6 +41,9 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
     /// @notice Side flag for proof public inputs on the order-chain side.
     uint256 private constant _PUBLIC_INPUT_SIDE_ORDER = 0;
 
+    /// @notice Gas forwarded to the best-effort payout attempt in unlock.
+    uint256 private constant _PAYOUT_GAS_LIMIT = 150_000;
+
     /*//////////////////////////////////////////////////////////////
                                  TYPES
     //////////////////////////////////////////////////////////////*/
@@ -111,6 +114,9 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
     /// @notice Open (created, not yet unlocked) orders per universal account id.
     mapping(bytes32 => uint256) public inFlightOf;
 
+    /// @notice Unlocked payouts awaiting claim: recipient => token => amount.
+    mapping(address => mapping(address => uint256)) public claimable;
+
     /// @notice Tracks manager permissions for addresses
     mapping(address => bool) public managers;
 
@@ -161,6 +167,16 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
     event OrderUnlocked(bytes32 indexed orderHash, bytes32 indexed recipient, bytes32 indexed nullifierHash);
 
     /**
+     * @notice Emitted when an unlock credits a claimable payout.
+     */
+    event PayoutCredited(address indexed recipient, address indexed token, uint256 amount);
+
+    /**
+     * @notice Emitted when a payout is claimed.
+     */
+    event PayoutClaimed(address indexed recipient, address indexed token, uint256 amount);
+
+    /**
      * @notice Emitted when a manager's status is updated
      */
     event UpdateManager(address indexed manager, bool status);
@@ -170,6 +186,8 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
     //////////////////////////////////////////////////////////////*/
 
     error OrderPortal__InvalidProof();
+    error OrderPortal__NothingToClaim();
+    error OrderPortal__SelfCallOnly();
     error OrderPortal__RoutesZeroAddress(address orderToken, bytes32 adToken);
     error OrderPortal__AdChainNotSupported(uint256 adChainId);
     error OrderPortal__ZeroAmount();
@@ -383,13 +401,51 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
 
         address orderTokenAddr = params.orderChainToken.toAddressChecked();
         address adRecipientAddr = params.adRecipient.toAddressChecked();
-        if (orderTokenAddr.isNative()) {
-            wNativeToken.safeWithdrawTo(params.amount, adRecipientAddr);
-        } else {
-            IERC20(orderTokenAddr).safeTransfer(adRecipientAddr, params.amount);
-        }
+        _payOrCredit(adRecipientAddr, orderTokenAddr, params.amount);
 
         emit OrderUnlocked(orderHash, params.adRecipient, nullifierHash);
+    }
+
+    /**
+     * @notice Pay out a credited unlock. Permissionless: funds can only go to
+     *         the credited recipient.
+     */
+    function claim(address recipient, address token) external nonReentrant whenNotPaused {
+        uint256 amount = claimable[recipient][token];
+        if (amount == 0) revert OrderPortal__NothingToClaim();
+        claimable[recipient][token] = 0;
+
+        if (token.isNative()) {
+            wNativeToken.safeWithdrawTo(amount, recipient);
+        } else {
+            IERC20(token).safeTransfer(recipient, amount);
+        }
+        emit PayoutClaimed(recipient, token, amount);
+    }
+
+    /**
+     * @notice Best-effort direct transfer; on any failure the payout becomes
+     *         claimable so a recipient can never block settlement.
+     */
+    function _payOrCredit(address recipient, address token, uint256 amount) private {
+        try this.directPayout{gas: _PAYOUT_GAS_LIMIT}(recipient, token, amount) {}
+        catch {
+            claimable[recipient][token] += amount;
+            emit PayoutCredited(recipient, token, amount);
+        }
+    }
+
+    /**
+     * @notice The payout transfer, self-callable only (makes it catchable).
+     */
+    function directPayout(address recipient, address token, uint256 amount) external {
+        if (msg.sender != address(this)) revert OrderPortal__SelfCallOnly();
+
+        if (token.isNative()) {
+            wNativeToken.safeWithdrawTo(amount, recipient);
+        } else {
+            IERC20(token).safeTransfer(recipient, amount);
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
