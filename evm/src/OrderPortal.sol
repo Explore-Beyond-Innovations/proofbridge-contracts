@@ -11,6 +11,7 @@ import {IwNativeToken, SafeNativeToken} from "./wNativeToken.sol";
 import {DecimalScaling} from "./libraries/DecimalScaling.sol";
 import {OrderHash} from "./libraries/OrderHash.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
+import {RootVerifierRegistry} from "./libraries/RootVerifierRegistry.sol";
 import {AddressCast} from "./libraries/AddressCast.sol";
 
 /**
@@ -22,7 +23,7 @@ import {AddressCast} from "./libraries/AddressCast.sol";
  *         The contract computes a minimal-domain EIP-712 order hash that serves as the canonical
  *         order identifier across components. Signatures are verified off-chain by a verifier.
  */
-contract OrderPortal is AccessControl, ReentrancyGuardTransient {
+contract OrderPortal is AccessControl, ReentrancyGuardTransient, RootVerifierRegistry {
     using SafeERC20 for IERC20;
     using SafeNativeToken for IwNativeToken;
     using AddressCast for address;
@@ -104,6 +105,9 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient {
 
     /// @notice Consumed nullifiers to prevent double-use across the system.
     mapping(bytes32 => bool) public nullifierUsed;
+
+    /// @notice Open (created, not yet unlocked) orders per universal account id.
+    mapping(bytes32 => uint256) public inFlightOf;
 
     /// @notice Tracks manager permissions for addresses
     mapping(address => bool) public managers;
@@ -233,6 +237,13 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient {
         emit ChainSet(adChainId, bytes32(0), false);
     }
 
+    /**
+     * @notice Set the root-verification module for a source chain.
+     */
+    function setRootVerifier(uint256 chainId, address verifier) external onlyRole(ADMIN_ROLE) {
+        _setRootVerifier(chainId, verifier);
+    }
+
     /*//////////////////////////////////////////////////////////////
                           ADMIN: TOKEN ROUTES
     //////////////////////////////////////////////////////////////*/
@@ -293,6 +304,8 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient {
         if (!i_merkleManager.appendOrderHash(orderHash, 1)) revert OrderPortal__MerkleManagerAppendFailed();
 
         orders[orderHash] = Status.Open;
+        inFlightOf[params.adCreator]++;
+        inFlightOf[params.bridger]++;
 
         requestHashes[message] = true;
 
@@ -324,7 +337,8 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient {
         OrderParams calldata params,
         bytes32 nullifierHash,
         bytes32 targetRoot,
-        bytes calldata proof
+        bytes calldata proof,
+        bytes calldata cosigData
     ) external nonReentrant {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
 
@@ -337,6 +351,12 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient {
 
         _consumeAuth(message, authToken, timeToExpire, signature);
 
+        // Gate 2 — root authenticity. Enforced once the route's module is
+        // configured; mandatory at the pre-auth cutover.
+        if (address(rootVerifier[params.adChainId]) != address(0)) {
+            _requireRootValid(params.adChainId, targetRoot, abi.encode(params.adCreator, params.bridger, cosigData));
+        }
+
         bytes32[] memory publicInputs = RequestAuth.buildPublicInputs(
             i_merkleManager, nullifierHash, targetRoot, orderHash, _PUBLIC_INPUT_SIDE_ORDER
         );
@@ -345,6 +365,8 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient {
 
         nullifierUsed[nullifierHash] = true;
         orders[orderHash] = Status.Filled;
+        inFlightOf[params.adCreator]--;
+        inFlightOf[params.bridger]--;
 
         requestHashes[message] = true;
 
@@ -362,6 +384,14 @@ contract OrderPortal is AccessControl, ReentrancyGuardTransient {
     /*//////////////////////////////////////////////////////////////
                                VIEWS
     //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice BLSKeyRegistry revoke guard: true while the account has an
+     *         order created but not yet unlocked.
+     */
+    function hasOpenPositions(bytes32 account) external view returns (bool) {
+        return inFlightOf[account] > 0;
+    }
 
     /**
      * @notice Return configured destination token for a route.

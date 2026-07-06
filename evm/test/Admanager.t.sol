@@ -66,7 +66,7 @@ contract AdManagerTest is Test {
     bytes32 authToken;
     uint256 timeToLive;
 
-    function setUp() public {
+    function setUp() public virtual {
         (admin, adminPk) = makeAddrAndKey("admin");
         verifier = new MockVerifier(true);
         merkleManager = new MerkleManager(admin, address(new Poseidon2Yul()));
@@ -1062,7 +1062,7 @@ contract AdManagerTest is Test {
 
         vm.prank(bridger);
         vm.expectRevert(abi.encodeWithSelector(AdManager.AdManager__OrderNotOpen.selector, expected));
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32(uint256(1)), bytes32(0), hex"");
+        adManager.unlock(signature, authToken, timeToLive, p, bytes32(uint256(1)), bytes32(0), hex"", hex"");
     }
 
     function _openOrder(
@@ -1111,7 +1111,7 @@ contract AdManagerTest is Test {
 
         // First unlock succeeds
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p1, nullifier, t_root, hex"");
+        adManager.unlock(signature, authToken, timeToLive, p1, nullifier, t_root, hex"", hex"");
 
         /// get auth
         (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, oh2, t_root);
@@ -1119,7 +1119,7 @@ contract AdManagerTest is Test {
         // Second unlock with the same nullifier on a different (still open) order
         vm.prank(bridger);
         vm.expectRevert(abi.encodeWithSelector(AdManager.AdManager__NullifierUsed.selector, nullifier));
-        adManager.unlock(signature, authToken, timeToLive, p2, nullifier, t_root, hex"");
+        adManager.unlock(signature, authToken, timeToLive, p2, nullifier, t_root, hex"", hex"");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1146,7 +1146,7 @@ contract AdManagerTest is Test {
 
         vm.prank(bridger);
         vm.expectRevert(AdManager.AdManager__InvalidProof.selector);
-        adManager.unlock(signature, authToken, timeToLive, p, keccak256("X"), t_root, hex"");
+        adManager.unlock(signature, authToken, timeToLive, p, keccak256("X"), t_root, hex"", hex"");
 
         // State unchanged
         (AdManager.Status statusAfter) = adManager.orders(orderHash);
@@ -1180,7 +1180,7 @@ contract AdManagerTest is Test {
 
         // Verify success
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32("N1"), targetRoot, hex"");
+        adManager.unlock(signature, authToken, timeToLive, p, bytes32("N1"), targetRoot, hex"", hex"");
 
         // Status -> Filled
         (AdManager.Status status) = adManager.orders(orderHash);
@@ -1201,7 +1201,7 @@ contract AdManagerTest is Test {
 
         vm.prank(bridger);
         vm.expectRevert(abi.encodeWithSelector(AdManager.AdManager__OrderNotOpen.selector, orderHash));
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32("N1"), targetRoot, hex"");
+        adManager.unlock(signature, authToken, timeToLive, p, bytes32("N1"), targetRoot, hex"", hex"");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1224,7 +1224,7 @@ contract AdManagerTest is Test {
 
         // Verify success
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32("N2"), targetRoot, hex"");
+        adManager.unlock(signature, authToken, timeToLive, p, bytes32("N2"), targetRoot, hex"", hex"");
 
         // status
         (AdManager.Status status) = adManager.orders(orderHash);
@@ -1265,7 +1265,7 @@ contract AdManagerTest is Test {
         (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, targetRoot);
 
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32("NBAL"), targetRoot, hex"");
+        adManager.unlock(signature, authToken, timeToLive, p, bytes32("NBAL"), targetRoot, hex"", hex"");
 
         (,,,, uint256 balanceAfter, uint256 lockedAfter,) = adManager.ads(p.adId);
         uint256 contractBalAfter = adToken.balanceOf(address(adManager));
@@ -1301,7 +1301,7 @@ contract AdManagerTest is Test {
         (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, targetRoot);
 
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32("NDRN"), targetRoot, hex"");
+        adManager.unlock(signature, authToken, timeToLive, p, bytes32("NDRN"), targetRoot, hex"", hex"");
 
         uint256 remaining = totalDeposited - lockAmt;
 
@@ -1342,7 +1342,7 @@ contract AdManagerTest is Test {
         (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, targetRoot);
 
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32("NCLS"), targetRoot, hex"");
+        adManager.unlock(signature, authToken, timeToLive, p, bytes32("NCLS"), targetRoot, hex"", hex"");
 
         uint256 closeRecipientBalBefore = adToken.balanceOf(other);
 

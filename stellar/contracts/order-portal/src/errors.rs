@@ -94,6 +94,8 @@ pub enum OrderPortalError {
     OrderDecimalsMismatch = 63,
     /// Signed adDecimals does not match on-chain token decimals
     AdDecimalsMismatch = 64,
+    /// Gate 2: the root-verification module rejected the target root.
+    RootNotValid = 65,
 
     // ==========================================================================
     // Address Decode Errors (70-80)

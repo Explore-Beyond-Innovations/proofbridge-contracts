@@ -580,7 +580,7 @@ contract ProofBridge is Test {
         (authToken, timeToLive, signature) = generateOrderChainUnlockOrderRequestHash(adId, orderHash, adChainRoot);
 
         vm.prank(maker);
-        orderPortal.unlock(signature, authToken, timeToLive, orderChainParams, makerNullifierHash, adChainRoot, proof);
+        orderPortal.unlock(signature, authToken, timeToLive, orderChainParams, makerNullifierHash, adChainRoot, proof, hex"");
 
         // Verify final balances
         uint256 orderPortalBalanceAfter = orderToken.balanceOf(address(orderPortal));
@@ -639,7 +639,7 @@ contract ProofBridge is Test {
         // verify and fulfill order
         vm.prank(maker);
         vm.expectRevert(); // should revert because the nullifier is not for the bridger
-        adManager.unlock(signature, authToken, timeToLive, adChainParams, makerNullifierHash, orderChainRoot, proof);
+        adManager.unlock(signature, authToken, timeToLive, adChainParams, makerNullifierHash, orderChainRoot, proof, hex"");
 
         vm.chainId(neutral);
     }
@@ -727,7 +727,7 @@ contract ProofBridge is Test {
 
         // Verify and fulfill order
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, adChainParams, bridgerNullifierHash, orderChainRoot, proof);
+        adManager.unlock(signature, authToken, timeToLive, adChainParams, bridgerNullifierHash, orderChainRoot, proof, hex"");
 
         // Check balances after
         uint256 adManagerBalanceAfter = adToken.balanceOf(address(adManager));
@@ -784,7 +784,7 @@ contract ProofBridge is Test {
         // verify and fulfill order
         vm.prank(bridger);
         vm.expectRevert(); // should revert because the nullifier is not for the maker
-        orderPortal.unlock(signature, authToken, timeToLive, orderChainParams, bridgerNullifierHash, adChainRoot, proof);
+        orderPortal.unlock(signature, authToken, timeToLive, orderChainParams, bridgerNullifierHash, adChainRoot, proof, hex"");
 
         vm.chainId(neutral);
     }
@@ -836,14 +836,14 @@ contract ProofBridge is Test {
 
         // verify and fulfill order
         vm.prank(maker);
-        orderPortal.unlock(signature, authToken, timeToLive, orderChainParams, makerNullifierHash, adChainRoot, proof);
+        orderPortal.unlock(signature, authToken, timeToLive, orderChainParams, makerNullifierHash, adChainRoot, proof, hex"");
 
         // get another auth
         (authToken, timeToLive, signature) = generateOrderChainUnlockOrderRequestHash(adId, orderHash, adChainRoot);
 
         vm.prank(maker);
         vm.expectRevert();
-        orderPortal.unlock(signature, authToken, timeToLive, orderChainParams, makerNullifierHash, adChainRoot, proof);
+        orderPortal.unlock(signature, authToken, timeToLive, orderChainParams, makerNullifierHash, adChainRoot, proof, hex"");
 
         vm.chainId(neutral);
     }
@@ -893,13 +893,13 @@ contract ProofBridge is Test {
 
         // Verify and fulfill order
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, adChainParams, bridgerNullifierHash, orderChainRoot, proof);
+        adManager.unlock(signature, authToken, timeToLive, adChainParams, bridgerNullifierHash, orderChainRoot, proof, hex"");
 
         // Get another auth
         (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, orderChainRoot);
 
         vm.prank(bridger);
         vm.expectRevert();
-        adManager.unlock(signature, authToken, timeToLive, adChainParams, bridgerNullifierHash, orderChainRoot, proof);
+        adManager.unlock(signature, authToken, timeToLive, adChainParams, bridgerNullifierHash, orderChainRoot, proof, hex"");
     }
 }

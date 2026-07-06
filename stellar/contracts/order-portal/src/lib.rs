@@ -136,6 +136,18 @@ impl OrderPortalContract {
     }
 
     /// Remove a destination chain configuration.
+    pub fn set_root_verifier(
+        env: Env,
+        chain_id: u128,
+        module: Address,
+    ) -> Result<(), OrderPortalError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        storage::set_root_verifier(&env, chain_id, &module);
+        events::RootVerifierSet { chain_id, module }.publish(&env);
+        Ok(())
+    }
+
     pub fn remove_chain(env: Env, ad_chain_id: u128) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
@@ -280,6 +292,16 @@ impl OrderPortalContract {
         cross_contract::append_to_merkle(&env, &config.merkle_manager, &order_hash, 1)?;
 
         storage::set_order_status(&env, &order_hash, Status::Open);
+        storage::set_in_flight(
+            &env,
+            &params.ad_creator,
+            storage::get_in_flight(&env, &params.ad_creator) + 1,
+        );
+        storage::set_in_flight(
+            &env,
+            &params.bridger,
+            storage::get_in_flight(&env, &params.bridger) + 1,
+        );
         storage::set_request_hash_used(&env, &message);
 
         events::OrderCreated {
@@ -318,6 +340,7 @@ impl OrderPortalContract {
         nullifier_hash: BytesN<32>,
         target_root: BytesN<32>,
         proof: Bytes,
+        cosig_data: Bytes,
     ) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
 
@@ -368,10 +391,36 @@ impl OrderPortalContract {
             &target_root,
             &order_hash,
         );
+        // Gate 2 - root authenticity. Enforced once the route's module is
+        // configured; mandatory at the pre-auth cutover.
+        if let Some(module) = storage::get_root_verifier(&env, params.ad_chain_id) {
+            if !proofbridge_core::cross_contract::is_root_valid(
+                &env,
+                &module,
+                params.ad_chain_id,
+                &target_root,
+                &params.ad_creator,
+                &params.bridger,
+                &cosig_data,
+            ) {
+                return Err(OrderPortalError::RootNotValid);
+            }
+        }
+
         cross_contract::verify_proof(&env, &config.verifier, &public_inputs, &proof)?;
 
         storage::set_nullifier_used(&env, &nullifier_hash);
         storage::set_order_status(&env, &order_hash, Status::Filled);
+        storage::set_in_flight(
+            &env,
+            &params.ad_creator,
+            storage::get_in_flight(&env, &params.ad_creator) - 1,
+        );
+        storage::set_in_flight(
+            &env,
+            &params.bridger,
+            storage::get_in_flight(&env, &params.bridger) - 1,
+        );
         storage::set_request_hash_used(&env, &message);
 
         // Transfer tokens to ad_recipient (the maker's recipient on this chain)
@@ -399,6 +448,12 @@ impl OrderPortalContract {
     // =========================================================================
 
     /// Get destination token for a route.
+    /// BLSKeyRegistry revoke guard: true while the account has an order
+    /// created but not yet unlocked.
+    pub fn has_open_positions(env: Env, account: BytesN<32>) -> bool {
+        storage::get_in_flight(&env, &account) > 0
+    }
+
     pub fn get_dest_token(env: Env, order_token: BytesN<32>, ad_chain_id: u128) -> BytesN<32> {
         storage::get_token_route(&env, &order_token, ad_chain_id)
             .unwrap_or(BytesN::from_array(&env, &[0u8; 32]))

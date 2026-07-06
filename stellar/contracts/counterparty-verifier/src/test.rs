@@ -97,18 +97,19 @@ impl Setup {
     fn metadata_with(&self, pk_maker: &[u8], agg_sig: &[u8]) -> Bytes {
         let v = &self.v;
         let auth = &v["settlement"]["auth"];
-        let mut out = std::vec![1u8];
-        out.extend_from_slice(&self.order_chain_id.to_be_bytes());
-        out.extend_from_slice(&self.ad_chain_id.to_be_bytes());
-        out.extend_from_slice(&hexval(&auth["orderHash"]));
-        out.extend_from_slice(&hexval(&auth["orderChainRoot"]));
-        out.extend_from_slice(&hexval(&auth["adChainRoot"]));
+        let mut out = std::vec::Vec::new();
         out.extend_from_slice(&hexval(
             &v["registration"]["makerOnStellarTestnet"]["account"],
         ));
         out.extend_from_slice(&hexval(
             &v["registration"]["bridgerOnStellarTestnet"]["account"],
         ));
+        out.push(1u8);
+        out.extend_from_slice(&self.order_chain_id.to_be_bytes());
+        out.extend_from_slice(&self.ad_chain_id.to_be_bytes());
+        out.extend_from_slice(&hexval(&auth["orderHash"]));
+        out.extend_from_slice(&hexval(&auth["orderChainRoot"]));
+        out.extend_from_slice(&hexval(&auth["adChainRoot"]));
         out.extend_from_slice(pk_maker);
         out.extend_from_slice(&hexval(&v["keys"]["bridgerBls"]["pk"]["uncompressed"]));
         out.extend_from_slice(agg_sig);
@@ -155,7 +156,7 @@ fn wrong_version_fails() {
     let m = s.metadata();
     let mut raw = [0u8; 577];
     m.copy_into_slice(&mut raw);
-    raw[0] = 2;
+    raw[64] = 2;
     let m2 = Bytes::from_slice(&s.env, &raw);
     assert!(!s
         .verifier
@@ -220,10 +221,10 @@ fn tampered_root_in_auth_fails() {
     let m = s.metadata();
     let mut raw = [0u8; 577];
     m.copy_into_slice(&mut raw);
-    raw[96] ^= 0x01; // last byte of order_chain_root (offset 65..97)
+    raw[160] ^= 0x01; // last byte of order_chain_root (offset 129..161)
     let m2 = Bytes::from_slice(&s.env, &raw);
     let mut tampered = [0u8; 32];
-    tampered.copy_from_slice(&raw[65..97]);
+    tampered.copy_from_slice(&raw[129..161]);
     let tampered_root = BytesN::from_array(&s.env, &tampered);
     // root matches the (tampered) auth, but the aggSig was made over the real one
     assert!(!s

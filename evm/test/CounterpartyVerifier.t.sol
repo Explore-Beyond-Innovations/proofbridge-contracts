@@ -84,7 +84,9 @@ contract CounterpartyVerifierTest is Test {
             orderChainRoot: orderChainRoot,
             adChainRoot: adChainRoot
         });
-        return abi.encode(uint8(1), auth, maker, bridger, pkMaker, v.readBytes(".keys.bridgerBls.pk.eip2537"), aggSig);
+        bytes memory moduleData =
+            abi.encode(uint8(1), auth, pkMaker, v.readBytes(".keys.bridgerBls.pk.eip2537"), aggSig);
+        return abi.encode(maker, bridger, moduleData);
     }
 
     // =========================================================================
@@ -106,9 +108,23 @@ contract CounterpartyVerifierTest is Test {
     }
 
     function test_wrongVersionFails() public view {
-        bytes memory m = metadata();
-        m[31] = 0x02; // version word
-        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, m));
+        CounterpartyVerifier.SettlementAuth memory auth = CounterpartyVerifier.SettlementAuth({
+            orderChainId: orderChainId,
+            adChainId: adChainId,
+            orderHash: v.readBytes32(".settlement.auth.orderHash"),
+            orderChainRoot: orderChainRoot,
+            adChainRoot: adChainRoot
+        });
+        bytes memory moduleData = abi.encode(
+            uint8(2),
+            auth,
+            v.readBytes(".keys.makerBls.pk.eip2537"),
+            v.readBytes(".keys.bridgerBls.pk.eip2537"),
+            v.readBytes(".settlement.aggSig.eip2537")
+        );
+        assertFalse(
+            verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, moduleData))
+        );
     }
 
     function test_pkNotMatchingCommitmentFails() public view {
@@ -157,15 +173,17 @@ contract CounterpartyVerifierTest is Test {
             orderChainRoot: bytes32(uint256(orderChainRoot) ^ 1),
             adChainRoot: adChainRoot
         });
-        bytes memory m = abi.encode(
+        bytes memory moduleData = abi.encode(
             uint8(1),
             auth,
-            maker,
-            bridger,
             v.readBytes(".keys.makerBls.pk.eip2537"),
             v.readBytes(".keys.bridgerBls.pk.eip2537"),
             v.readBytes(".settlement.aggSig.eip2537")
         );
-        assertFalse(verifier.isRootValid(orderChainId, bytes32(uint256(orderChainRoot) ^ 1), m));
+        assertFalse(
+            verifier.isRootValid(
+                orderChainId, bytes32(uint256(orderChainRoot) ^ 1), abi.encode(maker, bridger, moduleData)
+            )
+        );
     }
 }

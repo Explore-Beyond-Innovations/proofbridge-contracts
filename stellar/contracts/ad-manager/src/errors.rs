@@ -100,6 +100,8 @@ pub enum AdManagerError {
     OrderDecimalsMismatch = 37,
     /// Signed adDecimals does not match on-chain token decimals
     AdDecimalsMismatch = 38,
+    /// Gate 2: the root-verification module rejected the target root.
+    RootNotValid = 39,
 
     // Address decode errors (40-41)
     /// Recipient bytes do not decode to a valid Stellar account address

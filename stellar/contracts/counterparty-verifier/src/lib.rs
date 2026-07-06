@@ -35,8 +35,8 @@ const SETTLE_TAG: [u8; 32] = [
 ];
 
 const METADATA_VERSION: u8 = 1;
-/// version(1) + chainIds(2*16) + orderHash/roots(3*32) + accounts(2*32)
-/// + pks(2*96) + aggSig(192)
+/// maker(32) || bridger(32) || moduleData: version(1) || chainIds(2*16)
+/// || orderHash/roots(3*32) || pks(2*96) || aggSig(192)
 const METADATA_LEN: u32 = 577;
 
 const KEY_INIT: Symbol = symbol_short!("init");
@@ -66,7 +66,7 @@ impl CounterpartyVerifier {
         root: BytesN<32>,
         metadata: Bytes,
     ) -> bool {
-        if metadata.len() != METADATA_LEN || metadata.get(0) != Some(METADATA_VERSION) {
+        if metadata.len() != METADATA_LEN || metadata.get(64) != Some(METADATA_VERSION) {
             return false;
         }
         let m = Metadata::decode(&env, &metadata);
@@ -110,18 +110,18 @@ struct Metadata {
 }
 
 impl Metadata {
-    /// Fixed layout v1: version(1) || orderChainId(16) || adChainId(16) ||
-    /// orderHash(32) || orderChainRoot(32) || adChainRoot(32) || maker(32) ||
-    /// bridger(32) || pkMaker(96) || pkBridger(96) || aggSig(192)
+    /// maker(0) || bridger(32) || version(64) || orderChainId(65) ||
+    /// adChainId(81) || orderHash(97) || orderChainRoot(129) ||
+    /// adChainRoot(161) || pkMaker(193) || pkBridger(289) || aggSig(385)
     fn decode(env: &Env, b: &Bytes) -> Metadata {
         Metadata {
-            order_chain_id: u128::from_be_bytes(arr::<16>(b, 1)),
-            ad_chain_id: u128::from_be_bytes(arr::<16>(b, 17)),
-            order_hash: BytesN::from_array(env, &arr::<32>(b, 33)),
-            order_chain_root: BytesN::from_array(env, &arr::<32>(b, 65)),
-            ad_chain_root: BytesN::from_array(env, &arr::<32>(b, 97)),
-            maker: BytesN::from_array(env, &arr::<32>(b, 129)),
-            bridger: BytesN::from_array(env, &arr::<32>(b, 161)),
+            maker: BytesN::from_array(env, &arr::<32>(b, 0)),
+            bridger: BytesN::from_array(env, &arr::<32>(b, 32)),
+            order_chain_id: u128::from_be_bytes(arr::<16>(b, 65)),
+            ad_chain_id: u128::from_be_bytes(arr::<16>(b, 81)),
+            order_hash: BytesN::from_array(env, &arr::<32>(b, 97)),
+            order_chain_root: BytesN::from_array(env, &arr::<32>(b, 129)),
+            ad_chain_root: BytesN::from_array(env, &arr::<32>(b, 161)),
             pk_maker: BytesN::from_array(env, &arr::<96>(b, 193)),
             pk_bridger: BytesN::from_array(env, &arr::<96>(b, 289)),
             agg_sig: BytesN::from_array(env, &arr::<192>(b, 385)),

@@ -69,3 +69,10 @@ pub struct OrderUnlocked {
     pub recipient: BytesN<32>,
     pub nullifier_hash: BytesN<32>,
 }
+
+#[contractevent(topics = ["rverif"], data_format = "single-value")]
+pub struct RootVerifierSet {
+    #[topic]
+    pub chain_id: u128,
+    pub module: Address,
+}

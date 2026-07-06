@@ -12,6 +12,7 @@ import {DecimalScaling} from "./libraries/DecimalScaling.sol";
 import {OrderHash} from "./libraries/OrderHash.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {AddressCast} from "./libraries/AddressCast.sol";
+import {RootVerifierRegistry} from "./libraries/RootVerifierRegistry.sol";
 
 /**
  * @title AdManager (Proofbridge)
@@ -20,7 +21,7 @@ import {AddressCast} from "./libraries/AddressCast.sol";
  * @notice Makers (LPs) post/close liquidity ads, lock funds against EIP-712 orders,
  *         and bridgers unlock on this chain with a proof checked by an external verifier.
  */
-contract AdManager is AccessControl, ReentrancyGuardTransient {
+contract AdManager is AccessControl, ReentrancyGuardTransient, RootVerifierRegistry {
     using SafeERC20 for IERC20;
     using SafeNativeToken for IwNativeToken;
     using AddressCast for address;
@@ -139,6 +140,9 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
 
     /// @notice Ad Ids mapping
     mapping(string => bool) public adIds;
+
+    /// @notice Open (locked, not yet unlocked) orders per universal account id.
+    mapping(bytes32 => uint256) public inFlightOf;
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -292,6 +296,13 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
     function removeChain(uint256 orderChainId) external onlyRole(ADMIN_ROLE) {
         delete chains[orderChainId];
         emit ChainSet(orderChainId, bytes32(0), false);
+    }
+
+    /**
+     * @notice Set the root-verification module for a source chain.
+     */
+    function setRootVerifier(uint256 chainId, address verifier) external onlyRole(ADMIN_ROLE) {
+        _setRootVerifier(chainId, verifier);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -501,6 +512,8 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
 
         ad.locked += adAmount;
         orders[orderHash] = Status.Open;
+        inFlightOf[params.adCreator]++;
+        inFlightOf[params.bridger]++;
 
         // locks are unlocked on the order side (ad_contract = 0), so bind the leaf with side 0
         if (!i_merkleManager.appendOrderHash(orderHash, 0)) revert AdManager__MerkleManagerAppendFailed();
@@ -524,7 +537,8 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
         OrderParams calldata params,
         bytes32 nullifierHash,
         bytes32 targetRoot,
-        bytes calldata proof
+        bytes calldata proof,
+        bytes calldata cosigData
     ) external nonReentrant {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
 
@@ -537,6 +551,14 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
 
         _consumeAuth(message, authToken, timeToExpire, signature);
 
+        // Gate 2 — root authenticity. Enforced once the route's module is
+        // configured; mandatory at the pre-auth cutover.
+        if (address(rootVerifier[params.orderChainId]) != address(0)) {
+            _requireRootValid(
+                params.orderChainId, targetRoot, abi.encode(params.adCreator, params.bridger, cosigData)
+            );
+        }
+
         bytes32[] memory publicInputs =
             RequestAuth.buildPublicInputs(i_merkleManager, nullifierHash, targetRoot, orderHash, _PUBLIC_INPUT_SIDE_AD);
 
@@ -544,6 +566,8 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
 
         nullifierUsed[nullifierHash] = true;
         orders[orderHash] = Status.Filled;
+        inFlightOf[params.adCreator]--;
+        inFlightOf[params.bridger]--;
 
         requestHashes[message] = true;
 
@@ -568,6 +592,14 @@ contract AdManager is AccessControl, ReentrancyGuardTransient {
     /*//////////////////////////////////////////////////////////////
                                  VIEWS
     //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice BLSKeyRegistry revoke guard: true while the account has an
+     *         order locked but not yet unlocked.
+     */
+    function hasOpenPositions(bytes32 account) external view returns (bool) {
+        return inFlightOf[account] > 0;
+    }
 
     /**
      * @notice Return the currently available (unlocked) liquidity for an ad.

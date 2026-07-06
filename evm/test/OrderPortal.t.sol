@@ -64,7 +64,7 @@ contract OrderPortalTest is Test {
     bytes32 authToken;
     uint256 timeToLive;
 
-    function setUp() public {
+    function setUp() public virtual {
         (admin, adminPk) = makeAddrAndKey("admin");
         verifier = new MockVerifier(true);
         merkleManager = new MerkleManager(admin, address(new Poseidon2Yul()));
@@ -552,7 +552,7 @@ contract OrderPortalTest is Test {
         (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(p.adId, orderHash, t_root);
 
         vm.expectRevert(abi.encodeWithSelector(OrderPortal.OrderPortal__OrderNotOpen.selector, orderHash));
-        portal.unlock(signature, authToken, timeToLive, p, bytes32("N"), t_root, hex"");
+        portal.unlock(signature, authToken, timeToLive, p, bytes32("N"), t_root, hex"", hex"");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -576,14 +576,14 @@ contract OrderPortalTest is Test {
             p.adRecipient, // NOTE: contract emits dstRecipient in 2nd arg
             bytes32("N")
         );
-        portal.unlock(signature, authToken, timeToLive, p, bytes32("N"), t_root, hex"AA");
+        portal.unlock(signature, authToken, timeToLive, p, bytes32("N"), t_root, hex"AA", hex"");
 
         // get auth again
         (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(p.adId, orderHash, t_root);
 
         // Second unlock with same nullifier reverts
         vm.expectRevert(abi.encodeWithSelector(OrderPortal.OrderPortal__NullifierUsed.selector, bytes32("N")));
-        portal.unlock(signature, authToken, timeToLive, p, bytes32("N"), t_root, hex"BB");
+        portal.unlock(signature, authToken, timeToLive, p, bytes32("N"), t_root, hex"BB", hex"");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -605,7 +605,7 @@ contract OrderPortalTest is Test {
         (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(p.adId, orderHash, t_root);
 
         vm.expectRevert(OrderPortal.OrderPortal__InvalidProof.selector);
-        portal.unlock(signature, authToken, timeToLive, p, bytes32("X"), t_root, hex"");
+        portal.unlock(signature, authToken, timeToLive, p, bytes32("X"), t_root, hex"", hex"");
 
         // Status & balances unchanged
         (OrderPortal.Status status) = portal.orders(orderHash);
@@ -640,7 +640,7 @@ contract OrderPortalTest is Test {
         vm.expectEmit(true, true, true, true);
         emit OrderPortal.OrderUnlocked(orderHash, p.adRecipient, nullifier);
 
-        portal.unlock(signature, authToken, timeToLive, p, nullifier, t_root, proof);
+        portal.unlock(signature, authToken, timeToLive, p, nullifier, t_root, proof, hex"");
 
         // Status moved to Filled
         (OrderPortal.Status status) = portal.orders(orderHash);
@@ -665,12 +665,12 @@ contract OrderPortalTest is Test {
 
         (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(p.adId, orderHash, t_root);
 
-        portal.unlock(signature, authToken, timeToLive, p, bytes32("one"), t_root, hex"");
+        portal.unlock(signature, authToken, timeToLive, p, bytes32("one"), t_root, hex"", hex"");
 
         (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(p.adId, orderHash, t_root);
 
         vm.expectRevert(abi.encodeWithSelector(OrderPortal.OrderPortal__OrderNotOpen.selector, orderHash));
-        portal.unlock(signature, authToken, timeToLive, p, bytes32("two"), t_root, hex"");
+        portal.unlock(signature, authToken, timeToLive, p, bytes32("two"), t_root, hex"", hex"");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -694,7 +694,7 @@ contract OrderPortalTest is Test {
         vm.expectEmit(true, true, true, true);
         emit OrderPortal.OrderUnlocked(orderHash, p.adRecipient, nullifier);
 
-        portal.unlock(signature, authToken, timeToLive, p, nullifier, t_root, proof);
+        portal.unlock(signature, authToken, timeToLive, p, nullifier, t_root, proof, hex"");
 
         // Status moved to Filled
         (OrderPortal.Status status) = portal.orders(orderHash);

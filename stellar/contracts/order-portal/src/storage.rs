@@ -27,6 +27,10 @@ const KEY_MGRS: Symbol = symbol_short!("mgrs");
 const KEY_RTOKENS: Symbol = symbol_short!("rtokens");
 /// Prefix for request hash tracking
 const KEY_RHASHES: Symbol = symbol_short!("rhashes");
+/// Prefix for root-verifier modules: (KEY_RVERIF, chain_id) -> Address
+const KEY_RVERIF: Symbol = symbol_short!("rverif");
+/// Prefix for in-flight order counts: (KEY_INFLT, account) -> u64
+const KEY_INFLT: Symbol = symbol_short!("inflt");
 
 // =============================================================================
 // Instance Storage (Contract-level state)
@@ -217,4 +221,27 @@ pub fn extend_instance_ttl(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
+pub fn set_root_verifier(env: &Env, chain_id: u128, module: &Address) {
+    env.storage()
+        .persistent()
+        .set(&(KEY_RVERIF, chain_id), module);
+}
+
+pub fn get_root_verifier(env: &Env, chain_id: u128) -> Option<Address> {
+    env.storage().persistent().get(&(KEY_RVERIF, chain_id))
+}
+
+pub fn get_in_flight(env: &Env, account: &BytesN<32>) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&(KEY_INFLT, account.clone()))
+        .unwrap_or(0)
+}
+
+pub fn set_in_flight(env: &Env, account: &BytesN<32>, count: u64) {
+    env.storage()
+        .persistent()
+        .set(&(KEY_INFLT, account.clone()), &count);
 }

@@ -29,6 +29,13 @@ pub trait VerifierInterface {
     fn verify_proof(env: Env, public_inputs: Bytes, proof_bytes: Bytes);
 }
 
+/// Typed interface for the pluggable root-authentication seam.
+#[allow(dead_code)]
+#[contractclient(name = "RootVerifierClient")]
+pub trait RootVerifierInterface {
+    fn is_root_valid(env: Env, source_chain_id: u128, root: BytesN<32>, metadata: Bytes) -> bool;
+}
+
 // =============================================================================
 // MerkleManager Helpers
 // =============================================================================
@@ -121,4 +128,25 @@ pub fn build_public_inputs(
     inputs.append(&Bytes::from_slice(env, &chain_flag));
 
     inputs
+}
+
+// =============================================================================
+// RootVerifier Helpers
+// =============================================================================
+
+/// Gate 2: metadata = maker(32) || bridger(32) || cosig_data, accounts from
+/// the hash-bound order params.
+pub fn is_root_valid(
+    env: &Env,
+    module: &Address,
+    source_chain_id: u128,
+    root: &BytesN<32>,
+    maker: &BytesN<32>,
+    bridger: &BytesN<32>,
+    cosig_data: &Bytes,
+) -> bool {
+    let mut metadata = Bytes::from_slice(env, &maker.to_array());
+    metadata.extend_from_slice(&bridger.to_array());
+    metadata.append(cosig_data);
+    RootVerifierClient::new(env, module).is_root_valid(&source_chain_id, root, &metadata)
 }

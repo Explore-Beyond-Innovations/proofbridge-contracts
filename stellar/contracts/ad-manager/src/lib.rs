@@ -136,6 +136,18 @@ impl AdManagerContract {
     }
 
     /// Remove a source chain configuration.
+    pub fn set_root_verifier(
+        env: Env,
+        chain_id: u128,
+        module: Address,
+    ) -> Result<(), AdManagerError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        storage::set_root_verifier(&env, chain_id, &module);
+        events::RootVerifierSet { chain_id, module }.publish(&env);
+        Ok(())
+    }
+
     pub fn remove_chain(env: Env, order_chain_id: u128) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
@@ -583,6 +595,16 @@ impl AdManagerContract {
         ad.locked += ad_amount;
         storage::set_ad(&env, &params.ad_id, &ad);
         storage::set_order_status(&env, &order_hash, Status::Open);
+        storage::set_in_flight(
+            &env,
+            &params.ad_creator,
+            storage::get_in_flight(&env, &params.ad_creator) + 1,
+        );
+        storage::set_in_flight(
+            &env,
+            &params.bridger,
+            storage::get_in_flight(&env, &params.bridger) + 1,
+        );
 
         cross_contract::append_to_merkle(&env, &config.merkle_manager, &order_hash, 0)?;
 
@@ -618,6 +640,7 @@ impl AdManagerContract {
         nullifier_hash: BytesN<32>,
         target_root: BytesN<32>,
         proof: Bytes,
+        cosig_data: Bytes,
     ) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
 
@@ -661,6 +684,22 @@ impl AdManagerContract {
             &public_key,
         )?;
 
+        // Gate 2 - root authenticity. Enforced once the route's module is
+        // configured; mandatory at the pre-auth cutover.
+        if let Some(module) = storage::get_root_verifier(&env, params.order_chain_id) {
+            if !proofbridge_core::cross_contract::is_root_valid(
+                &env,
+                &module,
+                params.order_chain_id,
+                &target_root,
+                &params.ad_creator,
+                &params.bridger,
+                &cosig_data,
+            ) {
+                return Err(AdManagerError::RootNotValid);
+            }
+        }
+
         let public_inputs = cross_contract::build_public_inputs(
             &env,
             &config.merkle_manager,
@@ -672,6 +711,16 @@ impl AdManagerContract {
 
         storage::set_nullifier_used(&env, &nullifier_hash);
         storage::set_order_status(&env, &order_hash, Status::Filled);
+        storage::set_in_flight(
+            &env,
+            &params.ad_creator,
+            storage::get_in_flight(&env, &params.ad_creator) - 1,
+        );
+        storage::set_in_flight(
+            &env,
+            &params.bridger,
+            storage::get_in_flight(&env, &params.bridger) - 1,
+        );
         storage::set_request_hash_used(&env, &message);
 
         // Update ad and transfer tokens (scale signed amount to ad-chain precision)
@@ -710,6 +759,12 @@ impl AdManagerContract {
     // =========================================================================
     // View Functions
     // =========================================================================
+
+    /// BLSKeyRegistry revoke guard: true while the account has an order
+    /// locked but not yet unlocked.
+    pub fn has_open_positions(env: Env, account: BytesN<32>) -> bool {
+        storage::get_in_flight(&env, &account) > 0
+    }
 
     /// Get available (unlocked) liquidity for an ad.
     pub fn available_liquidity(env: Env, ad_id: String) -> u128 {

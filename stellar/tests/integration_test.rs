@@ -708,6 +708,7 @@ fn test_ad_manager_unlock_with_bridger_proof() {
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
         &bytes32_to_bytesn(&s.env, &s.tp.order_root),
         &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
     );
 
     // Verify order is now Filled
@@ -763,6 +764,7 @@ fn test_order_portal_create_and_unlock() {
         &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
         &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
         &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
+        &Bytes::new(&s.env),
     );
 
     assert_eq!(
@@ -824,6 +826,7 @@ fn test_full_cross_chain_flow() {
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
         &bridger_target_root,
         &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
     );
 
     assert_eq!(
@@ -847,6 +850,7 @@ fn test_full_cross_chain_flow() {
         &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
         &adcreator_target_root,
         &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
+        &Bytes::new(&s.env),
     );
 
     assert_eq!(
@@ -879,6 +883,7 @@ fn test_nullifier_prevents_double_unlock() {
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
         &bytes32_to_bytesn(&s.env, &s.tp.order_root),
         &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
     );
 
     // Second unlock should fail (order already filled)
@@ -894,7 +899,183 @@ fn test_nullifier_prevents_double_unlock() {
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
         &bytes32_to_bytesn(&s.env, &s.tp.order_root),
         &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
     );
 
     assert!(result.is_err(), "Double unlock must fail");
+}
+
+// ============================================================================
+// Gate 2 — root-verification module wiring (1.2c)
+// ============================================================================
+
+mod counterparty_verifier_contract {
+    soroban_sdk::contractimport!(file = "target/wasm32v1-none/release/counterparty_verifier.wasm");
+}
+
+#[soroban_sdk::contract]
+pub struct MockRootVerifier;
+
+#[soroban_sdk::contractimpl]
+impl MockRootVerifier {
+    pub fn set_ok(env: Env, ok: bool) {
+        env.storage()
+            .instance()
+            .set(&soroban_sdk::symbol_short!("ok"), &ok);
+    }
+
+    pub fn is_root_valid(
+        env: Env,
+        _source_chain_id: u128,
+        _root: BytesN<32>,
+        _metadata: Bytes,
+    ) -> bool {
+        env.storage()
+            .instance()
+            .get(&soroban_sdk::symbol_short!("ok"))
+            .unwrap_or(false)
+    }
+}
+
+fn locked_ad_order(s: &mut TestSetup) -> ad_manager_contract::OrderParams {
+    let params = ad_manager_order_params(&s.env, &s.tp);
+    let lock_params = lock_for_order_params(&s.tp.ad_id, &s.tp.order_hash);
+    let (sig, tok, exp) = s.sign_ad_manager_request("lockForOrder", &lock_params);
+    s.ad_manager
+        .lock_for_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+    params
+}
+
+fn ad_unlock(s: &mut TestSetup, params: &ad_manager_contract::OrderParams, cosig: &Bytes) -> bool {
+    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.order_root);
+    let (sig, tok, exp) = s.sign_ad_manager_request("unlockOrder", &unlock_params);
+    s.ad_manager
+        .try_unlock(
+            &sig,
+            &s.admin_pubkey,
+            &tok,
+            &exp,
+            params,
+            &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            cosig,
+        )
+        .is_ok()
+}
+
+#[test]
+fn test_gate2_mock_true_unlocks_and_clears_in_flight() {
+    let mut s = setup();
+    let params = locked_ad_order(&mut s);
+
+    let mock = s.env.register(MockRootVerifier, ());
+    MockRootVerifierClient::new(&s.env, &mock).set_ok(&true);
+    s.ad_manager.set_root_verifier(&s.tp.order_chain_id, &mock);
+
+    assert!(s.ad_manager.has_open_positions(&params.ad_creator));
+    assert!(s.ad_manager.has_open_positions(&params.bridger));
+
+    let empty = Bytes::new(&s.env);
+    assert!(ad_unlock(&mut s, &params, &empty));
+
+    assert!(!s.ad_manager.has_open_positions(&params.ad_creator));
+    assert!(!s.ad_manager.has_open_positions(&params.bridger));
+}
+
+#[test]
+fn test_gate2_mock_false_blocks_unlock() {
+    let mut s = setup();
+    let params = locked_ad_order(&mut s);
+
+    let mock = s.env.register(MockRootVerifier, ());
+    MockRootVerifierClient::new(&s.env, &mock).set_ok(&false);
+    s.ad_manager.set_root_verifier(&s.tp.order_chain_id, &mock);
+
+    let empty = Bytes::new(&s.env);
+    assert!(!ad_unlock(&mut s, &params, &empty));
+}
+
+#[test]
+fn test_gate2_real_module_rejects_root_outside_signed_auth() {
+    let mut s = setup();
+    let params = locked_ad_order(&mut s);
+
+    // Real module C wired to a dummy registry: the fixture's target root is
+    // not inside the vector SettlementAuth, so it fails before any lookup.
+    let module = s.env.register(counterparty_verifier_contract::WASM, ());
+    counterparty_verifier_contract::Client::new(&s.env, &module).initialize(&s.ad_manager.address);
+    s.ad_manager
+        .set_root_verifier(&s.tp.order_chain_id, &module);
+
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
+    let hexv =
+        |v: &serde_json::Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
+    let auth = &vectors["settlement"]["auth"];
+    let mut cosig = std::vec![1u8];
+    let ocid: u128 = auth["orderChainId"].as_str().unwrap().parse().unwrap();
+    let acid: u128 = auth["adChainId"].as_str().unwrap().parse().unwrap();
+    cosig.extend_from_slice(&ocid.to_be_bytes());
+    cosig.extend_from_slice(&acid.to_be_bytes());
+    cosig.extend_from_slice(&hexv(&auth["orderHash"]));
+    cosig.extend_from_slice(&hexv(&auth["orderChainRoot"]));
+    cosig.extend_from_slice(&hexv(&auth["adChainRoot"]));
+    cosig.extend_from_slice(&hexv(&vectors["keys"]["makerBls"]["pk"]["uncompressed"]));
+    cosig.extend_from_slice(&hexv(&vectors["keys"]["bridgerBls"]["pk"]["uncompressed"]));
+    cosig.extend_from_slice(&hexv(&vectors["settlement"]["aggSig"]["uncompressed"]));
+
+    let cosig_bytes = Bytes::from_slice(&s.env, &cosig);
+    assert!(!ad_unlock(&mut s, &params, &cosig_bytes));
+}
+
+#[test]
+fn test_gate2_garbage_cosig_blocks_unlock() {
+    let mut s = setup();
+    let params = locked_ad_order(&mut s);
+
+    let module = s.env.register(counterparty_verifier_contract::WASM, ());
+    counterparty_verifier_contract::Client::new(&s.env, &module).initialize(&s.ad_manager.address);
+    s.ad_manager
+        .set_root_verifier(&s.tp.order_chain_id, &module);
+
+    let garbage = Bytes::from_slice(&s.env, &[0xde, 0xad]);
+    assert!(!ad_unlock(&mut s, &params, &garbage));
+}
+
+#[test]
+fn test_gate2_portal_mock_false_blocks_unlock() {
+    let mut s = setup();
+
+    let bridger_addr = {
+        let strkey = stellar_strkey::ed25519::PublicKey(s.tp.bridger).to_string();
+        Address::from_string(&SorobanString::from_str(&s.env, &strkey))
+    };
+    TokenContractClient::new(&s.env, &s.order_token_addr)
+        .mint(&bridger_addr, &(s.tp.amount as i128 * 10));
+
+    let params = order_portal_order_params(&s.env, &s.tp);
+    let cp = create_order_params(&s.tp.ad_id, &s.tp.order_hash);
+    let (sig, tok, exp) = s.sign_order_portal_request("createOrder", &cp);
+    s.order_portal
+        .create_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+
+    let mock = s.env.register(MockRootVerifier, ());
+    MockRootVerifierClient::new(&s.env, &mock).set_ok(&false);
+    s.order_portal.set_root_verifier(&s.tp.ad_chain_id, &mock);
+
+    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.ad_root);
+    let (sig, tok, exp) = s.sign_order_portal_request("unlockOrder", &unlock_params);
+    let res = s.order_portal.try_unlock(
+        &sig,
+        &s.admin_pubkey,
+        &tok,
+        &exp,
+        &params,
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
+        &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
+        &Bytes::new(&s.env),
+    );
+    assert!(res.is_err(), "portal unlock must fail gate 2");
 }
