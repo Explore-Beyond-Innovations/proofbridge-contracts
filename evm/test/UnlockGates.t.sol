@@ -239,7 +239,9 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
     function test_inFlight_blocksRevokeUntilUnlock() public {
         BLSKeyRegistry reg = BLSKeyRegistry(REGISTRY);
         vm.store(REGISTRY, bytes32(0), bytes32(uint256(uint160(address(this)))));
-        reg.setPositionGuard(address(portal));
+        address[] memory guards = new address[](1);
+        guards[0] = address(portal);
+        reg.setPositionGuards(guards);
 
         address mockModule = address(new MockRootVerifier(true));
         vm.prank(admin);

@@ -218,6 +218,29 @@ export async function deployCore(
     },
   );
 
+  // ── wire the escrows as the registry's revoke guards ──────────────
+  // Re-set every run (idempotent); guards only gate key revocation/rotation.
+  {
+    const registry = attachContract(
+      blsKeyRegistryAddr,
+      "BLSKeyRegistry",
+      "BLSKeyRegistry",
+      signer,
+    );
+    try {
+      const tx = await registry.getFunction("setPositionGuards")(
+        [adManagerAddr, orderPortalAddr],
+        { nonce: nonces.next() },
+      );
+      await tx.wait();
+      console.log(`  [wire] BLSKeyRegistry.setPositionGuards([AdManager, OrderPortal])`);
+    } catch (err) {
+      console.warn(
+        `  [wire] setPositionGuards FAILED (signer may not be registry admin): ${err}`,
+      );
+    }
+  }
+
   // ── grant MANAGER_ROLE to AdManager + OrderPortal ─────────────────
   // Re-granted every run (idempotent); caught in case admin is a multisig that'll grant out of band.
   const merkleManager = attachContract(

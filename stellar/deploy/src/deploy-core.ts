@@ -178,6 +178,12 @@ export async function deployCore(
     console.log(`  [reuse] CounterpartyVerifier: ${counterpartyVerifier}`);
   }
 
+  // ── Wire the escrows as the registry's revoke guards (idempotent) ──
+  invokeContract(blsKeyRegistry, "set_position_guards", [
+    "--guards",
+    JSON.stringify([adManager, orderPortal]),
+  ]);
+
   // ── Grant MANAGER permission on MerkleManager (idempotent) ─────
   for (const manager of [adManager, orderPortal]) {
     invokeContract(merkleManager, "set_manager", [

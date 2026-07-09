@@ -11,6 +11,18 @@ contract MockGuard is IPositionGuard {
     }
 }
 
+contract ToggleGuard is IPositionGuard {
+    bool public busy;
+
+    function setBusy(bool b) external {
+        busy = b;
+    }
+
+    function hasOpenPositions(bytes32) external view returns (bool) {
+        return busy;
+    }
+}
+
 /// Vector-driven tests; the Soroban registry suite consumes the same JSON.
 contract BLSKeyRegistryTest is Test {
     using stdJson for string;
@@ -187,9 +199,102 @@ contract BLSKeyRegistryTest is Test {
 
     function test_revokeBlockedWhileInFlight() public {
         bytes32 account = registerMaker();
-        registry.setPositionGuard(address(new MockGuard()));
+        address[] memory guards = new address[](1);
+        guards[0] = address(new MockGuard());
+        registry.setPositionGuards(guards);
 
         vm.expectRevert(BLSKeyRegistry.AccountInFlight.selector);
         registry.revoke(account, sep53Auth(".registration.makerOnSepolia.revokeAtNonce1.ownerSig"), 1);
+    }
+
+    // Rotation is a key change like revoke: overwrite-register is blocked while
+    // in flight, allowed once clear; a FIRST registration ignores busy guards.
+    function test_rotationGatedLikeRevoke() public {
+        bytes32 account = registerMaker();
+        ToggleGuard adSide = new ToggleGuard();
+        ToggleGuard orderSide = new ToggleGuard();
+        address[] memory guards = new address[](2);
+        guards[0] = address(adSide);
+        guards[1] = address(orderSide);
+        registry.setPositionGuards(guards);
+
+        orderSide.setBusy(true);
+        vm.expectRevert(BLSKeyRegistry.AccountInFlight.selector);
+        registry.register(
+            account,
+            sep53Auth(".registration.makerOnSepolia.registerAtNonce1.ownerSig"),
+            reg("makerOnSepolia", "registerAtNonce1.pkNative"),
+            reg("makerOnSepolia", "registerAtNonce1.pop"),
+            1
+        );
+
+        orderSide.setBusy(false);
+        registry.register(
+            account,
+            sep53Auth(".registration.makerOnSepolia.registerAtNonce1.ownerSig"),
+            reg("makerOnSepolia", "registerAtNonce1.pkNative"),
+            reg("makerOnSepolia", "registerAtNonce1.pop"),
+            1
+        );
+        assertEq(registry.nonceOf(account), 2);
+    }
+
+    function test_firstRegistrationIgnoresBusyGuards() public {
+        address[] memory guards = new address[](1);
+        guards[0] = address(new MockGuard());
+        registry.setPositionGuards(guards);
+        bytes32 account = registerMaker();
+        assertEq(registry.keyOf(account), reg32("makerOnSepolia", "commitment"));
+    }
+
+    function test_evmHomeRotationGated() public {
+        bytes32 account = registerBridger();
+        address[] memory guards = new address[](1);
+        guards[0] = address(new MockGuard());
+        registry.setPositionGuards(guards);
+
+        vm.expectRevert(BLSKeyRegistry.AccountInFlight.selector);
+        registry.register(
+            account,
+            eip712Auth(".registration.bridgerOnSepolia.registerAtNonce1.ownerSig"),
+            reg("bridgerOnSepolia", "registerAtNonce1.pkNative"),
+            reg("bridgerOnSepolia", "registerAtNonce1.pop"),
+            1
+        );
+
+        registry.setPositionGuards(new address[](0));
+        registry.register(
+            account,
+            eip712Auth(".registration.bridgerOnSepolia.registerAtNonce1.ownerSig"),
+            reg("bridgerOnSepolia", "registerAtNonce1.pkNative"),
+            reg("bridgerOnSepolia", "registerAtNonce1.pop"),
+            1
+        );
+        assertEq(registry.nonceOf(account), 2);
+    }
+
+    // A single open position in EITHER escrow must block the revoke; both clear allows it.
+    function test_revokeChecksEveryGuard() public {
+        bytes32 account = registerMaker();
+        ToggleGuard adSide = new ToggleGuard();
+        ToggleGuard orderSide = new ToggleGuard();
+        address[] memory guards = new address[](2);
+        guards[0] = address(adSide);
+        guards[1] = address(orderSide);
+        registry.setPositionGuards(guards);
+
+        adSide.setBusy(true);
+        vm.expectRevert(BLSKeyRegistry.AccountInFlight.selector);
+        registry.revoke(account, sep53Auth(".registration.makerOnSepolia.revokeAtNonce1.ownerSig"), 1);
+
+        adSide.setBusy(false);
+        orderSide.setBusy(true);
+        vm.expectRevert(BLSKeyRegistry.AccountInFlight.selector);
+        registry.revoke(account, sep53Auth(".registration.makerOnSepolia.revokeAtNonce1.ownerSig"), 1);
+
+        orderSide.setBusy(false);
+        registry.revoke(account, sep53Auth(".registration.makerOnSepolia.revokeAtNonce1.ownerSig"), 1);
+        vm.expectRevert(BLSKeyRegistry.NotRegistered.selector);
+        registry.keyOf(account);
     }
 }

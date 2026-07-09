@@ -1,6 +1,6 @@
 //! Storage helpers for the BLSKeyRegistry contract.
 
-use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol};
+use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol, Vec};
 
 const KEY_INIT: Symbol = symbol_short!("init");
 const KEY_ADMIN: Symbol = symbol_short!("admin");
@@ -40,11 +40,11 @@ pub fn get_chain_id(env: &Env) -> u128 {
     env.storage().instance().get(&KEY_CHAIN).unwrap()
 }
 
-pub fn set_guard(env: &Env, guard: &Address) {
-    env.storage().instance().set(&KEY_GUARD, guard);
+pub fn set_guards(env: &Env, guards: &Vec<Address>) {
+    env.storage().instance().set(&KEY_GUARD, guards);
 }
 
-pub fn get_guard(env: &Env) -> Option<Address> {
+pub fn get_guards(env: &Env) -> Option<Vec<Address>> {
     env.storage().instance().get(&KEY_GUARD)
 }
 

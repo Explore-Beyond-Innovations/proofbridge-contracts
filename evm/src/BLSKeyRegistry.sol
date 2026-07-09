@@ -41,7 +41,7 @@ contract BLSKeyRegistry {
     uint256 private constant ED_D = 37095705934669439343138083508754565189542113879843219016388785533085940283555;
 
     address public admin;
-    IPositionGuard public positionGuard;
+    IPositionGuard[] public positionGuards;
     address public pendingAdmin;
     bool public paused;
 
@@ -54,7 +54,7 @@ contract BLSKeyRegistry {
     event AdminTransferStarted(address indexed from, address indexed to);
     event AdminTransferred(address indexed from, address indexed to);
     event KeyRevoked(bytes32 indexed account, uint256 nonce);
-    event PositionGuardSet(address guard);
+    event PositionGuardsSet(address[] guards);
 
     error BadNonce();
     error IdentityKey();
@@ -96,10 +96,13 @@ contract BLSKeyRegistry {
         pendingAdmin = address(0);
     }
 
-    function setPositionGuard(address guard) external {
+    function setPositionGuards(address[] calldata guards) external {
         if (msg.sender != admin) revert NotAdmin();
-        positionGuard = IPositionGuard(guard);
-        emit PositionGuardSet(guard);
+        delete positionGuards;
+        for (uint256 i = 0; i < guards.length; i++) {
+            positionGuards.push(IPositionGuard(guards[i]));
+        }
+        emit PositionGuardsSet(guards);
     }
 
     function register(
@@ -112,6 +115,8 @@ contract BLSKeyRegistry {
         if (paused) revert EnforcedPause();
         if (blsPubKey.length != 128 || pop.length != 256) revert BadLength();
         if (nonce != nonceOf[account]) revert BadNonce();
+        // rotation (overwrite) is a key change like revoke: blocked while in flight
+        if (commitments[account] != bytes32(0)) _requireNoOpenPositions(account);
         if (keccak256(blsPubKey) == keccak256(new bytes(128))) revert IdentityKey();
 
         bytes memory msgG2 = BLS.hashToG2(popMsg(account, blsPubKey, nonce), bytes(DST_POP));
@@ -133,9 +138,7 @@ contract BLSKeyRegistry {
         if (paused) revert EnforcedPause();
         if (commitments[account] == bytes32(0)) revert NotRegistered();
         if (nonce != nonceOf[account]) revert BadNonce();
-        if (address(positionGuard) != address(0) && positionGuard.hasOpenPositions(account)) {
-            revert AccountInFlight();
-        }
+        _requireNoOpenPositions(account);
 
         if (owner.scheme == Scheme.Eip712) {
             checkEip712Owner(account, keccak256(abi.encode(REVOKE_TYPEHASH, nonce)), owner.data);
@@ -146,6 +149,12 @@ contract BLSKeyRegistry {
         delete commitments[account];
         nonceOf[account] = nonce + 1;
         emit KeyRevoked(account, nonce);
+    }
+
+    function _requireNoOpenPositions(bytes32 account) private view {
+        for (uint256 i = 0; i < positionGuards.length; i++) {
+            if (positionGuards[i].hasOpenPositions(account)) revert AccountInFlight();
+        }
     }
 
     /// Returns keccak256(blsPubKey) — the full key travels in unlock metadata.

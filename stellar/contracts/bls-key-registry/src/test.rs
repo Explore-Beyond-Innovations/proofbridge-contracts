@@ -297,12 +297,73 @@ fn revoke_blocked_while_in_flight() {
     );
 
     let guard = env.register(MockGuard, ());
-    client.set_position_guard(&guard);
+    client.set_position_guards(&soroban_sdk::vec![&env, guard]);
 
     assert_eq!(
         client.try_revoke(&account, &OwnerAuth::Stellar(owner), &1),
         Err(Ok(RegistryError::AccountInFlight))
     );
+}
+
+#[test]
+fn rotation_gated_like_revoke() {
+    let (env, client, v) = setup();
+    let r = reg(&v, "makerOnStellarTestnet");
+    let rot = &r["registerAtNonce1"];
+    let account = bn::<32>(&env, &r["account"]);
+    let owner = maker_owner(&env, &v);
+
+    client.register(
+        &account,
+        &OwnerAuth::Stellar(owner.clone()),
+        &bn::<96>(&env, &r["pkNative"]),
+        &bn::<192>(&env, &r["pop"]),
+        &0,
+    );
+
+    let guard = env.register(MockGuard, ());
+    client.set_position_guards(&soroban_sdk::vec![&env, guard]);
+
+    assert_eq!(
+        client.try_register(
+            &account,
+            &OwnerAuth::Stellar(owner.clone()),
+            &bn::<96>(&env, &rot["pkNative"]),
+            &bn::<192>(&env, &rot["pop"]),
+            &1,
+        ),
+        Err(Ok(RegistryError::AccountInFlight))
+    );
+
+    client.set_position_guards(&soroban_sdk::vec![&env]);
+    client.register(
+        &account,
+        &OwnerAuth::Stellar(owner),
+        &bn::<96>(&env, &rot["pkNative"]),
+        &bn::<192>(&env, &rot["pop"]),
+        &1,
+    );
+    assert_eq!(client.nonce_of(&account), 2);
+}
+
+#[test]
+fn first_registration_ignores_busy_guards() {
+    let (env, client, v) = setup();
+    let r = reg(&v, "makerOnStellarTestnet");
+    let account = bn::<32>(&env, &r["account"]);
+    let owner = maker_owner(&env, &v);
+
+    let guard = env.register(MockGuard, ());
+    client.set_position_guards(&soroban_sdk::vec![&env, guard]);
+
+    client.register(
+        &account,
+        &OwnerAuth::Stellar(owner),
+        &bn::<96>(&env, &r["pkNative"]),
+        &bn::<192>(&env, &r["pop"]),
+        &0,
+    );
+    assert_eq!(client.key_of(&account), bn::<32>(&env, &r["commitment"]));
 }
 
 #[test]

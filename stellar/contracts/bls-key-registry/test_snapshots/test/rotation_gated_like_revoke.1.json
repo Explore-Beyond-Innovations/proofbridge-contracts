@@ -69,6 +69,64 @@
         }
       ]
     ],
+    [],
+    [
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CARCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEVQO",
+              "function_name": "set_position_guards",
+              "args": [
+                {
+                  "vec": []
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ],
+    [
+      [
+        "GBUQ6OISYPFLWZ4WALRQUDXM2WL6O4772CL6YOAQFX47BB36SVODCV4S",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CARCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEVQO",
+              "function_name": "register",
+              "args": [
+                {
+                  "bytes": "690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31"
+                },
+                {
+                  "vec": [
+                    {
+                      "symbol": "Stellar"
+                    },
+                    {
+                      "address": "GBUQ6OISYPFLWZ4WALRQUDXM2WL6O4772CL6YOAQFX47BB36SVODCV4S"
+                    }
+                  ]
+                },
+                {
+                  "bytes": "10b5d7ef1aec2eb92c6ef8a862b0093cb6ea4b49c9165ccb43c06cae3b4a4137ce36acb002ce09129e4f67f3c8d136070839598cb1f041fcfb9975919bb37bd38eefe1ee91ef6d5fdaabef82396e18d53c0f65a4a2ee611b8d7d9db9e5b57def"
+                },
+                {
+                  "bytes": "068214a30effd43ef2efa73bd7895e4dd7148b3540b9e12b558052af26129fb106812c12edbb2132615f59d90b7e0761017a5126c02cb3f78ec5878c67a3f8076a4afae0a64a0c81a8d39ad08cc54b5cf6e1e045e19387b8429f392f469376ec1925e1bff51e36c499502e5f3d3fce0c4b3f2e99155a6202f3a7e1bb3d4bc7e666acc6d9f41290ed9d6ce1ec8ee3837f0647762c88576124eae5eaf6ef99f7e91f957a92613831067ade24432c844bfee0c815ca5440fde18c92d2e902e4dcf7"
+                },
+                {
+                  "u64": "1"
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ],
     []
   ],
   "ledger": {
@@ -91,6 +149,46 @@
               "key": {
                 "ledger_key_nonce": {
                   "nonce": "801925984706572462"
+                }
+              },
+              "durability": "temporary",
+              "val": "void"
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 6311999
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "GBUQ6OISYPFLWZ4WALRQUDXM2WL6O4772CL6YOAQFX47BB36SVODCV4S",
+              "key": {
+                "ledger_key_nonce": {
+                  "nonce": "4837995959683129791"
+                }
+              },
+              "durability": "temporary",
+              "val": "void"
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 6311999
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "ledger_key_nonce": {
+                  "nonce": "1033654523790656264"
                 }
               },
               "durability": "temporary",
@@ -190,7 +288,7 @@
               },
               "durability": "persistent",
               "val": {
-                "u64": "1"
+                "u64": "2"
               }
             }
           },
@@ -234,11 +332,7 @@
                         "symbol": "guard"
                       },
                       "val": {
-                        "vec": [
-                          {
-                            "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                          }
-                        ]
+                        "vec": []
                       }
                     },
                     {

@@ -11,7 +11,7 @@ mod storage;
 use soroban_sdk::{
     bytesn, contract, contractclient, contractimpl, contracttype,
     crypto::bls12_381::{G1Affine, G2Affine},
-    vec, Address, Bytes, BytesN, Env,
+    vec, Address, Bytes, BytesN, Env, Vec,
 };
 
 use errors::RegistryError;
@@ -108,13 +108,13 @@ impl BlsKeyRegistry {
         Ok(())
     }
 
-    pub fn set_position_guard(env: Env, guard: Address) -> Result<(), RegistryError> {
+    pub fn set_position_guards(env: Env, guards: Vec<Address>) -> Result<(), RegistryError> {
         if !storage::is_initialized(&env) {
             return Err(RegistryError::NotInitialized);
         }
         storage::get_admin(&env).require_auth();
-        storage::set_guard(&env, &guard);
-        events::PositionGuardSet { guard }.publish(&env);
+        storage::set_guards(&env, &guards);
+        events::PositionGuardsSet { guards }.publish(&env);
         Ok(())
     }
 
@@ -134,6 +134,10 @@ impl BlsKeyRegistry {
         }
         if nonce != storage::get_nonce(&env, &account) {
             return Err(RegistryError::BadNonce);
+        }
+        // rotation (overwrite) is a key change like revoke: blocked while in flight
+        if storage::get_commitment(&env, &account).is_some() {
+            require_no_open_positions(&env, &account)?;
         }
         if bls_pub_key == g1_identity(&env) {
             return Err(RegistryError::IdentityKey);
@@ -192,11 +196,7 @@ impl BlsKeyRegistry {
         if nonce != storage::get_nonce(&env, &account) {
             return Err(RegistryError::BadNonce);
         }
-        if let Some(guard) = storage::get_guard(&env) {
-            if PositionGuardClient::new(&env, &guard).has_open_positions(&account) {
-                return Err(RegistryError::AccountInFlight);
-            }
-        }
+        require_no_open_positions(&env, &account)?;
         match owner {
             OwnerAuth::Stellar(addr) => {
                 addr.require_auth();
@@ -293,6 +293,17 @@ fn g1_identity(env: &Env) -> BytesN<96> {
 
 /// e(pk, H(pop_msg)) == e(G1, pop) ⇔ pairing_check([pk, -G1], [H(pop_msg), pop]).
 /// The host subgroup-checks both points as pairing inputs.
+fn require_no_open_positions(env: &Env, account: &BytesN<32>) -> Result<(), RegistryError> {
+    if let Some(guards) = storage::get_guards(env) {
+        for guard in guards.iter() {
+            if PositionGuardClient::new(env, &guard).has_open_positions(account) {
+                return Err(RegistryError::AccountInFlight);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn verify_pop(
     env: &Env,
     account: &BytesN<32>,

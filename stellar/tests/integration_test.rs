@@ -931,6 +931,10 @@ mod counterparty_verifier_contract {
     soroban_sdk::contractimport!(file = "target/wasm32v1-none/release/counterparty_verifier.wasm");
 }
 
+mod bls_key_registry_contract {
+    soroban_sdk::contractimport!(file = "target/wasm32v1-none/release/bls_key_registry.wasm");
+}
+
 #[soroban_sdk::contract]
 pub struct MockRootVerifier;
 
@@ -1284,4 +1288,74 @@ fn test_portal_payout_pushes_directly() {
         &bytes32_to_bytesn(&s.env, &s.tp.order_chain_token),
     );
     assert!(res.is_err(), "nothing to claim after a direct payout");
+}
+
+// ============================================================================
+// Position guards — the real escrows plug into the registry
+// ============================================================================
+
+// Revoke must round-trip through BOTH real escrows cross-contract: a live
+// locked trade keeps them busy while an uninvolved account revokes cleanly.
+#[test]
+fn test_registry_guards_are_the_real_escrows() {
+    let mut s = setup();
+    let params = locked_ad_order(&mut s);
+
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
+    let hexv =
+        |v: &serde_json::Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
+
+    // pin the registry at the contract id the vector PoPs bind
+    let regid: [u8; 32] = hexv(&vectors["chains"]["stellarTestnet"]["registryId"])
+        .try_into()
+        .unwrap();
+    let at = Address::from_string(&SorobanString::from_str(
+        &s.env,
+        &stellar_strkey::Contract(regid).to_string(),
+    ));
+    let registry = s.env.register_at(&at, bls_key_registry_contract::WASM, ());
+    let client = bls_key_registry_contract::Client::new(&s.env, &registry);
+    let chain_id: u128 = vectors["chains"]["stellarTestnet"]["chainId"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    client.initialize(&s.admin_addr, &chain_id);
+
+    client.set_position_guards(&soroban_sdk::vec![
+        &s.env,
+        s.ad_manager.address.clone(),
+        s.order_portal.address.clone()
+    ]);
+
+    // register the vector maker key (Stellar-home: require_auth, mocked)
+    let r = &vectors["registration"]["makerOnStellarTestnet"];
+    let account = BytesN::from_array(&s.env, &hexv(&r["account"]).try_into().unwrap());
+    let wallet_pk: [u8; 32] = hexv(&vectors["keys"]["makerWallet"]["pk"]).try_into().unwrap();
+    let owner = Address::from_string(&SorobanString::from_str(
+        &s.env,
+        &stellar_strkey::ed25519::PublicKey(wallet_pk).to_string(),
+    ));
+    let pk = BytesN::from_array(&s.env, &hexv(&r["pkNative"]).try_into().unwrap());
+    let pop = BytesN::from_array(&s.env, &hexv(&r["pop"]).try_into().unwrap());
+    client.register(
+        &account,
+        &bls_key_registry_contract::OwnerAuth::Stellar(owner.clone()),
+        &pk,
+        &pop,
+        &0,
+    );
+
+    // the fixture trade genuinely occupies both guard sources...
+    assert!(s.ad_manager.has_open_positions(&params.ad_creator));
+    assert!(!s.order_portal.has_open_positions(&account));
+
+    // ...and the revoke round-trips through BOTH real escrows and passes
+    client.revoke(
+        &account,
+        &bls_key_registry_contract::OwnerAuth::Stellar(owner),
+        &1,
+    );
+    assert!(client.try_key_of(&account).is_err());
 }

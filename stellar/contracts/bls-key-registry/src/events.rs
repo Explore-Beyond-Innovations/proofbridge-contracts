@@ -1,6 +1,6 @@
 //! Event types for the BLSKeyRegistry contract
 
-use soroban_sdk::{contractevent, Address, BytesN};
+use soroban_sdk::{contractevent, Address, BytesN, Vec};
 
 #[contractevent(topics = ["init"], data_format = "vec")]
 pub struct Initialized {
@@ -26,8 +26,8 @@ pub struct KeyRevoked {
 }
 
 #[contractevent(topics = ["guard_set"], data_format = "single-value")]
-pub struct PositionGuardSet {
-    pub guard: Address,
+pub struct PositionGuardsSet {
+    pub guards: Vec<Address>,
 }
 
 #[contractevent(topics = ["paused"], data_format = "single-value")]
