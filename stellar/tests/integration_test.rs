@@ -1332,7 +1332,9 @@ fn test_registry_guards_are_the_real_escrows() {
     // register the vector maker key (Stellar-home: require_auth, mocked)
     let r = &vectors["registration"]["makerOnStellarTestnet"];
     let account = BytesN::from_array(&s.env, &hexv(&r["account"]).try_into().unwrap());
-    let wallet_pk: [u8; 32] = hexv(&vectors["keys"]["makerWallet"]["pk"]).try_into().unwrap();
+    let wallet_pk: [u8; 32] = hexv(&vectors["keys"]["makerWallet"]["pk"])
+        .try_into()
+        .unwrap();
     let owner = Address::from_string(&SorobanString::from_str(
         &s.env,
         &stellar_strkey::ed25519::PublicKey(wallet_pk).to_string(),
