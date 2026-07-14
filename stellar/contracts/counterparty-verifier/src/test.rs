@@ -118,6 +118,26 @@ impl Setup {
     }
 }
 
+// Epic done-when: the aggregate pairing check (2 registry lookups + BLS
+// verify over the settlement digest) must clear well under 2s wall-clock.
+#[test]
+fn pairing_verification_under_two_seconds() {
+    let s = setup();
+    let start = std::time::Instant::now();
+    const RUNS: u32 = 10;
+    for _ in 0..RUNS {
+        assert!(s
+            .verifier
+            .is_root_valid(&s.order_chain_id, &s.order_chain_root, &s.metadata()));
+    }
+    let per_call = start.elapsed() / RUNS;
+    std::println!("is_root_valid wall-clock: {per_call:?} per call");
+    assert!(
+        per_call < std::time::Duration::from_secs(2),
+        "pairing check exceeded 2s: {per_call:?}"
+    );
+}
+
 #[test]
 fn order_chain_root_is_valid() {
     let s = setup();
