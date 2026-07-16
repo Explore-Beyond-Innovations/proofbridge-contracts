@@ -311,5 +311,126 @@
       "rule": "bytes that decode to no curve point must revert",
       "bytes": "0x04a9897d2053e43666b05bf92b5d879ad96b00dea84f80c7664b582377dc793dd1fae3fbfe10290b9f3c0e56fcdfbfee75fe6469ad565b058e156d8688875a3d39b5ba9e58416cd672da0bdfd5bc732c51db9d212a263abd7133c32ef07a69ef5a3df031758d246dd2d41b26280a51d0649ce59b379e2b0fe9e59b1ee5900aa9d8bf3481278a2bdb1021af3aae45a5a8e9424375e934cd14b24684cfa81676bfe5ae8032d5a7f6d1a92eb8332be0630936ee787bb7c475cc71922d046924b8a8"
     }
+  },
+  "derivation": {
+    "_meta": {
+      "spec": "docs/engineering/t1/1.2-build/01-bls-encodings.md §9",
+      "argon2id": {
+        "m": 65536,
+        "t": 3,
+        "p": 4,
+        "dkLen": 32,
+        "salt": "keccak256(PASS_TAG || primary_account)"
+      },
+      "walletSig": "EVM primary = personal_sign over the message string (65B r||s||v); Stellar primary = SEP-53 ed25519 over sha256(prefix || message) (64B)"
+    },
+    "eip2333": {
+      "ikm": "0xc55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
+      "masterSk": "0x0d7359d57963ab8fbbde1852dcf553fedbc31f464d80ee7d40ae683122b45070"
+    },
+    "bridger": {
+      "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+      "message0": "ProofBridge BLS key derivation v1 — do not sign on other dapps | key #0000",
+      "message1": "ProofBridge BLS key derivation v1 — do not sign on other dapps | key #0001",
+      "walletSig0": "0x6148aaddb4417bc8a8451856eea0973e144d97b1768ab1bdba5f80ff475a430571944085d79c6c3f1963ac4b07986586557b2e0eb46f5751b6f5d6876b9843bd1c",
+      "walletSig1": "0x1e7ec1709a5a6bb13be0d2b65ae2cb94a42e168ce62df5e7925b8eede1002789158a6e1d7e603bbbf2f01bad8818b4eec459413a952447ffead541262a83a3421c",
+      "cases": {
+        "none": {
+          "sk": "0x3e87514592fa863e1c6c11bda160f199a8a693b501254d2d5f8dc53e0d4aa573",
+          "pk": {
+            "compressed": "0xac9895e33d9e0ab72edbee5e1ba0ce8fb686f61ad06f79fa2e2cade53b745972629a05686dd1d19c8857bc7031fe02f7",
+            "uncompressed": "0x0c9895e33d9e0ab72edbee5e1ba0ce8fb686f61ad06f79fa2e2cade53b745972629a05686dd1d19c8857bc7031fe02f7177447decc67d98b7b3b79980dc89ed9d039aedf3d7eaa013ba9613c636091e1262d1d0df7c5b11b6a0941d010c089d0",
+            "eip2537": "0x000000000000000000000000000000000c9895e33d9e0ab72edbee5e1ba0ce8fb686f61ad06f79fa2e2cade53b745972629a05686dd1d19c8857bc7031fe02f700000000000000000000000000000000177447decc67d98b7b3b79980dc89ed9d039aedf3d7eaa013ba9613c636091e1262d1d0df7c5b11b6a0941d010c089d0"
+          },
+          "commitmentEvm": "0x9fc3e8cc643a02d455a1eae8f5c34eee19686db39c3081b12785e28aabec9f35",
+          "commitmentSoroban": "0x6c5c606d8646baebad1eccacdbfa40f51a03944a015ee4e78c381cc224479298"
+        },
+        "password": {
+          "password": "proofbridge vectors passphrase",
+          "keyInfo": "0xa191d40011f01f35912826e4c7cd9f04d91d114641235e46cf184acc266ba343",
+          "sk": "0x20a031a500c3a68ad3623e3f0a2a9d572d1b2b10a692c563e13248f0b6ecf5d7",
+          "pk": {
+            "compressed": "0x895ac08181666bbb48815a2acb12cc0321a174e31cd5b7b9d6b8c2a22ae31d8ce68b9ebf8595361479dec6c9cd2fdf88",
+            "uncompressed": "0x095ac08181666bbb48815a2acb12cc0321a174e31cd5b7b9d6b8c2a22ae31d8ce68b9ebf8595361479dec6c9cd2fdf880bfccf469cafed1508bbcdede0fba305c3aab2038e07893801033dd7045a179df2088bbbd80fd2202c3a5b2f34e32c75",
+            "eip2537": "0x00000000000000000000000000000000095ac08181666bbb48815a2acb12cc0321a174e31cd5b7b9d6b8c2a22ae31d8ce68b9ebf8595361479dec6c9cd2fdf88000000000000000000000000000000000bfccf469cafed1508bbcdede0fba305c3aab2038e07893801033dd7045a179df2088bbbd80fd2202c3a5b2f34e32c75"
+          },
+          "commitmentEvm": "0x6cfa4c03ad02585fcc245f4a560c87532444313af1c8f7521ca4869270af257d",
+          "commitmentSoroban": "0xf03d6ac7e7829774463bcfb15e5f71fafc914e6953758a9b1249252eabe222d4"
+        },
+        "passkeyPrf": {
+          "prfOutput": "0x84e520b3c0944ed6d325547c81f1054e2b991c88413b898e342a1b8e5e2d950f",
+          "sk": "0x64a3226f7d642bc68b1be6d2b6fcbd3e4e04de5728bc716ce766526d2e5e13cb",
+          "pk": {
+            "compressed": "0x911813c3db10fb84ff3e112a35a140e18c020aca1bdde9ddcad51951cad274fe504fd92de5f1ed379ab5bfebfc1da527",
+            "uncompressed": "0x111813c3db10fb84ff3e112a35a140e18c020aca1bdde9ddcad51951cad274fe504fd92de5f1ed379ab5bfebfc1da52708d19c11f10b28fd9ecc8dacc93fb19330fc187fb7ceecbfbe6d9d65002a1e1f534218cd3e6e4b31a55e4d67d45c6cdd",
+            "eip2537": "0x00000000000000000000000000000000111813c3db10fb84ff3e112a35a140e18c020aca1bdde9ddcad51951cad274fe504fd92de5f1ed379ab5bfebfc1da5270000000000000000000000000000000008d19c11f10b28fd9ecc8dacc93fb19330fc187fb7ceecbfbe6d9d65002a1e1f534218cd3e6e4b31a55e4d67d45c6cdd"
+          },
+          "commitmentEvm": "0x138b5ff7468e88527761ca1bbe28d7736f3c41ef31eee8326d947a9537e945e3",
+          "commitmentSoroban": "0x425e0e2266dc93c196766825706ce995db970d96c413199499095ead7798f037"
+        }
+      },
+      "rotation": {
+        "sk": "0x2a264b5ef9effdf1a1bd8801538d191cc65a7079c35255c307c62e7aa7e69346",
+        "pk": {
+          "compressed": "0xb0e7acd4dd6dc6d1a8190c030a720a19d7b8e9892096c74f82b1c631a398fd82d87756d20d994733c0b0b57c45207e5a",
+          "uncompressed": "0x10e7acd4dd6dc6d1a8190c030a720a19d7b8e9892096c74f82b1c631a398fd82d87756d20d994733c0b0b57c45207e5a0fe884a591f792387df72059f927e53b2a303e3f5bc0d8064c1ff7c80128e267e6be2d411397d51a4ed38afd21fd8224",
+          "eip2537": "0x0000000000000000000000000000000010e7acd4dd6dc6d1a8190c030a720a19d7b8e9892096c74f82b1c631a398fd82d87756d20d994733c0b0b57c45207e5a000000000000000000000000000000000fe884a591f792387df72059f927e53b2a303e3f5bc0d8064c1ff7c80128e267e6be2d411397d51a4ed38afd21fd8224"
+        },
+        "commitmentEvm": "0x0c603bfddc4c3b47576f11d150841009b98e4e012f617f86fcdd915fc5c874c6",
+        "commitmentSoroban": "0x94751620ad51f79f25b2319ce4d43c69a08e89c0641874e01cb38c16571fb8fb"
+      }
+    },
+    "maker": {
+      "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+      "message0": "ProofBridge BLS key derivation v1 — do not sign on other dapps | key #0000",
+      "message1": "ProofBridge BLS key derivation v1 — do not sign on other dapps | key #0001",
+      "walletSig0": "0x52442fab418ab6ee560ddf5fca0fd9d5cf25ec01333f43f126b641246c6b5cabb636696a0919bde8e579c9880704148dce1da4bc17f0d645791d70b70e6a8c06",
+      "walletSig1": "0x0a95c4ee24db14a58d5ee4a8866e8c4f2336f02dd4d121e491026a77520c92a8795a75c6e8eee0e40d72c4847e9afa46ef1dff636ffa3fd4acc3311afe0d3204",
+      "cases": {
+        "none": {
+          "sk": "0x308470fefd422147f1350c277260aefaa8de2501c2a173e7e5a1899567c5fe12",
+          "pk": {
+            "compressed": "0xa79fc03397a5475630243fec0ddc58af8211b3bacf0d75313568240e2a80127658d3fab55460b7922a19c18385739ad9",
+            "uncompressed": "0x079fc03397a5475630243fec0ddc58af8211b3bacf0d75313568240e2a80127658d3fab55460b7922a19c18385739ad90ea02cf0ad4e96a057555cfc6417170afde86228ad1d78a72ae25216760bff957d9a0b9e60f9297e9453ed4c42e732f7",
+            "eip2537": "0x00000000000000000000000000000000079fc03397a5475630243fec0ddc58af8211b3bacf0d75313568240e2a80127658d3fab55460b7922a19c18385739ad9000000000000000000000000000000000ea02cf0ad4e96a057555cfc6417170afde86228ad1d78a72ae25216760bff957d9a0b9e60f9297e9453ed4c42e732f7"
+          },
+          "commitmentEvm": "0xdcd1ca7083a2d0bea2021689015a2142b1e2245b52c85c37002feaa4cbafb254",
+          "commitmentSoroban": "0xdf0a26a9741b63c1212847c67b3b6e5f5a81a0e691e968b12bbced377fec26f8"
+        },
+        "password": {
+          "password": "proofbridge vectors passphrase",
+          "keyInfo": "0xb5828d5b69dca0ad0953db4b4b1b0e20a6d1035b199ee0ea81e7796e1918275e",
+          "sk": "0x227d89993b85ccbd723f4393b92dd32bc5bcfc6002e760d753cdabd2c7a33fbd",
+          "pk": {
+            "compressed": "0xa7ce0d91e74af5141d2caf3d25c5d2625ccb590509e1f230f6c010cf4dc7c47af3c1f960dbaf462f9c270f8b4d4f85d1",
+            "uncompressed": "0x07ce0d91e74af5141d2caf3d25c5d2625ccb590509e1f230f6c010cf4dc7c47af3c1f960dbaf462f9c270f8b4d4f85d113a2311962aa1952cf7466fe838098aa997e99e184dccc4cf3fcb608723af5d2b62590ef656b6f29090c7d6b3dd21467",
+            "eip2537": "0x0000000000000000000000000000000007ce0d91e74af5141d2caf3d25c5d2625ccb590509e1f230f6c010cf4dc7c47af3c1f960dbaf462f9c270f8b4d4f85d10000000000000000000000000000000013a2311962aa1952cf7466fe838098aa997e99e184dccc4cf3fcb608723af5d2b62590ef656b6f29090c7d6b3dd21467"
+          },
+          "commitmentEvm": "0xe69c22a6a8da68df7525849141b49553e70afb9354fd9c5230d2b1ebf93de360",
+          "commitmentSoroban": "0x599579ab9343a9064d89c965704b1076461dfc102092b9681378ced2980a8cd9"
+        },
+        "passkeyPrf": {
+          "prfOutput": "0x84e520b3c0944ed6d325547c81f1054e2b991c88413b898e342a1b8e5e2d950f",
+          "sk": "0x25b0d07f6515eb6753dbe7fd67b13a72cc747f40ff4a3fced763c4155d080778",
+          "pk": {
+            "compressed": "0x834a05637ad162c60b6b22daa7011b8bb0560adf7c8983f22c9bcfd91fc56530ccdab3b4b0fccea48efcf7ed9b32cb10",
+            "uncompressed": "0x034a05637ad162c60b6b22daa7011b8bb0560adf7c8983f22c9bcfd91fc56530ccdab3b4b0fccea48efcf7ed9b32cb1003a0c96d21ec2bb5d348a86346e6bd7b7845149412a1c0dbe96d75962abd1c6d91652b18983c5a55c39e5166e70709aa",
+            "eip2537": "0x00000000000000000000000000000000034a05637ad162c60b6b22daa7011b8bb0560adf7c8983f22c9bcfd91fc56530ccdab3b4b0fccea48efcf7ed9b32cb100000000000000000000000000000000003a0c96d21ec2bb5d348a86346e6bd7b7845149412a1c0dbe96d75962abd1c6d91652b18983c5a55c39e5166e70709aa"
+          },
+          "commitmentEvm": "0xd22fa0969182af04ea0000d6cbb8acb9ecbe41e841f2ae52f03fc1465c4acb42",
+          "commitmentSoroban": "0x2c2bdf62596f02d716fb2df4821b013b0f3c82d0ac8a30b6ff0c36ad99f035e3"
+        }
+      },
+      "rotation": {
+        "sk": "0x406eea38d0b6544c480a8a988d604b7ce4845b78d60a5972e3aef2adc0833841",
+        "pk": {
+          "compressed": "0x91edc3744977aad7ce3ff64fecf2b631b1d1f38d98435dc5c244d38b5ce1d6ef7f36800dac5edad0ee6836d9cf90fdbb",
+          "uncompressed": "0x11edc3744977aad7ce3ff64fecf2b631b1d1f38d98435dc5c244d38b5ce1d6ef7f36800dac5edad0ee6836d9cf90fdbb0546769b37b6382e7163b6ffbe13da8b8197f2dfa3b1faf97cb283fcec45c0e299cff5f5443db446f838c42f90ee2861",
+          "eip2537": "0x0000000000000000000000000000000011edc3744977aad7ce3ff64fecf2b631b1d1f38d98435dc5c244d38b5ce1d6ef7f36800dac5edad0ee6836d9cf90fdbb000000000000000000000000000000000546769b37b6382e7163b6ffbe13da8b8197f2dfa3b1faf97cb283fcec45c0e299cff5f5443db446f838c42f90ee2861"
+        },
+        "commitmentEvm": "0x77f774393d9259717d2b4cae38cc8a09ba5d1751d9c05d1639b5dbff9e8adc93",
+        "commitmentSoroban": "0x8a59515f176acc6ea2e85dd21d59664ee394c3e02209715be3c4fb54ab5aa19c"
+      }
+    }
   }
 }
