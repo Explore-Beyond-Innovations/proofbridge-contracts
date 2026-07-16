@@ -715,13 +715,7 @@ impl AdManagerContract {
         }
         let config = storage::get_config(&env)?;
 
-        // The order recipient on this (ad) chain authorizes the unlock —
-        // mirrors the OrderPortal side where the ad recipient authorizes.
-        let order_recipient_addr = proofbridge_core::token::bytes32_to_account_address::<
-            AdManagerError,
-        >(&env, &params.order_recipient)?;
-        order_recipient_addr.require_auth();
-
+        // Permissionless (EVM parity): the recipient is hash-bound, so anyone may submit.
         Self::assert_ad_decimals(&env, &params, &config.w_native_token)?;
 
         let contract_bytes = eip712::contract_address_to_bytes32(&env);

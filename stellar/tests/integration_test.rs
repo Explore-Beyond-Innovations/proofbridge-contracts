@@ -791,6 +791,87 @@ fn test_order_portal_create_and_unlock() {
     );
 }
 
+// Permissionless unlock: no external address's auth is required — env.auths()
+// after the call is empty (the removed recipient require_auth would appear here).
+#[test]
+fn test_order_portal_unlock_is_permissionless() {
+    let mut s = setup();
+
+    let bridger_addr = {
+        let strkey = stellar_strkey::ed25519::PublicKey(s.tp.bridger).to_string();
+        Address::from_string(&SorobanString::from_str(&s.env, &strkey))
+    };
+    TokenContractClient::new(&s.env, &s.order_token_addr)
+        .mint(&bridger_addr, &(s.tp.amount as i128 * 10));
+
+    let params = order_portal_order_params(&s.env, &s.tp);
+    let create_params = create_order_params(&s.tp.ad_id, &s.tp.order_hash);
+    let (sig, tok, exp) = s.sign_order_portal_request("createOrder", &create_params);
+    s.order_portal
+        .create_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+
+    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.ad_root);
+    let (sig, tok, exp) = s.sign_order_portal_request("unlockOrder", &unlock_params);
+
+    s.order_portal.unlock(
+        &sig,
+        &s.admin_pubkey,
+        &tok,
+        &exp,
+        &params,
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
+        &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
+        &Bytes::new(&s.env),
+    );
+
+    assert!(
+        s.env.auths().is_empty(),
+        "unlock must require no address auth (recipient gate removed)"
+    );
+    assert_eq!(
+        s.order_portal
+            .get_order_status(&bytes32_to_bytesn(&s.env, &s.tp.order_hash)),
+        order_portal_contract::Status::Filled,
+    );
+}
+
+#[test]
+fn test_ad_manager_unlock_is_permissionless() {
+    let mut s = setup();
+    let params = ad_manager_order_params(&s.env, &s.tp);
+
+    let lock_params = lock_for_order_params(&s.tp.ad_id, &s.tp.order_hash);
+    let (sig, tok, exp) = s.sign_ad_manager_request("lockForOrder", &lock_params);
+    s.ad_manager
+        .lock_for_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+
+    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.order_root);
+    let (sig, tok, exp) = s.sign_ad_manager_request("unlockOrder", &unlock_params);
+
+    s.ad_manager.unlock(
+        &sig,
+        &s.admin_pubkey,
+        &tok,
+        &exp,
+        &params,
+        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+        &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
+    );
+
+    assert!(
+        s.env.auths().is_empty(),
+        "unlock must require no address auth (recipient gate removed)"
+    );
+    assert_eq!(
+        s.ad_manager
+            .get_order_status(&bytes32_to_bytesn(&s.env, &s.tp.order_hash)),
+        ad_manager_contract::Status::Filled,
+    );
+}
+
 #[test]
 fn test_full_cross_chain_flow() {
     let mut s = setup();
