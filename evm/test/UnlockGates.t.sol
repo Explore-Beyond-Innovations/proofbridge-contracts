@@ -292,13 +292,14 @@ function _registerOne(string memory vjson, string memory who, bool sep53) {
             )
         );
     }
-    BLSKeyRegistry(0x1111111111111111111111111111111111111111).register(
-        stdJson.readBytes32(vjson, string.concat(base, ".account")),
-        auth,
-        stdJson.readBytes(vjson, string.concat(base, ".pkNative")),
-        stdJson.readBytes(vjson, string.concat(base, ".pop")),
-        0
-    );
+    BLSKeyRegistry(0x1111111111111111111111111111111111111111)
+        .register(
+            stdJson.readBytes32(vjson, string.concat(base, ".account")),
+            auth,
+            stdJson.readBytes(vjson, string.concat(base, ".pkNative")),
+            stdJson.readBytes(vjson, string.concat(base, ".pop")),
+            0
+        );
 }
 
 function _vectorCosig(string memory vjson) view returns (bytes memory) {

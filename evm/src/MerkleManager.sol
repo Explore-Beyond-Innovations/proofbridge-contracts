@@ -35,6 +35,7 @@ interface IMerkleManager {
  */
 contract MerkleManager is IMerkleManager, TwoStepAdmin, Pausable, ReentrancyGuard {
     using MMRPoseidon2 for MMRPoseidon2.Tree;
+
     MMRPoseidon2.Tree _tree;
 
     // Mapping of width count to roothistory

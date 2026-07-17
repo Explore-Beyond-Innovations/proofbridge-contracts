@@ -447,12 +447,7 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
     /**
      * @notice Reserve `params.amount` from `params.adId` to fulfill an order.
      */
-    function lockForOrder(OrderParams calldata params)
-        external
-        nonReentrant
-        whenNotPaused
-        returns (bytes32 orderHash)
-    {
+    function lockForOrder(OrderParams calldata params) external nonReentrant whenNotPaused returns (bytes32 orderHash) {
         Ad storage ad = __getAdOwned(params.adId, msg.sender);
 
         orderHash = validateOrder(ad, params);
