@@ -8,7 +8,7 @@ import {MerkleManager} from "src/MerkleManager.sol";
 import {IVerifier} from "src/Verifier.sol";
 import {IMerkleManager} from "src/MerkleManager.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
-import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
 import {AddressCast} from "src/libraries/AddressCast.sol";
 import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
@@ -61,11 +61,6 @@ contract AdManagerTest is Test {
 
     string internal lastAdId;
 
-    // auth variables
-    bytes signature;
-    bytes32 authToken;
-    uint256 timeToLive;
-
     function setUp() public virtual {
         (admin, adminPk) = makeAddrAndKey("admin");
         verifier = new MockVerifier(true);
@@ -81,6 +76,7 @@ contract AdManagerTest is Test {
 
         vm.startPrank(admin);
         merkleManager.grantRole(merkleManager.MANAGER_ROLE(), address(adManager));
+        adManager.setRootVerifier(orderChainId, address(new MockRootVerifier(true)));
         vm.stopPrank();
 
         adChainId = block.chainid;
@@ -106,84 +102,6 @@ contract AdManagerTest is Test {
         p.salt = 123;
         p.orderDecimals = 18;
         p.adDecimals = 18;
-    }
-
-    function generateCreateAdRequestParams(string memory adId, address adTokenAddr)
-        internal
-        view
-        returns (bytes32 token, uint256 ttl, bytes memory sig)
-    {
-        token = bytes32(vm.randomBytes(32));
-        ttl = block.timestamp + 1 hours;
-        bytes32 message =
-            adManager.createAdRequestHash(adId, adTokenAddr, initAmt, orderChainId, _b32(adRecipient), token, ttl);
-
-        sig = sign(message, adminPk);
-    }
-
-    function generateFundAdRequestParams(string memory adId, uint256 amount)
-        internal
-        view
-        returns (bytes32 token, uint256 ttl, bytes memory sig)
-    {
-        token = bytes32(vm.randomBytes(32));
-        ttl = block.timestamp + 1 hours;
-        bytes32 message = adManager.fundAdRequestHash(adId, amount, token, ttl);
-        sig = sign(message, adminPk);
-    }
-
-    function generateCloseAdRequestParams(string memory adId, address to)
-        internal
-        view
-        returns (bytes32 token, uint256 ttl, bytes memory sig)
-    {
-        token = bytes32(vm.randomBytes(32));
-        ttl = block.timestamp + 1 hours;
-
-        bytes32 message = adManager.closeAdRequestHash(adId, to, token, ttl);
-        sig = sign(message, adminPk);
-    }
-
-    function generateWithdrawFromAdRequestParams(string memory adId, uint256 amount, address to)
-        internal
-        view
-        returns (bytes32 token, uint256 ttl, bytes memory sig)
-    {
-        token = bytes32(vm.randomBytes(32));
-        ttl = block.timestamp + 1 hours;
-
-        bytes32 message = adManager.withdrawFromAdRequestHash(adId, amount, to, token, ttl);
-        sig = sign(message, adminPk);
-    }
-
-    function generateLockForOrderRequestHash(string memory adId, bytes32 orderHash)
-        internal
-        view
-        returns (bytes32 token, uint256 ttl, bytes memory sig)
-    {
-        token = bytes32(vm.randomBytes(32));
-        ttl = block.timestamp + 1 hours;
-
-        bytes32 message = adManager.lockForOrderRequestHash(adId, orderHash, token, ttl);
-        sig = sign(message, adminPk);
-    }
-
-    function generateUnlockOrderRequestHash(string memory adId, bytes32 orderHash, bytes32 targetRoot)
-        internal
-        view
-        returns (bytes32 token, uint256 ttl, bytes memory sig)
-    {
-        token = bytes32(vm.randomBytes(32));
-        ttl = block.timestamp + 1 hours;
-
-        bytes32 message = adManager.unlockOrderRequestHash(adId, orderHash, targetRoot, token, ttl);
-        sig = sign(message, adminPk);
-    }
-
-    function sign(bytes32 message, uint256 pk) public pure returns (bytes memory sig) {
-        bytes32 hash = MessageHashUtils.toEthSignedMessageHash(message);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, hash);
-        sig = abi.encodePacked(r, s, v);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -328,33 +246,25 @@ contract AdManagerTest is Test {
     // Test that createAd rejects zero adToken address
     function test_createAd_rejectsZeroAdToken() public {
         string memory adId = "1";
-        // get auth
-        (authToken, timeToLive, signature) = generateCreateAdRequestParams(adId, address(adToken));
 
         vm.prank(maker);
         adToken.approve(address(adManager), initAmt);
 
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__TokenZeroAddress.selector);
-        adManager.createAd(
-            signature, authToken, timeToLive, adId, address(0), initAmt, orderChainId, _b32(address(0xDEAD))
-        );
+        adManager.createAd(adId, address(0), initAmt, orderChainId, _b32(address(0xDEAD)));
     }
 
     // Test that createAd rejects when no route exists for the chain
     function test_createAd_rejectsWhenNoRoute() public {
         string memory adId = "1";
-        // get auth
-        (authToken, timeToLive, signature) = generateCreateAdRequestParams(adId, address(adToken));
 
         vm.prank(maker);
         adToken.approve(address(adManager), initAmt);
 
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(AdManager.AdManager__ChainNotSupported.selector, orderChainId));
-        adManager.createAd(
-            signature, authToken, timeToLive, adId, address(adToken), initAmt, orderChainId, _b32(address(0xDEAD))
-        );
+        adManager.createAd(adId, address(adToken), initAmt, orderChainId, _b32(address(0xDEAD)));
     }
 
     // Test that createAd succeeds when route exists, emits event, and stores ad data
@@ -366,17 +276,13 @@ contract AdManagerTest is Test {
         adManager.setTokenRoute(address(adToken), _b32(orderToken), orderChainId);
         vm.stopPrank();
 
-        (authToken, timeToLive, signature) = generateCreateAdRequestParams(adId, address(adToken));
-
         vm.prank(maker);
         adToken.approve(address(adManager), initAmt);
 
         vm.prank(maker);
         vm.expectEmit(true, true, true, true);
         emit AdManager.AdCreated("1", maker, address(adToken), initAmt, orderChainId);
-        adManager.createAd(
-            signature, authToken, timeToLive, adId, address(adToken), initAmt, orderChainId, _b32(adRecipient)
-        );
+        adManager.createAd(adId, address(adToken), initAmt, orderChainId, _b32(adRecipient));
 
         (
             uint256 linkedOrderChainId,
@@ -407,16 +313,12 @@ contract AdManagerTest is Test {
         adManager.setTokenRoute(NATIVE_TOKEN_ADDRESS, _b32(orderToken), orderChainId);
         vm.stopPrank();
 
-        (authToken, timeToLive, signature) = generateCreateAdRequestParams(adId, NATIVE_TOKEN_ADDRESS);
-
         vm.deal(maker, initAmt);
 
         vm.prank(maker);
         vm.expectEmit(true, true, true, true);
         emit AdManager.AdCreated(adId, maker, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId);
-        adManager.createAd{value: initAmt}(
-            signature, authToken, timeToLive, adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, _b32(adRecipient)
-        );
+        adManager.createAd{value: initAmt}(adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, _b32(adRecipient));
 
         (
             uint256 linkedOrderChainId,
@@ -448,15 +350,11 @@ contract AdManagerTest is Test {
         adManager.setTokenRoute(NATIVE_TOKEN_ADDRESS, _b32(orderToken), orderChainId);
         vm.stopPrank();
 
-        (authToken, timeToLive, signature) = generateCreateAdRequestParams(adId, NATIVE_TOKEN_ADDRESS);
-
         vm.deal(maker, initAmt);
 
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__InsufficientLiquidity.selector);
-        adManager.createAd(
-            signature, authToken, timeToLive, adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, _b32(adRecipient)
-        );
+        adManager.createAd(adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, _b32(adRecipient));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -466,21 +364,15 @@ contract AdManagerTest is Test {
         test_createAd_succeedsWhenRouteExists_emitsAndStores();
         string memory adId = lastAdId;
 
-        // get auth
-        (authToken, timeToLive, signature) = generateFundAdRequestParams(adId, fundAmt);
-
         vm.prank(nonMaker);
         vm.expectRevert(AdManager.AdManager__NotMaker.selector);
-        adManager.fundAd(signature, authToken, timeToLive, adId, fundAmt);
+        adManager.fundAd(adId, fundAmt);
 
         vm.prank(maker);
         adToken.approve(address(adManager), fundAmt);
 
-        // another auth
-        (authToken, timeToLive, signature) = generateFundAdRequestParams(adId, fundAmt);
-
         vm.prank(maker);
-        adManager.fundAd(signature, authToken, timeToLive, adId, fundAmt);
+        adManager.fundAd(adId, fundAmt);
 
         (,,,, uint256 balance,,,) = adManager.ads(adId);
         assertEq(balance, initAmt + fundAmt);
@@ -493,19 +385,15 @@ contract AdManagerTest is Test {
         test_createAd_succeedsWhenRouteExists_emitsAndStores();
         string memory adId = lastAdId;
 
-        (authToken, timeToLive, signature) = generateCloseAdRequestParams(adId, maker);
-
         // Close first (no locked funds, balance 0)
         vm.prank(maker);
-        adManager.closeAd(signature, authToken, timeToLive, adId, maker);
+        adManager.closeAd(adId, maker);
 
         uint256 amount = 1 ether;
 
-        (bytes32 token2, uint256 ttl2, bytes memory sig2) = generateFundAdRequestParams(adId, amount);
-
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__AdClosed.selector);
-        adManager.fundAd(sig2, token2, ttl2, adId, amount);
+        adManager.fundAd(adId, amount);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -516,11 +404,9 @@ contract AdManagerTest is Test {
 
         string memory adId = lastAdId;
 
-        (authToken, timeToLive, signature) = generateFundAdRequestParams(adId, 0);
-
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__ZeroAmount.selector);
-        adManager.fundAd(signature, authToken, timeToLive, adId, 0);
+        adManager.fundAd(adId, 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -530,9 +416,8 @@ contract AdManagerTest is Test {
         test_createAd_with_native_token_success();
         string memory adId = "nativeAd";
         vm.deal(maker, fundAmt);
-        (authToken, timeToLive, signature) = generateFundAdRequestParams(adId, fundAmt);
         vm.prank(maker);
-        adManager.fundAd{value: fundAmt}(signature, authToken, timeToLive, adId, fundAmt);
+        adManager.fundAd{value: fundAmt}(adId, fundAmt);
         (,,,, uint256 balance,,,) = adManager.ads(adId);
 
         assertEq(balance, initAmt + fundAmt);
@@ -549,11 +434,9 @@ contract AdManagerTest is Test {
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
-
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(AdManager.AdManager__ChainNotSupported.selector, p.orderChainId));
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -575,13 +458,11 @@ contract AdManagerTest is Test {
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
-
         vm.prank(maker);
         vm.expectRevert(
             abi.encodeWithSelector(AdManager.AdManager__OrderChainMismatch.selector, orderChainId, p.orderChainId)
         );
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -595,15 +476,13 @@ contract AdManagerTest is Test {
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
-
         vm.prank(maker);
         vm.expectRevert(
             abi.encodeWithSelector(
                 AdManager.AdManager__OrderPortalMismatch.selector, _b32(orderPortal), p.srcOrderPortal
             )
         );
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -620,13 +499,11 @@ contract AdManagerTest is Test {
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
-
         vm.prank(maker);
         vm.expectRevert(
             abi.encodeWithSelector(AdManager.AdManager__MissingRoute.selector, p.orderChainToken, block.chainid)
         );
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -643,8 +520,6 @@ contract AdManagerTest is Test {
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
-
         vm.prank(maker);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -653,7 +528,7 @@ contract AdManagerTest is Test {
                 p.orderChainToken // provided in params
             )
         );
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -667,11 +542,9 @@ contract AdManagerTest is Test {
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
-
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__NotMaker.selector);
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -691,15 +564,13 @@ contract AdManagerTest is Test {
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
-
         vm.prank(maker);
         vm.expectRevert(
             abi.encodeWithSelector(
                 AdManager.AdManager__AdTokenMismatch.selector, _b32(address(adToken)), _b32(address(otherAdToken))
             )
         );
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -716,13 +587,11 @@ contract AdManagerTest is Test {
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
-
         vm.prank(maker);
         vm.expectRevert(
             abi.encodeWithSelector(AdManager.AdManager__AdRecipientMismatch.selector, expected, p.adRecipient)
         );
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -736,11 +605,9 @@ contract AdManagerTest is Test {
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
-
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__BridgerZero.selector);
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -754,11 +621,9 @@ contract AdManagerTest is Test {
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
-
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__RecipientZero.selector);
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -777,11 +642,10 @@ contract AdManagerTest is Test {
         p.orderRecipient = dirty;
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
 
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(AddressCast.AddressCast__NotEvmAddress.selector, dirty));
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -795,11 +659,9 @@ contract AdManagerTest is Test {
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
-
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__ZeroAmount.selector);
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -813,11 +675,9 @@ contract AdManagerTest is Test {
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
-
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__InsufficientLiquidity.selector);
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -837,10 +697,8 @@ contract AdManagerTest is Test {
         vm.expectEmit(true, true, true, true);
         emit AdManager.OrderLocked(adId, expectedHash, adMaker, token, p.amount, p.bridger, p.orderRecipient);
 
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, expectedHash);
-
         vm.prank(maker);
-        bytes32 orderHash = adManager.lockForOrder(signature, authToken, timeToLive, p);
+        bytes32 orderHash = adManager.lockForOrder(p);
         assertEq(orderHash, expectedHash, "order hash mismatch");
 
         (,,,,, uint256 lockedAfter,,) = adManager.ads(adId);
@@ -861,14 +719,12 @@ contract AdManagerTest is Test {
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
-
         vm.prank(maker);
-        bytes32 h1 = adManager.lockForOrder(signature, authToken, timeToLive, p);
+        bytes32 h1 = adManager.lockForOrder(p);
 
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(AdManager.AdManager__OrderExists.selector, h1));
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -880,14 +736,12 @@ contract AdManagerTest is Test {
 
         uint256 amount = 3 ether;
 
-        (authToken, timeToLive, signature) = generateWithdrawFromAdRequestParams(adId, amount, recipient);
-
         vm.prank(nonMaker);
         vm.expectRevert(AdManager.AdManager__NotMaker.selector);
-        adManager.withdrawFromAd(signature, authToken, timeToLive, adId, amount, recipient);
+        adManager.withdrawFromAd(adId, amount, recipient);
 
         vm.prank(maker);
-        adManager.withdrawFromAd(signature, authToken, timeToLive, adId, amount, recipient);
+        adManager.withdrawFromAd(adId, amount, recipient);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -898,11 +752,9 @@ contract AdManagerTest is Test {
 
         string memory adId = lastAdId;
 
-        (authToken, timeToLive, signature) = generateWithdrawFromAdRequestParams(adId, 0, recipient);
-
         vm.startPrank(maker);
         vm.expectRevert(AdManager.AdManager__ZeroAmount.selector);
-        adManager.withdrawFromAd(signature, authToken, timeToLive, adId, 0, recipient);
+        adManager.withdrawFromAd(adId, 0, recipient);
         vm.stopPrank();
     }
 
@@ -915,12 +767,10 @@ contract AdManagerTest is Test {
         string memory adId = lastAdId;
         uint256 available = initAmt + fundAmt;
 
-        (authToken, timeToLive, signature) = generateWithdrawFromAdRequestParams(adId, available + 1, recipient);
-
         vm.startPrank(maker);
         // available = fundAmt, ask for fundAmt + 1
         vm.expectRevert(AdManager.AdManager__InsufficientLiquidity.selector);
-        adManager.withdrawFromAd(signature, authToken, timeToLive, adId, available + 1, recipient);
+        adManager.withdrawFromAd(adId, available + 1, recipient);
         vm.stopPrank();
     }
 
@@ -932,10 +782,9 @@ contract AdManagerTest is Test {
         string memory adId = "nativeAd";
         uint256 amount = 5 ether;
         uint256 balBefore = recipient.balance;
-        (authToken, timeToLive, signature) = generateWithdrawFromAdRequestParams(adId, amount, recipient);
 
         vm.prank(maker);
-        adManager.withdrawFromAd(signature, authToken, timeToLive, adId, amount, recipient);
+        adManager.withdrawFromAd(adId, amount, recipient);
 
         uint256 balAfter = recipient.balance;
         assertEq(balAfter - balBefore, amount);
@@ -949,11 +798,9 @@ contract AdManagerTest is Test {
         string memory adId = "nativeAd";
         uint256 available = initAmt + fundAmt;
 
-        (authToken, timeToLive, signature) = generateWithdrawFromAdRequestParams(adId, available + 1, recipient);
-
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__InsufficientLiquidity.selector);
-        adManager.withdrawFromAd(signature, authToken, timeToLive, adId, available + 1, recipient);
+        adManager.withdrawFromAd(adId, available + 1, recipient);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -964,11 +811,9 @@ contract AdManagerTest is Test {
 
         string memory adId = lastAdId;
 
-        (authToken, timeToLive, signature) = generateCloseAdRequestParams(adId, recipient);
-
         vm.prank(nonMaker);
         vm.expectRevert(AdManager.AdManager__NotMaker.selector);
-        adManager.closeAd(signature, authToken, timeToLive, adId, recipient);
+        adManager.closeAd(adId, recipient);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -982,18 +827,14 @@ contract AdManagerTest is Test {
         // Prepare a minimal valid lock to set locked > 0
         AdManager.OrderParams memory p = _defaultParams(adId);
         bytes32 orderHash = adManager.hashOrderPublic(p);
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
-
-        (bytes32 tokenCloseAd, uint256 ttlCloseAd, bytes memory sigCloseAd) =
-            generateCloseAdRequestParams(adId, recipient);
 
         vm.startPrank(maker);
 
         // Lock succeeds -> increases ad.locked
-        adManager.lockForOrder(signature, authToken, timeToLive, p);
+        adManager.lockForOrder(p);
 
         vm.expectRevert(AdManager.Admanager__ActiveLocks.selector);
-        adManager.closeAd(sigCloseAd, tokenCloseAd, ttlCloseAd, adId, recipient);
+        adManager.closeAd(adId, recipient);
         vm.stopPrank();
     }
 
@@ -1007,11 +848,9 @@ contract AdManagerTest is Test {
 
         uint256 balBefore = adToken.balanceOf(recipient);
 
-        (authToken, timeToLive, signature) = generateCloseAdRequestParams(adId, recipient);
-
         // Close (no locks)
         vm.prank(maker);
-        adManager.closeAd(signature, authToken, timeToLive, adId, recipient);
+        adManager.closeAd(adId, recipient);
 
         // Remaining transferred to recipient
         uint256 balAfter = adToken.balanceOf(recipient);
@@ -1032,10 +871,9 @@ contract AdManagerTest is Test {
 
         string memory adId = "nativeAd";
         uint256 balBefore = recipient.balance;
-        (authToken, timeToLive, signature) = generateCloseAdRequestParams(adId, recipient);
 
         vm.prank(maker);
-        adManager.closeAd(signature, authToken, timeToLive, adId, recipient);
+        adManager.closeAd(adId, recipient);
 
         uint256 balAfter = recipient.balance;
         assertEq(balAfter - balBefore, initAmt, "remaining not transferred");
@@ -1058,11 +896,9 @@ contract AdManagerTest is Test {
         AdManager.OrderParams memory p = _defaultParams(adId);
         bytes32 expected = adManager.hashOrderPublic(p);
 
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, expected, bytes32(0));
-
         vm.prank(bridger);
         vm.expectRevert(abi.encodeWithSelector(AdManager.AdManager__OrderNotOpen.selector, expected));
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32(uint256(1)), bytes32(0), hex"", hex"");
+        adManager.unlock(p, bytes32(uint256(1)), bytes32(0), hex"", hex"");
     }
 
     function _openOrder(
@@ -1081,10 +917,9 @@ contract AdManagerTest is Test {
         p.orderRecipient = _b32(_recipient);
 
         bytes32 orderHashExpected = adManager.hashOrderPublic(p);
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHashExpected);
 
         vm.prank(maker);
-        orderHash = adManager.lockForOrder(signature, authToken, timeToLive, p);
+        orderHash = adManager.lockForOrder(p);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1106,20 +941,14 @@ contract AdManagerTest is Test {
 
         bytes32 t_root = bytes32(uint256(0));
 
-        // get auth
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, oh1, t_root);
-
         // First unlock succeeds
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p1, nullifier, t_root, hex"", hex"");
-
-        /// get auth
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, oh2, t_root);
+        adManager.unlock(p1, nullifier, t_root, hex"", hex"");
 
         // Second unlock with the same nullifier on a different (still open) order
         vm.prank(bridger);
         vm.expectRevert(abi.encodeWithSelector(AdManager.AdManager__NullifierUsed.selector, nullifier));
-        adManager.unlock(signature, authToken, timeToLive, p2, nullifier, t_root, hex"", hex"");
+        adManager.unlock(p2, nullifier, t_root, hex"", hex"");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1142,11 +971,9 @@ contract AdManagerTest is Test {
 
         bytes32 t_root = bytes32(uint256(0));
 
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, t_root);
-
         vm.prank(bridger);
         vm.expectRevert(AdManager.AdManager__InvalidProof.selector);
-        adManager.unlock(signature, authToken, timeToLive, p, keccak256("X"), t_root, hex"", hex"");
+        adManager.unlock(p, keccak256("X"), t_root, hex"", hex"");
 
         // State unchanged
         (AdManager.Status statusAfter) = adManager.orders(orderHash);
@@ -1176,11 +1003,10 @@ contract AdManagerTest is Test {
         emit AdManager.OrderUnlocked(orderHash, p.orderRecipient, bytes32("N1"));
 
         bytes32 targetRoot = bytes32(uint256(5));
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, targetRoot);
 
         // Verify success
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32("N1"), targetRoot, hex"", hex"");
+        adManager.unlock(p, bytes32("N1"), targetRoot, hex"", hex"");
 
         // Status -> Filled
         (AdManager.Status status) = adManager.orders(orderHash);
@@ -1196,12 +1022,9 @@ contract AdManagerTest is Test {
 
         // Second call (same order) should fail (order not open anymore)
 
-        // get auth
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, targetRoot);
-
         vm.prank(bridger);
         vm.expectRevert(abi.encodeWithSelector(AdManager.AdManager__OrderNotOpen.selector, orderHash));
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32("N1"), targetRoot, hex"", hex"");
+        adManager.unlock(p, bytes32("N1"), targetRoot, hex"", hex"");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1217,14 +1040,13 @@ contract AdManagerTest is Test {
         (,,,,, uint256 lockedBefore,,) = adManager.ads(p.adId);
 
         bytes32 targetRoot = bytes32(uint256(10));
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, targetRoot);
 
         // get contract wrapped token balance before
         uint256 contractBalBefore = _wNativeToken.balanceOf(address(adManager));
 
         // Verify success
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32("N2"), targetRoot, hex"", hex"");
+        adManager.unlock(p, bytes32("N2"), targetRoot, hex"", hex"");
 
         // status
         (AdManager.Status status) = adManager.orders(orderHash);
@@ -1262,10 +1084,9 @@ contract AdManagerTest is Test {
         uint256 contractBalBefore = adToken.balanceOf(address(adManager));
 
         bytes32 targetRoot = bytes32(uint256(5));
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, targetRoot);
 
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32("NBAL"), targetRoot, hex"", hex"");
+        adManager.unlock(p, bytes32("NBAL"), targetRoot, hex"", hex"");
 
         (,,,, uint256 balanceAfter, uint256 lockedAfter,,) = adManager.ads(p.adId);
         uint256 contractBalAfter = adToken.balanceOf(address(adManager));
@@ -1298,23 +1119,20 @@ contract AdManagerTest is Test {
             _openOrder(adId, address(adToken), lockAmt, 222, bridger, recipient);
 
         bytes32 targetRoot = bytes32(uint256(7));
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, targetRoot);
 
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32("NDRN"), targetRoot, hex"", hex"");
+        adManager.unlock(p, bytes32("NDRN"), targetRoot, hex"", hex"");
 
         uint256 remaining = totalDeposited - lockAmt;
 
         // One wei more than what is left in escrow must revert.
-        (authToken, timeToLive, signature) = generateWithdrawFromAdRequestParams(adId, remaining + 1, recipient);
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__InsufficientLiquidity.selector);
-        adManager.withdrawFromAd(signature, authToken, timeToLive, adId, remaining + 1, recipient);
+        adManager.withdrawFromAd(adId, remaining + 1, recipient);
 
         // The exact remaining must succeed and zero out the pool.
-        (authToken, timeToLive, signature) = generateWithdrawFromAdRequestParams(adId, remaining, recipient);
         vm.prank(maker);
-        adManager.withdrawFromAd(signature, authToken, timeToLive, adId, remaining, recipient);
+        adManager.withdrawFromAd(adId, remaining, recipient);
 
         (,,,, uint256 balanceFinal,,,) = adManager.ads(adId);
         assertEq(balanceFinal, 0, "ad.balance should be zero after full withdraw");
@@ -1339,16 +1157,14 @@ contract AdManagerTest is Test {
             _openOrder(adId, address(adToken), lockAmt, 333, bridger, recipient);
 
         bytes32 targetRoot = bytes32(uint256(9));
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, targetRoot);
 
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32("NCLS"), targetRoot, hex"", hex"");
+        adManager.unlock(p, bytes32("NCLS"), targetRoot, hex"", hex"");
 
         uint256 closeRecipientBalBefore = adToken.balanceOf(other);
 
-        (authToken, timeToLive, signature) = generateCloseAdRequestParams(adId, other);
         vm.prank(maker);
-        adManager.closeAd(signature, authToken, timeToLive, adId, other);
+        adManager.closeAd(adId, other);
 
         uint256 sweptAmount = adToken.balanceOf(other) - closeRecipientBalBefore;
         assertEq(sweptAmount, totalDeposited - lockAmt, "closeAd swept more than what remained in escrow");

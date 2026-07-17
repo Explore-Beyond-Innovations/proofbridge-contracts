@@ -34,9 +34,8 @@ contract PayoutFallbackTest is AdManagerTest {
         (p, orderHash) = _openOrder("nativeAd", NATIVE_TOKEN_ADDRESS, 50 ether, 777, bridger, recipient);
 
         bytes32 targetRoot = bytes32(uint256(7));
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash("nativeAd", orderHash, targetRoot);
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p, nullifier, targetRoot, hex"", hex"");
+        adManager.unlock(p, nullifier, targetRoot, hex"", hex"");
     }
 
     function test_happyPath_paysDirectly_nothingClaimable() public {
@@ -84,9 +83,8 @@ contract PayoutFallbackTest is AdManagerTest {
                 _openOrder(adId, NATIVE_TOKEN_ADDRESS, amount, 9000 + i, bridger, address(receiver));
 
             bytes32 targetRoot = bytes32(uint256(100 + i));
-            (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(adId, orderHash, targetRoot);
             vm.prank(bridger);
-            adManager.unlock(signature, authToken, timeToLive, p, bytes32(uint256(9000 + i)), targetRoot, hex"", hex"");
+            adManager.unlock(p, bytes32(uint256(9000 + i)), targetRoot, hex"", hex"");
 
             (,,,, uint256 adBalance,,,) = adManager.ads(adId);
             uint256 owed = adManager.claimable(address(receiver), NATIVE_TOKEN_ADDRESS);

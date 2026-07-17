@@ -117,15 +117,6 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
     /// @notice Unlocked payouts awaiting claim: recipient => token => amount.
     mapping(address => mapping(address => uint256)) public claimable;
 
-    /// @notice Tracks manager permissions for addresses
-    mapping(address => bool) public managers;
-
-    /// @notice Request tokens tracker to prevent replay attacks
-    mapping(bytes32 => bool) public requestTokens;
-
-    /// @notice Request hash tracker to prevent replay attacks
-    mapping(bytes32 => bool) public requestHashes;
-
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -176,11 +167,6 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
      */
     event PayoutClaimed(address indexed recipient, address indexed token, uint256 amount);
 
-    /**
-     * @notice Emitted when a manager's status is updated
-     */
-    event UpdateManager(address indexed manager, bool status);
-
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -199,9 +185,6 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
     error OrderPortal__OrderNotOpen(bytes32 orderHash);
     error OrderPortal__ZeroAddress();
     error OrderPortal__BridgerMustBeSender();
-    error OrderPortal__TokenAlreadyUsed();
-    error OrderPortal__InvalidSigner();
-    error OrderPortal__RequestHashedProcessed();
     error OrderPortal__MerkleManagerAppendFailed();
     error OrderPortal__InsufficientLiquidity();
 
@@ -219,29 +202,19 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
         _initAdmin(admin);
         i_verifier = _verifier;
         i_merkleManager = _merkleManager;
-        managers[admin] = true;
         wNativeToken = _wNativeToken;
     }
 
     /*//////////////////////////////////////////////////////////////
-                              ADMIN: MANAGERS
+                              ADMIN: PAUSE
     //////////////////////////////////////////////////////////////*/
 
-    /**
-     * @notice Sets or unsets an address as a manager
-     */
     function pause() external onlyRole(ADMIN_ROLE) {
         _pause();
     }
 
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
-    }
-
-    function setManager(address _manager, bool _status) external onlyRole(ADMIN_ROLE) {
-        if (_manager == address(0)) revert OrderPortal__ZeroAddress();
-        managers[_manager] = _status;
-        emit UpdateManager(_manager, _status);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -303,7 +276,7 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
     /**
      * @notice Create and fund an order; tokens are transferred to this contract.
      */
-    function createOrder(bytes memory signature, bytes32 authToken, uint256 timeToExpire, OrderParams calldata params)
+    function createOrder(OrderParams calldata params)
         external
         payable
         nonReentrant
@@ -313,12 +286,6 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
         orderHash = validateOrder(params);
 
         if (orders[orderHash] != Status.None) revert OrderPortal__OrderExists(orderHash);
-
-        bytes32 message = createOrderRequestHash(params.adId, orderHash, authToken, timeToExpire);
-
-        if (requestHashes[message]) revert OrderPortal__RequestHashedProcessed();
-
-        _consumeAuth(message, authToken, timeToExpire, signature);
 
         address orderTokenAddr = params.orderChainToken.toAddressChecked();
         if (orderTokenAddr.isNative()) {
@@ -335,8 +302,6 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
         orders[orderHash] = Status.Open;
         inFlightOf[params.adCreator]++;
         inFlightOf[params.bridger]++;
-
-        requestHashes[message] = true;
 
         emit OrderCreated(
             orderHash,
@@ -360,9 +325,6 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
      * @notice Unlock an order after a valid proof and pay out the destination recipient on this chain.
      */
     function unlock(
-        bytes memory signature,
-        bytes32 authToken,
-        uint256 timeToExpire,
         OrderParams calldata params,
         bytes32 nullifierHash,
         bytes32 targetRoot,
@@ -374,17 +336,9 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
         if (nullifierUsed[nullifierHash]) revert OrderPortal__NullifierUsed(nullifierHash);
         if (orders[orderHash] != Status.Open) revert OrderPortal__OrderNotOpen(orderHash);
 
-        bytes32 message = unlockOrderRequestHash(params.adId, orderHash, targetRoot, authToken, timeToExpire);
-
-        if (requestHashes[message]) revert OrderPortal__RequestHashedProcessed();
-
-        _consumeAuth(message, authToken, timeToExpire, signature);
-
-        // Gate 2 — root authenticity. Enforced once the route's module is
-        // configured; mandatory at the pre-auth cutover.
-        if (address(rootVerifier[params.adChainId]) != address(0)) {
-            _requireRootValid(params.adChainId, targetRoot, abi.encode(params.adCreator, params.bridger, cosigData));
-        }
+        // Gate 2 — root authenticity. Mandatory: reverts with
+        // NoRootVerifier when no module is configured for the ad chain.
+        _requireRootValid(params.adChainId, targetRoot, abi.encode(params.adCreator, params.bridger, cosigData));
 
         bytes32[] memory publicInputs = RequestAuth.buildPublicInputs(
             i_merkleManager, nullifierHash, targetRoot, orderHash, _PUBLIC_INPUT_SIDE_ORDER
@@ -396,8 +350,6 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
         orders[orderHash] = Status.Filled;
         inFlightOf[params.adCreator]--;
         inFlightOf[params.bridger]--;
-
-        requestHashes[message] = true;
 
         address orderTokenAddr = params.orderChainToken.toAddressChecked();
         address adRecipientAddr = params.adRecipient.toAddressChecked();
@@ -468,13 +420,6 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
     }
 
     /**
-     * @notice Check if a request hash exists
-     */
-    function checkRequestHashExists(bytes32 message) external view returns (bool) {
-        return requestHashes[message];
-    }
-
-    /**
      * @notice Return the merkle manager root
      */
     function getLatestMerkleRoot() external view returns (bytes32 root) {
@@ -493,41 +438,6 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
      */
     function getMerkleLeafCount() external view returns (uint256 count) {
         count = i_merkleManager.getWidth();
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                              HASH HELPERS
-    //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @notice Creates a hash for an order request
-     */
-    function createOrderRequestHash(string memory adId, bytes32 orderHash, bytes32 authToken, uint256 timeToExpire)
-        public
-        view
-        returns (bytes32 message)
-    {
-        bytes[] memory params = new bytes[](2);
-        params[0] = abi.encode(adId);
-        params[1] = abi.encode(orderHash);
-        message = RequestAuth.hashRequest(authToken, timeToExpire, "createOrder", params, block.chainid, address(this));
-    }
-
-    /**
-     * @notice Generates a hash for unlocking an advertisement order
-     */
-    function unlockOrderRequestHash(
-        string memory adId,
-        bytes32 orderHash,
-        bytes32 _targetRoot,
-        bytes32 authToken,
-        uint256 timeToExpire
-    ) public view returns (bytes32 message) {
-        bytes[] memory params = new bytes[](3);
-        params[0] = abi.encode(adId);
-        params[1] = abi.encode(orderHash);
-        params[2] = abi.encode(_targetRoot);
-        message = RequestAuth.hashRequest(authToken, timeToExpire, "unlockOrder", params, block.chainid, address(this));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -562,19 +472,6 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
             adDecimals: p.adDecimals
         });
         return OrderHash.digest(o);
-    }
-
-    /**
-     * @notice Verify and consume a pre-authorization: signer must be a
-     *         manager, deadline must not have passed, and the authToken must
-     *         not have been used before.
-     */
-    function _consumeAuth(bytes32 message, bytes32 authToken, uint256 timeToExpire, bytes memory signature) internal {
-        if (requestTokens[authToken]) revert OrderPortal__TokenAlreadyUsed();
-        RequestAuth.assertNotExpired(timeToExpire);
-        address signer = RequestAuth.recoverSigner(message, signature);
-        if (!managers[signer]) revert OrderPortal__InvalidSigner();
-        requestTokens[authToken] = true;
     }
 
     /**

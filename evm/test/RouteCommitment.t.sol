@@ -15,13 +15,12 @@ contract RouteCommitmentTest is AdManagerTest {
         rp = p;
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
-        (authToken, timeToLive, signature) = generateLockForOrderRequestHash(adId, orderHash);
         vm.prank(maker);
     }
 
     function _lockWithOrderToken(string memory adId, bytes32 orderChainToken, uint256 salt) internal {
         _prepareLock(adId, orderChainToken, salt);
-        adManager.lockForOrder(signature, authToken, timeToLive, rp);
+        adManager.lockForOrder(rp);
     }
 
     function test_adStoresCommittedRouteAtCreation() public {
@@ -43,7 +42,7 @@ contract RouteCommitmentTest is AdManagerTest {
         vm.expectRevert(
             abi.encodeWithSelector(AdManager.AdManager__RouteMismatch.selector, _b32(orderToken), _b32(newOrderToken))
         );
-        adManager.lockForOrder(signature, authToken, timeToLive, rp);
+        adManager.lockForOrder(rp);
 
         // matches the commitment, not the table: frozen, not redirected
         _prepareLock(adId, _b32(orderToken), 42);
@@ -52,7 +51,7 @@ contract RouteCommitmentTest is AdManagerTest {
                 AdManager.AdManager__OrderTokenMismatch.selector, _b32(newOrderToken), _b32(orderToken)
             )
         );
-        adManager.lockForOrder(signature, authToken, timeToLive, rp);
+        adManager.lockForOrder(rp);
 
         vm.prank(admin);
         adManager.setTokenRoute(address(adToken), _b32(orderToken), orderChainId);
@@ -76,7 +75,7 @@ contract RouteCommitmentTest is AdManagerTest {
         if (!shouldSucceed) {
             vm.expectRevert();
         }
-        adManager.lockForOrder(signature, authToken, timeToLive, rp);
+        adManager.lockForOrder(rp);
 
         if (shouldSucceed) {
             (,,,,, uint256 locked,,) = adManager.ads(adId);

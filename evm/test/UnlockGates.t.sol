@@ -8,20 +8,8 @@ import {AdManager} from "src/AdManager.sol";
 import {OrderPortal} from "src/OrderPortal.sol";
 import {BLSKeyRegistry} from "src/BLSKeyRegistry.sol";
 import {CounterpartyVerifier} from "src/CounterpartyVerifier.sol";
-import {IRootVerifier} from "src/interfaces/IRootVerifier.sol";
 import {RootVerifierRegistry} from "src/libraries/RootVerifierRegistry.sol";
-
-contract MockRootVerifier is IRootVerifier {
-    bool public ok;
-
-    constructor(bool ok_) {
-        ok = ok_;
-    }
-
-    function isRootValid(uint256, bytes32, bytes calldata) external view returns (bool) {
-        return ok;
-    }
-}
+import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
 
 abstract contract GateVectors {
     uint256 constant VECTOR_CHAIN_ID = 11155111;
@@ -63,12 +51,11 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         (AdManager.OrderParams memory p, bytes32 orderHash) =
             _openOrder(lastAdId, address(adToken), 60 ether, 999, bridger, recipient);
         gp = p;
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(lastAdId, orderHash, targetRoot);
     }
 
     function _unlockVia(address module, bytes32 targetRoot, bytes memory cosig) internal {
         _prepareUnlock(module, targetRoot);
-        adManager.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), targetRoot, hex"", cosig);
+        adManager.unlock(gp, bytes32("NG"), targetRoot, hex"", cosig);
     }
 
     function test_gate2_mockTrue_unlocks() public {
@@ -80,14 +67,14 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         vm.expectRevert(
             abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, orderChainId, bytes32(uint256(5)))
         );
-        adManager.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), bytes32(uint256(5)), hex"", hex"");
+        adManager.unlock(gp, bytes32("NG"), bytes32(uint256(5)), hex"", hex"");
     }
 
     function test_gate2_rootNotInSignedAuth_reverts() public {
         bytes32 junkRoot = bytes32(uint256(0xbad));
         _prepareUnlock(address(cVerifier), junkRoot);
         vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, orderChainId, junkRoot));
-        adManager.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), junkRoot, hex"", _cosigData());
+        adManager.unlock(gp, bytes32("NG"), junkRoot, hex"", _cosigData());
     }
 
     function test_gate2_partiesNotTheSigners_reverts() public {
@@ -95,23 +82,25 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         // addresses, not the registered vector signers
         _prepareUnlock(address(cVerifier), vOrderRoot);
         vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, orderChainId, vOrderRoot));
-        adManager.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), vOrderRoot, hex"", _cosigData());
+        adManager.unlock(gp, bytes32("NG"), vOrderRoot, hex"", _cosigData());
     }
 
     function test_gate2_garbageCosig_reverts() public {
         _prepareUnlock(address(cVerifier), vOrderRoot);
         vm.expectRevert();
-        adManager.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), vOrderRoot, hex"", hex"deadbeef");
+        adManager.unlock(gp, bytes32("NG"), vOrderRoot, hex"", hex"deadbeef");
     }
 
-    function test_gate2_noModuleConfigured_skipsGate() public {
+    function test_gate2_noModuleConfigured_reverts() public {
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, address(0));
+
         test_fundAd_makerOnly();
-        (AdManager.OrderParams memory p, bytes32 orderHash) =
-            _openOrder(lastAdId, address(adToken), 60 ether, 998, bridger, recipient);
+        (AdManager.OrderParams memory p,) = _openOrder(lastAdId, address(adToken), 60 ether, 998, bridger, recipient);
         bytes32 targetRoot = bytes32(uint256(7));
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(lastAdId, orderHash, targetRoot);
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32("NS"), targetRoot, hex"", hex"");
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.NoRootVerifier.selector, orderChainId));
+        adManager.unlock(p, bytes32("NS"), targetRoot, hex"", hex"");
     }
 
     function test_inFlight_tracksLockAndUnlock() public {
@@ -123,9 +112,8 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         assertTrue(adManager.hasOpenPositions(p.bridger));
 
         bytes32 targetRoot = bytes32(uint256(3));
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(lastAdId, orderHash, targetRoot);
         vm.prank(bridger);
-        adManager.unlock(signature, authToken, timeToLive, p, bytes32("NI"), targetRoot, hex"", hex"");
+        adManager.unlock(p, bytes32("NI"), targetRoot, hex"", hex"");
 
         assertFalse(adManager.hasOpenPositions(p.adCreator));
         assertFalse(adManager.hasOpenPositions(p.bridger));
@@ -178,19 +166,17 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
 
         orderToken.mint(vBridger, p.amount);
         bytes32 orderHash = portal.hashOrderPublic(p);
-        (authToken, timeToLive, signature) = generateCreateOrderRequestParams(p.adId, orderHash);
         vm.startPrank(vBridger);
         orderToken.approve(address(portal), p.amount);
-        portal.createOrder(signature, authToken, timeToLive, p);
+        portal.createOrder(p);
         vm.stopPrank();
 
         gp = p;
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(p.adId, orderHash, targetRoot);
     }
 
     function _unlockAsVectorParties(address module, bytes32 targetRoot, bytes memory cosig) internal {
         _prepareUnlock(module, targetRoot);
-        portal.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), targetRoot, hex"", cosig);
+        portal.unlock(gp, bytes32("NG"), targetRoot, hex"", cosig);
     }
 
     function test_gate2_realModule_fullCosig_unlocks() public {
@@ -200,14 +186,14 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
     function test_gate2_mockFalse_reverts() public {
         _prepareUnlock(address(new MockRootVerifier(false)), vOrderRoot);
         vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, vOrderRoot));
-        portal.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), vOrderRoot, hex"", hex"");
+        portal.unlock(gp, bytes32("NG"), vOrderRoot, hex"", hex"");
     }
 
     function test_gate2_rootNotInSignedAuth_reverts() public {
         bytes32 junkRoot = bytes32(uint256(0xbad));
         _prepareUnlock(address(cVerifier), junkRoot);
         vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, junkRoot));
-        portal.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), junkRoot, hex"", _cosigData());
+        portal.unlock(gp, bytes32("NG"), junkRoot, hex"", _cosigData());
     }
 
     function test_gate2_singleSigNotAggregate_reverts() public {
@@ -227,13 +213,13 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
         );
         _prepareUnlock(address(cVerifier), vOrderRoot);
         vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, vOrderRoot));
-        portal.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), vOrderRoot, hex"", cosig);
+        portal.unlock(gp, bytes32("NG"), vOrderRoot, hex"", cosig);
     }
 
     function test_gate2_garbageCosig_reverts() public {
         _prepareUnlock(address(cVerifier), vOrderRoot);
         vm.expectRevert();
-        portal.unlock(signature, authToken, timeToLive, gp, bytes32("NG"), vOrderRoot, hex"", hex"beef");
+        portal.unlock(gp, bytes32("NG"), vOrderRoot, hex"", hex"beef");
     }
 
     function test_inFlight_blocksRevokeUntilUnlock() public {
@@ -253,10 +239,9 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
         p.bridger = bridgerAcct;
         orderToken.mint(vBridger, p.amount);
         bytes32 orderHash = portal.hashOrderPublic(p);
-        (authToken, timeToLive, signature) = generateCreateOrderRequestParams(p.adId, orderHash);
         vm.startPrank(vBridger);
         orderToken.approve(address(portal), p.amount);
-        portal.createOrder(signature, authToken, timeToLive, p);
+        portal.createOrder(p);
         vm.stopPrank();
 
         assertTrue(portal.hasOpenPositions(bridgerAcct));
@@ -272,8 +257,7 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
         reg.revoke(bridgerAcct, revokeAuth, 1);
 
         bytes32 targetRoot = bytes32(uint256(3));
-        (authToken, timeToLive, signature) = generateUnlockOrderRequestHash(p.adId, orderHash, targetRoot);
-        portal.unlock(signature, authToken, timeToLive, p, bytes32("NR"), targetRoot, hex"", hex"");
+        portal.unlock(p, bytes32("NR"), targetRoot, hex"", hex"");
 
         assertFalse(portal.hasOpenPositions(bridgerAcct));
         reg.revoke(bridgerAcct, revokeAuth, 1);
@@ -308,14 +292,13 @@ function _registerOne(string memory vjson, string memory who, bool sep53) {
             )
         );
     }
-    BLSKeyRegistry(0x1111111111111111111111111111111111111111)
-        .register(
-            stdJson.readBytes32(vjson, string.concat(base, ".account")),
-            auth,
-            stdJson.readBytes(vjson, string.concat(base, ".pkNative")),
-            stdJson.readBytes(vjson, string.concat(base, ".pop")),
-            0
-        );
+    BLSKeyRegistry(0x1111111111111111111111111111111111111111).register(
+        stdJson.readBytes32(vjson, string.concat(base, ".account")),
+        auth,
+        stdJson.readBytes(vjson, string.concat(base, ".pkNative")),
+        stdJson.readBytes(vjson, string.concat(base, ".pop")),
+        0
+    );
 }
 
 function _vectorCosig(string memory vjson) view returns (bytes memory) {

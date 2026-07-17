@@ -135,15 +135,6 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
     /// @notice Consumed nullifiers to prevent reuse across proofs.
     mapping(bytes32 => bool) public nullifierUsed;
 
-    /// @notice Tracks manager permissions for addresses
-    mapping(address => bool) public managers;
-
-    /// @notice Request tokens tracker to prevent replay attacks
-    mapping(bytes32 => bool) public requestTokens;
-
-    /// @notice Request hash tracker to prevent replay attacks
-    mapping(bytes32 => bool) public requestHashes;
-
     /// @notice Ad Ids mapping
     mapping(string => bool) public adIds;
 
@@ -222,11 +213,6 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
      */
     event PayoutClaimed(address indexed recipient, address indexed token, uint256 amount);
 
-    /**
-     * @notice Emitted when a manager's status is updated
-     */
-    event UpdateManager(address indexed manager, bool status);
-
     /*//////////////////////////////////////////////////////////////
                                   ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -259,10 +245,6 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
     error AdManager__SelfCallOnly();
     error AdManager__ZeroAddress();
 
-    error AdManager__TokenAlreadyUsed();
-    error Admanager__InvalidSigner();
-    error Admanager__RequestHashedProcessed();
-
     error AdManager__MerkleManagerAppendFailed();
     error AdManager__UsedAdId();
 
@@ -281,31 +263,21 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
             revert AdManager__ZeroAddress();
         }
         _initAdmin(admin);
-        managers[admin] = true;
         i_verifier = _verifier;
         i_merkleManager = _merkleManager;
         wNativeToken = _wNativeToken;
     }
 
     /*//////////////////////////////////////////////////////////////
-                              ADMIN: MANAGERS
+                              ADMIN: PAUSE
     //////////////////////////////////////////////////////////////*/
 
-    /**
-     * @notice Sets or unsets an address as a manager
-     */
     function pause() external onlyRole(ADMIN_ROLE) {
         _pause();
     }
 
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
-    }
-
-    function setManager(address _manager, bool _status) external onlyRole(ADMIN_ROLE) {
-        if (_manager == address(0)) revert AdManager__ZeroAddress();
-        managers[_manager] = _status;
-        emit UpdateManager(_manager, _status);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -366,9 +338,6 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
      * @notice Create a new liquidity ad to serve orders from `orderChainId`.
      */
     function createAd(
-        bytes memory signature,
-        bytes32 authToken,
-        uint256 timeToExpire,
         string memory adId,
         address adToken,
         uint256 initialAmount,
@@ -386,13 +355,6 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         }
 
         if (adIds[adId]) revert AdManager__UsedAdId();
-
-        bytes32 message =
-            createAdRequestHash(adId, adToken, initialAmount, orderChainId, adRecipient, authToken, timeToExpire);
-
-        if (requestHashes[message]) revert Admanager__RequestHashedProcessed();
-
-        _consumeAuth(message, authToken, timeToExpire, signature);
 
         if (adToken.isNative()) {
             if (msg.value < initialAmount) revert AdManager__InsufficientLiquidity();
@@ -413,28 +375,16 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         });
 
         adIds[adId] = true;
-        requestHashes[message] = true;
         emit AdCreated(adId, msg.sender, adToken, initialAmount, orderChainId);
     }
 
     /**
      * @notice Fund an existing ad with `amount` of its ERC20 token.
      */
-    function fundAd(bytes memory signature, bytes32 authToken, uint256 timeToExpire, string memory adId, uint256 amount)
-        external
-        payable
-        nonReentrant
-        whenNotPaused
-    {
+    function fundAd(string memory adId, uint256 amount) external payable nonReentrant whenNotPaused {
         Ad storage ad = __getAdOwned(adId, msg.sender);
         if (!ad.open) revert AdManager__AdClosed();
         if (amount == 0) revert AdManager__ZeroAmount();
-
-        bytes32 message = fundAdRequestHash(adId, amount, authToken, timeToExpire);
-
-        if (requestHashes[message]) revert Admanager__RequestHashedProcessed();
-
-        _consumeAuth(message, authToken, timeToExpire, signature);
 
         if (ad.token.isNative()) {
             if (msg.value < amount) revert AdManager__InsufficientLiquidity();
@@ -444,33 +394,20 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         }
 
         ad.balance += amount;
-        requestHashes[message] = true;
         emit AdFunded(adId, msg.sender, amount, ad.balance);
     }
 
     /**
      * @notice Withdraw unfrozen liquidity from an ad.
      */
-    function withdrawFromAd(
-        bytes memory signature,
-        bytes32 authToken,
-        uint256 timeToExpire,
-        string memory adId,
-        uint256 amount,
-        address to
-    ) external nonReentrant whenNotPaused {
+    function withdrawFromAd(string memory adId, uint256 amount, address to) external nonReentrant whenNotPaused {
         Ad storage ad = __getAdOwned(adId, msg.sender);
 
-        bytes32 message = withdrawFromAdRequestHash(adId, amount, to, authToken, timeToExpire);
-
-        if (requestHashes[message]) revert Admanager__RequestHashedProcessed();
         if (to == address(0)) revert AdManager__RecipientZero();
         if (amount == 0) revert AdManager__ZeroAmount();
 
         uint256 available = ad.balance - ad.locked;
         if (amount > available) revert AdManager__InsufficientLiquidity();
-
-        _consumeAuth(message, authToken, timeToExpire, signature);
 
         ad.balance -= amount;
 
@@ -480,27 +417,16 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
             IERC20(ad.token).safeTransfer(to, amount);
         }
 
-        requestHashes[message] = true;
         emit AdWithdrawn(adId, msg.sender, amount, ad.balance);
     }
 
     /**
      * @notice Close an ad and withdraw any remaining funds.
      */
-    function closeAd(bytes memory signature, bytes32 authToken, uint256 timeToExpire, string memory adId, address to)
-        external
-        nonReentrant
-        whenNotPaused
-    {
+    function closeAd(string memory adId, address to) external nonReentrant whenNotPaused {
         Ad storage ad = __getAdOwned(adId, msg.sender);
         if (ad.locked != 0) revert Admanager__ActiveLocks();
         if (to == address(0)) revert AdManager__RecipientZero();
-
-        bytes32 message = closeAdRequestHash(adId, to, authToken, timeToExpire);
-
-        if (requestHashes[message]) revert Admanager__RequestHashedProcessed();
-
-        _consumeAuth(message, authToken, timeToExpire, signature);
 
         uint256 remaining = ad.balance;
 
@@ -515,14 +441,13 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
             }
         }
 
-        requestHashes[message] = true;
         emit AdClosed(adId, msg.sender);
     }
 
     /**
      * @notice Reserve `params.amount` from `params.adId` to fulfill an order.
      */
-    function lockForOrder(bytes memory signature, bytes32 authToken, uint256 timeToExpire, OrderParams calldata params)
+    function lockForOrder(OrderParams calldata params)
         external
         nonReentrant
         whenNotPaused
@@ -540,12 +465,6 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
 
         if (orders[orderHash] != Status.None) revert AdManager__OrderExists(orderHash);
 
-        bytes32 message = lockForOrderRequestHash(params.adId, orderHash, authToken, timeToExpire);
-
-        if (requestHashes[message]) revert Admanager__RequestHashedProcessed();
-
-        _consumeAuth(message, authToken, timeToExpire, signature);
-
         ad.locked += adAmount;
         orders[orderHash] = Status.Open;
         inFlightOf[params.adCreator]++;
@@ -553,8 +472,6 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
 
         // locks are unlocked on the order side (ad_contract = 0), so bind the leaf with side 0
         if (!i_merkleManager.appendOrderHash(orderHash, 0)) revert AdManager__MerkleManagerAppendFailed();
-
-        requestHashes[message] = true;
 
         emit OrderLocked(params.adId, orderHash, ad.maker, ad.token, adAmount, params.bridger, params.orderRecipient);
     }
@@ -567,9 +484,6 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
      * @notice Unlock previously reserved funds after presenting a valid zk-proof.
      */
     function unlock(
-        bytes memory signature,
-        bytes32 authToken,
-        uint256 timeToExpire,
         OrderParams calldata params,
         bytes32 nullifierHash,
         bytes32 targetRoot,
@@ -581,17 +495,9 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         if (orders[orderHash] != Status.Open) revert AdManager__OrderNotOpen(orderHash);
         if (nullifierUsed[nullifierHash]) revert AdManager__NullifierUsed(nullifierHash);
 
-        bytes32 message = unlockOrderRequestHash(params.adId, orderHash, targetRoot, authToken, timeToExpire);
-
-        if (requestHashes[message]) revert Admanager__RequestHashedProcessed();
-
-        _consumeAuth(message, authToken, timeToExpire, signature);
-
-        // Gate 2 — root authenticity. Enforced once the route's module is
-        // configured; mandatory at the pre-auth cutover.
-        if (address(rootVerifier[params.orderChainId]) != address(0)) {
-            _requireRootValid(params.orderChainId, targetRoot, abi.encode(params.adCreator, params.bridger, cosigData));
-        }
+        // Gate 2 — root authenticity. Mandatory: reverts with
+        // NoRootVerifier when no module is configured for the source chain.
+        _requireRootValid(params.orderChainId, targetRoot, abi.encode(params.adCreator, params.bridger, cosigData));
 
         bytes32[] memory publicInputs =
             RequestAuth.buildPublicInputs(i_merkleManager, nullifierHash, targetRoot, orderHash, _PUBLIC_INPUT_SIDE_AD);
@@ -602,8 +508,6 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         orders[orderHash] = Status.Filled;
         inFlightOf[params.adCreator]--;
         inFlightOf[params.bridger]--;
-
-        requestHashes[message] = true;
 
         // Pay recipient on this chain from the ad's escrowed token.
         // Scale to ad-chain units to match what was reserved in lockForOrder.
@@ -682,13 +586,6 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
     }
 
     /**
-     * @notice Check if a request hash exists
-     */
-    function checkRequestHashExists(bytes32 message) external view returns (bool) {
-        return requestHashes[message];
-    }
-
-    /**
      * @notice Return the latest merkle manager root
      */
     function getLatestMerkleRoot() external view returns (bytes32 root) {
@@ -707,108 +604,6 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
      */
     function getMerkleLeafCount() external view returns (uint256 count) {
         count = i_merkleManager.getWidth();
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                              HASH HELPERS
-    //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @notice Creates a hash for ad creation requests
-     */
-    function createAdRequestHash(
-        string memory adId,
-        address adToken,
-        uint256 initialAmount,
-        uint256 orderChainId,
-        bytes32 adRecipient,
-        bytes32 authToken,
-        uint256 timeToExpire
-    ) public view returns (bytes32 message) {
-        bytes[] memory params = new bytes[](5);
-        params[0] = abi.encode(adId);
-        params[1] = abi.encode(adToken);
-        params[2] = abi.encode(initialAmount);
-        params[3] = abi.encode(orderChainId);
-        params[4] = abi.encode(adRecipient);
-        message = RequestAuth.hashRequest(authToken, timeToExpire, "createAd", params, block.chainid, address(this));
-    }
-
-    /**
-     * @notice Creates a hash of a fund ad request
-     */
-    function fundAdRequestHash(string memory adId, uint256 amount, bytes32 authToken, uint256 timeToExpire)
-        public
-        view
-        returns (bytes32 message)
-    {
-        bytes[] memory params = new bytes[](2);
-        params[0] = abi.encode(adId);
-        params[1] = abi.encode(amount);
-        message = RequestAuth.hashRequest(authToken, timeToExpire, "fundAd", params, block.chainid, address(this));
-    }
-
-    /**
-     * @notice Generates a hash for withdrawing funds from an ad request
-     */
-    function withdrawFromAdRequestHash(
-        string memory adId,
-        uint256 amount,
-        address to,
-        bytes32 authToken,
-        uint256 timeToExpire
-    ) public view returns (bytes32 message) {
-        bytes[] memory params = new bytes[](3);
-        params[0] = abi.encode(adId);
-        params[1] = abi.encode(amount);
-        params[2] = abi.encode(to);
-        message =
-            RequestAuth.hashRequest(authToken, timeToExpire, "withdrawFromAd", params, block.chainid, address(this));
-    }
-
-    /**
-     * @notice Generates a hash for closing an advertisement request
-     */
-    function closeAdRequestHash(string memory adId, address to, bytes32 authToken, uint256 timeToExpire)
-        public
-        view
-        returns (bytes32 message)
-    {
-        bytes[] memory params = new bytes[](2);
-        params[0] = abi.encode(adId);
-        params[1] = abi.encode(to);
-        message = RequestAuth.hashRequest(authToken, timeToExpire, "closeAd", params, block.chainid, address(this));
-    }
-
-    /**
-     * @notice Generates a hash for locking an advertisement for an order
-     */
-    function lockForOrderRequestHash(string memory adId, bytes32 orderHash, bytes32 authToken, uint256 timeToExpire)
-        public
-        view
-        returns (bytes32 message)
-    {
-        bytes[] memory params = new bytes[](2);
-        params[0] = abi.encode(adId);
-        params[1] = abi.encode(orderHash);
-        message = RequestAuth.hashRequest(authToken, timeToExpire, "lockForOrder", params, block.chainid, address(this));
-    }
-
-    /**
-     * @notice Generates a hash for unlocking an advertisement order
-     */
-    function unlockOrderRequestHash(
-        string memory adId,
-        bytes32 orderHash,
-        bytes32 _targetRoot,
-        bytes32 authToken,
-        uint256 timeToExpire
-    ) public view returns (bytes32 message) {
-        bytes[] memory params = new bytes[](3);
-        params[0] = abi.encode(adId);
-        params[1] = abi.encode(orderHash);
-        params[2] = abi.encode(_targetRoot);
-        message = RequestAuth.hashRequest(authToken, timeToExpire, "unlockOrder", params, block.chainid, address(this));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -846,19 +641,6 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
             adDecimals: p.adDecimals
         });
         return OrderHash.digest(o);
-    }
-
-    /**
-     * @notice Verify and consume a pre-authorization: signer must be a
-     *         manager, deadline must not have passed, and the authToken must
-     *         not have been used before.
-     */
-    function _consumeAuth(bytes32 message, bytes32 authToken, uint256 timeToExpire, bytes memory signature) internal {
-        if (requestTokens[authToken]) revert AdManager__TokenAlreadyUsed();
-        RequestAuth.assertNotExpired(timeToExpire);
-        address signer = RequestAuth.recoverSigner(message, signature);
-        if (!managers[signer]) revert Admanager__InvalidSigner();
-        requestTokens[authToken] = true;
     }
 
     /**
