@@ -38,15 +38,6 @@ const KEY_ORDERS: Symbol = symbol_short!("orders");
 /// Prefix for nullifiers
 const KEY_NULLIFIERS: Symbol = symbol_short!("nulls");
 
-/// Prefix for managers
-const KEY_MANAGERS: Symbol = symbol_short!("mgrs");
-
-/// Prefix for request tokens (auth tokens)
-const KEY_REQ_TOKENS: Symbol = symbol_short!("rtokens");
-
-/// Prefix for request hashes
-const KEY_REQ_HASHES: Symbol = symbol_short!("rhashes");
-
 /// Prefix for ad IDs
 const KEY_AD_IDS: Symbol = symbol_short!("adids");
 /// Prefix for root-verifier modules: (KEY_RVERIF, chain_id) -> Address
@@ -181,54 +172,6 @@ pub fn is_nullifier_used(env: &Env, nullifier_hash: &BytesN<32>) -> bool {
 /// Mark nullifier as used
 pub fn set_nullifier_used(env: &Env, nullifier_hash: &BytesN<32>) {
     let key = (KEY_NULLIFIERS, nullifier_hash.clone());
-    env.storage().persistent().set(&key, &true);
-}
-
-// =============================================================================
-// Managers
-// =============================================================================
-
-/// Check if address is a manager
-pub fn is_manager(env: &Env, addr: &Address) -> bool {
-    let key = (KEY_MANAGERS, addr.clone());
-    env.storage().persistent().get(&key).unwrap_or(false)
-}
-
-/// Set manager status
-pub fn set_manager(env: &Env, addr: &Address, status: bool) {
-    let key = (KEY_MANAGERS, addr.clone());
-    env.storage().persistent().set(&key, &status);
-}
-
-// =============================================================================
-// Request Tokens (Auth Tokens)
-// =============================================================================
-
-/// Check if request token has been used
-pub fn is_request_token_used(env: &Env, token: &BytesN<32>) -> bool {
-    let key = (KEY_REQ_TOKENS, token.clone());
-    env.storage().persistent().get(&key).unwrap_or(false)
-}
-
-/// Mark request token as used
-pub fn set_request_token_used(env: &Env, token: &BytesN<32>) {
-    let key = (KEY_REQ_TOKENS, token.clone());
-    env.storage().persistent().set(&key, &true);
-}
-
-// =============================================================================
-// Request Hashes
-// =============================================================================
-
-/// Check if request hash has been processed
-pub fn is_request_hash_used(env: &Env, hash: &BytesN<32>) -> bool {
-    let key = (KEY_REQ_HASHES, hash.clone());
-    env.storage().persistent().get(&key).unwrap_or(false)
-}
-
-/// Mark request hash as processed
-pub fn set_request_hash_used(env: &Env, hash: &BytesN<32>) {
-    let key = (KEY_REQ_HASHES, hash.clone());
     env.storage().persistent().set(&key, &true);
 }
 

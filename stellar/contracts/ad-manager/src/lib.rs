@@ -44,8 +44,8 @@ impl AdManagerContract {
 
     /// Initialize the contract with admin and external contract addresses.
     ///
-    /// Can only be called once. Sets up admin (granted manager role),
-    /// verifier, merkle manager, wrapped native token, and chain ID.
+    /// Can only be called once. Sets up admin, verifier, merkle manager,
+    /// wrapped native token, and chain ID.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -68,7 +68,6 @@ impl AdManagerContract {
             chain_id,
         };
         storage::set_config(&env, &config);
-        storage::set_manager(&env, &admin, true);
         storage::set_initialized(&env);
 
         events::Initialized {
@@ -86,8 +85,6 @@ impl AdManagerContract {
     // =========================================================================
     // Admin Functions
     // =========================================================================
-
-    /// Set or unset an address as a manager.
 
     pub fn pause(env: Env) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
@@ -136,22 +133,6 @@ impl AdManagerContract {
             to: pending,
         }
         .publish(&env);
-        Ok(())
-    }
-
-    pub fn set_manager(env: Env, manager: Address, status: bool) -> Result<(), AdManagerError> {
-        let config = storage::get_config(&env)?;
-        config.admin.require_auth();
-
-        storage::set_manager(&env, &manager, status);
-
-        events::ManagerUpdated {
-            manager: manager.clone(),
-            status,
-        }
-        .publish(&env);
-
-        storage::extend_instance_ttl(&env);
         Ok(())
     }
 
@@ -281,10 +262,6 @@ impl AdManagerContract {
     /// Create a new liquidity ad.
     pub fn create_ad(
         env: Env,
-        signature: BytesN<64>,
-        public_key: BytesN<32>,
-        auth_token: BytesN<32>,
-        time_to_expire: u64,
         creator: Address,
         ad_id: String,
         ad_token: BytesN<32>,
@@ -317,30 +294,6 @@ impl AdManagerContract {
         // Creator authorizes the call (and the downstream SAC transfer).
         creator.require_auth();
 
-        let contract_bytes = eip712::contract_address_to_bytes32(&env);
-        let message = auth::create_ad_request_hash(
-            &env,
-            &ad_id,
-            &ad_token,
-            initial_amount,
-            order_chain_id,
-            &ad_recipient,
-            &auth_token,
-            time_to_expire,
-            config.chain_id,
-            &contract_bytes,
-        );
-
-        // Manager role check (signer is only validated as a registered manager).
-        Self::verify_request(
-            &env,
-            &message,
-            &auth_token,
-            time_to_expire,
-            &signature,
-            &public_key,
-        )?;
-
         token::transfer_from_user_bytes32(
             &env,
             &ad_token,
@@ -361,7 +314,6 @@ impl AdManagerContract {
         };
         storage::set_ad(&env, &ad_id, &ad);
         storage::set_ad_id_used(&env, &ad_id);
-        storage::set_request_hash_used(&env, &message);
 
         events::AdCreated {
             ad_id: ad_id.clone(),
@@ -377,15 +329,7 @@ impl AdManagerContract {
     }
 
     /// Fund an existing ad with additional liquidity.
-    pub fn fund_ad(
-        env: Env,
-        signature: BytesN<64>,
-        public_key: BytesN<32>,
-        auth_token: BytesN<32>,
-        time_to_expire: u64,
-        ad_id: String,
-        amount: u128,
-    ) -> Result<(), AdManagerError> {
+    pub fn fund_ad(env: Env, ad_id: String, amount: u128) -> Result<(), AdManagerError> {
         if storage::is_paused(&env) {
             return Err(AdManagerError::ContractPaused);
         }
@@ -402,27 +346,6 @@ impl AdManagerContract {
         // Maker authorizes the call (and the downstream SAC transfer).
         ad.maker.require_auth();
 
-        let contract_bytes = eip712::contract_address_to_bytes32(&env);
-        let message = auth::fund_ad_request_hash(
-            &env,
-            &ad_id,
-            amount,
-            &auth_token,
-            time_to_expire,
-            config.chain_id,
-            &contract_bytes,
-        );
-
-        // Manager role check.
-        Self::verify_request(
-            &env,
-            &message,
-            &auth_token,
-            time_to_expire,
-            &signature,
-            &public_key,
-        )?;
-
         token::transfer_from_user_bytes32(
             &env,
             &ad.token,
@@ -433,7 +356,6 @@ impl AdManagerContract {
 
         ad.balance += amount;
         storage::set_ad(&env, &ad_id, &ad);
-        storage::set_request_hash_used(&env, &message);
 
         events::AdFunded {
             ad_id: ad_id.clone(),
@@ -450,10 +372,6 @@ impl AdManagerContract {
     /// Withdraw available (unlocked) liquidity from an ad.
     pub fn withdraw_from_ad(
         env: Env,
-        signature: BytesN<64>,
-        public_key: BytesN<32>,
-        auth_token: BytesN<32>,
-        time_to_expire: u64,
         ad_id: String,
         amount: u128,
         to: Address,
@@ -476,34 +394,10 @@ impl AdManagerContract {
         // Maker authorizes the withdrawal.
         ad.maker.require_auth();
 
-        let contract_bytes = eip712::contract_address_to_bytes32(&env);
-        let message = auth::withdraw_from_ad_request_hash(
-            &env,
-            &ad_id,
-            amount,
-            &to,
-            &auth_token,
-            time_to_expire,
-            config.chain_id,
-            &contract_bytes,
-        );
-
-        // Manager role check.
-        Self::verify_request(
-            &env,
-            &message,
-            &auth_token,
-            time_to_expire,
-            &signature,
-            &public_key,
-        )?;
-
         ad.balance -= amount;
         storage::set_ad(&env, &ad_id, &ad);
 
         token::transfer_to_user_bytes32(&env, &ad.token, &config.w_native_token, &to, amount)?;
-
-        storage::set_request_hash_used(&env, &message);
 
         events::AdWithdrawn {
             ad_id: ad_id.clone(),
@@ -518,15 +412,7 @@ impl AdManagerContract {
     }
 
     /// Close an ad and withdraw all remaining funds.
-    pub fn close_ad(
-        env: Env,
-        signature: BytesN<64>,
-        public_key: BytesN<32>,
-        auth_token: BytesN<32>,
-        time_to_expire: u64,
-        ad_id: String,
-        to: Address,
-    ) -> Result<(), AdManagerError> {
+    pub fn close_ad(env: Env, ad_id: String, to: Address) -> Result<(), AdManagerError> {
         if storage::is_paused(&env) {
             return Err(AdManagerError::ContractPaused);
         }
@@ -539,27 +425,6 @@ impl AdManagerContract {
 
         // Maker authorizes the close.
         ad.maker.require_auth();
-
-        let contract_bytes = eip712::contract_address_to_bytes32(&env);
-        let message = auth::close_ad_request_hash(
-            &env,
-            &ad_id,
-            &to,
-            &auth_token,
-            time_to_expire,
-            config.chain_id,
-            &contract_bytes,
-        );
-
-        // Manager role check.
-        Self::verify_request(
-            &env,
-            &message,
-            &auth_token,
-            time_to_expire,
-            &signature,
-            &public_key,
-        )?;
 
         let remaining = ad.balance;
         let ad_token = ad.token.clone();
@@ -579,8 +444,6 @@ impl AdManagerContract {
             )?;
         }
 
-        storage::set_request_hash_used(&env, &message);
-
         events::AdClosed {
             ad_id: ad_id.clone(),
             maker,
@@ -596,14 +459,7 @@ impl AdManagerContract {
     // =========================================================================
 
     /// Lock liquidity for an order.
-    pub fn lock_for_order(
-        env: Env,
-        signature: BytesN<64>,
-        public_key: BytesN<32>,
-        auth_token: BytesN<32>,
-        time_to_expire: u64,
-        params: OrderParams,
-    ) -> Result<BytesN<32>, AdManagerError> {
+    pub fn lock_for_order(env: Env, params: OrderParams) -> Result<BytesN<32>, AdManagerError> {
         if storage::is_paused(&env) {
             return Err(AdManagerError::ContractPaused);
         }
@@ -638,26 +494,6 @@ impl AdManagerContract {
             return Err(AdManagerError::OrderExists);
         }
 
-        let message = auth::lock_for_order_request_hash(
-            &env,
-            &params.ad_id,
-            &order_hash,
-            &auth_token,
-            time_to_expire,
-            config.chain_id,
-            &contract_bytes,
-        );
-
-        // Manager role check.
-        Self::verify_request(
-            &env,
-            &message,
-            &auth_token,
-            time_to_expire,
-            &signature,
-            &public_key,
-        )?;
-
         let maker = ad.maker.clone();
         let ad_token = ad.token.clone();
         ad.locked += ad_amount;
@@ -675,8 +511,6 @@ impl AdManagerContract {
         );
 
         cross_contract::append_to_merkle(&env, &config.merkle_manager, &order_hash, 0)?;
-
-        storage::set_request_hash_used(&env, &message);
 
         events::OrderLocked {
             order_hash: order_hash.clone(),
@@ -700,10 +534,6 @@ impl AdManagerContract {
     /// Unlock funds with a ZK proof.
     pub fn unlock(
         env: Env,
-        signature: BytesN<64>,
-        public_key: BytesN<32>,
-        auth_token: BytesN<32>,
-        time_to_expire: u64,
         params: OrderParams,
         nullifier_hash: BytesN<32>,
         target_root: BytesN<32>,
@@ -728,41 +558,20 @@ impl AdManagerContract {
             return Err(AdManagerError::NullifierUsed);
         }
 
-        let message = auth::unlock_order_request_hash(
+        // Gate 2 - root authenticity (BLS co-signature). Mandatory: unlock is
+        // impossible until the route's verifier module is configured.
+        let module = storage::get_root_verifier(&env, params.order_chain_id)
+            .ok_or(AdManagerError::RootVerifierNotSet)?;
+        if !proofbridge_core::cross_contract::is_root_valid(
             &env,
-            &params.ad_id,
-            &order_hash,
+            &module,
+            params.order_chain_id,
             &target_root,
-            &auth_token,
-            time_to_expire,
-            config.chain_id,
-            &contract_bytes,
-        );
-
-        // Manager role check.
-        Self::verify_request(
-            &env,
-            &message,
-            &auth_token,
-            time_to_expire,
-            &signature,
-            &public_key,
-        )?;
-
-        // Gate 2 - root authenticity. Enforced once the route's module is
-        // configured; mandatory at the pre-auth cutover.
-        if let Some(module) = storage::get_root_verifier(&env, params.order_chain_id) {
-            if !proofbridge_core::cross_contract::is_root_valid(
-                &env,
-                &module,
-                params.order_chain_id,
-                &target_root,
-                &params.ad_creator,
-                &params.bridger,
-                &cosig_data,
-            ) {
-                return Err(AdManagerError::RootNotValid);
-            }
+            &params.ad_creator,
+            &params.bridger,
+            &cosig_data,
+        ) {
+            return Err(AdManagerError::RootNotValid);
         }
 
         let public_inputs = cross_contract::build_public_inputs(
@@ -786,7 +595,6 @@ impl AdManagerContract {
             &params.bridger,
             storage::get_in_flight(&env, &params.bridger) - 1,
         );
-        storage::set_request_hash_used(&env, &message);
 
         // Update ad and transfer tokens (scale signed amount to ad-chain precision)
         let ad_amount = proofbridge_core::decimal_scaling::scale(
@@ -893,11 +701,6 @@ impl AdManagerContract {
         }
     }
 
-    /// Check if a request hash has been processed.
-    pub fn check_request_hash_exists(env: Env, message: BytesN<32>) -> bool {
-        storage::is_request_hash_used(&env, &message)
-    }
-
     /// Get the latest merkle root.
     pub fn get_latest_merkle_root(env: Env) -> Result<BytesN<32>, AdManagerError> {
         let config = storage::get_config(&env)?;
@@ -941,11 +744,6 @@ impl AdManagerContract {
         storage::get_order_status(&env, &order_hash)
     }
 
-    /// Check if address is a manager.
-    pub fn is_manager(env: Env, addr: Address) -> bool {
-        storage::is_manager(&env, &addr)
-    }
-
     /// Get chain ID.
     pub fn get_chain_id(env: Env) -> Result<u128, AdManagerError> {
         let config = storage::get_config(&env)?;
@@ -978,30 +776,6 @@ impl AdManagerContract {
             return Err(AdManagerError::AdDecimalsMismatch);
         }
         Ok(())
-    }
-
-    /// Verify a pre-authorized request: check hash uniqueness, then validate
-    /// signature and manager status. Returns the signer address on success.
-    fn verify_request(
-        env: &Env,
-        message: &BytesN<32>,
-        auth_token: &BytesN<32>,
-        time_to_expire: u64,
-        signature: &BytesN<64>,
-        public_key: &BytesN<32>,
-    ) -> Result<Address, AdManagerError> {
-        if storage::is_request_hash_used(env, message) {
-            return Err(AdManagerError::RequestHashProcessed);
-        }
-
-        auth::pre_auth_validations(
-            env,
-            message,
-            auth_token,
-            time_to_expire,
-            signature,
-            public_key,
-        )
     }
 }
 

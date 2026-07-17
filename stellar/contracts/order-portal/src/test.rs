@@ -42,7 +42,6 @@ mod contract_tests {
         );
 
         assert!(client.is_initialized());
-        assert!(client.is_manager(&admin));
         assert_eq!(client.get_chain_id(), chain_id);
     }
 
@@ -91,8 +90,6 @@ mod contract_tests {
         );
 
         assert_eq!(client.get_chain_id(), 42);
-        assert!(client.is_manager(&admin));
-        assert!(!client.is_manager(&Address::generate(&env)));
 
         let config = client.get_config();
         assert_eq!(config.chain_id, 42);
@@ -303,75 +300,6 @@ mod validation_tests {
 }
 
 // =============================================================================
-// Auth & Request Hash Tests
-// =============================================================================
-
-mod auth_tests {
-    use crate::auth;
-    use soroban_sdk::{BytesN, Env, String as SorobanString};
-
-    #[test]
-    fn test_create_order_request_hash_deterministic() {
-        let env = Env::default();
-        let ad_id = SorobanString::from_str(&env, "test-ad");
-        let order_hash = BytesN::from_array(&env, &[0xAA; 32]);
-        let auth_token = BytesN::from_array(&env, &[0xBB; 32]);
-        let contract_addr = BytesN::from_array(&env, &[0xCC; 32]);
-
-        let hash1 = auth::create_order_request_hash(
-            &env,
-            &ad_id,
-            &order_hash,
-            &auth_token,
-            9999,
-            42,
-            &contract_addr,
-        );
-        let hash2 = auth::create_order_request_hash(
-            &env,
-            &ad_id,
-            &order_hash,
-            &auth_token,
-            9999,
-            42,
-            &contract_addr,
-        );
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_different_request_types_produce_different_hashes() {
-        let env = Env::default();
-        let ad_id = SorobanString::from_str(&env, "test-ad");
-        let order_hash = BytesN::from_array(&env, &[0xAA; 32]);
-        let target_root = BytesN::from_array(&env, &[0xDD; 32]);
-        let auth_token = BytesN::from_array(&env, &[0xBB; 32]);
-        let contract_addr = BytesN::from_array(&env, &[0xCC; 32]);
-
-        let create_hash = auth::create_order_request_hash(
-            &env,
-            &ad_id,
-            &order_hash,
-            &auth_token,
-            9999,
-            42,
-            &contract_addr,
-        );
-        let unlock_hash = auth::unlock_order_request_hash(
-            &env,
-            &ad_id,
-            &order_hash,
-            &target_root,
-            &auth_token,
-            9999,
-            42,
-            &contract_addr,
-        );
-        assert_ne!(create_hash, unlock_hash);
-    }
-}
-
-// =============================================================================
 // Storage Tests
 // =============================================================================
 
@@ -455,43 +383,6 @@ mod storage_tests {
 
             storage::set_nullifier_used(&env, &nullifier);
             assert!(storage::is_nullifier_used(&env, &nullifier));
-        });
-    }
-
-    #[test]
-    fn test_manager_tracking() {
-        let env = Env::default();
-        let contract_id = env.register(OrderPortalContract, ());
-
-        env.as_contract(&contract_id, || {
-            let addr = Address::generate(&env);
-            assert!(!storage::is_manager(&env, &addr));
-
-            storage::set_manager(&env, &addr, true);
-            assert!(storage::is_manager(&env, &addr));
-
-            storage::set_manager(&env, &addr, false);
-            assert!(!storage::is_manager(&env, &addr));
-        });
-    }
-
-    #[test]
-    fn test_request_hash_and_token_tracking() {
-        let env = Env::default();
-        let contract_id = env.register(OrderPortalContract, ());
-
-        env.as_contract(&contract_id, || {
-            let hash = BytesN::from_array(&env, &[0xAA; 32]);
-            let token = BytesN::from_array(&env, &[0xBB; 32]);
-
-            assert!(!storage::is_request_hash_used(&env, &hash));
-            assert!(!storage::is_request_token_used(&env, &token));
-
-            storage::set_request_hash_used(&env, &hash);
-            storage::set_request_token_used(&env, &token);
-
-            assert!(storage::is_request_hash_used(&env, &hash));
-            assert!(storage::is_request_token_used(&env, &token));
         });
     }
 }

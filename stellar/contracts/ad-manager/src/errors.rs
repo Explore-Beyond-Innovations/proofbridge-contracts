@@ -53,21 +53,9 @@ pub enum AdManagerError {
     /// ZK proof verification failed
     InvalidProof = 20,
 
-    // Auth errors (21-27)
+    // Auth errors (21)
     /// Address is zero/invalid
     ZeroAddress = 21,
-    /// Message hash is invalid
-    InvalidMessage = 22,
-    /// Auth token has already been used
-    TokenAlreadyUsed = 23,
-    /// Request token has expired
-    RequestTokenExpired = 24,
-    /// Signature recovered zero address
-    ZeroSigner = 25,
-    /// Signer is not a valid manager
-    InvalidSigner = 26,
-    /// Request hash has already been processed
-    RequestHashProcessed = 27,
 
     // External call errors (28)
     /// MerkleManager append failed
@@ -83,12 +71,6 @@ pub enum AdManagerError {
     /// Contract not yet initialized
     NotInitialized = 31,
 
-    // Signature errors (32-33)
-    /// Invalid signature length
-    InvalidSignatureLength = 32,
-    /// Signature verification failed
-    SignatureVerificationFailed = 33,
-
     // Decimal scaling errors (34-38)
     /// Decimals value is outside the supported range
     DecimalsOutOfRange = 34,
@@ -102,6 +84,8 @@ pub enum AdManagerError {
     AdDecimalsMismatch = 38,
     /// Gate 2: the root-verification module rejected the target root.
     RootNotValid = 39,
+    /// Gate 2: no root-verification module configured for the route.
+    RootVerifierNotSet = 45,
     ContractPaused = 41,
     NotPendingAdmin = 42,
     NothingToClaim = 43,
@@ -122,18 +106,6 @@ impl proofbridge_core::errors::ProofBridgeError for AdManagerError {
     }
     fn invalid_proof() -> Self {
         Self::InvalidProof
-    }
-    fn invalid_message() -> Self {
-        Self::InvalidMessage
-    }
-    fn token_already_used() -> Self {
-        Self::TokenAlreadyUsed
-    }
-    fn request_token_expired() -> Self {
-        Self::RequestTokenExpired
-    }
-    fn invalid_signer() -> Self {
-        Self::InvalidSigner
     }
     fn decimals_out_of_range() -> Self {
         Self::DecimalsOutOfRange

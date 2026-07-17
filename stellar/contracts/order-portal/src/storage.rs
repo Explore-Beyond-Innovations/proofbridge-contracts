@@ -25,12 +25,6 @@ const KEY_ROUTES: Symbol = symbol_short!("routes");
 const KEY_ORDERS: Symbol = symbol_short!("orders");
 /// Prefix for nullifier tracking
 const KEY_NULLS: Symbol = symbol_short!("nulls");
-/// Prefix for manager tracking
-const KEY_MGRS: Symbol = symbol_short!("mgrs");
-/// Prefix for request token tracking
-const KEY_RTOKENS: Symbol = symbol_short!("rtokens");
-/// Prefix for request hash tracking
-const KEY_RHASHES: Symbol = symbol_short!("rhashes");
 /// Prefix for root-verifier modules: (KEY_RVERIF, chain_id) -> Address
 const KEY_RVERIF: Symbol = symbol_short!("rverif");
 /// Prefix for in-flight order counts: (KEY_INFLT, account) -> u64
@@ -156,63 +150,6 @@ pub fn set_nullifier_used(env: &Env, nullifier_hash: &BytesN<32>) {
     env.storage()
         .persistent()
         .set(&(KEY_NULLS, nullifier_hash.clone()), &true);
-}
-
-// =============================================================================
-// Persistent Storage - Managers
-// =============================================================================
-
-/// Check if address is a manager
-pub fn is_manager(env: &Env, addr: &Address) -> bool {
-    env.storage()
-        .persistent()
-        .get(&(KEY_MGRS, addr.clone()))
-        .unwrap_or(false)
-}
-
-/// Set manager status
-pub fn set_manager(env: &Env, addr: &Address, status: bool) {
-    env.storage()
-        .persistent()
-        .set(&(KEY_MGRS, addr.clone()), &status);
-}
-
-// =============================================================================
-// Persistent Storage - Request Tokens (Replay Protection)
-// =============================================================================
-
-/// Check if request token is used
-pub fn is_request_token_used(env: &Env, token: &BytesN<32>) -> bool {
-    env.storage()
-        .persistent()
-        .get(&(KEY_RTOKENS, token.clone()))
-        .unwrap_or(false)
-}
-
-/// Mark request token as used
-pub fn set_request_token_used(env: &Env, token: &BytesN<32>) {
-    env.storage()
-        .persistent()
-        .set(&(KEY_RTOKENS, token.clone()), &true);
-}
-
-// =============================================================================
-// Persistent Storage - Request Hashes (Replay Protection)
-// =============================================================================
-
-/// Check if request hash is used
-pub fn is_request_hash_used(env: &Env, hash: &BytesN<32>) -> bool {
-    env.storage()
-        .persistent()
-        .get(&(KEY_RHASHES, hash.clone()))
-        .unwrap_or(false)
-}
-
-/// Mark request hash as used
-pub fn set_request_hash_used(env: &Env, hash: &BytesN<32>) {
-    env.storage()
-        .persistent()
-        .set(&(KEY_RHASHES, hash.clone()), &true);
 }
 
 // =============================================================================

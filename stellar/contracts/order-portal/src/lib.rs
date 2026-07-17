@@ -42,8 +42,8 @@ impl OrderPortalContract {
 
     /// Initialize the contract with admin and external contract addresses.
     ///
-    /// Can only be called once. Sets up admin (granted manager role),
-    /// verifier, merkle manager, wrapped native token, and chain ID.
+    /// Can only be called once. Sets up admin, verifier, merkle manager,
+    /// wrapped native token, and chain ID.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -68,7 +68,6 @@ impl OrderPortalContract {
             chain_id,
         };
         storage::set_config(&env, &config);
-        storage::set_manager(&env, &admin, true);
         storage::set_initialized(&env);
 
         storage::extend_instance_ttl(&env);
@@ -76,10 +75,8 @@ impl OrderPortalContract {
     }
 
     // =========================================================================
-    // Admin Functions - Managers
+    // Admin Functions
     // =========================================================================
-
-    /// Set or unset a manager.
 
     pub fn pause(env: Env) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
@@ -128,26 +125,6 @@ impl OrderPortalContract {
             to: pending,
         }
         .publish(&env);
-        Ok(())
-    }
-
-    pub fn set_manager(env: Env, manager: Address, status: bool) -> Result<(), OrderPortalError> {
-        let config = storage::get_config(&env)?;
-        config.admin.require_auth();
-
-        if manager == env.current_contract_address() {
-            return Err(OrderPortalError::ZeroAddress);
-        }
-
-        storage::set_manager(&env, &manager, status);
-
-        events::ManagerUpdated {
-            manager: manager.clone(),
-            status,
-        }
-        .publish(&env);
-
-        storage::extend_instance_ttl(&env);
         Ok(())
     }
 
@@ -282,14 +259,7 @@ impl OrderPortalContract {
     ///
     /// Bridger deposits tokens and creates an order that can be unlocked
     /// by a maker with a ZK proof on this chain.
-    pub fn create_order(
-        env: Env,
-        signature: BytesN<64>,
-        public_key: BytesN<32>,
-        auth_token: BytesN<32>,
-        time_to_expire: u64,
-        params: OrderParams,
-    ) -> Result<BytesN<32>, OrderPortalError> {
+    pub fn create_order(env: Env, params: OrderParams) -> Result<BytesN<32>, OrderPortalError> {
         if storage::is_paused(&env) {
             return Err(OrderPortalError::ContractPaused);
         }
@@ -306,25 +276,6 @@ impl OrderPortalContract {
         if storage::get_order_status(&env, &order_hash) != Status::None {
             return Err(OrderPortalError::OrderExists);
         }
-
-        let message = auth::create_order_request_hash(
-            &env,
-            &params.ad_id,
-            &order_hash,
-            &auth_token,
-            time_to_expire,
-            config.chain_id,
-            &contract_bytes,
-        );
-
-        let _signer = Self::verify_request(
-            &env,
-            &message,
-            &auth_token,
-            time_to_expire,
-            &signature,
-            &public_key,
-        )?;
 
         let bridger_addr =
             token::bytes32_to_account_address::<OrderPortalError>(&env, &params.bridger)?;
@@ -356,7 +307,6 @@ impl OrderPortalContract {
             &params.bridger,
             storage::get_in_flight(&env, &params.bridger) + 1,
         );
-        storage::set_request_hash_used(&env, &message);
 
         events::OrderCreated {
             order_hash: order_hash.clone(),
@@ -386,10 +336,6 @@ impl OrderPortalContract {
     /// the deposited tokens on this chain.
     pub fn unlock(
         env: Env,
-        signature: BytesN<64>,
-        public_key: BytesN<32>,
-        auth_token: BytesN<32>,
-        time_to_expire: u64,
         params: OrderParams,
         nullifier_hash: BytesN<32>,
         target_root: BytesN<32>,
@@ -414,27 +360,6 @@ impl OrderPortalContract {
             return Err(OrderPortalError::NullifierUsed);
         }
 
-        let message = auth::unlock_order_request_hash(
-            &env,
-            &params.ad_id,
-            &order_hash,
-            &target_root,
-            &auth_token,
-            time_to_expire,
-            config.chain_id,
-            &contract_bytes,
-        );
-
-        // Manager role check.
-        Self::verify_request(
-            &env,
-            &message,
-            &auth_token,
-            time_to_expire,
-            &signature,
-            &public_key,
-        )?;
-
         let public_inputs = cross_contract::build_public_inputs(
             &env,
             &config.merkle_manager,
@@ -442,20 +367,20 @@ impl OrderPortalContract {
             &target_root,
             &order_hash,
         );
-        // Gate 2 - root authenticity. Enforced once the route's module is
-        // configured; mandatory at the pre-auth cutover.
-        if let Some(module) = storage::get_root_verifier(&env, params.ad_chain_id) {
-            if !proofbridge_core::cross_contract::is_root_valid(
-                &env,
-                &module,
-                params.ad_chain_id,
-                &target_root,
-                &params.ad_creator,
-                &params.bridger,
-                &cosig_data,
-            ) {
-                return Err(OrderPortalError::RootNotValid);
-            }
+        // Gate 2 - root authenticity (BLS co-signature). Mandatory: unlock is
+        // impossible until the route's verifier module is configured.
+        let module = storage::get_root_verifier(&env, params.ad_chain_id)
+            .ok_or(OrderPortalError::RootVerifierNotSet)?;
+        if !proofbridge_core::cross_contract::is_root_valid(
+            &env,
+            &module,
+            params.ad_chain_id,
+            &target_root,
+            &params.ad_creator,
+            &params.bridger,
+            &cosig_data,
+        ) {
+            return Err(OrderPortalError::RootNotValid);
         }
 
         cross_contract::verify_proof(&env, &config.verifier, &public_inputs, &proof)?;
@@ -472,7 +397,6 @@ impl OrderPortalContract {
             &params.bridger,
             storage::get_in_flight(&env, &params.bridger) - 1,
         );
-        storage::set_request_hash_used(&env, &message);
 
         Self::pay_or_credit(
             &env,
@@ -566,11 +490,6 @@ impl OrderPortalContract {
             .unwrap_or(BytesN::from_array(&env, &[0u8; 32]))
     }
 
-    /// Check if a request hash has been processed.
-    pub fn check_request_hash_exists(env: Env, message: BytesN<32>) -> bool {
-        storage::is_request_hash_used(&env, &message)
-    }
-
     /// Get the latest merkle root.
     pub fn get_latest_merkle_root(env: Env) -> Result<BytesN<32>, OrderPortalError> {
         let config = storage::get_config(&env)?;
@@ -607,11 +526,6 @@ impl OrderPortalContract {
     /// Get chain info.
     pub fn get_chain(env: Env, chain_id: u128) -> Option<ChainInfo> {
         storage::get_chain(&env, chain_id)
-    }
-
-    /// Check if address is a manager.
-    pub fn is_manager(env: Env, addr: Address) -> bool {
-        storage::is_manager(&env, &addr)
     }
 
     /// Get chain ID.
@@ -651,30 +565,6 @@ impl OrderPortalContract {
             return Err(OrderPortalError::OrderDecimalsMismatch);
         }
         Ok(())
-    }
-
-    /// Verify a pre-authorized request: check hash uniqueness, then validate
-    /// signature and manager status. Returns the signer address on success.
-    fn verify_request(
-        env: &Env,
-        message: &BytesN<32>,
-        auth_token: &BytesN<32>,
-        time_to_expire: u64,
-        signature: &BytesN<64>,
-        public_key: &BytesN<32>,
-    ) -> Result<Address, OrderPortalError> {
-        if storage::is_request_hash_used(env, message) {
-            return Err(OrderPortalError::RequestHashProcessed);
-        }
-
-        auth::pre_auth_validations(
-            env,
-            message,
-            auth_token,
-            time_to_expire,
-            signature,
-            public_key,
-        )
     }
 }
 

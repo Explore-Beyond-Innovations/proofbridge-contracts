@@ -6,17 +6,6 @@
 use soroban_sdk::{contractevent, Address, BytesN, String};
 
 // =============================================================================
-// Admin Events
-// =============================================================================
-
-#[contractevent(topics = ["mgr_upd"], data_format = "single-value")]
-pub struct ManagerUpdated {
-    #[topic]
-    pub manager: Address,
-    pub status: bool,
-}
-
-// =============================================================================
 // Chain / Route Events
 // =============================================================================
 

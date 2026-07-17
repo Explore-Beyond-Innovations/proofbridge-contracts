@@ -18,13 +18,6 @@ pub struct Initialized {
     pub chain_id: u128,
 }
 
-#[contractevent(topics = ["mgr_upd"], data_format = "single-value")]
-pub struct ManagerUpdated {
-    #[topic]
-    pub manager: Address,
-    pub status: bool,
-}
-
 // =============================================================================
 // Chain / Route Events
 // =============================================================================

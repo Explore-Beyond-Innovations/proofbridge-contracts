@@ -6,8 +6,8 @@ For shared architecture, contract descriptions, and protocol details, see the [c
 
 ## Stellar-Specific Details
 
-* **Ed25519 Authentication**: All state-changing functions require real ed25519 signatures over request hashes (not Soroban `require_auth` — verified via `env.crypto().ed25519_verify()`)
-* **Request Hash Binding**: `keccak256(auth_token + expiry + action_hash + params + chain_id + contract_address)`
+* **Wallet Authorization**: State-changing functions use Soroban `require_auth` on the acting wallet (bridger, maker, admin); `unlock` is permissionless
+* **Root Verification**: `unlock` requires the route's root-verifier module (BLS co-signature over the root-bound settlement message) — it fails with `RootVerifierNotSet` until the module is configured
 * **SAC-Convention Tokens**: Uses `stellar-tokens` crate's `FungibleToken` trait for token handling
 * **Address Format**: Full 32-byte `BytesN<32>` — `C...` strkey for contracts/tokens, `G...` strkey for ed25519 accounts
 * **Native Token**: Wrapped native XLM support via sentinel address (`0xEE...EE`)
@@ -16,7 +16,7 @@ For shared architecture, contract descriptions, and protocol details, see the [c
 
 Shared Rust library used by both AdManager and OrderPortal:
 
-* **`auth.rs`**: Ed25519 signature verification, request hash computation, auth token tracking
+* **`auth.rs`**: Shared auth helpers (zero-bytes checks)
 * **`eip712.rs`**: EIP-712 domain separator, Order struct hashing, `address_to_bytes32` conversions
 * **`token.rs`**: `BytesN<32>` <-> `Address` conversion, native token detection, transfer helpers
 * **`cross_contract.rs`**: Cross-contract call wrappers for MerkleManager and Verifier
@@ -93,7 +93,7 @@ cargo test
 
 ### End-to-end integration tests
 
-The integration tests deploy all 4 contracts and exercise the full cross-chain flow with real ed25519 signatures and ZK proofs.
+The integration tests deploy all 4 contracts and exercise the full cross-chain flow with real ZK proofs.
 
 ```bash
 # Build contract WASMs first (tests load them via include_bytes!)

@@ -52,18 +52,6 @@ pub enum OrderPortalError {
     // ==========================================================================
     /// Address is zero
     ZeroAddress = 30,
-    /// Message hash is invalid (zero)
-    InvalidMessage = 31,
-    /// Auth token has already been used
-    TokenAlreadyUsed = 32,
-    /// Request token has expired
-    RequestTokenExpired = 33,
-    /// Signer is zero address
-    ZeroSigner = 34,
-    /// Signer is not authorized as manager
-    InvalidSigner = 35,
-    /// Request hash has already been processed
-    RequestHashProcessed = 36,
 
     // ==========================================================================
     // External Call Errors (40-50)
@@ -96,6 +84,8 @@ pub enum OrderPortalError {
     AdDecimalsMismatch = 64,
     /// Gate 2: the root-verification module rejected the target root.
     RootNotValid = 65,
+    /// Gate 2: no root-verification module configured for the route.
+    RootVerifierNotSet = 66,
     ContractPaused = 71,
     NotPendingAdmin = 72,
     NothingToClaim = 73,
@@ -116,18 +106,6 @@ impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
     }
     fn invalid_proof() -> Self {
         Self::InvalidProof
-    }
-    fn invalid_message() -> Self {
-        Self::InvalidMessage
-    }
-    fn token_already_used() -> Self {
-        Self::TokenAlreadyUsed
-    }
-    fn request_token_expired() -> Self {
-        Self::RequestTokenExpired
-    }
-    fn invalid_signer() -> Self {
-        Self::InvalidSigner
     }
     fn decimals_out_of_range() -> Self {
         Self::DecimalsOutOfRange

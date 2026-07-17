@@ -344,9 +344,6 @@ mod contract_tests {
 
         let stored_chain_id = client.get_chain_id();
         assert_eq!(stored_chain_id, chain_id);
-
-        let is_mgr = client.is_manager(&admin);
-        assert!(is_mgr);
     }
 
     #[test]
@@ -752,79 +749,6 @@ mod validation_tests {
 }
 
 // =============================================================================
-// Auth & Request Hash Tests
-// =============================================================================
-
-mod auth_tests {
-    use crate::auth;
-    use soroban_sdk::{BytesN, Env, String as SorobanString};
-
-    #[test]
-    fn test_create_ad_request_hash_deterministic() {
-        let env = Env::default();
-        let ad_id = SorobanString::from_str(&env, "test-ad");
-        let ad_token = BytesN::from_array(&env, &[0xAA; 32]);
-        let ad_recipient = BytesN::from_array(&env, &[0xBB; 32]);
-        let auth_token = BytesN::from_array(&env, &[0xCC; 32]);
-        let contract_addr = BytesN::from_array(&env, &[0xDD; 32]);
-
-        let hash1 = auth::create_ad_request_hash(
-            &env,
-            &ad_id,
-            &ad_token,
-            1000,
-            1,
-            &ad_recipient,
-            &auth_token,
-            9999,
-            42,
-            &contract_addr,
-        );
-        let hash2 = auth::create_ad_request_hash(
-            &env,
-            &ad_id,
-            &ad_token,
-            1000,
-            1,
-            &ad_recipient,
-            &auth_token,
-            9999,
-            42,
-            &contract_addr,
-        );
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_different_request_types_produce_different_hashes() {
-        let env = Env::default();
-        let ad_id = SorobanString::from_str(&env, "test-ad");
-        let token = BytesN::from_array(&env, &[0xAA; 32]);
-        let auth_token = BytesN::from_array(&env, &[0xCC; 32]);
-        let contract_addr = BytesN::from_array(&env, &[0xDD; 32]);
-
-        let create_hash = auth::create_ad_request_hash(
-            &env,
-            &ad_id,
-            &token,
-            1000,
-            1,
-            &token,
-            &auth_token,
-            9999,
-            42,
-            &contract_addr,
-        );
-        let fund_hash =
-            auth::fund_ad_request_hash(&env, &ad_id, 1000, &auth_token, 9999, 42, &contract_addr);
-        assert_ne!(
-            create_hash, fund_hash,
-            "Different request types must produce different hashes"
-        );
-    }
-}
-
-// =============================================================================
 // Storage Tests
 // =============================================================================
 
@@ -951,44 +875,6 @@ mod storage_tests {
     }
 
     #[test]
-    fn test_manager_tracking() {
-        let env = Env::default();
-        let contract_id = env.register(AdManagerContract, ());
-
-        env.as_contract(&contract_id, || {
-            let addr = Address::generate(&env);
-
-            assert!(!storage::is_manager(&env, &addr));
-
-            storage::set_manager(&env, &addr, true);
-            assert!(storage::is_manager(&env, &addr));
-
-            storage::set_manager(&env, &addr, false);
-            assert!(!storage::is_manager(&env, &addr));
-        });
-    }
-
-    #[test]
-    fn test_request_hash_and_token_tracking() {
-        let env = Env::default();
-        let contract_id = env.register(AdManagerContract, ());
-
-        env.as_contract(&contract_id, || {
-            let hash = BytesN::from_array(&env, &[0xAA; 32]);
-            let token = BytesN::from_array(&env, &[0xBB; 32]);
-
-            assert!(!storage::is_request_hash_used(&env, &hash));
-            assert!(!storage::is_request_token_used(&env, &token));
-
-            storage::set_request_hash_used(&env, &hash);
-            storage::set_request_token_used(&env, &token);
-
-            assert!(storage::is_request_hash_used(&env, &hash));
-            assert!(storage::is_request_token_used(&env, &token));
-        });
-    }
-
-    #[test]
     fn test_ad_id_tracking() {
         let env = Env::default();
         let contract_id = env.register(AdManagerContract, ());
@@ -1033,7 +919,6 @@ mod ad_lifecycle_tests {
             };
             storage::set_config(&env, &config);
             storage::set_initialized(&env);
-            storage::set_manager(&env, &config.admin, true);
 
             // Set up chain
             let chain_info = ChainInfo {
@@ -1485,10 +1370,6 @@ mod order_lifecycle_tests {
 
         // get_chain_id
         assert_eq!(client.get_chain_id(), 42);
-
-        // is_manager
-        assert!(client.is_manager(&admin));
-        assert!(!client.is_manager(&Address::generate(&env)));
 
         // get_config
         let config = client.get_config();

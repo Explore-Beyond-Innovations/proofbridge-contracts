@@ -10,10 +10,6 @@ pub trait ProofBridgeError: Copy {
     fn token_zero_address() -> Self;
     fn merkle_append_failed() -> Self;
     fn invalid_proof() -> Self;
-    fn invalid_message() -> Self;
-    fn token_already_used() -> Self;
-    fn request_token_expired() -> Self;
-    fn invalid_signer() -> Self;
     fn decimals_out_of_range() -> Self;
     fn non_exact_downscale() -> Self;
     fn decimal_overflow() -> Self;

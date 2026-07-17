@@ -11,11 +11,10 @@
 
 extern crate std;
 
-use ed25519_dalek::{Signer, SigningKey};
 use serde::Deserialize;
-use sha3::{Digest, Keccak256};
 use soroban_sdk::{
-    contract, contractimpl, Address, Bytes, BytesN, Env, MuxedAddress, String as SorobanString,
+    contract, contractimpl, testutils::Address as _, Address, Bytes, BytesN, Env,
+    String as SorobanString,
 };
 use stellar_strkey::Contract;
 use stellar_tokens::fungible::{Base, FungibleToken};
@@ -246,55 +245,6 @@ fn load_test_params() -> TestParams {
 }
 
 // ---------------------------------------------------------------------------
-// Keccak256 + request hash helpers (mirrors proofbridge-core/src/auth.rs)
-// ---------------------------------------------------------------------------
-
-fn keccak256(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Keccak256::new();
-    hasher.update(data);
-    hasher.finalize().into()
-}
-
-/// Replicate proofbridge_core::auth::hash_string_field
-fn hash_string_field(s: &str) -> [u8; 32] {
-    keccak256(s.as_bytes())
-}
-
-/// Replicate proofbridge_core::auth::hash_request
-fn hash_request(
-    auth_token: &[u8; 32],
-    time_to_expire: u64,
-    action: &str,
-    params: &[u8],
-    chain_id: u128,
-    contract_address: &[u8; 32],
-) -> [u8; 32] {
-    let mut buf = [0u8; 512];
-    let mut offset = 0;
-
-    buf[offset..offset + 32].copy_from_slice(auth_token);
-    offset += 32;
-
-    buf[offset..offset + 8].copy_from_slice(&time_to_expire.to_be_bytes());
-    offset += 8;
-
-    let action_hash = keccak256(action.as_bytes());
-    buf[offset..offset + 32].copy_from_slice(&action_hash);
-    offset += 32;
-
-    buf[offset..offset + params.len()].copy_from_slice(params);
-    offset += params.len();
-
-    buf[offset..offset + 16].copy_from_slice(&chain_id.to_be_bytes());
-    offset += 16;
-
-    buf[offset..offset + 32].copy_from_slice(contract_address);
-    offset += 32;
-
-    keccak256(&buf[..offset])
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -309,42 +259,6 @@ fn contract_address(env: &Env, id: &[u8; 32]) -> Address {
     Address::from_string(&soroban_str)
 }
 
-/// Generate an ed25519 keypair and derive the Stellar account address
-fn generate_signer(env: &Env) -> (SigningKey, BytesN<32>, Address) {
-    let mut rng = rand::thread_rng();
-    let signing_key = SigningKey::generate(&mut rng);
-    let pubkey_bytes = signing_key.verifying_key().to_bytes();
-    let pub_bytes32 = BytesN::from_array(env, &pubkey_bytes);
-
-    let strkey = stellar_strkey::ed25519::PublicKey(pubkey_bytes).to_string();
-    let soroban_str = SorobanString::from_str(env, &strkey);
-    let address = Address::from_string(&soroban_str);
-
-    (signing_key, pub_bytes32, address)
-}
-
-/// Sign a 32-byte message hash with ed25519, returning a BytesN<64> signature
-fn ed25519_sign(env: &Env, signing_key: &SigningKey, message_hash: &[u8; 32]) -> BytesN<64> {
-    let sig = signing_key.sign(message_hash);
-    BytesN::from_array(env, &sig.to_bytes())
-}
-
-/// Counter for unique auth tokens
-struct AuthTokenCounter(u8);
-
-impl AuthTokenCounter {
-    fn new() -> Self {
-        Self(1)
-    }
-
-    fn next(&mut self) -> [u8; 32] {
-        let mut token = [0u8; 32];
-        token[0] = self.0;
-        self.0 += 1;
-        token
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Test setup
 // ---------------------------------------------------------------------------
@@ -357,78 +271,28 @@ struct TestSetup<'a> {
     // Contracts
     ad_manager: ad_manager_contract::Client<'a>,
     order_portal: order_portal_contract::Client<'a>,
-    // Admin signer
-    signing_key: SigningKey,
-    admin_pubkey: BytesN<32>,
+    // Admin
     admin_addr: Address,
     // Token addresses (deployed test-token contracts)
     ad_token_addr: Address,
     order_token_addr: Address,
-    // Auth token counter (each call needs unique token)
-    auth_counter: AuthTokenCounter,
 }
 
-impl<'a> TestSetup<'a> {
-    /// Sign a request for the ad-manager (computes hash then signs)
-    fn sign_ad_manager_request(
-        &mut self,
-        action: &str,
-        params: &[u8],
-    ) -> (BytesN<64>, BytesN<32>, u64) {
-        let auth_token = self.auth_counter.next();
-        let time_to_expire = u64::MAX;
-
-        let message_hash = hash_request(
-            &auth_token,
-            time_to_expire,
-            action,
-            params,
-            self.tp.ad_chain_id,
-            &self.tp.ad_manager_id,
-        );
-
-        let signature = ed25519_sign(&self.env, &self.signing_key, &message_hash);
-        let auth_token_bn = BytesN::from_array(&self.env, &auth_token);
-
-        (signature, auth_token_bn, time_to_expire)
-    }
-
-    /// Sign a request for the order-portal
-    fn sign_order_portal_request(
-        &mut self,
-        action: &str,
-        params: &[u8],
-    ) -> (BytesN<64>, BytesN<32>, u64) {
-        let auth_token = self.auth_counter.next();
-        let time_to_expire = u64::MAX;
-
-        let message_hash = hash_request(
-            &auth_token,
-            time_to_expire,
-            action,
-            params,
-            self.tp.order_chain_id,
-            &self.tp.order_portal_id,
-        );
-
-        let signature = ed25519_sign(&self.env, &self.signing_key, &message_hash);
-        let auth_token_bn = BytesN::from_array(&self.env, &auth_token);
-
-        (signature, auth_token_bn, time_to_expire)
-    }
-}
-
+/// Standard setup: wires a MockRootVerifier that accepts every root on both
+/// escrows (the gate is mandatory now — unlock fails without a module).
 fn setup() -> TestSetup<'static> {
+    setup_with_verifiers(true)
+}
+
+fn setup_with_verifiers(wire_root_verifiers: bool) -> TestSetup<'static> {
     let tp = load_test_params();
 
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
     env.cost_estimate().budget().reset_unlimited();
 
-    let mut auth_counter = AuthTokenCounter::new();
-
-    // Generate admin keypair
-    let (signing_key, admin_pubkey, admin_addr) = generate_signer(&env);
+    // Generate admin address
+    let admin_addr = Address::generate(&env);
 
     // Deploy verifiers
     let vk_bytes = Bytes::from_slice(&env, VK);
@@ -539,83 +403,33 @@ fn setup() -> TestSetup<'static> {
     let ad_token_client = TokenContractClient::new(&env, &ad_token_addr);
     ad_token_client.mint(&admin_addr, &(tp.amount as i128 * 10));
 
-    // --- Ad-manager: create_ad (ed25519 signed) ---
-    {
-        let auth_token = auth_counter.next();
-        let time_to_expire = u64::MAX;
-
-        // params: ad_id_hash(32) + ad_token(32) + initial_amount(16) + order_chain_id(16) + ad_recipient(32) = 128
-        let mut params = [0u8; 128];
-        let ad_id_hash = hash_string_field(&tp.ad_id);
-        params[0..32].copy_from_slice(&ad_id_hash);
-        params[32..64].copy_from_slice(&tp.ad_chain_token);
-        params[64..80].copy_from_slice(&tp.amount.to_be_bytes());
-        params[80..96].copy_from_slice(&tp.order_chain_id.to_be_bytes());
-        params[96..128].copy_from_slice(&tp.ad_recipient);
-
-        let message_hash = hash_request(
-            &auth_token,
-            time_to_expire,
-            "createAd",
-            &params,
-            tp.ad_chain_id,
-            &tp.ad_manager_id,
-        );
-        let signature = ed25519_sign(&env, &signing_key, &message_hash);
-        let auth_token_bn = BytesN::from_array(&env, &auth_token);
-
-        ad_manager.create_ad(
-            &signature,
-            &admin_pubkey,
-            &auth_token_bn,
-            &time_to_expire,
-            &admin_addr,
-            &SorobanString::from_str(&env, &tp.ad_id),
-            &bytes32_to_bytesn(&env, &tp.ad_chain_token),
-            &tp.amount,
-            &tp.order_chain_id,
-            &bytes32_to_bytesn(&env, &tp.ad_recipient),
-        );
+    // Root-verification gate is mandatory: wire a permissive mock by default.
+    if wire_root_verifiers {
+        let mock = env.register(MockRootVerifier, ());
+        MockRootVerifierClient::new(&env, &mock).set_ok(&true);
+        ad_manager.set_root_verifier(&tp.order_chain_id, &mock);
+        order_portal.set_root_verifier(&tp.ad_chain_id, &mock);
     }
+
+    // --- Ad-manager: create_ad (creator wallet auth, mocked) ---
+    ad_manager.create_ad(
+        &admin_addr,
+        &SorobanString::from_str(&env, &tp.ad_id),
+        &bytes32_to_bytesn(&env, &tp.ad_chain_token),
+        &tp.amount,
+        &tp.order_chain_id,
+        &bytes32_to_bytesn(&env, &tp.ad_recipient),
+    );
 
     TestSetup {
         env,
         tp,
         ad_manager,
         order_portal,
-        signing_key,
-        admin_pubkey,
         admin_addr,
         ad_token_addr,
         order_token_addr,
-        auth_counter,
     }
-}
-
-// ===========================================================================
-// Helper: build request hash params for various actions
-// ===========================================================================
-
-fn lock_for_order_params(ad_id: &str, order_hash: &[u8; 32]) -> [u8; 64] {
-    let mut params = [0u8; 64];
-    params[0..32].copy_from_slice(&hash_string_field(ad_id));
-    params[32..64].copy_from_slice(order_hash);
-    params
-}
-
-fn unlock_order_params(ad_id: &str, order_hash: &[u8; 32], target_root: &[u8; 32]) -> [u8; 96] {
-    let mut params = [0u8; 96];
-    params[0..32].copy_from_slice(&hash_string_field(ad_id));
-    params[32..64].copy_from_slice(order_hash);
-    params[64..96].copy_from_slice(target_root);
-    params
-}
-
-fn create_order_params(ad_id: &str, order_hash: &[u8; 32]) -> [u8; 64] {
-    let mut params = [0u8; 64];
-    params[0..32].copy_from_slice(&hash_string_field(ad_id));
-    params[32..64].copy_from_slice(order_hash);
-    params
 }
 
 // ===========================================================================
@@ -664,21 +478,10 @@ fn order_portal_order_params(env: &Env, tp: &TestParams) -> order_portal_contrac
 
 #[test]
 fn test_ad_manager_lock_for_order() {
-    let mut s = setup();
+    let s = setup();
     let params = ad_manager_order_params(&s.env, &s.tp);
 
-    // Sign lockForOrder
-    let lock_params = lock_for_order_params(&s.tp.ad_id, &s.tp.order_hash);
-    let (signature, auth_token, time_to_expire) =
-        s.sign_ad_manager_request("lockForOrder", &lock_params);
-
-    let order_hash = s.ad_manager.lock_for_order(
-        &signature,
-        &s.admin_pubkey,
-        &auth_token,
-        &time_to_expire,
-        &params,
-    );
+    let order_hash = s.ad_manager.lock_for_order(&params);
 
     // Verify the order hash matches fixture
     assert_eq!(
@@ -704,24 +507,14 @@ fn test_ad_manager_lock_for_order() {
 
 #[test]
 fn test_ad_manager_unlock_with_bridger_proof() {
-    let mut s = setup();
+    let s = setup();
     let params = ad_manager_order_params(&s.env, &s.tp);
 
     // Lock first
-    let lock_params = lock_for_order_params(&s.tp.ad_id, &s.tp.order_hash);
-    let (sig, tok, exp) = s.sign_ad_manager_request("lockForOrder", &lock_params);
-    s.ad_manager
-        .lock_for_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+    s.ad_manager.lock_for_order(&params);
 
     // Bridger proves inclusion in the counterparty (order-chain) root.
-    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.order_root);
-    let (sig, tok, exp) = s.sign_ad_manager_request("unlockOrder", &unlock_params);
-
     s.ad_manager.unlock(
-        &sig,
-        &s.admin_pubkey,
-        &tok,
-        &exp,
         &params,
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
         &bytes32_to_bytesn(&s.env, &s.tp.order_root),
@@ -739,7 +532,7 @@ fn test_ad_manager_unlock_with_bridger_proof() {
 
 #[test]
 fn test_order_portal_create_and_unlock() {
-    let mut s = setup();
+    let s = setup();
 
     // Mint tokens to bridger
     let bridger_addr = {
@@ -751,13 +544,7 @@ fn test_order_portal_create_and_unlock() {
 
     let params = order_portal_order_params(&s.env, &s.tp);
 
-    // Sign createOrder
-    let create_params = create_order_params(&s.tp.ad_id, &s.tp.order_hash);
-    let (sig, tok, exp) = s.sign_order_portal_request("createOrder", &create_params);
-
-    let order_hash = s
-        .order_portal
-        .create_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+    let order_hash = s.order_portal.create_order(&params);
 
     assert_eq!(
         order_hash,
@@ -770,14 +557,7 @@ fn test_order_portal_create_and_unlock() {
     );
 
     // Ad-creator proves inclusion in the counterparty (ad-chain) root.
-    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.ad_root);
-    let (sig, tok, exp) = s.sign_order_portal_request("unlockOrder", &unlock_params);
-
     s.order_portal.unlock(
-        &sig,
-        &s.admin_pubkey,
-        &tok,
-        &exp,
         &params,
         &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
         &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
@@ -795,7 +575,7 @@ fn test_order_portal_create_and_unlock() {
 // after the call is empty (the removed recipient require_auth would appear here).
 #[test]
 fn test_order_portal_unlock_is_permissionless() {
-    let mut s = setup();
+    let s = setup();
 
     let bridger_addr = {
         let strkey = stellar_strkey::ed25519::PublicKey(s.tp.bridger).to_string();
@@ -805,19 +585,9 @@ fn test_order_portal_unlock_is_permissionless() {
         .mint(&bridger_addr, &(s.tp.amount as i128 * 10));
 
     let params = order_portal_order_params(&s.env, &s.tp);
-    let create_params = create_order_params(&s.tp.ad_id, &s.tp.order_hash);
-    let (sig, tok, exp) = s.sign_order_portal_request("createOrder", &create_params);
-    s.order_portal
-        .create_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
-
-    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.ad_root);
-    let (sig, tok, exp) = s.sign_order_portal_request("unlockOrder", &unlock_params);
+    s.order_portal.create_order(&params);
 
     s.order_portal.unlock(
-        &sig,
-        &s.admin_pubkey,
-        &tok,
-        &exp,
         &params,
         &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
         &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
@@ -838,22 +608,12 @@ fn test_order_portal_unlock_is_permissionless() {
 
 #[test]
 fn test_ad_manager_unlock_is_permissionless() {
-    let mut s = setup();
+    let s = setup();
     let params = ad_manager_order_params(&s.env, &s.tp);
 
-    let lock_params = lock_for_order_params(&s.tp.ad_id, &s.tp.order_hash);
-    let (sig, tok, exp) = s.sign_ad_manager_request("lockForOrder", &lock_params);
-    s.ad_manager
-        .lock_for_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
-
-    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.order_root);
-    let (sig, tok, exp) = s.sign_ad_manager_request("unlockOrder", &unlock_params);
+    s.ad_manager.lock_for_order(&params);
 
     s.ad_manager.unlock(
-        &sig,
-        &s.admin_pubkey,
-        &tok,
-        &exp,
         &params,
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
         &bytes32_to_bytesn(&s.env, &s.tp.order_root),
@@ -874,17 +634,12 @@ fn test_ad_manager_unlock_is_permissionless() {
 
 #[test]
 fn test_full_cross_chain_flow() {
-    let mut s = setup();
+    let s = setup();
 
     // ----- AD CHAIN: lock order -----
     let ad_params = ad_manager_order_params(&s.env, &s.tp);
 
-    let lock_params = lock_for_order_params(&s.tp.ad_id, &s.tp.order_hash);
-    let (sig, tok, exp) = s.sign_ad_manager_request("lockForOrder", &lock_params);
-
-    let ad_order_hash = s
-        .ad_manager
-        .lock_for_order(&sig, &s.admin_pubkey, &tok, &exp, &ad_params);
+    let ad_order_hash = s.ad_manager.lock_for_order(&ad_params);
 
     // ----- ORDER CHAIN: create order -----
     let bridger_addr = {
@@ -896,12 +651,7 @@ fn test_full_cross_chain_flow() {
 
     let order_params = order_portal_order_params(&s.env, &s.tp);
 
-    let create_params = create_order_params(&s.tp.ad_id, &s.tp.order_hash);
-    let (sig, tok, exp) = s.sign_order_portal_request("createOrder", &create_params);
-
-    let order_hash = s
-        .order_portal
-        .create_order(&sig, &s.admin_pubkey, &tok, &exp, &order_params);
+    let order_hash = s.order_portal.create_order(&order_params);
 
     // Both chains compute the same order hash
     assert_eq!(
@@ -911,16 +661,8 @@ fn test_full_cross_chain_flow() {
 
     // ----- AD CHAIN: bridger unlocks proving the order-chain (counterparty) root -----
     let bridger_target_root = s.order_portal.get_latest_merkle_root();
-    let bridger_target_root_arr = bridger_target_root.to_array();
-    let unlock_params =
-        unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &bridger_target_root_arr);
-    let (sig, tok, exp) = s.sign_ad_manager_request("unlockOrder", &unlock_params);
 
     s.ad_manager.unlock(
-        &sig,
-        &s.admin_pubkey,
-        &tok,
-        &exp,
         &ad_params,
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
         &bridger_target_root,
@@ -935,16 +677,8 @@ fn test_full_cross_chain_flow() {
 
     // ----- ORDER CHAIN: ad creator unlocks proving the ad-chain (counterparty) root -----
     let adcreator_target_root = s.ad_manager.get_latest_merkle_root();
-    let adcreator_target_root_arr = adcreator_target_root.to_array();
-    let unlock_params =
-        unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &adcreator_target_root_arr);
-    let (sig, tok, exp) = s.sign_order_portal_request("unlockOrder", &unlock_params);
 
     s.order_portal.unlock(
-        &sig,
-        &s.admin_pubkey,
-        &tok,
-        &exp,
         &order_params,
         &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
         &adcreator_target_root,
@@ -960,24 +694,14 @@ fn test_full_cross_chain_flow() {
 
 #[test]
 fn test_nullifier_prevents_double_unlock() {
-    let mut s = setup();
+    let s = setup();
     let params = ad_manager_order_params(&s.env, &s.tp);
 
     // Lock
-    let lock_params = lock_for_order_params(&s.tp.ad_id, &s.tp.order_hash);
-    let (sig, tok, exp) = s.sign_ad_manager_request("lockForOrder", &lock_params);
-    s.ad_manager
-        .lock_for_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+    s.ad_manager.lock_for_order(&params);
 
     // First unlock succeeds (bridger proves the order-chain root)
-    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.order_root);
-    let (sig, tok, exp) = s.sign_ad_manager_request("unlockOrder", &unlock_params);
-
     s.ad_manager.unlock(
-        &sig,
-        &s.admin_pubkey,
-        &tok,
-        &exp,
         &params,
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
         &bytes32_to_bytesn(&s.env, &s.tp.order_root),
@@ -986,14 +710,7 @@ fn test_nullifier_prevents_double_unlock() {
     );
 
     // Second unlock should fail (order already filled)
-    let unlock_params2 = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.order_root);
-    let (sig2, tok2, exp2) = s.sign_ad_manager_request("unlockOrder", &unlock_params2);
-
     let result = s.ad_manager.try_unlock(
-        &sig2,
-        &s.admin_pubkey,
-        &tok2,
-        &exp2,
         &params,
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
         &bytes32_to_bytesn(&s.env, &s.tp.order_root),
@@ -1040,24 +757,15 @@ impl MockRootVerifier {
     }
 }
 
-fn locked_ad_order(s: &mut TestSetup) -> ad_manager_contract::OrderParams {
+fn locked_ad_order(s: &TestSetup) -> ad_manager_contract::OrderParams {
     let params = ad_manager_order_params(&s.env, &s.tp);
-    let lock_params = lock_for_order_params(&s.tp.ad_id, &s.tp.order_hash);
-    let (sig, tok, exp) = s.sign_ad_manager_request("lockForOrder", &lock_params);
-    s.ad_manager
-        .lock_for_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+    s.ad_manager.lock_for_order(&params);
     params
 }
 
-fn ad_unlock(s: &mut TestSetup, params: &ad_manager_contract::OrderParams, cosig: &Bytes) -> bool {
-    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.order_root);
-    let (sig, tok, exp) = s.sign_ad_manager_request("unlockOrder", &unlock_params);
+fn ad_unlock(s: &TestSetup, params: &ad_manager_contract::OrderParams, cosig: &Bytes) -> bool {
     s.ad_manager
         .try_unlock(
-            &sig,
-            &s.admin_pubkey,
-            &tok,
-            &exp,
             params,
             &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
             &bytes32_to_bytesn(&s.env, &s.tp.order_root),
@@ -1069,8 +777,8 @@ fn ad_unlock(s: &mut TestSetup, params: &ad_manager_contract::OrderParams, cosig
 
 #[test]
 fn test_gate2_mock_true_unlocks_and_clears_in_flight() {
-    let mut s = setup();
-    let params = locked_ad_order(&mut s);
+    let s = setup();
+    let params = locked_ad_order(&s);
 
     let mock = s.env.register(MockRootVerifier, ());
     MockRootVerifierClient::new(&s.env, &mock).set_ok(&true);
@@ -1080,7 +788,7 @@ fn test_gate2_mock_true_unlocks_and_clears_in_flight() {
     assert!(s.ad_manager.has_open_positions(&params.bridger));
 
     let empty = Bytes::new(&s.env);
-    assert!(ad_unlock(&mut s, &params, &empty));
+    assert!(ad_unlock(&s, &params, &empty));
 
     assert!(!s.ad_manager.has_open_positions(&params.ad_creator));
     assert!(!s.ad_manager.has_open_positions(&params.bridger));
@@ -1088,21 +796,42 @@ fn test_gate2_mock_true_unlocks_and_clears_in_flight() {
 
 #[test]
 fn test_gate2_mock_false_blocks_unlock() {
-    let mut s = setup();
-    let params = locked_ad_order(&mut s);
+    let s = setup();
+    let params = locked_ad_order(&s);
 
     let mock = s.env.register(MockRootVerifier, ());
     MockRootVerifierClient::new(&s.env, &mock).set_ok(&false);
     s.ad_manager.set_root_verifier(&s.tp.order_chain_id, &mock);
 
     let empty = Bytes::new(&s.env);
-    assert!(!ad_unlock(&mut s, &params, &empty));
+    assert!(!ad_unlock(&s, &params, &empty));
+}
+
+/// The gate is mandatory: with no root-verifier module configured for the
+/// route, unlock must fail (RootVerifierNotSet) even with a valid proof.
+#[test]
+fn test_unlock_fails_without_root_verifier() {
+    let s = setup_with_verifiers(false);
+    let params = locked_ad_order(&s);
+
+    let res = s.ad_manager.try_unlock(
+        &params,
+        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+        &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
+    );
+    assert_eq!(
+        res,
+        Err(Ok(ad_manager_contract::AdManagerError::RootVerifierNotSet)),
+        "unlock must fail with RootVerifierNotSet when no module is configured"
+    );
 }
 
 #[test]
 fn test_gate2_real_module_rejects_root_outside_signed_auth() {
-    let mut s = setup();
-    let params = locked_ad_order(&mut s);
+    let s = setup();
+    let params = locked_ad_order(&s);
 
     // Real module C wired to a dummy registry: the fixture's target root is
     // not inside the vector SettlementAuth, so it fails before any lookup.
@@ -1129,13 +858,13 @@ fn test_gate2_real_module_rejects_root_outside_signed_auth() {
     cosig.extend_from_slice(&hexv(&vectors["settlement"]["aggSig"]["uncompressed"]));
 
     let cosig_bytes = Bytes::from_slice(&s.env, &cosig);
-    assert!(!ad_unlock(&mut s, &params, &cosig_bytes));
+    assert!(!ad_unlock(&s, &params, &cosig_bytes));
 }
 
 #[test]
 fn test_gate2_garbage_cosig_blocks_unlock() {
-    let mut s = setup();
-    let params = locked_ad_order(&mut s);
+    let s = setup();
+    let params = locked_ad_order(&s);
 
     let module = s.env.register(counterparty_verifier_contract::WASM, ());
     counterparty_verifier_contract::Client::new(&s.env, &module).initialize(&s.ad_manager.address);
@@ -1143,12 +872,12 @@ fn test_gate2_garbage_cosig_blocks_unlock() {
         .set_root_verifier(&s.tp.order_chain_id, &module);
 
     let garbage = Bytes::from_slice(&s.env, &[0xde, 0xad]);
-    assert!(!ad_unlock(&mut s, &params, &garbage));
+    assert!(!ad_unlock(&s, &params, &garbage));
 }
 
 #[test]
 fn test_gate2_portal_mock_false_blocks_unlock() {
-    let mut s = setup();
+    let s = setup();
 
     let bridger_addr = {
         let strkey = stellar_strkey::ed25519::PublicKey(s.tp.bridger).to_string();
@@ -1158,22 +887,13 @@ fn test_gate2_portal_mock_false_blocks_unlock() {
         .mint(&bridger_addr, &(s.tp.amount as i128 * 10));
 
     let params = order_portal_order_params(&s.env, &s.tp);
-    let cp = create_order_params(&s.tp.ad_id, &s.tp.order_hash);
-    let (sig, tok, exp) = s.sign_order_portal_request("createOrder", &cp);
-    s.order_portal
-        .create_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+    s.order_portal.create_order(&params);
 
     let mock = s.env.register(MockRootVerifier, ());
     MockRootVerifierClient::new(&s.env, &mock).set_ok(&false);
     s.order_portal.set_root_verifier(&s.tp.ad_chain_id, &mock);
 
-    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.ad_root);
-    let (sig, tok, exp) = s.sign_order_portal_request("unlockOrder", &unlock_params);
     let res = s.order_portal.try_unlock(
-        &sig,
-        &s.admin_pubkey,
-        &tok,
-        &exp,
         &params,
         &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
         &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
@@ -1189,47 +909,37 @@ fn test_gate2_portal_mock_false_blocks_unlock() {
 
 #[test]
 fn test_pause_blocks_lock_and_unlock_until_unpause() {
-    let mut s = setup();
+    let s = setup();
 
     s.ad_manager.pause();
 
     let params = ad_manager_order_params(&s.env, &s.tp);
-    let lock_params = lock_for_order_params(&s.tp.ad_id, &s.tp.order_hash);
-    let (sig, tok, exp) = s.sign_ad_manager_request("lockForOrder", &lock_params);
-    let res = s
-        .ad_manager
-        .try_lock_for_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+    let res = s.ad_manager.try_lock_for_order(&params);
     assert!(res.is_err(), "lock must fail while paused");
 
     s.ad_manager.unpause();
-    let (sig, tok, exp) = s.sign_ad_manager_request("lockForOrder", &lock_params);
-    s.ad_manager
-        .lock_for_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+    s.ad_manager.lock_for_order(&params);
 
     s.ad_manager.pause();
     let empty = Bytes::new(&s.env);
     assert!(
-        !ad_unlock(&mut s, &params, &empty),
+        !ad_unlock(&s, &params, &empty),
         "unlock must fail while paused"
     );
 
     s.ad_manager.unpause();
     let empty = Bytes::new(&s.env);
-    assert!(ad_unlock(&mut s, &params, &empty));
+    assert!(ad_unlock(&s, &params, &empty));
 }
 
 #[test]
 fn test_pause_blocks_create_order() {
-    let mut s = setup();
+    let s = setup();
 
     s.order_portal.pause();
 
     let params = order_portal_order_params(&s.env, &s.tp);
-    let cp = create_order_params(&s.tp.ad_id, &s.tp.order_hash);
-    let (sig, tok, exp) = s.sign_order_portal_request("createOrder", &cp);
-    let res = s
-        .order_portal
-        .try_create_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+    let res = s.order_portal.try_create_order(&params);
     assert!(res.is_err(), "create must fail while paused");
 }
 
@@ -1239,7 +949,6 @@ fn test_two_step_admin_transfer() {
 
     assert!(s.ad_manager.try_accept_admin().is_err());
 
-    use soroban_sdk::testutils::Address as _;
     let next = Address::generate(&s.env);
     s.ad_manager.transfer_admin(&next);
     s.ad_manager.accept_admin();
@@ -1254,8 +963,8 @@ fn test_two_step_admin_transfer() {
 
 #[test]
 fn test_payout_pushes_directly_when_recipient_ok() {
-    let mut s = setup();
-    let params = locked_ad_order(&mut s);
+    let s = setup();
+    let params = locked_ad_order(&s);
 
     let recipient_addr = {
         let strkey = stellar_strkey::ed25519::PublicKey(s.tp.order_recipient).to_string();
@@ -1265,7 +974,7 @@ fn test_payout_pushes_directly_when_recipient_ok() {
     let before = token_client.balance(&recipient_addr);
 
     let empty = Bytes::new(&s.env);
-    assert!(ad_unlock(&mut s, &params, &empty));
+    assert!(ad_unlock(&s, &params, &empty));
 
     assert!(
         token_client.balance(&recipient_addr) > before,
@@ -1280,8 +989,8 @@ fn test_payout_pushes_directly_when_recipient_ok() {
 
 #[test]
 fn test_payout_falls_back_to_credit_then_claims_once() {
-    let mut s = setup();
-    let params = locked_ad_order(&mut s);
+    let s = setup();
+    let params = locked_ad_order(&s);
 
     let recipient_addr = {
         let strkey = stellar_strkey::ed25519::PublicKey(s.tp.order_recipient).to_string();
@@ -1294,7 +1003,7 @@ fn test_payout_falls_back_to_credit_then_claims_once() {
     token_client.set_fail_transfers(&true);
     let empty = Bytes::new(&s.env);
     assert!(
-        ad_unlock(&mut s, &params, &empty),
+        ad_unlock(&s, &params, &empty),
         "unlock blocked by payout failure"
     );
     assert_eq!(
@@ -1324,7 +1033,7 @@ fn test_payout_falls_back_to_credit_then_claims_once() {
 
 #[test]
 fn test_portal_payout_pushes_directly() {
-    let mut s = setup();
+    let s = setup();
 
     let bridger_addr = {
         let strkey = stellar_strkey::ed25519::PublicKey(s.tp.bridger).to_string();
@@ -1334,10 +1043,7 @@ fn test_portal_payout_pushes_directly() {
         .mint(&bridger_addr, &(s.tp.amount as i128 * 10));
 
     let params = order_portal_order_params(&s.env, &s.tp);
-    let cp = create_order_params(&s.tp.ad_id, &s.tp.order_hash);
-    let (sig, tok, exp) = s.sign_order_portal_request("createOrder", &cp);
-    s.order_portal
-        .create_order(&sig, &s.admin_pubkey, &tok, &exp, &params);
+    s.order_portal.create_order(&params);
 
     let recipient_addr = {
         let strkey = stellar_strkey::ed25519::PublicKey(s.tp.ad_recipient).to_string();
@@ -1346,13 +1052,7 @@ fn test_portal_payout_pushes_directly() {
     let token_client = TokenContractClient::new(&s.env, &s.order_token_addr);
     let before = token_client.balance(&recipient_addr);
 
-    let unlock_params = unlock_order_params(&s.tp.ad_id, &s.tp.order_hash, &s.tp.ad_root);
-    let (sig, tok, exp) = s.sign_order_portal_request("unlockOrder", &unlock_params);
     s.order_portal.unlock(
-        &sig,
-        &s.admin_pubkey,
-        &tok,
-        &exp,
         &params,
         &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
         &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
@@ -1379,8 +1079,8 @@ fn test_portal_payout_pushes_directly() {
 // locked trade keeps them busy while an uninvolved account revokes cleanly.
 #[test]
 fn test_registry_guards_are_the_real_escrows() {
-    let mut s = setup();
-    let params = locked_ad_order(&mut s);
+    let s = setup();
+    let params = locked_ad_order(&s);
 
     let vectors: serde_json::Value =
         serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
