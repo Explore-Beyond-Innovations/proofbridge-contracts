@@ -1387,3 +1387,60 @@ mod order_lifecycle_tests {
         assert_eq!(client.get_order_status(&unknown), Status::None);
     }
 }
+
+// Cross-language EIP-712 order-hash parity (issue #205 / 1.6b). The same
+// fixture drives the JS and EVM suites; all three recompute `expected.orderHash`.
+mod order_hash_parity {
+    extern crate std;
+    use crate::eip712::hash_order;
+    use crate::types::OrderParams;
+    use soroban_sdk::{BytesN, Env, String as SorobanString};
+
+    const V: &str = include_str!("../../../../test-vectors/order-hash.json");
+
+    fn bn32(env: &Env, hex_str: &str) -> BytesN<32> {
+        let bytes = hex::decode(hex_str.trim_start_matches("0x")).expect("invalid hex");
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        BytesN::from_array(env, &arr)
+    }
+
+    #[test]
+    fn order_hash_matches_fixture() {
+        let env = Env::default();
+        let j: serde_json::Value = serde_json::from_str(V).expect("valid fixture json");
+        let o = &j["order"];
+
+        // ad-manager variant: order_chain_id + src_order_portal are struct fields;
+        // ad_chain_id + ad_manager are passed externally.
+        let params = OrderParams {
+            order_chain_token: bn32(&env, o["orderChainToken"].as_str().unwrap()),
+            ad_chain_token: bn32(&env, o["adChainToken"].as_str().unwrap()),
+            amount: o["amount"].as_str().unwrap().parse::<u128>().unwrap(),
+            bridger: bn32(&env, o["bridger"].as_str().unwrap()),
+            order_chain_id: o["orderChainId"].as_str().unwrap().parse::<u128>().unwrap(),
+            src_order_portal: bn32(&env, o["orderPortal"].as_str().unwrap()),
+            order_recipient: bn32(&env, o["orderRecipient"].as_str().unwrap()),
+            ad_id: SorobanString::from_str(&env, o["adId"].as_str().unwrap()),
+            ad_creator: bn32(&env, o["adCreator"].as_str().unwrap()),
+            ad_recipient: bn32(&env, o["adRecipient"].as_str().unwrap()),
+            salt: o["salt"].as_str().unwrap().parse::<u128>().unwrap(),
+            order_decimals: o["orderDecimals"].as_u64().unwrap() as u32,
+            ad_decimals: o["adDecimals"].as_u64().unwrap() as u32,
+        };
+
+        let ad_chain_id = o["adChainId"].as_str().unwrap().parse::<u128>().unwrap();
+        let ad_manager = bn32(&env, o["adManager"].as_str().unwrap());
+
+        let hash = hash_order(&env, &params, ad_chain_id, &ad_manager);
+        let expected = j["expected"]["orderHash"].as_str().unwrap();
+        std::println!(
+            "[order-hash][rust-ad-manager] 0x{}",
+            hex::encode(hash.to_array())
+        );
+        assert_eq!(
+            hash.to_array().to_vec(),
+            hex::decode(expected.trim_start_matches("0x")).unwrap()
+        );
+    }
+}

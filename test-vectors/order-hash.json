@@ -1,0 +1,35 @@
+{
+  "_meta": {
+    "spec": "issue #205 / 1.6b — cross-language EIP-712 order-hash parity",
+    "generator": "scripts/bls-vectors/src/gen-order-hash.ts",
+    "digest": "EIP-712 Order typed-data hash: keccak256(0x1901 || domainSeparator || structHash), minimal domain (name,version)",
+    "orderTypehash": "0x14683916007ecb1a2b772bfd1c3126340f16b7e1da0d2f955b8ca285571e06e4",
+    "domainSeparator": "0x30be5c0eff57121410bcfb088c479028b3b8059112c22dff7e7b55f1b3927d7d",
+    "structHash": "0xda50fa1c667209ebd907ad6d4c10926ffa231ebff3ba0311a4805baa4367f0f0"
+  },
+  "domain": {
+    "name": "Proofbridge",
+    "version": "1"
+  },
+  "order": {
+    "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+    "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+    "amount": "1000000",
+    "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+    "orderChainId": "11155111",
+    "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+    "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+    "adChainId": "1000002",
+    "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "adId": "test-ad-1",
+    "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+    "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+    "saltUuid": "00000000-0000-0000-0000-000000003039",
+    "salt": "12345",
+    "orderDecimals": 7,
+    "adDecimals": 7
+  },
+  "expected": {
+    "orderHash": "0xf098686a3a9e5f61806fb0811fd37ff7e3c9abea9dcb56792a568d472b5330ad"
+  }
+}
