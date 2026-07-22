@@ -108,7 +108,7 @@ const PROOF_AD_CREATOR: &[u8] = include_bytes!("fixtures/proof_ad_creator.bin");
 
 // 1.6c compute-cost gate: in-source ceilings for a single WASM unlock (real
 // ultrahonk ZK verify) on each escrow. CI builds with `stellar contract build
-// --optimize=true`, so the metered artifact is byte-identical to what the deploy
+// --optimize`, so the metered artifact is byte-identical to what the deploy
 // flow ships. This gate is ALSO the optimize backstop: an unoptimized unlock meters
 // ~109.8M CPU — over the 100M budget below — so a build that silently skipped
 // optimization fails right here.
@@ -118,7 +118,7 @@ const PROOF_AD_CREATOR: &[u8] = include_bytes!("fixtures/proof_ad_creator.bin");
 // gate. The metered call uses reset_unlimited() only so the test can *observe* an
 // over-budget number instead of aborting mid-call — the assert still enforces it.
 //
-// Measured optimized baseline (`stellar contract build --optimize=true`):
+// Measured optimized baseline (`stellar contract build --optimize`):
 //   ad_manager.unlock:   ~96.05M CPU / ~7.21M mem
 //   order_portal.unlock: ~95.92M CPU / ~7.16M mem
 // ⚠️ Only ~4% CPU headroom under the 100M budget. We deliberately do NOT add the
