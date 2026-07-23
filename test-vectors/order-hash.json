@@ -3,33 +3,165 @@
     "spec": "issue #205 / 1.6b — cross-language EIP-712 order-hash parity",
     "generator": "scripts/bls-vectors/src/gen-order-hash.ts",
     "digest": "EIP-712 Order typed-data hash: keccak256(0x1901 || domainSeparator || structHash), minimal domain (name,version)",
+    "domainBound": "salt/amount/chainIds are u128 in the Soroban OrderParams — every vector stays within 128 bits for those fields",
     "orderTypehash": "0x14683916007ecb1a2b772bfd1c3126340f16b7e1da0d2f955b8ca285571e06e4",
-    "domainSeparator": "0x30be5c0eff57121410bcfb088c479028b3b8059112c22dff7e7b55f1b3927d7d",
-    "structHash": "0xda50fa1c667209ebd907ad6d4c10926ffa231ebff3ba0311a4805baa4367f0f0"
+    "domainSeparator": "0x30be5c0eff57121410bcfb088c479028b3b8059112c22dff7e7b55f1b3927d7d"
   },
   "domain": {
     "name": "Proofbridge",
     "version": "1"
   },
-  "order": {
-    "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
-    "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
-    "amount": "1000000",
-    "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
-    "orderChainId": "11155111",
-    "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
-    "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
-    "adChainId": "1000002",
-    "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
-    "adId": "test-ad-1",
-    "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
-    "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
-    "saltUuid": "00000000-0000-0000-0000-000000003039",
-    "salt": "12345",
-    "orderDecimals": 7,
-    "adDecimals": 7
-  },
-  "expected": {
-    "orderHash": "0xf098686a3a9e5f61806fb0811fd37ff7e3c9abea9dcb56792a568d472b5330ad"
-  }
+  "count": 6,
+  "vectors": [
+    {
+      "name": "canonical",
+      "order": {
+        "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        "amount": "1000000",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "11155111",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "1000002",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "test-ad-1",
+        "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "saltUuid": "00000000-0000-0000-0000-000000003039",
+        "salt": "12345",
+        "orderDecimals": 7,
+        "adDecimals": 7
+      },
+      "expected": {
+        "structHash": "0xda50fa1c667209ebd907ad6d4c10926ffa231ebff3ba0311a4805baa4367f0f0",
+        "orderHash": "0xf098686a3a9e5f61806fb0811fd37ff7e3c9abea9dcb56792a568d472b5330ad"
+      }
+    },
+    {
+      "name": "full-width-salt",
+      "order": {
+        "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        "amount": "1000000",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "11155111",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "1000002",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "test-ad-1",
+        "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "saltUuid": "fedcba98-7654-3210-8899-aabbccddeeff",
+        "salt": "338770000845734292525803352717036220159",
+        "orderDecimals": 7,
+        "adDecimals": 7
+      },
+      "expected": {
+        "structHash": "0x09048bee590c5df9a4057754efbc70bd7b755b6bf42f5cc54ccc5592a8ebbb3c",
+        "orderHash": "0xc67165c55fd2db25438f1987b094d93128d24dc822f442a39ac8ec469bc5ca9c"
+      }
+    },
+    {
+      "name": "empty-ad-id",
+      "order": {
+        "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        "amount": "1000000",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "11155111",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "1000002",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "",
+        "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "saltUuid": "00000000-0000-0000-0000-000000003039",
+        "salt": "12345",
+        "orderDecimals": 7,
+        "adDecimals": 7
+      },
+      "expected": {
+        "structHash": "0xbfa1a475d7abc63643a3d740ea2a6d42009cfb00ea8214fb8a1b3e9fe82ca734",
+        "orderHash": "0xe1c2087b1c6525bbbc800a64e0991faa551e81ddf31f30d71e71d89ca203e607"
+      }
+    },
+    {
+      "name": "non-ascii-ad-id",
+      "order": {
+        "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        "amount": "1000000",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "11155111",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "1000002",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "アド-⚡-ü",
+        "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "saltUuid": "00000000-0000-0000-0000-000000003039",
+        "salt": "12345",
+        "orderDecimals": 7,
+        "adDecimals": 7
+      },
+      "expected": {
+        "structHash": "0x16fdd9069d3643e54747ed351556255b31db90fe04d3716dc67b85407987c1ac",
+        "orderHash": "0xf05ed6929b34475dcf7193ddf18f0964215a90007329d352b48f44d827f2b0d9"
+      }
+    },
+    {
+      "name": "boundary-max",
+      "order": {
+        "orderChainToken": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "adChainToken": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "amount": "340282366920938463463374607431768211455",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "340282366920938463463374607431768211455",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "340282366920938463463374607431768211455",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "test-ad-1",
+        "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "saltUuid": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        "salt": "340282366920938463463374607431768211455",
+        "orderDecimals": 255,
+        "adDecimals": 255
+      },
+      "expected": {
+        "structHash": "0x355f210dec1e992e90c37b6f8b9a9b5868646f3bf83eebcae47db7ce8e7bb059",
+        "orderHash": "0x71a00534390cc2ee7604782ed7804e4fe74771f907067a1a12de8755d1b08bea"
+      }
+    },
+    {
+      "name": "boundary-min",
+      "order": {
+        "orderChainToken": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "adChainToken": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "amount": "0",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "0",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "0",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "a",
+        "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "saltUuid": "00000000-0000-0000-0000-000000000000",
+        "salt": "0",
+        "orderDecimals": 0,
+        "adDecimals": 0
+      },
+      "expected": {
+        "structHash": "0xda671256ed9a0390e545ac3871be44eaa3bda02d43b96780f9195bb552181490",
+        "orderHash": "0xa45de59b9dc7c57bb988999f67f0a5098d65788ad2062450714bdd5be61ead12"
+      }
+    }
+  ]
 }
