@@ -544,38 +544,42 @@ mod order_hash_parity {
     fn order_hash_matches_fixture() {
         let env = Env::default();
         let j: serde_json::Value = serde_json::from_str(V).expect("valid fixture json");
-        let o = &j["order"];
+        let vectors = j["vectors"].as_array().expect("vectors array");
+        assert_eq!(vectors.len() as u64, j["count"].as_u64().unwrap());
+        assert!(!vectors.is_empty(), "fixture must carry vectors");
 
-        // order-portal variant: ad_chain_id + ad_manager are struct fields;
-        // order_chain_id + order_portal are passed externally.
-        let params = OrderParams {
-            order_chain_token: bn32(&env, o["orderChainToken"].as_str().unwrap()),
-            ad_chain_token: bn32(&env, o["adChainToken"].as_str().unwrap()),
-            amount: o["amount"].as_str().unwrap().parse::<u128>().unwrap(),
-            bridger: bn32(&env, o["bridger"].as_str().unwrap()),
-            order_recipient: bn32(&env, o["orderRecipient"].as_str().unwrap()),
-            ad_chain_id: o["adChainId"].as_str().unwrap().parse::<u128>().unwrap(),
-            ad_manager: bn32(&env, o["adManager"].as_str().unwrap()),
-            ad_id: SorobanString::from_str(&env, o["adId"].as_str().unwrap()),
-            ad_creator: bn32(&env, o["adCreator"].as_str().unwrap()),
-            ad_recipient: bn32(&env, o["adRecipient"].as_str().unwrap()),
-            salt: o["salt"].as_str().unwrap().parse::<u128>().unwrap(),
-            order_decimals: o["orderDecimals"].as_u64().unwrap() as u32,
-            ad_decimals: o["adDecimals"].as_u64().unwrap() as u32,
-        };
+        for v in vectors {
+            let o = &v["order"];
+            let params = OrderParams {
+                order_chain_token: bn32(&env, o["orderChainToken"].as_str().unwrap()),
+                ad_chain_token: bn32(&env, o["adChainToken"].as_str().unwrap()),
+                amount: o["amount"].as_str().unwrap().parse::<u128>().unwrap(),
+                bridger: bn32(&env, o["bridger"].as_str().unwrap()),
+                order_recipient: bn32(&env, o["orderRecipient"].as_str().unwrap()),
+                ad_chain_id: o["adChainId"].as_str().unwrap().parse::<u128>().unwrap(),
+                ad_manager: bn32(&env, o["adManager"].as_str().unwrap()),
+                ad_id: SorobanString::from_str(&env, o["adId"].as_str().unwrap()),
+                ad_creator: bn32(&env, o["adCreator"].as_str().unwrap()),
+                ad_recipient: bn32(&env, o["adRecipient"].as_str().unwrap()),
+                salt: o["salt"].as_str().unwrap().parse::<u128>().unwrap(),
+                order_decimals: o["orderDecimals"].as_u64().unwrap() as u32,
+                ad_decimals: o["adDecimals"].as_u64().unwrap() as u32,
+            };
 
-        let order_chain_id = o["orderChainId"].as_str().unwrap().parse::<u128>().unwrap();
-        let order_portal = bn32(&env, o["orderPortal"].as_str().unwrap());
+            let order_chain_id = o["orderChainId"].as_str().unwrap().parse::<u128>().unwrap();
+            let order_portal = bn32(&env, o["orderPortal"].as_str().unwrap());
 
-        let hash = hash_order(&env, &params, order_chain_id, &order_portal);
-        let expected = j["expected"]["orderHash"].as_str().unwrap();
-        std::println!(
-            "[order-hash][rust-order-portal] 0x{}",
-            hex::encode(hash.to_array())
-        );
-        assert_eq!(
-            hash.to_array().to_vec(),
-            hex::decode(expected.trim_start_matches("0x")).unwrap()
-        );
+            let hash = hash_order(&env, &params, order_chain_id, &order_portal);
+            let expected = v["expected"]["orderHash"].as_str().unwrap();
+            std::println!(
+                "[order-hash][rust-order-portal] {} 0x{}",
+                v["name"].as_str().unwrap(),
+                hex::encode(hash.to_array())
+            );
+            assert_eq!(
+                hash.to_array().to_vec(),
+                hex::decode(expected.trim_start_matches("0x")).unwrap()
+            );
+        }
     }
 }
