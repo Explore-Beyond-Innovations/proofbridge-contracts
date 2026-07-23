@@ -11,6 +11,7 @@ import {
   deploySAC,
   getAddress,
   invokeContract,
+  latestLedger,
 } from "./stellar-cli.js";
 import {
   buildManifest,
@@ -88,7 +89,10 @@ export async function deployCore(
 
   // ── MerkleManager ───────────────────────────────────────────────
   let merkleManager = reused(existing?.contracts.merkleManager.address);
+  let merkleManagerDeployBlock = existing?.contracts.merkleManager.deployBlock;
   if (!merkleManager) {
+    // Pre-deploy ledger: a safe lower bound for the ingester's scan start.
+    merkleManagerDeployBlock = latestLedger() ?? merkleManagerDeployBlock;
     merkleManager = deployContract(path.join(wasmBase, "merkle_manager.wasm"));
     invokeContract(merkleManager, "initialize", ["--admin", adminStrkey]);
     console.log(`  [deploy] MerkleManager: ${merkleManager}`);
@@ -204,6 +208,7 @@ export async function deployCore(
     contracts: {
       verifier,
       merkleManager,
+      merkleManagerDeployBlock,
       wNativeToken,
       adManager,
       orderPortal,

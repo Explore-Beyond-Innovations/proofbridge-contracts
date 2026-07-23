@@ -20,6 +20,17 @@ export function stellar(args: string[]): string {
   return exec(args);
 }
 
+/** Latest ledger sequence, or undefined on CLIs without `ledger latest`. */
+export function latestLedger(): string | undefined {
+  try {
+    const out = exec(["ledger", "latest", "--network", NETWORK, "--output", "json"]);
+    const seq = (JSON.parse(out) as { sequence?: number }).sequence;
+    return seq != null ? String(seq) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Deploy a contract WASM. Returns the contract id (C...). */
 export function deployContract(
   wasmPath: string,

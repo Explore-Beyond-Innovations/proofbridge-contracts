@@ -59,6 +59,7 @@ export interface BuildStellarManifestInput {
   contracts: {
     verifier: string;
     merkleManager: string;
+    merkleManagerDeployBlock?: string;
     wNativeToken: string;
     adManager: string;
     orderPortal: string;
@@ -80,7 +81,12 @@ export function buildManifest(
     },
     contracts: {
       verifier: stellarContractEntry(input.contracts.verifier),
-      merkleManager: stellarContractEntry(input.contracts.merkleManager),
+      merkleManager: {
+        ...stellarContractEntry(input.contracts.merkleManager),
+        ...(input.contracts.merkleManagerDeployBlock
+          ? { deployBlock: input.contracts.merkleManagerDeployBlock }
+          : {}),
+      },
       wNativeToken: stellarContractEntry(input.contracts.wNativeToken),
       adManager: stellarContractEntry(input.contracts.adManager),
       ...(input.contracts.blsKeyRegistry

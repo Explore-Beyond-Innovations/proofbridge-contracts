@@ -126,13 +126,19 @@ export async function deployCore(
     },
   );
 
+  // The receipt block seeds the ingester's scan start; a reused deployment
+  // keeps the manifest's recorded value.
+  let merkleManagerDeployBlock = existing?.contracts.merkleManager.deployBlock;
   const merkleManagerAddr = await deployIfMissing(
     "MerkleManager",
     existing?.contracts.merkleManager.address,
     async () => {
       const f = contractFactory("MerkleManager", "MerkleManager", signer);
       const c = await f.deploy(admin, poseidon2YulAddr, { nonce: nonces.next() });
-      await c.deploymentTransaction()?.wait();
+      const receipt = await c.deploymentTransaction()?.wait();
+      if (receipt?.blockNumber != null) {
+        merkleManagerDeployBlock = receipt.blockNumber.toString();
+      }
       return c as ethers.Contract;
     },
   );
@@ -277,6 +283,7 @@ export async function deployCore(
     contracts: {
       verifier: verifierAddr,
       merkleManager: merkleManagerAddr,
+      merkleManagerDeployBlock,
       poseidon2Yul: poseidon2YulAddr,
       wNativeToken: wNativeAddr,
       adManager: adManagerAddr,
