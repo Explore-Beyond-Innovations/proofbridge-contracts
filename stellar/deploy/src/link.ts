@@ -60,31 +60,60 @@ export async function link(
   const stripHex = (h: string) => h.replace(/^0x/, "");
   let chainTxs = 0;
 
-  invokeContract(local.contracts.adManager.address, "set_chain", [
-    "--order_chain_id",
-    peerChainId,
-    "--order_portal",
-    stripHex(peer.contracts.orderPortal.addressBytes32),
-    "--supported",
-    "true",
-  ]);
-  chainTxs++;
-  console.log(
-    `  [link] AdManager.set_chain(${peerChainId}, peerOrderPortal=${peer.contracts.orderPortal.address})`,
-  );
+  // Check-first: a read-only get_chain simulation decides whether the write
+  // is needed; already-linked state is never resent.
+  const chainAlreadySet = (escrow: string, peerField: string, want: string): boolean => {
+    try {
+      const out = invokeContract(
+        escrow,
+        "get_chain",
+        ["--chain_id", peerChainId],
+        { send: false },
+      );
+      const parsed = JSON.parse(out.split("\n").filter(Boolean).pop() ?? "null");
+      return (
+        !!parsed &&
+        parsed.supported === true &&
+        String(parsed[peerField]).toLowerCase() === stripHex(want).toLowerCase()
+      );
+    } catch {
+      return false;
+    }
+  };
 
-  invokeContract(local.contracts.orderPortal.address, "set_chain", [
-    "--ad_chain_id",
-    peerChainId,
-    "--ad_manager",
-    stripHex(peer.contracts.adManager.addressBytes32),
-    "--supported",
-    "true",
-  ]);
-  chainTxs++;
-  console.log(
-    `  [link] OrderPortal.set_chain(${peerChainId}, peerAdManager=${peer.contracts.adManager.address})`,
-  );
+  if (chainAlreadySet(local.contracts.adManager.address, "order_portal", peer.contracts.orderPortal.addressBytes32)) {
+    console.log(`  [skip] AdManager.set_chain(${peerChainId}) already set`);
+  } else {
+    invokeContract(local.contracts.adManager.address, "set_chain", [
+      "--order_chain_id",
+      peerChainId,
+      "--order_portal",
+      stripHex(peer.contracts.orderPortal.addressBytes32),
+      "--supported",
+      "true",
+    ]);
+    chainTxs++;
+    console.log(
+      `  [link] AdManager.set_chain(${peerChainId}, peerOrderPortal=${peer.contracts.orderPortal.address})`,
+    );
+  }
+
+  if (chainAlreadySet(local.contracts.orderPortal.address, "ad_manager", peer.contracts.adManager.addressBytes32)) {
+    console.log(`  [skip] OrderPortal.set_chain(${peerChainId}) already set`);
+  } else {
+    invokeContract(local.contracts.orderPortal.address, "set_chain", [
+      "--ad_chain_id",
+      peerChainId,
+      "--ad_manager",
+      stripHex(peer.contracts.adManager.addressBytes32),
+      "--supported",
+      "true",
+    ]);
+    chainTxs++;
+    console.log(
+      `  [link] OrderPortal.set_chain(${peerChainId}, peerAdManager=${peer.contracts.adManager.address})`,
+    );
+  }
 
   // ── Root-auth module (module C) ───────────────────────────────────
   const enforceBls = opts.enforceBls ?? process.env.ENFORCE_BLS === "true";
