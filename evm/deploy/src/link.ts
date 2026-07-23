@@ -68,36 +68,50 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
   );
 
   const peerChainId = BigInt(peer.chain.chainId);
+  const sameHex = (a: unknown, b: string) =>
+    String(a).toLowerCase() === b.toLowerCase();
 
   // ── Chain-level linking ────────────────────────────────────────────
-  // Local adManager accepts from peer orderPortal; local orderPortal accepts from peer adManager.
+  // Local adManager accepts from peer orderPortal; local orderPortal accepts
+  // from peer adManager. Every write is check-first: state already on-chain
+  // is skipped, never resent.
   let chainTxs = 0;
 
   {
-    const tx = await adManager.getFunction("setChain")(
-      peerChainId,
-      peer.contracts.orderPortal.addressBytes32,
-      true,
-      { nonce: nonces.next() },
-    );
-    await tx.wait();
-    chainTxs++;
-    console.log(
-      `  [link] AdManager.setChain(${peerChainId}, peerOrderPortal=${peer.contracts.orderPortal.address})`,
-    );
+    const cur = await adManager.getFunction("chains")(peerChainId);
+    if (cur.supported && sameHex(cur.orderPortal, peer.contracts.orderPortal.addressBytes32)) {
+      console.log(`  [skip] AdManager.setChain(${peerChainId}) already set`);
+    } else {
+      const tx = await adManager.getFunction("setChain")(
+        peerChainId,
+        peer.contracts.orderPortal.addressBytes32,
+        true,
+        { nonce: nonces.next() },
+      );
+      await tx.wait();
+      chainTxs++;
+      console.log(
+        `  [link] AdManager.setChain(${peerChainId}, peerOrderPortal=${peer.contracts.orderPortal.address})`,
+      );
+    }
   }
   {
-    const tx = await orderPortal.getFunction("setChain")(
-      peerChainId,
-      peer.contracts.adManager.addressBytes32,
-      true,
-      { nonce: nonces.next() },
-    );
-    await tx.wait();
-    chainTxs++;
-    console.log(
-      `  [link] OrderPortal.setChain(${peerChainId}, peerAdManager=${peer.contracts.adManager.address})`,
-    );
+    const cur = await orderPortal.getFunction("chains")(peerChainId);
+    if (cur.supported && sameHex(cur.adManager, peer.contracts.adManager.addressBytes32)) {
+      console.log(`  [skip] OrderPortal.setChain(${peerChainId}) already set`);
+    } else {
+      const tx = await orderPortal.getFunction("setChain")(
+        peerChainId,
+        peer.contracts.adManager.addressBytes32,
+        true,
+        { nonce: nonces.next() },
+      );
+      await tx.wait();
+      chainTxs++;
+      console.log(
+        `  [link] OrderPortal.setChain(${peerChainId}, peerAdManager=${peer.contracts.adManager.address})`,
+      );
+    }
   }
 
   // ── Root-auth module (module C) ───────────────────────────────────
@@ -114,6 +128,11 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
       ["AdManager", adManager],
       ["OrderPortal", orderPortal],
     ] as const) {
+      const cur = await escrow.getFunction("rootVerifier")(peerChainId);
+      if (sameHex(cur, verifierEntry.address)) {
+        console.log(`  [skip] ${name}.setRootVerifier(${peerChainId}) already set`);
+        continue;
+      }
       const tx = await escrow.getFunction("setRootVerifier")(
         peerChainId,
         verifierEntry.address,
@@ -145,27 +164,37 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     // Direction A: local is ad-side.
     // AdManager.setTokenRoute(address adToken, bytes32 orderToken, uint256 orderChainId)
     {
-      const tx = await adManager.getFunction("setTokenRoute")(
-        localTok.address, // adToken
-        peerTok.addressBytes32, // orderToken (bytes32)
-        peerChainId, // orderChainId
-        { nonce: nonces.next() },
-      );
-      await tx.wait();
-      routeTxs++;
+      const cur = await adManager.getFunction("tokenRoute")(localTok.address, peerChainId);
+      if (sameHex(cur, peerTok.addressBytes32)) {
+        console.log(`  [skip] AdManager route "${localTok.pairKey}" already set`);
+      } else {
+        const tx = await adManager.getFunction("setTokenRoute")(
+          localTok.address, // adToken
+          peerTok.addressBytes32, // orderToken (bytes32)
+          peerChainId, // orderChainId
+          { nonce: nonces.next() },
+        );
+        await tx.wait();
+        routeTxs++;
+      }
     }
     // Direction B: local is order-side.
     // OrderPortal.setTokenRoute(address orderToken, uint256 adChainId, bytes32 adToken)
     // Args 2/3 swap vs AdManager — mis-ordering here would silently mis-wire routes.
     {
-      const tx = await orderPortal.getFunction("setTokenRoute")(
-        localTok.address, // orderToken
-        peerChainId, // adChainId
-        peerTok.addressBytes32, // adToken (bytes32)
-        { nonce: nonces.next() },
-      );
-      await tx.wait();
-      routeTxs++;
+      const cur = await orderPortal.getFunction("tokenRoute")(localTok.address, peerChainId);
+      if (sameHex(cur, peerTok.addressBytes32)) {
+        console.log(`  [skip] OrderPortal route "${localTok.pairKey}" already set`);
+      } else {
+        const tx = await orderPortal.getFunction("setTokenRoute")(
+          localTok.address, // orderToken
+          peerChainId, // adChainId
+          peerTok.addressBytes32, // adToken (bytes32)
+          { nonce: nonces.next() },
+        );
+        await tx.wait();
+        routeTxs++;
+      }
     }
     console.log(
       `  [link] route "${localTok.pairKey}": ${localTok.symbol} ↔ ${peerTok.symbol}`,
