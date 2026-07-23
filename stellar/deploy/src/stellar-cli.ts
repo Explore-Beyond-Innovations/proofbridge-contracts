@@ -20,7 +20,7 @@ export function stellar(args: string[]): string {
   return exec(args);
 }
 
-/** Latest ledger sequence, or undefined on CLIs without `ledger latest`. */
+/** Latest ledger sequence (verified on the pinned v23.3.0), or undefined without `ledger latest`. */
 export function latestLedger(): string | undefined {
   try {
     const out = exec(["ledger", "latest", "--network", NETWORK, "--output", "json"]);
