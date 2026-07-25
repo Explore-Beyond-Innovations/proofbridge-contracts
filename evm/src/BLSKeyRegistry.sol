@@ -16,7 +16,7 @@ interface IPositionGuard {
 contract BLSKeyRegistry {
     enum Scheme {
         Eip712, // EVM-home: typed sig, recovered address must be `account`
-        Sep53 // Stellar-home: ed25519 over SHA256("Stellar Signed Message:\n" || digest)
+        Sep53 // Stellar-home: ed25519 over SHA256("Stellar Signed Message:\n" || hex(digest))
     }
 
     struct OwnerAuth {
@@ -213,8 +213,9 @@ contract BLSKeyRegistry {
         }
     }
 
-    /// `account` is the raw 32-byte ed25519 pubkey (SEP-53: the wallet signs
-    /// SHA256(prefix || digest)). Caller supplies the decompressed Edwards
+    /// `account` is the raw 32-byte ed25519 pubkey. SEP-53 wallets sign text,
+    /// so the message is the digest's lowercase 0x-hex string:
+    /// SHA256(prefix || "0x…64hex"). Caller supplies the decompressed Edwards
     /// point; it is checked against `account` and the curve equation, so a
     /// wrong point cannot verify.
     function checkSep53Owner(bytes32 account, bytes32 digest, bytes calldata data) private view {
@@ -230,8 +231,21 @@ contract BLSKeyRegistry {
         (extKpub[0], extKpub[1]) = SCL_EIP6565.Edwards2WeierStrass(edX, edY);
         extKpub[4] = uint256(account);
 
-        string memory m = string(bytes.concat(sha256(bytes.concat(SEP53_PREFIX, digest))));
+        string memory m =
+            string(bytes.concat(sha256(bytes.concat(SEP53_PREFIX, toHexString(digest)))));
         if (!SCL_EIP6565.Verify_LE(m, r, s, extKpub)) revert OwnerMismatch();
+    }
+
+    /// Lowercase "0x" + 64-hex — the exact string a Stellar wallet signs.
+    function toHexString(bytes32 b) private pure returns (bytes memory out) {
+        bytes16 alphabet = "0123456789abcdef";
+        out = new bytes(66);
+        out[0] = "0";
+        out[1] = "x";
+        for (uint256 i = 0; i < 32; i++) {
+            out[2 + i * 2] = alphabet[uint8(b[i]) >> 4];
+            out[3 + i * 2] = alphabet[uint8(b[i]) & 0x0f];
+        }
     }
 
     /// -x^2 + y^2 == 1 + d*x^2*y^2 (mod p)
