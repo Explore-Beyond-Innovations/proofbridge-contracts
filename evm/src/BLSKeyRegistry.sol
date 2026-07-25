@@ -231,8 +231,7 @@ contract BLSKeyRegistry {
         (extKpub[0], extKpub[1]) = SCL_EIP6565.Edwards2WeierStrass(edX, edY);
         extKpub[4] = uint256(account);
 
-        string memory m =
-            string(bytes.concat(sha256(bytes.concat(SEP53_PREFIX, toHexString(digest)))));
+        string memory m = string(bytes.concat(sha256(bytes.concat(SEP53_PREFIX, toHexString(digest)))));
         if (!SCL_EIP6565.Verify_LE(m, r, s, extKpub)) revert OwnerMismatch();
     }
 
