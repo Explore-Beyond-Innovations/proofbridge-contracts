@@ -1,0 +1,169 @@
+name: Publish Contracts Bundle
+
+# Builds Stellar WASMs + EVM artifacts + deposit VK, publishes as a tarball on two releases (per-sha + rolling `latest`).
+# The tarball keeps the monorepo layout (contracts/..., proof_circuits/...) so downstream
+# consumers (scripts/docker-local/up.sh in the ProofBridge monorepo) are unchanged.
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - "evm/**"
+      - "stellar/**"
+      - "test-vectors/**"
+      - "scripts/build_circuits.sh"
+      - ".github/workflows/contracts-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: contracts-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build + release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The deposit circuit lives in proofbridge-circuits; the VK build below needs it.
+      - name: Checkout proofbridge-circuits
+        uses: actions/checkout@v4
+        with:
+          repository: Explore-Beyond-Innovations/proofbridge-circuits
+          path: proof_circuits
+
+      - name: Set short sha
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # ── toolchains ──────────────────────────────────────────────────
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install wasm32v1-none target
+        run: rustup target add wasm32v1-none
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            stellar/target
+          key: ${{ runner.os }}-cargo-stellar-${{
+            hashFiles('stellar/Cargo.lock') }}
+
+      - name: Install Stellar CLI
+        run: |
+          curl -Ls https://github.com/stellar/stellar-cli/releases/download/v26.0.0/stellar-cli-26.0.0-x86_64-unknown-linux-gnu.tar.gz -o /tmp/stellar-cli.tar.gz
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/stellar-cli.tar.gz -C "$HOME/.local/bin" stellar
+          chmod +x "$HOME/.local/bin/stellar"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      # ── builds ──────────────────────────────────────────────────────
+      # --optimize is explicit so the bundle the deploy flow ships is optimized
+      # (matching what the 1.6c compute gate meters). On a CLI without the optimize
+      # feature the unknown flag fails the build rather than shipping unoptimized wasm.
+      - name: Build Stellar WASMs
+        working-directory: stellar
+        run: |
+          stellar contract build --optimize --package verifier
+          stellar contract build --optimize --package merkle-manager
+          stellar contract build --optimize --package ad-manager
+          stellar contract build --optimize --package order-portal
+          stellar contract build --optimize --package test-token
+          stellar contract build --optimize --package bls-key-registry
+          stellar contract build --optimize --package counterparty-verifier
+
+      - name: Build EVM artifacts
+        working-directory: evm
+        env:
+          FOUNDRY_PROFILE: default
+        run: forge build --silent
+
+      - name: Build deposit circuit VK
+        run: scripts/build_circuits.sh proof_circuits/deposits
+      - name: Assemble bundle
+        id: bundle
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/bundle"
+          WASM_DIR="$STAGE/contracts/stellar/target/wasm32v1-none/release"
+          EVM_OUT="$STAGE/contracts/evm/out"
+          VK_DIR="$STAGE/proof_circuits/deposits/target"
+          mkdir -p "$WASM_DIR" "$EVM_OUT" "$VK_DIR"
+
+          cp stellar/target/wasm32v1-none/release/ad_manager.wasm      "$WASM_DIR/"
+          cp stellar/target/wasm32v1-none/release/order_portal.wasm    "$WASM_DIR/"
+          cp stellar/target/wasm32v1-none/release/merkle_manager.wasm  "$WASM_DIR/"
+          cp stellar/target/wasm32v1-none/release/verifier.wasm        "$WASM_DIR/"
+          cp stellar/target/wasm32v1-none/release/test_token.wasm      "$WASM_DIR/"
+
+          # Copy only the artifacts the deployer actually loads.
+          for c in OrderPortal AdManager MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20; do
+            mkdir -p "$EVM_OUT/${c}.sol"
+            cp evm/out/${c}.sol/*.json "$EVM_OUT/${c}.sol/"
+          done
+
+          cp proof_circuits/deposits/target/vk "$VK_DIR/vk"
+
+          TARBALL="$RUNNER_TEMP/contracts-bundle.tar.gz"
+          tar -C "$STAGE" -czf "$TARBALL" contracts proof_circuits
+
+          # Emit a manifest for quick eyeballing from the release page.
+          MANIFEST="$RUNNER_TEMP/contracts-bundle.manifest.txt"
+          {
+            echo "commit: $GITHUB_SHA"
+            echo "built:  $(date -u +%FT%TZ)"
+            echo "size:   $(du -h "$TARBALL" | cut -f1)"
+            echo "sha256: $(sha256sum "$TARBALL" | cut -d' ' -f1)"
+            echo
+            tar -tzf "$TARBALL"
+          } > "$MANIFEST"
+
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "manifest=$MANIFEST" >> "$GITHUB_OUTPUT"
+
+      # ── immutable per-sha release ───────────────────────────────────
+      - name: Release ${{ steps.sha.outputs.short }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.sha.outputs.short }}
+          name: Proofbridge-Contracts @ ${{ steps.sha.outputs.short }}
+          body: |
+            Bundled WASMs, EVM artifacts, and deposit VK built from `${{ github.sha }}`.
+
+            Consumed by `scripts/docker-local/up.sh` (defaults to `latest`;
+            pin this tag by exporting `CONTRACTS_BUNDLE_TAG=${{ steps.sha.outputs.short }}`).
+          files: |
+            ${{ steps.bundle.outputs.tarball }}
+            ${{ steps.bundle.outputs.manifest }}
+          make_latest: "false"
+
+      # ── rolling pointer ─────────────────────────────────────────────
+      # main -> `latest` (what docker-local pulls by default), develop -> `staging`.
+      - name: Update rolling pointer
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref == 'refs/heads/main' && 'latest' || 'staging' }}
+          name: Proofbridge-Contracts (${{ github.ref == 'refs/heads/main' && 'latest' || 'staging' }})
+          body: |
+            Rolling pointer to the most recent contracts build from `${{ github.ref_name }}`.
+            Current commit: ${{ github.sha }}
+
+            `scripts/docker-local/up.sh` pulls `latest` by default; pin the `staging`
+            build with `CONTRACTS_BUNDLE_TAG=staging`.
+          files: |
+            ${{ steps.bundle.outputs.tarball }}
+            ${{ steps.bundle.outputs.manifest }}
+          make_latest: "false"

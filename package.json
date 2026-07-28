@@ -1,0 +1,10 @@
+{
+  "name": "proofbridge-contracts",
+  "private": true,
+  "packageManager": "pnpm@10.10.0",
+  "pnpm": {
+    "overrides": {
+      "proofbridge-mmr": "1.2.1"
+    }
+  }
+}

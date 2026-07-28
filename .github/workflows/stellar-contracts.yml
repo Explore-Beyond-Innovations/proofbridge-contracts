@@ -1,0 +1,131 @@
+name: Stellar Contracts CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "stellar/**"
+      - ".github/workflows/stellar-contracts.yml"
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+        working-directory: stellar
+
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The deposit circuit lives in proofbridge-circuits; the VK build below needs it.
+      - name: Checkout proofbridge-circuits
+        uses: actions/checkout@v4
+        with:
+          repository: Explore-Beyond-Innovations/proofbridge-circuits
+          path: proof_circuits
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install wasm32v1-none target
+        run: rustup target add wasm32v1-none
+
+      - name: Cache cargo directories
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            stellar/target
+          key: ${{ runner.os }}-cargo-stellar-${{ hashFiles('stellar/Cargo.lock') }}
+
+      - name: Install Stellar CLI
+        run: |
+          curl -Ls https://github.com/stellar/stellar-cli/releases/download/v26.0.0/stellar-cli-26.0.0-x86_64-unknown-linux-gnu.tar.gz -o /tmp/stellar-cli.tar.gz
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/stellar-cli.tar.gz -C "$HOME/.local/bin" stellar
+          chmod +x "$HOME/.local/bin/stellar"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "pnpm"
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      # --optimize (bare flag on the pinned v26.0.0 CLI) opts the build into
+      # wasm-opt, so the metered/deployed bytes are optimized. On a CLI compiled
+      # without the optimize feature the flag is rejected and the build fails
+      # instead of silently shipping unoptimized wasm. The metering gate
+      # (integration_test.rs) is the backstop — unoptimized unlock meters over the
+      # 100M budget and fails there.
+      - name: Build contract WASMs
+        run: |
+          stellar contract build --optimize --package ad-manager
+          stellar contract build --optimize --package order-portal
+          stellar contract build --optimize --package merkle-manager
+          stellar contract build --optimize --package verifier
+          stellar contract build --optimize --package counterparty-verifier
+          stellar contract build --optimize --package bls-key-registry
+        working-directory: stellar
+
+      - name: Build deposit circuit
+        run: scripts/build_circuits.sh proof_circuits/deposits
+
+      - name: Build verifier test circuits
+        run: scripts/build_circuits.sh stellar/contracts/verifier/tests --prove
+
+      - name: Run unit tests
+        run: cargo test --workspace --exclude proofbridge-stellar
+        working-directory: stellar
+
+      # Both packages must actually run the parity test: cargo exits 0 when a
+      # renamed filter matches nothing, silently deleting the guard.
+      - name: Order-hash parity (Stellar)
+        run: |
+          set -o pipefail
+          cargo test -p ad-manager -p order-portal order_hash_parity -- --nocapture | tee /tmp/parity.log
+          test "$(grep -cE 'test result: ok\. [1-9][0-9]* passed' /tmp/parity.log)" -eq 2
+        working-directory: stellar
+
+      # The order-hash fixture drift guard (@proofbridge/bls-vectors) runs in the
+      # ProofBridge monorepo, which owns the vector generator.
+
+      - name: Generate integration test fixtures
+        run: npx tsx generate_fixtures.ts
+        working-directory: stellar/tests/fixtures
+
+      - name: Run integration tests
+        run: cargo test --test integration_test -- --nocapture
+        working-directory: stellar
+
+      - name: Unlock compute-cost baseline gate (1.6c)
+        run: |
+          set -o pipefail
+          cargo test --test integration_test test_unlock_metering -- --nocapture | tee /tmp/metering.log
+          grep -qE 'test result: ok\. [1-9][0-9]* passed' /tmp/metering.log
+        working-directory: stellar

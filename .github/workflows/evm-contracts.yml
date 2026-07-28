@@ -1,0 +1,86 @@
+name: EVM Contracts CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "evm/**"
+      - ".github/workflows/evm-contracts.yml"
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  FOUNDRY_PROFILE: ci
+
+jobs:
+  check:
+    name: EVM Contracts
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: evm
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The deposit circuit lives in proofbridge-circuits; the VK build below needs it.
+      - name: Checkout proofbridge-circuits
+        uses: actions/checkout@v4
+        with:
+          repository: Explore-Beyond-Innovations/proofbridge-circuits
+          path: proof_circuits
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Show Forge version
+        run: forge --version
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: .
+
+      - name: Run Forge fmt
+        run: forge fmt --check
+        id: fmt
+
+      - name: Run Forge build
+        run: forge build --sizes
+        id: build
+
+      - name: Build deposit circuit
+        run: scripts/build_circuits.sh proof_circuits/deposits
+        working-directory: .
+
+      # Piped through a passed-count check: a renamed contract must fail the
+      # step, not skip it (forge exits 0 on zero matches).
+      - name: Order-hash parity (EVM)
+        run: |
+          set -o pipefail
+          forge test --match-contract OrderHashParity -vvv | tee /tmp/parity.log
+          grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/parity.log
+
+      - name: Run Forge tests
+        run: forge test -vvv
+        id: test
+
+      - name: Unlock gas baseline gate (1.6c)
+        run: |
+          set -o pipefail
+          forge test --match-contract UnlockGas -vv | tee /tmp/gas.log
+          grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/gas.log
+        id: gas-baseline

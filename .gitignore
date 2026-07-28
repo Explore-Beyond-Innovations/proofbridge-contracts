@@ -1,0 +1,21 @@
+node_modules/
+dist/
+target
+
+# environment / local config
+.env
+.env.*
+
+# per-network deploy outputs (kept locally, not in the repo)
+*/deployments/*.json
+!*/deployments/.gitkeep
+
+# soroban local artifacts
+test_snapshots/
+temp-mmr-db/
+
+# local working notes
+CLAUDE.md
+review.md
+x-ray/
+/evm/md

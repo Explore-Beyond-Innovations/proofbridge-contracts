@@ -1,0 +1,18 @@
+[submodule "evm/lib/forge-std"]
+	path = evm/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
+[submodule "evm/lib/openzeppelin-contracts"]
+	path = evm/lib/openzeppelin-contracts
+	url = https://github.com/openzeppelin/openzeppelin-contracts
+[submodule "evm/lib/poseidon2-evm"]
+	path = evm/lib/poseidon2-evm
+	url = https://github.com/zemse/poseidon2-evm
+[submodule "evm/lib/solady"]
+	path = evm/lib/solady
+	url = https://github.com/vectorized/solady
+[submodule "evm/lib/solidity-mmr"]
+	path = evm/lib/solidity-mmr
+	url = https://github.com/Explore-Beyond-Innovations/proofbridge-solidity-mmr
+[submodule "evm/lib/crypto-lib"]
+	path = evm/lib/crypto-lib
+	url = https://github.com/get-smooth/crypto-lib

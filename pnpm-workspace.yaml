@@ -1,0 +1,6 @@
+# CI/test workspace. The deploy packages (evm/deploy, stellar/deploy) are not
+# listed: they depend on @proofbridge/deployment-manifest, which is internal to
+# the ProofBridge monorepo (deploys run from there, not from this repo).
+packages:
+  - "evm"
+  - "stellar/tests/fixtures"
