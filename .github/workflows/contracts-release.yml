@@ -38,6 +38,12 @@ jobs:
           repository: Explore-Beyond-Innovations/proofbridge-circuits
           path: proof_circuits
 
+      # The monorepo layout puts proof_circuits one level above evm/ and stellar/
+      # (the scripts resolve it relative to their own dir), so mirror the checkout
+      # at the workspace parent too.
+      - name: Link circuits at monorepo-relative path
+        run: ln -sfn "$GITHUB_WORKSPACE/proof_circuits" "$(dirname "$GITHUB_WORKSPACE")/proof_circuits"
+
       - name: Set short sha
         id: sha
         run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
