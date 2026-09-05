@@ -21,4 +21,14 @@ pub enum RegistryError {
     AccountInFlight = 8,
     ContractPaused = 9,
     NotPendingAdmin = 10,
+    /// MAX_ACTIVE_SLOTS stored and none past valid_until + GRACE_PERIOD.
+    RegistryFull = 11,
+    /// Slot id never assigned, pruned, or revoked.
+    NoSuchSlot = 12,
+    /// Slot exists but ledger timestamp >= valid_until.
+    SlotExpired = 13,
+    /// The commitment already occupied a slot for this account.
+    KeyPreviouslyUsed = 14,
+    /// set_valid_until is shorten-only and never 0.
+    BadValidUntil = 15,
 }
