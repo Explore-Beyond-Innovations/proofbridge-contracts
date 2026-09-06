@@ -90,6 +90,7 @@ jobs:
           stellar contract build --optimize --package test-token
           stellar contract build --optimize --package bls-key-registry
           stellar contract build --optimize --package counterparty-verifier
+          stellar contract build --optimize --package agent-account
 
       - name: Build EVM artifacts
         working-directory: evm
@@ -114,6 +115,7 @@ jobs:
           cp stellar/target/wasm32v1-none/release/merkle_manager.wasm  "$WASM_DIR/"
           cp stellar/target/wasm32v1-none/release/verifier.wasm        "$WASM_DIR/"
           cp stellar/target/wasm32v1-none/release/test_token.wasm      "$WASM_DIR/"
+          cp stellar/target/wasm32v1-none/release/agent_account.wasm   "$WASM_DIR/"
 
           # Copy only the artifacts the deployer actually loads.
           for c in OrderPortal AdManager MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20; do

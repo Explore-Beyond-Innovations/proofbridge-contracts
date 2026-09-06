@@ -96,6 +96,7 @@ jobs:
           stellar contract build --optimize --package merkle-manager
           stellar contract build --optimize --package verifier
           stellar contract build --optimize --package counterparty-verifier
+          stellar contract build --optimize --package agent-account
           stellar contract build --optimize --package bls-key-registry
         working-directory: stellar
 
