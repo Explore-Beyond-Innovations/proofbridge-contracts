@@ -13,7 +13,9 @@ pub mod cross_contract;
 pub mod decimal_scaling;
 pub mod eip712;
 pub mod errors;
+pub mod secp;
 pub mod token;
+pub mod ttl;
 pub mod types;
 
 #[cfg(test)]

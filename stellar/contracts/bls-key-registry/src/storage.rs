@@ -22,8 +22,6 @@ const KEY_USED: Symbol = symbol_short!("used");
 
 /// Every write (and every use-time read) re-extends the account's records; the
 /// T1 registry never did, and an archived slot would strand settlement.
-const PERSISTENT_LIFETIME_THRESHOLD: u32 = 518_400; // ~30 days
-const PERSISTENT_BUMP_AMOUNT: u32 = 3_110_400; // ~180 days
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,11 +144,7 @@ pub fn touch(env: &Env, account: &BytesN<32>, slot_id: u32) {
 }
 
 fn bump<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
-    env.storage().persistent().extend_ttl(
-        key,
-        PERSISTENT_LIFETIME_THRESHOLD,
-        PERSISTENT_BUMP_AMOUNT,
-    );
+    proofbridge_core::ttl::extend_persistent(env, key);
 }
 
 pub fn is_paused(env: &Env) -> bool {

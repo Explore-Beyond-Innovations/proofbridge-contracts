@@ -17,7 +17,14 @@ pub struct AgentRevoked {
     pub agent_id: BytesN<32>,
 }
 
+/// Emitted by the constructor and by `set_targets`, so an event-only indexer
+/// sees the initial escrow set too.
 #[contractevent(topics = ["tgt_set"], data_format = "single-value")]
 pub struct TargetsSet {
     pub targets: Vec<Address>,
+}
+
+#[contractevent(topics = ["upgraded"], data_format = "single-value")]
+pub struct Upgraded {
+    pub new_wasm_hash: BytesN<32>,
 }

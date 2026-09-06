@@ -10,18 +10,19 @@
 extern crate std;
 
 use super::*;
+use ad_manager::OrderParams;
 use ed25519_dalek::{Signer, SigningKey};
 use proofbridge_core::eip712::address_to_bytes32;
 use soroban_sdk::{
     auth::ContractContext,
-    testutils::{Address as _, Ledger as _, MockAuthContract},
+    testutils::{Address as _, Events as _, Ledger as _, MockAuthContract},
     vec,
     xdr::{
         self, HashIdPreimage, HashIdPreimageSorobanAuthorization, InvokeContractArgs, Limits,
-        ScAddress, ScBytes, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
+        ScAddress, ScBytes, ScSymbol, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
         SorobanAuthorizedFunction, SorobanAuthorizedInvocation, SorobanCredentials, VecM, WriteXdr,
     },
-    Address, Bytes, BytesN, Env, InvokeError, String, Symbol, TryFromVal, Val, Vec,
+    Address, Bytes, BytesN, Env, InvokeError, Map, String, Symbol, TryFromVal, Val, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -72,7 +73,7 @@ struct Fixture {
 }
 
 fn lock_sym(env: &Env) -> Symbol {
-    Symbol::new(env, "lock_for_order")
+    lock_for_order(env)
 }
 
 fn deploy(
@@ -99,7 +100,7 @@ fn fixture() -> Fixture {
     let agent = Agent::new(7);
     let ad_token = b32(&env, 0xAA);
     let order_token = b32(&env, 0xBB);
-    let signer = b32(&env, 0x77);
+    let signer = address_to_bytes32(&env, &account);
     client.set_policy(
         &agent.id(&env),
         &vec![&env, lock_sym(&env)],
@@ -122,8 +123,8 @@ fn fixture() -> Fixture {
     }
 }
 
-fn params(f: &Fixture) -> LockParams {
-    LockParams {
+fn params(f: &Fixture) -> OrderParams {
+    OrderParams {
         order_chain_token: f.order_token.clone(),
         ad_chain_token: f.ad_token.clone(),
         amount: 500_000,
@@ -138,6 +139,13 @@ fn params(f: &Fixture) -> LockParams {
         order_decimals: 7,
         ad_decimals: 7,
     }
+}
+
+/// The lock argument as the map the account decodes (what the escrow's
+/// `OrderParams` encodes to on the wire).
+fn lock_map(f: &Fixture) -> Map<Symbol, Val> {
+    let v: Val = params(f).into_val(&f.env);
+    Map::<Symbol, Val>::try_from_val(&f.env, &v).unwrap()
 }
 
 fn lock_ctx(env: &Env, target: &Address, args: Vec<Val>) -> Vec<Context> {
@@ -182,6 +190,24 @@ fn expect_err(r: Result<(), Result<AccountError, InvokeError>>, e: AccountError)
     assert_eq!(r, Err(Ok(e)));
 }
 
+/// Topics of the first / last event this contract emitted, as XDR.
+fn event_topics(env: &Env, contract: &Address, last: bool) -> std::vec::Vec<ScVal> {
+    let all = env.events().all().filter_by_contract(contract);
+    let evs = all.events();
+    let ev = if last { evs.last() } else { evs.first() }.unwrap().clone();
+    match ev.body {
+        xdr::ContractEventBody::V0(v0) => v0.topics.to_vec(),
+    }
+}
+
+fn sym(s: &str) -> ScVal {
+    ScVal::Symbol(ScSymbol(s.try_into().unwrap()))
+}
+
+fn bytes32(b: &BytesN<32>) -> ScVal {
+    ScVal::Bytes(ScBytes(b.to_array().to_vec().try_into().unwrap()))
+}
+
 // ---------------------------------------------------------------------------
 // owner-gated entry points
 // ---------------------------------------------------------------------------
@@ -194,11 +220,52 @@ fn constructor_pins_owner_and_targets() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "Error(Contract, #13)")]
 fn constructor_rejects_empty_targets() {
     let env = Env::default();
     let owner = Address::generate(&env);
     deploy(&env, &owner, &Vec::new(&env));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn constructor_rejects_three_targets() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let t = || Address::generate(&env);
+    deploy(&env, &owner, &vec![&env, t(), t(), t()]);
+}
+
+/// F1: `owner == self` would make the owner path pass the host's direct-invoker
+/// rule with no signature at all.
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")]
+fn constructor_rejects_self_as_owner() {
+    let env = Env::default();
+    let at = Address::generate(&env);
+    let target = Address::generate(&env);
+    env.register_at(&at, AgentAccount, (at.clone(), vec![&env, target]));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn constructor_rejects_self_as_target() {
+    let env = Env::default();
+    let at = Address::generate(&env);
+    let owner = Address::generate(&env);
+    env.register_at(&at, AgentAccount, (owner, vec![&env, at.clone()]));
+}
+
+#[test]
+fn constructor_emits_targets_and_pins_schema_version() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let target = Address::generate(&env);
+    let (account, client) = deploy(&env, &owner, &vec![&env, target]);
+    // events() holds the last invocation's events: read before any other call
+    let topics = event_topics(&env, &account, false);
+    assert_eq!(topics[0], sym("tgt_set"));
+    assert_eq!(client.schema_version(), SCHEMA_VERSION);
 }
 
 #[test]
@@ -320,6 +387,17 @@ fn set_policy_validates_lengths_and_zero_values() {
         .client
         .try_set_policy(&id, &ok_actions, &ok_tokens, &1, &T0, &f.signer);
     assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
+    // foreign settlement signer (F5: until 2.3b only this account may be named)
+    let r = f
+        .client
+        .try_set_policy(&id, &ok_actions, &ok_tokens, &1, &0, &b32(&f.env, 0x77));
+    assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
+    // duplicate selector
+    let dup = vec![&f.env, lock_sym(&f.env), lock_sym(&f.env)];
+    let r = f
+        .client
+        .try_set_policy(&id, &dup, &ok_tokens, &1, &0, &f.signer);
+    assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
     // and the boundary that is fine
     f.client
         .set_policy(&id, &ok_actions, &ok_tokens, &1, &(T0 + 1), &f.signer);
@@ -338,9 +416,24 @@ fn set_targets_replaces_and_bounds() {
     );
     let c = Address::generate(&f.env);
     assert_eq!(
-        f.client.try_set_targets(&vec![&f.env, a, b, c]),
+        f.client.try_set_targets(&vec![&f.env, a.clone(), b, c]),
         Err(Ok(AccountError::BadTargets))
     );
+    // never the account itself (F1)
+    assert_eq!(
+        f.client
+            .try_set_targets(&vec![&f.env, a, f.account.clone()]),
+        Err(Ok(AccountError::BadTargets))
+    );
+}
+
+/// Only the owner may replace the code; the wasm hash is validated by the host.
+#[test]
+fn upgrade_is_owner_only() {
+    let f = fixture();
+    f.env.set_auths(&[]);
+    assert!(f.client.try_upgrade(&b32(&f.env, 0x42)).is_err());
+    assert_eq!(f.client.schema_version(), SCHEMA_VERSION);
 }
 
 // ---------------------------------------------------------------------------
@@ -452,6 +545,10 @@ fn revoked_agent_rejected_and_revocation_is_sticky() {
     agent_check(&f, &ctxs).unwrap();
 
     f.client.revoke_agent(&id);
+    // the event 2.1e consumes: topics ["agent_rev", agent_id]
+    let topics = event_topics(&f.env, &f.account, true);
+    assert_eq!(topics[0], sym("agent_rev"));
+    assert_eq!(topics[1], bytes32(&id));
     assert!(f.client.is_revoked(&id));
     assert!(f.client.policy(&id).unwrap().revoked);
     expect_err(agent_check(&f, &ctxs), AccountError::AgentRevoked);
@@ -472,11 +569,12 @@ fn revoked_agent_rejected_and_revocation_is_sticky() {
     assert_eq!(r, Err(Ok(AccountError::AgentRevoked)));
     expect_err(agent_check(&f, &ctxs), AccountError::AgentRevoked);
 
-    // A never-installed id cannot be revoked.
+    // A never-installed id cannot be revoked, and is not "revoked".
     assert_eq!(
         f.client.try_revoke_agent(&b32(&f.env, 0x55)),
         Err(Ok(AccountError::NoPolicyForAgent))
     );
+    assert!(!f.client.is_revoked(&b32(&f.env, 0x55)));
 }
 
 /// D5 via the transitional `ad_creator` field (2.3b swaps it for
@@ -561,6 +659,43 @@ fn bad_args_fail_closed() {
         ),
         AccountError::BadArgs,
     );
+    // a required key missing
+    let mut m = lock_map(&f);
+    m.remove(Symbol::new(&f.env, "amount"));
+    expect_err(
+        agent_check(
+            &f,
+            &lock_ctx(&f.env, &f.target, vec![&f.env, m.into_val(&f.env)]),
+        ),
+        AccountError::BadArgs,
+    );
+    // a required key of the wrong type
+    let mut m = lock_map(&f);
+    m.set(Symbol::new(&f.env, "amount"), 7u32.into_val(&f.env));
+    expect_err(
+        agent_check(
+            &f,
+            &lock_ctx(&f.env, &f.target, vec![&f.env, m.into_val(&f.env)]),
+        ),
+        AccountError::BadArgs,
+    );
+}
+
+/// F4a: the decoder reads only the keys the policy needs, so the 2.3b
+/// 17-field order (or any wider shape) passes unchanged.
+#[test]
+fn wider_order_shape_decodes() {
+    let f = fixture();
+    let mut m = lock_map(&f);
+    for k in ["ad_settlement_signer", "deadline", "extra_a", "extra_b"] {
+        m.set(Symbol::new(&f.env, k), b32(&f.env, 0x33).into_val(&f.env));
+    }
+    assert_eq!(m.len(), 17);
+    agent_check(
+        &f,
+        &lock_ctx(&f.env, &f.target, vec![&f.env, m.into_val(&f.env)]),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -653,15 +788,19 @@ impl SecpAgent {
         id[12..].copy_from_slice(&hash[12..]);
         BytesN::from_array(env, &id)
     }
-    fn sign(&self, env: &Env, payload: &BytesN<32>) -> AccountSig {
+    fn sign_with(&self, env: &Env, payload: &BytesN<32>, eth_style: bool) -> AccountSig {
         let (sig, rid) = self
             .key
             .sign_prehash_recoverable(&payload.to_array())
             .unwrap();
+        let v = rid.to_byte() as u32;
         AccountSig::AgentSecp(SecpSig {
             sig: BytesN::from_array(env, &sig.to_bytes().into()),
-            recovery_id: rid.to_byte() as u32 + 27,
+            recovery_id: if eth_style { v + 27 } else { v },
         })
+    }
+    fn sign(&self, env: &Env, payload: &BytesN<32>) -> AccountSig {
+        self.sign_with(env, payload, true)
     }
 }
 
@@ -687,6 +826,18 @@ fn secp256k1_agent_authorizes_and_wrong_signer_has_no_policy() {
             &ctxs,
         )
         .unwrap();
+
+    // raw 0/1 recovery id is accepted too
+    f.env
+        .try_invoke_contract_check_auth::<AccountError>(
+            &f.account,
+            &payload,
+            secp.sign_with(&f.env, &payload, false).into_val(&f.env),
+            &ctxs,
+        )
+        .unwrap();
+    // the id is the left-padded EVM address
+    assert_eq!(secp.id(&f.env).to_array()[..12], [0u8; 12]);
 
     let other = SecpAgent::new(5);
     let r = f.env.try_invoke_contract_check_auth::<AccountError>(
@@ -740,7 +891,6 @@ struct Escrow {
     env: Env,
     owner: Address,
     account: Address,
-    client: AgentAccountClient<'static>,
     ad_manager: Address,
     ad_token: BytesN<32>,
     order_token: BytesN<32>,
@@ -821,7 +971,6 @@ fn escrow_fixture() -> Escrow {
         env,
         owner,
         account,
-        client,
         ad_manager,
         ad_token,
         order_token,
@@ -832,8 +981,8 @@ fn escrow_fixture() -> Escrow {
     }
 }
 
-fn escrow_params(e: &Escrow, amount: u128) -> LockParams {
-    LockParams {
+fn escrow_params(e: &Escrow, amount: u128) -> OrderParams {
+    OrderParams {
         order_chain_token: e.order_token.clone(),
         ad_chain_token: e.ad_token.clone(),
         amount,
@@ -1040,5 +1189,4 @@ fn e2e_owner_withdraw_via_nested_require_auth() {
     );
     assert!(r.is_err());
     assert_eq!(liquidity(&e), 4_000_000);
-    let _ = &e.client;
 }

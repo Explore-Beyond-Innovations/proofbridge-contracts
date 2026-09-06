@@ -509,19 +509,15 @@ fn check_evm_owner(
     let sig_arr = sig.to_array();
     let mut rs = [0u8; 64];
     rs.copy_from_slice(&sig_arr[..64]);
-    let v = sig_arr[64];
-    let recovery_id = if v >= 27 { v - 27 } else { v } as u32;
+    let addr = proofbridge_core::secp::recover_evm_address(
+        env,
+        &eth_digest,
+        &BytesN::from_array(env, &rs),
+        sig_arr[64] as u32,
+    )
+    .ok_or(RegistryError::OwnerMismatch)?;
 
-    let pubkey =
-        env.crypto()
-            .secp256k1_recover(&eth_digest, &BytesN::from_array(env, &rs), recovery_id);
-    let pk_arr = pubkey.to_array();
-    let addr_hash = env
-        .crypto()
-        .keccak256(&Bytes::from_slice(env, &pk_arr[1..]))
-        .to_array();
-
-    if addr_hash[12..] != acct[12..] {
+    if addr[..] != acct[12..] {
         return Err(RegistryError::OwnerMismatch);
     }
     Ok(())
