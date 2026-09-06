@@ -1,5 +1,5 @@
 [package]
-name = "ad-manager"
+name = "agent-account"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -14,8 +14,11 @@ proofbridge-core = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils", "alloc"] }
-hex = { workspace = true }
-serde_json = "1"
+ad-manager = { path = "../ad-manager", features = ["testutils"] }
+merkle-manager = { path = "../merkle-manager", features = ["testutils"] }
+test-token = { path = "../test-token", features = ["testutils"] }
+ed25519-dalek = { workspace = true }
+k256 = { version = "0.13", features = ["ecdsa"] }
 
 [features]
 testutils = ["soroban-sdk/testutils"]
