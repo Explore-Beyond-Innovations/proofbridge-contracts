@@ -72,10 +72,6 @@ struct Fixture {
     signer: BytesN<32>,
 }
 
-fn lock_sym(env: &Env) -> Symbol {
-    lock_for_order(env)
-}
-
 fn deploy(
     env: &Env,
     owner: &Address,
@@ -103,7 +99,7 @@ fn fixture() -> Fixture {
     let signer = address_to_bytes32(&env, &account);
     client.set_policy(
         &agent.id(&env),
-        &vec![&env, lock_sym(&env)],
+        &vec![&env, lock_for_order(&env)],
         &vec![&env, ad_token.clone(), order_token.clone()],
         &1_000_000_u128,
         &0_u64,
@@ -153,7 +149,7 @@ fn lock_ctx(env: &Env, target: &Address, args: Vec<Val>) -> Vec<Context> {
         env,
         Context::Contract(ContractContext {
             contract: target.clone(),
-            fn_name: lock_sym(env),
+            fn_name: lock_for_order(env),
             args,
         }),
     ]
@@ -288,7 +284,7 @@ fn non_owner_cannot_set_policy_revoke_or_set_targets() {
         .client
         .try_set_policy(
             &id,
-            &vec![&f.env, lock_sym(&f.env)],
+            &vec![&f.env, lock_for_order(&f.env)],
             &vec![&f.env, f.ad_token.clone()],
             &1_u128,
             &0_u64,
@@ -319,7 +315,7 @@ fn set_policy_rejects_reserved_and_unknown_selectors() {
     ] {
         let r = f.client.try_set_policy(
             &id,
-            &vec![&f.env, lock_sym(&f.env), Symbol::new(&f.env, bad)],
+            &vec![&f.env, lock_for_order(&f.env), Symbol::new(&f.env, bad)],
             &vec![&f.env, f.ad_token.clone()],
             &1_u128,
             &0_u64,
@@ -334,7 +330,7 @@ fn set_policy_rejects_reserved_and_unknown_selectors() {
 fn set_policy_validates_lengths_and_zero_values() {
     let f = fixture();
     let id = b32(&f.env, 0x03);
-    let ok_actions = vec![&f.env, lock_sym(&f.env)];
+    let ok_actions = vec![&f.env, lock_for_order(&f.env)];
     let ok_tokens = vec![&f.env, f.ad_token.clone()];
 
     // empty actions / 5 actions
@@ -344,7 +340,7 @@ fn set_policy_validates_lengths_and_zero_values() {
     assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
     let mut five = Vec::new(&f.env);
     for _ in 0..5 {
-        five.push_back(lock_sym(&f.env));
+        five.push_back(lock_for_order(&f.env));
     }
     let r = f
         .client
@@ -393,7 +389,7 @@ fn set_policy_validates_lengths_and_zero_values() {
         .try_set_policy(&id, &ok_actions, &ok_tokens, &1, &0, &b32(&f.env, 0x77));
     assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
     // duplicate selector
-    let dup = vec![&f.env, lock_sym(&f.env), lock_sym(&f.env)];
+    let dup = vec![&f.env, lock_for_order(&f.env), lock_for_order(&f.env)];
     let r = f
         .client
         .try_set_policy(&id, &dup, &ok_tokens, &1, &0, &f.signer);
@@ -522,7 +518,7 @@ fn expired_policy_rejected_at_boundary() {
     let id = f.agent.id(&f.env);
     f.client.set_policy(
         &id,
-        &vec![&f.env, lock_sym(&f.env)],
+        &vec![&f.env, lock_for_order(&f.env)],
         &vec![&f.env, f.ad_token.clone(), f.order_token.clone()],
         &1_000_000,
         &(T0 + 100),
@@ -560,7 +556,7 @@ fn revoked_agent_rejected_and_revocation_is_sticky() {
     // Re-install is refused; the key stays dead.
     let r = f.client.try_set_policy(
         &id,
-        &vec![&f.env, lock_sym(&f.env)],
+        &vec![&f.env, lock_for_order(&f.env)],
         &vec![&f.env, f.ad_token.clone()],
         &1,
         &0,
@@ -725,12 +721,12 @@ fn every_context_must_pass() {
         &f.env,
         Context::Contract(ContractContext {
             contract: f.target.clone(),
-            fn_name: lock_sym(&f.env),
+            fn_name: lock_for_order(&f.env),
             args: vec![&f.env, good.into_val(&f.env)],
         }),
         Context::Contract(ContractContext {
             contract: f.target.clone(),
-            fn_name: lock_sym(&f.env),
+            fn_name: lock_for_order(&f.env),
             args: vec![&f.env, bad.into_val(&f.env)],
         }),
     ];
@@ -810,7 +806,7 @@ fn secp256k1_agent_authorizes_and_wrong_signer_has_no_policy() {
     let secp = SecpAgent::new(4);
     f.client.set_policy(
         &secp.id(&f.env),
-        &vec![&f.env, lock_sym(&f.env)],
+        &vec![&f.env, lock_for_order(&f.env)],
         &vec![&f.env, f.ad_token.clone(), f.order_token.clone()],
         &1_000_000,
         &0,
@@ -960,7 +956,7 @@ fn escrow_fixture() -> Escrow {
     let signer = address_to_bytes32(&env, &account);
     client.set_policy(
         &agent.id(&env),
-        &vec![&env, lock_sym(&env)],
+        &vec![&env, lock_for_order(&env)],
         &vec![&env, ad_token.clone(), order_token.clone()],
         &1_000_000_u128,
         &0_u64,
@@ -1107,7 +1103,15 @@ fn e2e_agent_lock_via_require_auth() {
         &Symbol::new(&e.env, "lock_for_order"),
         vec![&e.env, p_val],
     );
-    assert!(r.is_err());
+    // The policy's CapExceeded fails the account's __check_auth; the host
+    // surfaces that as a context error on the escrow call, not a panic.
+    assert_eq!(
+        r,
+        Err(Ok(soroban_sdk::Error::from_type_and_code(
+            soroban_sdk::xdr::ScErrorType::Context,
+            soroban_sdk::xdr::ScErrorCode::InvalidAction,
+        )))
+    );
     assert_eq!(liquidity(&e), 4_600_000);
 }
 
