@@ -162,9 +162,9 @@ contract BLSKeyRegistry {
         emit KeyRegistered(account, slotId, blsPubKey, nonce);
     }
 
-    /// Shorten-only, nonce-free, never guarded: the retirement lever (D6).
+    /// Shorten-only, nonce-free, never guarded, and not pausable: the retirement lever
+    /// (D6/D9) only ever reduces authority, so a registry pause must not block it.
     function setValidUntil(bytes32 account, OwnerAuth calldata owner, uint32 slotId, uint64 validUntil) external {
-        if (paused) revert EnforcedPause();
         KeySlot storage slot = entries[account].slots[slotId];
         if (slot.commitment == bytes32(0)) revert NoSuchSlot();
         if (validUntil == 0 || (slot.validUntil != 0 && validUntil >= slot.validUntil)) revert BadValidUntil();
@@ -246,6 +246,16 @@ contract BLSKeyRegistry {
         return slot.commitment;
     }
 
+    /// True iff at least one live slot is usable now (the "is registered" check for 2.3c).
+    function hasUsableSlot(bytes32 account) external view returns (bool) {
+        RegistryEntry storage e = entries[account];
+        for (uint256 i = 0; i < e.liveSlots.length; i++) {
+            uint64 vu = e.slots[e.liveSlots[i]].validUntil;
+            if (vu == 0 || block.timestamp < vu) return true;
+        }
+        return false;
+    }
+
     function lookup(bytes32 account, uint32 slotId) external view returns (KeySlot memory slot) {
         slot = entries[account].slots[slotId];
         if (slot.commitment == bytes32(0)) revert NoSuchSlot();
@@ -305,7 +315,7 @@ contract BLSKeyRegistry {
     function domainSeparator() public view returns (bytes32) {
         return keccak256(
             abi.encode(
-                DOMAIN_TYPEHASH, keccak256("ProofBridge.BLSKeyRegistry"), keccak256("2"), block.chainid, address(this)
+                DOMAIN_TYPEHASH, keccak256("ProofBridge.BLSKeyRegistry"), keccak256("1"), block.chainid, address(this)
             )
         );
     }
@@ -317,7 +327,7 @@ contract BLSKeyRegistry {
         } else if (owner.scheme == Scheme.Sep53) {
             checkSep53Owner(account, digest, owner.data);
         } else {
-            revert UnknownScheme();
+            revert UnknownScheme(); // unreachable today: calldata decoding rejects out-of-range enums
         }
     }
 

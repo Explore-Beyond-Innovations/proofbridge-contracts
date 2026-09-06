@@ -424,6 +424,33 @@ contract BLSKeyRegistryTest is Test {
         );
     }
 
+    /// Retirement is the incident lever: it lands while the registry is paused.
+    function test_setValidUntilLandsWhilePaused() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        registerSlot("makerOnSepolia", 0);
+        registry.pause();
+
+        vm.expectRevert(BLSKeyRegistry.EnforcedPause.selector);
+        registerSlot("makerOnSepolia", 1);
+
+        setValidUntil("makerOnSepolia", 0, true);
+        vm.expectRevert(BLSKeyRegistry.SlotExpired.selector);
+        registry.commitmentAt(account, 0);
+    }
+
+    function test_hasUsableSlot() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        assertFalse(registry.hasUsableSlot(account));
+        registerSlot("makerOnSepolia", 0);
+        assertTrue(registry.hasUsableSlot(account));
+        setValidUntil("makerOnSepolia", 0, false); // in grace
+        assertTrue(registry.hasUsableSlot(account));
+        vm.warp(graceTs());
+        assertFalse(registry.hasUsableSlot(account));
+        registerSlot("makerOnSepolia", 1);
+        assertTrue(registry.hasUsableSlot(account));
+    }
+
     function test_firstRegistrationIgnoresBusyGuards() public {
         busyGuard();
         bytes32 account = registerMaker();

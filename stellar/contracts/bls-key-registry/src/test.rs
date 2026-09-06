@@ -415,41 +415,53 @@ fn first_registration_ignores_busy_guards() {
     assert_eq!(register_slot(&env, &client, &v, MAKER, 1), 1);
 }
 
+/// Pause brakes register/revoke; retirement (the incident lever) still lands.
 #[test]
-fn pause_blocks_register_and_revoke_until_unpause() {
+fn pause_blocks_register_and_revoke_but_not_retirement() {
     let (env, client, v) = setup();
-    let r = reg(&v, "makerOnStellarTestnet");
-    let account = bn::<32>(&env, &r["account"]);
+    let account = slot_account(&env, &v, MAKER);
     let owner = maker_owner(&env, &v);
+    register_slot(&env, &client, &v, MAKER, 0);
 
     client.pause();
+    let r1 = slot_reg(&v, MAKER, 1);
     assert_eq!(
         client.try_register(
             &account,
             &OwnerAuth::Stellar(owner.clone()),
-            &bn::<96>(&env, &r["pkNative"]),
-            &bn::<192>(&env, &r["pop"]),
-            &0
+            &bn::<96>(&env, &r1["pkNative"]),
+            &bn::<192>(&env, &r1["pop"]),
+            &1
         ),
         Err(Ok(RegistryError::ContractPaused))
     );
     assert_eq!(
-        client.try_revoke(&account, &OwnerAuth::Stellar(owner.clone()), &0),
+        client.try_revoke(&account, &OwnerAuth::Stellar(owner.clone()), &1),
         Err(Ok(RegistryError::ContractPaused))
     );
+    set_valid_until(&env, &client, &v, MAKER, 0, true);
     assert_eq!(
-        client.try_set_valid_until(&account, &OwnerAuth::Stellar(owner.clone()), &0, &1),
-        Err(Ok(RegistryError::ContractPaused))
+        client.try_commitment_at(&account, &0),
+        Err(Ok(RegistryError::SlotExpired))
     );
 
     client.unpause();
-    client.register(
-        &account,
-        &OwnerAuth::Stellar(owner),
-        &bn::<96>(&env, &r["pkNative"]),
-        &bn::<192>(&env, &r["pop"]),
-        &0,
-    );
+    assert_eq!(register_slot(&env, &client, &v, MAKER, 1), 1);
+}
+
+#[test]
+fn has_usable_slot_follows_validity() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    assert!(!client.has_usable_slot(&account));
+    register_slot(&env, &client, &v, MAKER, 0);
+    assert!(client.has_usable_slot(&account));
+    set_valid_until(&env, &client, &v, MAKER, 0, false); // in grace
+    assert!(client.has_usable_slot(&account));
+    env.ledger().set_timestamp(grace_ts(&v));
+    assert!(!client.has_usable_slot(&account));
+    register_slot(&env, &client, &v, MAKER, 1);
+    assert!(client.has_usable_slot(&account));
 }
 
 #[test]

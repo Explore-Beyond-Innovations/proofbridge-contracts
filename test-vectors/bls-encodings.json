@@ -94,6 +94,7 @@
         }
       },
       "registerAtNonce1": {
+        "rule": "same key at nonce 1: v1 rotation fixture; v2 registries revert KeyPreviouslyUsed (use `slots` for rotation)",
         "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
         "nonce": "1",
         "pkNative": "0x0000000000000000000000000000000010b5d7ef1aec2eb92c6ef8a862b0093cb6ea4b49c9165ccb43c06cae3b4a4137ce36acb002ce09129e4f67f3c8d13607000000000000000000000000000000000839598cb1f041fcfb9975919bb37bd38eefe1ee91ef6d5fdaabef82396e18d53c0f65a4a2ee611b8d7d9db9e5b57def",
@@ -129,6 +130,7 @@
         "scheme": "require_auth"
       },
       "registerAtNonce1": {
+        "rule": "same key at nonce 1: v1 rotation fixture; v2 registries revert KeyPreviouslyUsed (use `slots` for rotation)",
         "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
         "nonce": "1",
         "pkNative": "0x10b5d7ef1aec2eb92c6ef8a862b0093cb6ea4b49c9165ccb43c06cae3b4a4137ce36acb002ce09129e4f67f3c8d136070839598cb1f041fcfb9975919bb37bd38eefe1ee91ef6d5fdaabef82396e18d53c0f65a4a2ee611b8d7d9db9e5b57def",
@@ -153,12 +155,12 @@
       "revokeDigest": "0x829cfae0f5c8c781710f71facf2b27a89a64f9f39e2d1a6802c95c447b7d5aad",
       "ownerSig": {
         "scheme": "eip712",
-        "domainSeparator": "0x697500bc0f8c6272a3b7f1692e77756e619e7bd3f66db0106cae1d9ffaa9f59a",
+        "domainSeparator": "0x7031f015958091dda356fe3f41ba0b4103e8adccd8ea2ab517d7d0f7534cce12",
         "structHash": "0xa7fe4c97242ba8876ebbd85b624d4661c0fb2e0b65a968a24d80e0b928639464",
-        "digest": "0x81ef837e1df8ad763d44a6c7481e1a4d971220d0c730c61847c70bb0735e94f0",
+        "digest": "0xaec28ba129ec03559d1d2c114432658cb74f6231a09ab74888553f0ef45e42fd",
         "sig": {
-          "r": "0x42a94d8a2fc858284fd455df80338eb535bdc6ffd868fb3d5de6410c30d4c55b",
-          "s": "0x6a03f23eeb6135e889b96be12c843534368e809524c96eb494bb11d6b1c40c5e",
+          "r": "0xd228d443f98d39fe3394b9fbeeec2cf4731a25ff5d1d683240edc4e225dde89f",
+          "s": "0x15389f2f89a14959586ba0970bab1dd9adcb27a19c58cd6635a685ed4d4cd4f6",
           "v": 28
         },
         "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
@@ -168,16 +170,17 @@
         "ownerSig": {
           "scheme": "eip712",
           "structHash": "0x92379d3d68635cfbecc8ae1b3388954b7c1eec4bba5a2709ba908443b8f3ff89",
-          "digest": "0x2d28bb7a499eafa85c64373545cd7617db8c0dbb7d45078a7ad5a3cf87481bcc",
+          "digest": "0x480cb15261db9c7e2e73cd037d6507a6002eeeebbdc2f9b1989f7477f427de16",
           "sig": {
-            "r": "0x7777a12e6640471dc63a69360a292c0858856e28a95874a15f78d16050a88499",
-            "s": "0x20c473f7eca015b33e5a6c8da234f79b9341e3f998eb3fb2a0b0a2d8237020c1",
+            "r": "0x611b7a5e3188830a8083e21fef95fe954c4fcd39158c30e53ceb97bea35dfac0",
+            "s": "0x6a19a2c4e80e61a5ac76211c43e84201182558c797bf882f9fff6740b11ae0e6",
             "v": 27
           },
           "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
         }
       },
       "registerAtNonce1": {
+        "rule": "same key at nonce 1: v1 rotation fixture; v2 registries revert KeyPreviouslyUsed (use `slots` for rotation)",
         "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
         "nonce": "1",
         "pkNative": "0x000000000000000000000000000000000955dbd6d4daef5d3623b3c934ea240a1c74d53fce884f241b8cee611c529eb85887ac586e9d1f3f1ac845835252e85a000000000000000000000000000000000644d6553c0f5b9c65b68aa39fd1e503bbeb44e4bdb29ec6a940d3127c99ef9a1e35e7fd14c4a9f59a0bcbcde58ada9e",
@@ -188,12 +191,12 @@
         "revokeDigest": "0xe0b9850c3149bb7744f828a43a279f8e03c103095e133569dccbf8dd6e6e506c",
         "ownerSig": {
           "scheme": "eip712",
-          "domainSeparator": "0x697500bc0f8c6272a3b7f1692e77756e619e7bd3f66db0106cae1d9ffaa9f59a",
+          "domainSeparator": "0x7031f015958091dda356fe3f41ba0b4103e8adccd8ea2ab517d7d0f7534cce12",
           "structHash": "0x92bf47e8b3e22ca4497805edc1c912c87375879e9a47ff52347c61af0e9b2cba",
-          "digest": "0xf4d059fc08bdbcfff2f4568de4a724650ab9c7dec214b519a1e41fc0988fab78",
+          "digest": "0x9e644213e5caa5294a369b9f8ffb06159151799cfca590e4958bc4033b114d2f",
           "sig": {
-            "r": "0xd9e849742250d51ac8f6f8e4ff225903caffd9cf8fbdf3175babf2631709c523",
-            "s": "0x66c987b54c0c8d8f425a81616822d55fa027af8b14ef7bd01aa6842616cc1b99",
+            "r": "0x51a49d499db6626ec19bba8d16fcf2162b2957901b2f7e79d02c9abef3140582",
+            "s": "0x5f17fd615543a29fc27dca95f06f48c9b17dc20ba45f86dca3c1b51e705c4535",
             "v": 28
           },
           "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
@@ -601,12 +604,12 @@
           "revokeDigest": "0x829cfae0f5c8c781710f71facf2b27a89a64f9f39e2d1a6802c95c447b7d5aad",
           "ownerSig": {
             "scheme": "eip712",
-            "domainSeparator": "0x697500bc0f8c6272a3b7f1692e77756e619e7bd3f66db0106cae1d9ffaa9f59a",
+            "domainSeparator": "0x7031f015958091dda356fe3f41ba0b4103e8adccd8ea2ab517d7d0f7534cce12",
             "structHash": "0xa7fe4c97242ba8876ebbd85b624d4661c0fb2e0b65a968a24d80e0b928639464",
-            "digest": "0x81ef837e1df8ad763d44a6c7481e1a4d971220d0c730c61847c70bb0735e94f0",
+            "digest": "0xaec28ba129ec03559d1d2c114432658cb74f6231a09ab74888553f0ef45e42fd",
             "sig": {
-              "r": "0x42a94d8a2fc858284fd455df80338eb535bdc6ffd868fb3d5de6410c30d4c55b",
-              "s": "0x6a03f23eeb6135e889b96be12c843534368e809524c96eb494bb11d6b1c40c5e",
+              "r": "0xd228d443f98d39fe3394b9fbeeec2cf4731a25ff5d1d683240edc4e225dde89f",
+              "s": "0x15389f2f89a14959586ba0970bab1dd9adcb27a19c58cd6635a685ed4d4cd4f6",
               "v": 28
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
@@ -624,13 +627,13 @@
           "revokeDigest": "0xe0b9850c3149bb7744f828a43a279f8e03c103095e133569dccbf8dd6e6e506c",
           "ownerSig": {
             "scheme": "eip712",
-            "domainSeparator": "0x697500bc0f8c6272a3b7f1692e77756e619e7bd3f66db0106cae1d9ffaa9f59a",
+            "domainSeparator": "0x7031f015958091dda356fe3f41ba0b4103e8adccd8ea2ab517d7d0f7534cce12",
             "structHash": "0x74407008640883cbb6e1dbc1e3f2ed94add6cd63ecd40b57e834f400a1989ee1",
-            "digest": "0x1eb2d4e12c68f5ead57662e8123ee233c2754e2290aa07e51a15a48017561933",
+            "digest": "0xbd6b1bd993b8fe6cd188bf772a86b88c76e95dfda6ee1b838e08bfd596ac0ef9",
             "sig": {
-              "r": "0xab8ed5a7e8ce655d1704951c9d61df1ef87413c89532c6c7c4b08732c022560c",
-              "s": "0x5743e6feb8c93dbf0eb97558c03c5b006809d8e6b2ebab6a3d2009102ae46806",
-              "v": 28
+              "r": "0x2b3706745803840bdb754238dec2c63d3aba45cfa419fcd34e783385a045714c",
+              "s": "0x56511d13d1729a0f456e84c33f32da4e6efc5cd4f616f09d6c0d7c03049d8aa9",
+              "v": 27
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
           }
@@ -647,13 +650,13 @@
           "revokeDigest": "0x2404153be391fca28ba03f7af86430d105cf25fe0d98dd427d50a844825b4bf0",
           "ownerSig": {
             "scheme": "eip712",
-            "domainSeparator": "0x697500bc0f8c6272a3b7f1692e77756e619e7bd3f66db0106cae1d9ffaa9f59a",
+            "domainSeparator": "0x7031f015958091dda356fe3f41ba0b4103e8adccd8ea2ab517d7d0f7534cce12",
             "structHash": "0x35e9025ce5fe9ba397262e6a5d7325674529ea9f9a4b8388a33c4b6625949a81",
-            "digest": "0xcc16df711237dc2700ba8ae90cac1f601a8682e7f1bacf7fbec4eec79ec455b4",
+            "digest": "0xbf3c4ab90a6e1f7e2388e1e584e40b183f2243b5ec0a992e011ce74c8219d676",
             "sig": {
-              "r": "0x0b1129dc9a35bfa5692c7514aabe180e91f6735d70cc429601b77767aa6d9f1f",
-              "s": "0x16f45ec2a19144b2c11431a4b540a1f4267c0262a8dbf1ee4d9c4e12807423bc",
-              "v": 28
+              "r": "0x6638aadc2328bac585a74029ad17dd55e2ebab2f70ee58e606f0e39d4f246365",
+              "s": "0x30e30f762daf0ace9ee45c866ff9aa564c6fda046280f36f0802055b8a8a6577",
+              "v": 27
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
           }
@@ -670,12 +673,12 @@
           "revokeDigest": "0xdafa037aebea2b3ba372c7ae5fe96b0967734045737ea64e6cf6bf4c878ab195",
           "ownerSig": {
             "scheme": "eip712",
-            "domainSeparator": "0x697500bc0f8c6272a3b7f1692e77756e619e7bd3f66db0106cae1d9ffaa9f59a",
+            "domainSeparator": "0x7031f015958091dda356fe3f41ba0b4103e8adccd8ea2ab517d7d0f7534cce12",
             "structHash": "0x1dc1fca5a93cdc61b916ff8ec6386ca9edcc7e42c97d37131b77d6f540ea462b",
-            "digest": "0x5ac46a9d751df8397788e29cd394d729ed93ed894e080b0255200653938cb0b0",
+            "digest": "0xdad58a8f63e3901074a2a2df8e02610fe9b596a724beca7e1275b850082f7581",
             "sig": {
-              "r": "0x0dc48f27be217ad87c7219e3ecb22031212071bc5595a4e4c417fbe94f34b380",
-              "s": "0x19e116455e8199492a464b2c396f855a48dfcb4dfe67ab0cd33ac83ed8ff393f",
+              "r": "0xee6dec33105fb226b92bbad773c7981f0ffd315b5353bb5fcce1755ded87eb98",
+              "s": "0x4d78c8ff5a26f1cb03b9eac1158d3bfc3442b6abe27ada34852f697c833a001f",
               "v": 27
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
@@ -693,12 +696,12 @@
           "revokeDigest": "0x176dfde9c0a6bb57aea22a2988f30ddf042fecdce5a1c2ad388f798be75c5b81",
           "ownerSig": {
             "scheme": "eip712",
-            "domainSeparator": "0x697500bc0f8c6272a3b7f1692e77756e619e7bd3f66db0106cae1d9ffaa9f59a",
+            "domainSeparator": "0x7031f015958091dda356fe3f41ba0b4103e8adccd8ea2ab517d7d0f7534cce12",
             "structHash": "0xb6ae248d32c91f5d8dc1c0b3599bfd9ccb36e35583474407239a8587ec5aa946",
-            "digest": "0x64e0c0577b69d12a2572201a2fbd7886e67b5a8b66ec2dc16533764c424b58d6",
+            "digest": "0x90d60f604c1b7b69494cb10ab4d54b85ae244e4579de0a717a860fc8facf6ca4",
             "sig": {
-              "r": "0xb2c1f06ce86b4e5211e1164f3a809afa76491d6693cc5d888f5903a88f7f2788",
-              "s": "0x62003142ff56eda1ba0326dade33255aaeec9de9599c3b868695a4043a2d353a",
+              "r": "0x9b6d4ed02577337f97ff348d8a46dab2dd79a8bbd118569f7ab32378cba9d5d9",
+              "s": "0x68487314db45cdd58d42aa4d290836ddb1f175a438c2e0d6bb7c74c72ebeb3d7",
               "v": 28
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
@@ -716,12 +719,12 @@
           "revokeDigest": "0x9df7761d430cea5acb957e74a753b0fad993b392bdcbd5842347de24851943d2",
           "ownerSig": {
             "scheme": "eip712",
-            "domainSeparator": "0x697500bc0f8c6272a3b7f1692e77756e619e7bd3f66db0106cae1d9ffaa9f59a",
+            "domainSeparator": "0x7031f015958091dda356fe3f41ba0b4103e8adccd8ea2ab517d7d0f7534cce12",
             "structHash": "0x1fb172ce93e2d7f0f34869ac4cdeadf5ee840c0a093e578fd93e0e4a48d6260e",
-            "digest": "0xfd2f28b56a3e09b1d82889f4cf81f0a794e6666135d09069eb470b7a3b2038c3",
+            "digest": "0xe20b81b5f9b3e29700b68803b922d0c7806768ea23cef075ab2b5f50c150e57f",
             "sig": {
-              "r": "0xecf8e824e2af9f4751a2d0abd3f8dafd9743ca9573f3dadaa6ad93ef680ee8b5",
-              "s": "0x4b59fbcafe012f3c71cd77d62df7415c630ff594abfa68e90ab9cf58d22fcd64",
+              "r": "0x9abbc1240e9b27f969ebc5e6fa9de39597bffa5149dbe12194a6a56bea6822fe",
+              "s": "0x7541b137956302b06f039af24211b84e27f01658f50115f8689b7ee79de5c6a9",
               "v": 28
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
@@ -736,10 +739,10 @@
           "ownerSig": {
             "scheme": "eip712",
             "structHash": "0x6da8c218591933b0c9395bf7af810616ef66e9c8939596e47a850e1245fdc668",
-            "digest": "0x120bd23b3dd926536804f586ab3da49308603d8bf86eaeb70f5b7d1b6898696d",
+            "digest": "0x576e7d3331c6312f97abfd43e4f4dcc97d6f631230f22f2f693ae0073912933f",
             "sig": {
-              "r": "0xc34909269affcd50de697c9b93384a7c427769910c40fcc459788edd52a5b60e",
-              "s": "0x3d4d5cc6c41d9c7dd367071c3f8293df36233ef17a5af19392bcf12584a36664",
+              "r": "0xc6100c193ce94323ed07580912272cfa4c919e2052ff93b461f0ca9df492a210",
+              "s": "0x1b819a406c301b66dcea99c7741d3ddcf7704d0dca296ad97ded662638ef9e67",
               "v": 27
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
@@ -752,11 +755,11 @@
           "ownerSig": {
             "scheme": "eip712",
             "structHash": "0xcc84a2866f897554deccc31f256dd4ff178e03514862990809bcd093e7fb30e3",
-            "digest": "0x6ce85ecc78348c5ff7e57f2cedc87475d1abf16c1d25bd9e0b23b01a5d2bd348",
+            "digest": "0x61e1c713354ddb4b501cf36a061427ab7b999eb17fac017789da3e8c571dabf6",
             "sig": {
-              "r": "0xffaa6c955e0f9c6e55840abb7c22b9218f5599a2f954e1f373177d2eb6febdda",
-              "s": "0x458389b1b69f559a40a854f099a534101e2c0f1702a4f3f46074f91726562e06",
-              "v": 27
+              "r": "0x1cdebedc3aefb26e0109870014ce41ea0ce8352a0813c1237fecd7c88e264e15",
+              "s": "0x4f8f7735d4a0b05840ec1555bc1f89407baa0bc31c08cc0263ef217b4c5598b5",
+              "v": 28
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
           }
@@ -768,10 +771,10 @@
           "ownerSig": {
             "scheme": "eip712",
             "structHash": "0xb2b5fc6c176c5fee95a7744f797cdcad5a506f6dd224e6b54e4f9e4dfee2434f",
-            "digest": "0xf0d9205f17ab9edff6181381ecd184c699f558cf1053694291f4f1846256ca2f",
+            "digest": "0xc8b2faa5fb7604b17469174184dcfe07970f5c8293a9d66471f3618f797ff0d6",
             "sig": {
-              "r": "0xc1b977f83d21f051eae3f36843f86f1de23d02faa336690187a9c39c7038d3a9",
-              "s": "0x2a49df64451a8548d81d5645641433aea1ef400f89341acef9eeba3d7c2d72d2",
+              "r": "0x8bf6783fa897bba5ddb1fadb1197abc8fbe29737f7e8697ed961985816c9165b",
+              "s": "0x0cb60409e32190fc8ac961d59832892aae0adee645cb50e1ec838af8b690cf01",
               "v": 28
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
@@ -784,11 +787,11 @@
           "ownerSig": {
             "scheme": "eip712",
             "structHash": "0x334dcf34663bdb99ab600db0e34f3cfce874b5e66a2dabf757ac75d6c8c1b57f",
-            "digest": "0x73f6ad1c62e8a8ac888632dfa391e6f357fff338320ce3ccd4710c0a876763e5",
+            "digest": "0x40b28e13ffad8e3e671adcf137db07996e3735cd6a8f6e3a7069e9969c3e0352",
             "sig": {
-              "r": "0xd51d82b10b57dddf7f26a9ad035ba292dc94ed213b9632a1475667d7e8518a8f",
-              "s": "0x2613f5e512ae7f2fa7b8b24e701cd8d2cfe80b3d3787de075256d6775773551b",
-              "v": 28
+              "r": "0xac05107267127d61579e6dc56e43bd128c54f1fd828ee47cb7ae1ea208804693",
+              "s": "0x392445dd20bd718efb54a9eb64adf627d6ff3ad9f3ccf24efbd69f07bfd7f9b4",
+              "v": 27
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
           }
@@ -800,10 +803,10 @@
           "ownerSig": {
             "scheme": "eip712",
             "structHash": "0xf070e6ba73c6da532bf792ce790ab725a9969237599f76df6190a694989ebd81",
-            "digest": "0x1d587f0a6a92e0b450ab48ae280df799507e467dae401988856ec793433432db",
+            "digest": "0x667191426801134c148c6707a12650236827c54045a3b6ac63cab35baad7abc4",
             "sig": {
-              "r": "0x2ac2585e633b2ff7dcbbd5ccff62974a8ab2ffa5e90524b5d8b4925ecd70b4af",
-              "s": "0x7f57b5351abf32b7adca779e96fe2367c93d1066c6dbc065267566e5f01c9927",
+              "r": "0x25b4c897138e52d033d2f366e67baedb05b2233b5dad2f6f770db05e7ff5f3cd",
+              "s": "0x002e18daa26b13eb19d4a8b433774dd2be0f718a206f11496fd3d02f58c00bdf",
               "v": 28
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
@@ -816,11 +819,11 @@
           "ownerSig": {
             "scheme": "eip712",
             "structHash": "0x59030bdc4aa0d459195a57d25beec9de0639b46a7d181283ee0f1413e4d276af",
-            "digest": "0xc5fdd60004b947863d3d55449be4d34c41e5350ed2e41002b2d6b63b9cfcb464",
+            "digest": "0x32c0f817d012fba682bf8df45652eed43f36bfc3c7fd34423a75d46c345d0bfd",
             "sig": {
-              "r": "0x45813bddcaf302110095acbebf2d437f52dbca08f554232241dcae7828a569ad",
-              "s": "0x74e534e0037bc9293f0c35cb2fe5df3dc54d1b28ff36c97e61eaacee3698a491",
-              "v": 27
+              "r": "0x8ff0c16195ac76a0a70251cbbb13efb662b9ee350c919f6c988a5d28aabb03f2",
+              "s": "0x7c68b85328d92f73084ca6a6f99c7f661889011f25d1da3cc5b3a5b2672fd837",
+              "v": 28
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
           }
@@ -832,11 +835,11 @@
           "ownerSig": {
             "scheme": "eip712",
             "structHash": "0x79535062690183a9c8b4c35b646055cbc67f275c8bbae842e08e2f16c1323f29",
-            "digest": "0xe612d323e6ad5d96709b6aadfc135c69b446ed863400e08d55d4f0a9f7eba005",
+            "digest": "0x33ba939705df8060649aa079031668ab079a544db0e68eba92a22ebb9dcd91d8",
             "sig": {
-              "r": "0xa70739686e7ec1e2af5091295962b27b48aea2f3fed8737f0f2e7eae0231b198",
-              "s": "0x48be53b951a8949ba44b2e11b5252172732900261100de301abd5499a3c94299",
-              "v": 27
+              "r": "0x8feca039d86dc7a5546a937a4dd7b52ef8629105327caaa0bc6b6c7bb077419a",
+              "s": "0x7af4c9b4550bc4ba17e14932599e9fe20fedbc5e76affcb1f69ad4a7085864fb",
+              "v": 28
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
           }
@@ -848,11 +851,11 @@
           "ownerSig": {
             "scheme": "eip712",
             "structHash": "0xb3dcc704f728d67c879262d208483aa4341b901e8a42e57792e6ae548a27ea82",
-            "digest": "0xb9b896fea443e9c602f74f5a9ca0dd76e966491f769dde0303d3fe507d797cd2",
+            "digest": "0xfa073bc8f0e7344b681aa2605efb73d98957517cdc467e21eff068fb3941174b",
             "sig": {
-              "r": "0xb6613261818f7095cafdb614b49210ad5e1aaf7dd09120c023ea2c74b42a7450",
-              "s": "0x7a6c98c7597cf759d5097c8a0b6a35942efc93ab3b8fb24cadbc6971fc931b7a",
-              "v": 28
+              "r": "0x9a526a5b2a82b0ccce843606e684b76f2167131e425fd336b5287067fe715626",
+              "s": "0x02cd923b95e0d6be2d312db944fccfe79e45be0bca9bdf9fbbb8cb0c40a4aaca",
+              "v": 27
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
           }
@@ -864,10 +867,10 @@
           "ownerSig": {
             "scheme": "eip712",
             "structHash": "0x28c0b75554fb6c9aac74dba5d84fdaedced81e51679960148384904760c17dbf",
-            "digest": "0x4038e095c1f6f004a5518e7e6768b8523ded1ff31dabc0d45ea168641b5103c3",
+            "digest": "0x47907b211b5b83abeba081643c9199b370993bfb013f18c634c2409cd64402ca",
             "sig": {
-              "r": "0x0d8d1caf37c588529d320e343c5e5662d1a15e53ae34ea1d3edfb1fdc4663eba",
-              "s": "0x4e55d450910cdf78f07d8dfcbf5476fc021624f9f83d05d306952cb4c8a44a04",
+              "r": "0xcde595ac63f4767725173a9717c805a41d796b2183b81e7bdc28449513024c9b",
+              "s": "0x02c600ab2bbebc750249705193fb94c00fc2bc47563d1f96ed99f2d68e19fad3",
               "v": 28
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
@@ -880,11 +883,11 @@
           "ownerSig": {
             "scheme": "eip712",
             "structHash": "0x53678c3a4eacfb2b0b807bd917b445744c802a61aba5667454e79ba907130938",
-            "digest": "0xe45a2a37bf3e20fd777d1f844605e171cdc26ca543bb445fcc0c8e77fa8187a6",
+            "digest": "0x501471c62532bd93ae986560b1f21ec0032891ba7b98cfad2bc51e389ef29fce",
             "sig": {
-              "r": "0x6d9958690989d4362ed6f59bd83bb013392c6e52e87abc523ee2514fb283b6d2",
-              "s": "0x779471a126254d76808c4dcb94348b557553432eec56c7d0cc3bf2cc70f03a63",
-              "v": 27
+              "r": "0xafb569486540df1125e02583f73100eb62ca731c6c218d8a523b72a002dbd24d",
+              "s": "0x077b3b16f97aa96ccf51d2b08fc6c6e6c8a22fec44cc2617324d74475a794667",
+              "v": 28
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
           }
@@ -896,11 +899,11 @@
           "ownerSig": {
             "scheme": "eip712",
             "structHash": "0x9b6dca880db4f6002beb61a1b99ffe2a20a0c546d944b3cd1eb014182b24ed02",
-            "digest": "0xb4270e099baa815a35868f9c200d3ca9959bb878c2995074af990c33d578e30d",
+            "digest": "0x658f0faa6b8dcf1fa7958fdf51b7c265403460f6c14ee6973aeb496588792b5c",
             "sig": {
-              "r": "0xc5fefa1b9a16bbd60a7e950588cdab4af3b475ba1d2bb661ca3cd4646ad4edff",
-              "s": "0x5ffe70c1f7efb52f8c01cc121ebc0d299e1ad4baa1ceaf3b59d0e964b86292f6",
-              "v": 27
+              "r": "0x400b92fbdd336fd4d70d50df0476156b5e04e4c16484f2e9cb956201c86aab81",
+              "s": "0x4ec5406f035785cf04d4504ee06554f14cd87a828043aacc5b7a3587ad15f211",
+              "v": 28
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"
           }
@@ -912,10 +915,10 @@
           "ownerSig": {
             "scheme": "eip712",
             "structHash": "0xaf586effe7b8e0a18a19e15726e48832ed7a052d54f40707d8543199fc1605d6",
-            "digest": "0xced6f1d321e74f27cfcd75adaa3c8e37135f79c7205f195fbc5ae058ff9b28e0",
+            "digest": "0xced9fc01f3dbf2097bb22188515841a9ead7277a6e6b7499fd1aa28a232a73f9",
             "sig": {
-              "r": "0xc1e5967276f5657deae58b87fb07243e11879a9f5c564d8ae83949891d114a0a",
-              "s": "0x59c6c4956c4105fa38c359e2dfe84d65509ad3f88cab59545b1491640ae5e91d",
+              "r": "0x17daa58f8b237efd521147ae0e2b29a6b5f9f5c7ccba2bdf6be0a9dda5feb159",
+              "s": "0x7c6a9d27e93b609edd850fc5f016760dcce6d024e1a320f6ed23b5b43fa2b747",
               "v": 27
             },
             "signerAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0"

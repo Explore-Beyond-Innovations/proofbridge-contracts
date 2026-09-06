@@ -175,7 +175,8 @@ impl BlsKeyRegistry {
         Ok(slot_id)
     }
 
-    /// Shorten-only, nonce-free, never guarded: the retirement lever (D6).
+    /// Shorten-only, nonce-free, never guarded, and not pausable: the retirement lever
+    /// (D6/D9) only ever reduces authority, so a registry pause must not block it.
     pub fn set_valid_until(
         env: Env,
         account: BytesN<32>,
@@ -185,9 +186,6 @@ impl BlsKeyRegistry {
     ) -> Result<(), RegistryError> {
         if !storage::is_initialized(&env) {
             return Err(RegistryError::NotInitialized);
-        }
-        if storage::is_paused(&env) {
-            return Err(RegistryError::ContractPaused);
         }
         let mut slot =
             storage::get_slot(&env, &account, slot_id).ok_or(RegistryError::NoSuchSlot)?;
@@ -258,6 +256,18 @@ impl BlsKeyRegistry {
         }
         storage::touch(&env, &account, slot_id);
         Ok(slot.commitment)
+    }
+
+    /// True iff at least one live slot is usable now (the "is registered" check for 2.3c).
+    pub fn has_usable_slot(env: Env, account: BytesN<32>) -> bool {
+        let now = env.ledger().timestamp();
+        storage::get_entry(&env, &account)
+            .live
+            .iter()
+            .any(|slot_id| {
+                matches!(storage::get_slot(&env, &account, slot_id),
+                Some(s) if s.valid_until == 0 || now < s.valid_until)
+            })
     }
 
     pub fn lookup(env: Env, account: BytesN<32>, slot_id: u32) -> Option<KeySlot> {

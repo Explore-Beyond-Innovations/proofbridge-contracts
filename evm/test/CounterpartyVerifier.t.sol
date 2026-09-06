@@ -179,6 +179,26 @@ contract CounterpartyVerifierTest is Test {
         assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, moduleData)));
     }
 
+    /// A v1-layout blob (no slot ids) must return false, not revert with empty data.
+    function test_v1LayoutBlobFails() public view {
+        CounterpartyVerifier.SettlementAuth memory auth = CounterpartyVerifier.SettlementAuth({
+            orderChainId: orderChainId,
+            adChainId: adChainId,
+            orderHash: v.readBytes32(".settlement.auth.orderHash"),
+            orderChainRoot: orderChainRoot,
+            adChainRoot: adChainRoot
+        });
+        bytes memory v1 = abi.encode(
+            uint8(1),
+            auth,
+            v.readBytes(".keys.makerBls.pk.eip2537"),
+            v.readBytes(".keys.bridgerBls.pk.eip2537"),
+            v.readBytes(".settlement.aggSig.eip2537")
+        );
+        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, v1)));
+        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, hex"")));
+    }
+
     // =========================================================================
     // T-02: slot hints + use-time validity
     // =========================================================================
