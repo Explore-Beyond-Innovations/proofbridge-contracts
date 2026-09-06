@@ -871,7 +871,7 @@ fn test_gate2_real_module_rejects_root_outside_signed_auth() {
     let hexv =
         |v: &serde_json::Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
     let auth = &vectors["settlement"]["auth"];
-    let mut cosig = std::vec![1u8];
+    let mut cosig = std::vec![2u8]; // metadata v2
     let ocid: u128 = auth["orderChainId"].as_str().unwrap().parse().unwrap();
     let acid: u128 = auth["adChainId"].as_str().unwrap().parse().unwrap();
     cosig.extend_from_slice(&ocid.to_be_bytes());
@@ -879,6 +879,8 @@ fn test_gate2_real_module_rejects_root_outside_signed_auth() {
     cosig.extend_from_slice(&hexv(&auth["orderHash"]));
     cosig.extend_from_slice(&hexv(&auth["orderChainRoot"]));
     cosig.extend_from_slice(&hexv(&auth["adChainRoot"]));
+    cosig.extend_from_slice(&0u32.to_be_bytes()); // maker slot id
+    cosig.extend_from_slice(&0u32.to_be_bytes()); // bridger slot id
     cosig.extend_from_slice(&hexv(&vectors["keys"]["makerBls"]["pk"]["uncompressed"]));
     cosig.extend_from_slice(&hexv(&vectors["keys"]["bridgerBls"]["pk"]["uncompressed"]));
     cosig.extend_from_slice(&hexv(&vectors["settlement"]["aggSig"]["uncompressed"]));
@@ -1166,7 +1168,7 @@ fn test_registry_guards_are_the_real_escrows() {
         &bls_key_registry_contract::OwnerAuth::Stellar(owner),
         &1,
     );
-    assert!(client.try_key_of(&account).is_err());
+    assert!(client.try_commitment_at(&account, &0).is_err());
 }
 
 // 1.6c cost-measurement gate: CPU instructions + memory bytes consumed by a full

@@ -14,8 +14,26 @@ pub struct Initialized {
 pub struct KeyRegistered {
     #[topic]
     pub account: BytesN<32>,
+    #[topic]
+    pub slot_id: u32,
     pub bls_pub_key: BytesN<96>,
     pub nonce: u64,
+}
+
+#[contractevent(topics = ["slot_vu"], data_format = "single-value")]
+pub struct SlotValidUntilSet {
+    #[topic]
+    pub account: BytesN<32>,
+    #[topic]
+    pub slot_id: u32,
+    pub valid_until: u64,
+}
+
+#[contractevent(topics = ["slot_prn"], data_format = "single-value")]
+pub struct SlotPruned {
+    #[topic]
+    pub account: BytesN<32>,
+    pub slot_id: u32,
 }
 
 #[contractevent(topics = ["key_rev"], data_format = "single-value")]

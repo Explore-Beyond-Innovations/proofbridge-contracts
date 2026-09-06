@@ -6,12 +6,17 @@ extern crate std;
 
 use super::*;
 use bls_key_registry::{BlsKeyRegistry, BlsKeyRegistryClient, OwnerAuth};
-use soroban_sdk::{testutils::Address as _, Env, String as SString};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger as _},
+    Env, String as SString,
+};
 
 const VECTORS: &str = include_str!("../../../../test-vectors/bls-encodings.json");
 
 const REGISTRY_ID: [u8; 32] = [0x22; 32];
 const CHAIN_ID: u128 = 1_000_002;
+const T0: u64 = 1_700_000_000;
+const METADATA_LEN: usize = 585;
 
 fn vectors() -> serde_json::Value {
     serde_json::from_str(VECTORS).unwrap()
@@ -38,6 +43,7 @@ struct Setup {
 fn setup() -> Setup {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
     let v = vectors();
 
     // Registry at the exact contract id the vector digests bind.
@@ -95,6 +101,17 @@ impl Setup {
     }
 
     fn metadata_with(&self, pk_maker: &[u8], agg_sig: &[u8]) -> Bytes {
+        self.metadata_slots(0, 0, pk_maker, agg_sig)
+    }
+
+    /// Both parties' settlement keys sit in slot 0; the slot hints are calldata, not hash-bound.
+    fn metadata_slots(
+        &self,
+        maker_slot: u32,
+        bridger_slot: u32,
+        pk_maker: &[u8],
+        agg_sig: &[u8],
+    ) -> Bytes {
         let v = &self.v;
         let auth = &v["settlement"]["auth"];
         let mut out = std::vec::Vec::new();
@@ -104,17 +121,65 @@ impl Setup {
         out.extend_from_slice(&hexval(
             &v["registration"]["bridgerOnStellarTestnet"]["account"],
         ));
-        out.push(1u8);
+        out.push(2u8);
         out.extend_from_slice(&self.order_chain_id.to_be_bytes());
         out.extend_from_slice(&self.ad_chain_id.to_be_bytes());
         out.extend_from_slice(&hexval(&auth["orderHash"]));
         out.extend_from_slice(&hexval(&auth["orderChainRoot"]));
         out.extend_from_slice(&hexval(&auth["adChainRoot"]));
+        out.extend_from_slice(&maker_slot.to_be_bytes());
+        out.extend_from_slice(&bridger_slot.to_be_bytes());
         out.extend_from_slice(pk_maker);
         out.extend_from_slice(&hexval(&v["keys"]["bridgerBls"]["pk"]["uncompressed"]));
         out.extend_from_slice(agg_sig);
-        assert_eq!(out.len(), 577);
+        assert_eq!(out.len(), METADATA_LEN);
         Bytes::from_slice(&self.env, &out)
+    }
+
+    fn registry(&self) -> BlsKeyRegistryClient<'static> {
+        BlsKeyRegistryClient::new(&self.env, &self.verifier.registry())
+    }
+
+    fn maker_owner(&self) -> OwnerAuth {
+        let pk = hexval(&self.v["keys"]["makerWallet"]["pk"]);
+        let g = stellar_strkey::ed25519::PublicKey(pk.try_into().unwrap()).to_string();
+        OwnerAuth::Stellar(Address::from_string(&SString::from_str(&self.env, &g)))
+    }
+
+    fn maker_account(&self) -> BytesN<32> {
+        bn::<32>(
+            &self.env,
+            &self.v["registration"]["makerOnStellarTestnet"]["account"],
+        )
+    }
+
+    /// slots.makerOnStellarTestnet.registrations[i] at nonce i (slot 0 = the settlement key).
+    fn register_maker_slot(&self, i: usize) -> u32 {
+        let r = &self.v["slots"]["makerOnStellarTestnet"]["registrations"][i];
+        self.registry().register(
+            &self.maker_account(),
+            &self.maker_owner(),
+            &bn::<96>(&self.env, &r["pkNative"]),
+            &bn::<192>(&self.env, &r["pop"]),
+            &(i as u64),
+        )
+    }
+
+    fn set_maker_valid_until(&self, slot_id: u32, valid_until: u64) {
+        self.registry().set_valid_until(
+            &self.maker_account(),
+            &self.maker_owner(),
+            &slot_id,
+            &valid_until,
+        );
+    }
+
+    fn grace_ts(&self) -> u64 {
+        self.v["slots"]["graceTs"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
     }
 }
 
@@ -174,9 +239,9 @@ fn unknown_source_chain_fails() {
 fn wrong_version_fails() {
     let s = setup();
     let m = s.metadata();
-    let mut raw = [0u8; 577];
+    let mut raw = [0u8; METADATA_LEN];
     m.copy_into_slice(&mut raw);
-    raw[64] = 2;
+    raw[64] = 1; // the retired v1 layout
     let m2 = Bytes::from_slice(&s.env, &raw);
     assert!(!s
         .verifier
@@ -239,7 +304,7 @@ fn single_signature_is_not_the_aggregate() {
 fn tampered_root_in_auth_fails() {
     let s = setup();
     let m = s.metadata();
-    let mut raw = [0u8; 577];
+    let mut raw = [0u8; METADATA_LEN];
     m.copy_into_slice(&mut raw);
     raw[160] ^= 0x01; // last byte of order_chain_root (offset 129..161)
     let m2 = Bytes::from_slice(&s.env, &raw);
@@ -250,4 +315,65 @@ fn tampered_root_in_auth_fails() {
     assert!(!s
         .verifier
         .is_root_valid(&s.order_chain_id, &tampered_root, &m2));
+}
+
+// =============================================================================
+// T-02: slot hints + use-time validity
+// =============================================================================
+
+/// Rotation: the old slot keeps verifying through its grace window, then stops.
+#[test]
+fn t02_old_slot_in_grace_settles_then_expires() {
+    let s = setup();
+    s.register_maker_slot(1); // new key in slot 1
+    let g = s.grace_ts();
+    s.set_maker_valid_until(0, g); // old slot valid until grace_ts
+
+    assert!(s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &s.metadata()));
+    s.env.ledger().set_timestamp(g - 1);
+    assert!(s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &s.metadata()));
+    s.env.ledger().set_timestamp(g);
+    assert!(!s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &s.metadata()));
+}
+
+/// Citing the wrong slot for a key fails on commitment mismatch.
+#[test]
+fn t02_wrong_slot_hint_fails() {
+    let s = setup();
+    s.register_maker_slot(1);
+    let pk_maker = hexval(&s.v["keys"]["makerBls"]["pk"]["uncompressed"]);
+    let agg_sig = hexval(&s.v["settlement"]["aggSig"]["uncompressed"]);
+    for (m, b) in [(1u32, 0u32), (0, 1), (9, 0)] {
+        assert!(!s.verifier.is_root_valid(
+            &s.order_chain_id,
+            &s.order_chain_root,
+            &s.metadata_slots(m, b, &pk_maker, &agg_sig)
+        ));
+    }
+}
+
+/// A retired slot fails immediately; a pruned slot fails as missing, with no state change.
+#[test]
+fn t02_retired_then_pruned_slot_fails() {
+    let s = setup();
+    s.set_maker_valid_until(0, 1);
+    assert!(!s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &s.metadata()));
+
+    for i in 1..5 {
+        s.register_maker_slot(i);
+    }
+    s.register_maker_slot(5); // at cap: prunes slot 0 (1 + 30 days < now)
+    assert_eq!(s.registry().lookup(&s.maker_account(), &0), None);
+    assert!(!s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &s.metadata()));
+    assert_eq!(s.registry().live_slots(&s.maker_account()).len(), 5);
 }
