@@ -4,7 +4,7 @@
 
 use soroban_poseidon::poseidon2_hash;
 use soroban_sdk::{
-    crypto::{bn254::Fr, BnScalar},
+    crypto::{bn254::Bn254Fr as Fr, BnScalar},
     Bytes, BytesN, Env, Vec, U256,
 };
 

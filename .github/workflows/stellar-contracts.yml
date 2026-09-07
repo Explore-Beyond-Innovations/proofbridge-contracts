@@ -65,7 +65,7 @@ jobs:
 
       - name: Install Stellar CLI
         run: |
-          curl -Ls https://github.com/stellar/stellar-cli/releases/download/v26.0.0/stellar-cli-26.0.0-x86_64-unknown-linux-gnu.tar.gz -o /tmp/stellar-cli.tar.gz
+          curl -Ls https://github.com/stellar/stellar-cli/releases/download/v28.0.0/stellar-cli-28.0.0-x86_64-unknown-linux-gnu.tar.gz -o /tmp/stellar-cli.tar.gz
           mkdir -p "$HOME/.local/bin"
           tar -xzf /tmp/stellar-cli.tar.gz -C "$HOME/.local/bin" stellar
           chmod +x "$HOME/.local/bin/stellar"
@@ -83,7 +83,7 @@ jobs:
       - name: Install Node dependencies
         run: pnpm install --frozen-lockfile
 
-      # --optimize (bare flag on the pinned v26.0.0 CLI) opts the build into
+      # --optimize (bare flag on the pinned v28.0.0 CLI) opts the build into
       # wasm-opt, so the metered/deployed bytes are optimized. On a CLI compiled
       # without the optimize feature the flag is rejected and the build fails
       # instead of silently shipping unoptimized wasm. The metering gate
