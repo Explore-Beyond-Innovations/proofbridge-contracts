@@ -12,7 +12,7 @@ mod storage;
 
 use soroban_sdk::{
     bytesn, contract, contractclient, contractimpl, contracttype,
-    crypto::bls12_381::{G1Affine, G2Affine},
+    crypto::bls12_381::{Bls12381G1Affine as G1Affine, Bls12381G2Affine as G2Affine},
     vec, Address, Bytes, BytesN, Env, Vec,
 };
 

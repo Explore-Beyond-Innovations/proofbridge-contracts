@@ -14,16 +14,24 @@ use ad_manager::OrderParams;
 use ed25519_dalek::{Signer, SigningKey};
 use proofbridge_core::eip712::address_to_bytes32;
 use soroban_sdk::{
-    auth::ContractContext,
+    auth::{
+        ContractContext, CreateContractHostFnContext, CreateContractWithConstructorHostFnContext,
+    },
     testutils::{Address as _, Events as _, Ledger as _, MockAuthContract},
     vec,
     xdr::{
-        self, HashIdPreimage, HashIdPreimageSorobanAuthorization, InvokeContractArgs, Limits,
-        ScAddress, ScBytes, ScSymbol, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
+        self, HashIdPreimage, HashIdPreimageSorobanAuthorization,
+        HashIdPreimageSorobanAuthorizationWithAddress, InvokeContractArgs, Limits, ScAddress,
+        ScBytes, ScSymbol, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
         SorobanAuthorizedFunction, SorobanAuthorizedInvocation, SorobanCredentials, VecM, WriteXdr,
     },
-    Address, Bytes, BytesN, Env, InvokeError, Map, String, Symbol, TryFromVal, Val, Vec,
+    Address, Bytes, BytesN, ContractExecutable, ContractExecutableRef, Env, InvokeError, Map,
+    String, Symbol, TryFromVal, Val, Vec,
 };
+
+/// Protocol 28 (testnet since 2026-08-27, mainnet vote 2026-09-16): the
+/// fixtures pin it so CAP-85 executables and AddressV2 credentials are real.
+const PROTOCOL: u32 = 28;
 
 // ---------------------------------------------------------------------------
 // fixtures
@@ -88,6 +96,7 @@ fn fixture() -> Fixture {
     let env = Env::default();
     env.ledger().set_timestamp(T0);
     env.mock_all_auths();
+    env.ledger().set_protocol_version(PROTOCOL);
 
     let owner = Address::generate(&env);
     let target = Address::generate(&env);
@@ -711,6 +720,40 @@ fn non_contract_and_empty_contexts_rejected_on_agent_path() {
     expect_err(agent_check(&f, &ctxs), AccountError::UnsupportedContext);
 }
 
+/// CAP-85 (P28): an `ExternalRef` executable inside a create-contract context
+/// is a clean `UnsupportedContext` on the agent path (never a trap) and is
+/// invisible to the owner path, which does not inspect contexts. This is the
+/// whole of the design's "tolerate the new executable type" requirement for
+/// the built account: agents never create contracts, owners are sovereign.
+#[test]
+fn cap85_external_executable_is_a_clean_refusal_for_agents_and_invisible_to_the_owner() {
+    let f = fixture();
+    let external = ContractExecutable::ExternalRef(ContractExecutableRef {
+        owner: Address::generate(&f.env),
+        tag: String::from_str(&f.env, "cap85-external"),
+    });
+    let contexts = [
+        Context::CreateContractHostFn(CreateContractHostFnContext {
+            executable: external.clone(),
+            salt: b32(&f.env, 0x11),
+        }),
+        Context::CreateContractWithCtorHostFn(CreateContractWithConstructorHostFnContext {
+            executable: external,
+            salt: b32(&f.env, 0x12),
+            constructor_args: vec![&f.env],
+        }),
+    ];
+    for ctx in contexts {
+        expect_err(
+            agent_check(&f, &vec![&f.env, ctx.clone()]),
+            AccountError::UnsupportedContext,
+        );
+        // Owner path: mock_all_auths satisfies the nested owner auth; the
+        // context is never decoded, so the new executable type cannot break it.
+        check(&f, AccountSig::Owner, &vec![&f.env, ctx]).unwrap();
+    }
+}
+
 #[test]
 fn every_context_must_pass() {
     let f = fixture();
@@ -902,6 +945,7 @@ fn escrow_fixture() -> Escrow {
     let env = Env::default();
     env.ledger().set_timestamp(T0);
     env.mock_all_auths();
+    env.ledger().set_protocol_version(PROTOCOL);
     env.cost_estimate().budget().reset_unlimited();
 
     let admin = Address::generate(&env);
@@ -1018,15 +1062,44 @@ fn invocation(
     }
 }
 
-/// sha256 of the HashIdPreimage::SorobanAuthorization XDR: what the host
-/// hands `__check_auth` as `signature_payload`.
-fn payload_hash(env: &Env, inv: &SorobanAuthorizedInvocation, nonce: i64, exp: u32) -> BytesN<32> {
-    let preimage = HashIdPreimage::SorobanAuthorization(HashIdPreimageSorobanAuthorization {
-        network_id: xdr::Hash(env.ledger().network_id().to_array()),
-        nonce,
-        signature_expiration_ledger: exp,
-        invocation: inv.clone(),
-    });
+/// Which credential the auth entry carries. `Address` is the pre-P28 shape
+/// (still accepted at protocol 28, retired after); `AddressV2` (CAP-71-02)
+/// binds the signing address into the payload preimage.
+#[derive(Clone, Copy)]
+enum Creds {
+    V1,
+    V2,
+}
+
+/// sha256 of the HashIdPreimage the host hands `__check_auth` as
+/// `signature_payload`: `SorobanAuthorization` for V1 credentials,
+/// `SorobanAuthorizationWithAddress` for V2.
+fn payload_hash(
+    env: &Env,
+    address: &Address,
+    inv: &SorobanAuthorizedInvocation,
+    nonce: i64,
+    exp: u32,
+    creds: Creds,
+) -> BytesN<32> {
+    let network_id = xdr::Hash(env.ledger().network_id().to_array());
+    let preimage = match creds {
+        Creds::V1 => HashIdPreimage::SorobanAuthorization(HashIdPreimageSorobanAuthorization {
+            network_id,
+            nonce,
+            signature_expiration_ledger: exp,
+            invocation: inv.clone(),
+        }),
+        Creds::V2 => HashIdPreimage::SorobanAuthorizationWithAddress(
+            HashIdPreimageSorobanAuthorizationWithAddress {
+                network_id,
+                nonce,
+                signature_expiration_ledger: exp,
+                address: sc_addr(address),
+                invocation: inv.clone(),
+            },
+        ),
+    };
     let bytes = preimage.to_xdr(Limits::none()).unwrap();
     env.crypto()
         .sha256(&Bytes::from_slice(env, &bytes))
@@ -1039,14 +1112,19 @@ fn entry(
     nonce: i64,
     exp: u32,
     signature: ScVal,
+    creds: Creds,
 ) -> SorobanAuthorizationEntry {
+    let address_creds = SorobanAddressCredentials {
+        address: sc_addr(address),
+        nonce,
+        signature_expiration_ledger: exp,
+        signature,
+    };
     SorobanAuthorizationEntry {
-        credentials: SorobanCredentials::Address(SorobanAddressCredentials {
-            address: sc_addr(address),
-            nonce,
-            signature_expiration_ledger: exp,
-            signature,
-        }),
+        credentials: match creds {
+            Creds::V1 => SorobanCredentials::Address(address_creds),
+            Creds::V2 => SorobanCredentials::AddressV2(address_creds),
+        },
         root_invocation: inv,
     }
 }
@@ -1062,8 +1140,7 @@ fn liquidity(e: &Escrow) -> u128 {
 /// The real thing: `lock_for_order` -> `ad.maker.require_auth()` -> this
 /// account's `__check_auth` with the agent's signature over the host-derived
 /// payload. Over the cap it fails at auth with no state change.
-#[test]
-fn e2e_agent_lock_via_require_auth() {
+fn agent_lock_e2e(creds: Creds) {
     let e = escrow_fixture();
     assert_eq!(liquidity(&e), 5_000_000);
     let exp = e.env.ledger().sequence() + 100;
@@ -1076,9 +1153,10 @@ fn e2e_agent_lock_via_require_auth() {
         "lock_for_order",
         std::vec![sc_val(&e.env, p_val)],
     );
-    let payload = payload_hash(&e.env, &inv, 1, exp);
+    let payload = payload_hash(&e.env, &e.account, &inv, 1, exp, creds);
     let sig = sc_val(&e.env, e.agent.sign(&e.env, &payload).into_val(&e.env));
-    e.env.set_auths(&[entry(&e.account, inv, 1, exp, sig)]);
+    e.env
+        .set_auths(&[entry(&e.account, inv, 1, exp, sig, creds)]);
     let _hash: BytesN<32> = e.env.invoke_contract(
         &e.ad_manager,
         &Symbol::new(&e.env, "lock_for_order"),
@@ -1095,9 +1173,10 @@ fn e2e_agent_lock_via_require_auth() {
         "lock_for_order",
         std::vec![sc_val(&e.env, p_val)],
     );
-    let payload = payload_hash(&e.env, &inv, 2, exp);
+    let payload = payload_hash(&e.env, &e.account, &inv, 2, exp, creds);
     let sig = sc_val(&e.env, e.agent.sign(&e.env, &payload).into_val(&e.env));
-    e.env.set_auths(&[entry(&e.account, inv, 2, exp, sig)]);
+    e.env
+        .set_auths(&[entry(&e.account, inv, 2, exp, sig, creds)]);
     let r = e.env.try_invoke_contract::<BytesN<32>, soroban_sdk::Error>(
         &e.ad_manager,
         &Symbol::new(&e.env, "lock_for_order"),
@@ -1118,8 +1197,7 @@ fn e2e_agent_lock_via_require_auth() {
 /// Owner path end to end: the account authorizes `withdraw_from_ad` with
 /// `AccountSig::Owner`, and the (contract) owner authorizes
 /// `account.__check_auth(payload)` in a second entry.
-#[test]
-fn e2e_owner_withdraw_via_nested_require_auth() {
+fn owner_withdraw_e2e(creds: Creds) {
     let e = escrow_fixture();
     let exp = e.env.ledger().sequence() + 100;
     let to = Address::generate(&e.env);
@@ -1133,7 +1211,7 @@ fn e2e_owner_withdraw_via_nested_require_auth() {
             sc_val(&e.env, to.clone().into_val(&e.env)),
         ],
     );
-    let payload = payload_hash(&e.env, &inv, 7, exp);
+    let payload = payload_hash(&e.env, &e.account, &inv, 7, exp, creds);
     let owner_inv = invocation(
         &e.account,
         "__check_auth",
@@ -1148,9 +1226,10 @@ fn e2e_owner_withdraw_via_nested_require_auth() {
             7,
             exp,
             sc_val(&e.env, AccountSig::Owner.into_val(&e.env)),
+            creds,
         ),
         // MockAuthContract accepts any signature; Void keeps the entry minimal.
-        entry(&e.owner, owner_inv, 8, exp, ScVal::Void),
+        entry(&e.owner, owner_inv, 8, exp, ScVal::Void, creds),
     ]);
     let _: () = e.env.invoke_contract(
         &e.ad_manager,
@@ -1180,6 +1259,7 @@ fn e2e_owner_withdraw_via_nested_require_auth() {
         9,
         exp,
         sc_val(&e.env, AccountSig::Owner.into_val(&e.env)),
+        creds,
     )]);
     let r = e.env.try_invoke_contract::<(), soroban_sdk::Error>(
         &e.ad_manager,
@@ -1193,4 +1273,53 @@ fn e2e_owner_withdraw_via_nested_require_auth() {
     );
     assert!(r.is_err());
     assert_eq!(liquidity(&e), 4_000_000);
+}
+
+/// The real thing under both credential shapes. V1 stays while the host still
+/// accepts it at protocol 28; V2 is what every client must send after.
+#[test]
+fn e2e_agent_lock_via_require_auth_address_v2_credentials() {
+    agent_lock_e2e(Creds::V2);
+}
+
+#[test]
+fn e2e_agent_lock_via_require_auth_legacy_v1_credentials() {
+    agent_lock_e2e(Creds::V1);
+}
+
+#[test]
+fn e2e_owner_withdraw_via_nested_require_auth_address_v2_credentials() {
+    owner_withdraw_e2e(Creds::V2);
+}
+
+#[test]
+fn e2e_owner_withdraw_via_nested_require_auth_legacy_v1_credentials() {
+    owner_withdraw_e2e(Creds::V1);
+}
+
+/// A V2 signature over the V1 preimage (or vice versa) must not authorize:
+/// the credential type selects the preimage the host verifies against.
+#[test]
+fn e2e_credential_type_and_preimage_must_match() {
+    let e = escrow_fixture();
+    let exp = e.env.ledger().sequence() + 100;
+    let p = escrow_params(&e, 400_000);
+    let p_val: Val = p.into_val(&e.env);
+    let inv = invocation(
+        &e.ad_manager,
+        "lock_for_order",
+        std::vec![sc_val(&e.env, p_val)],
+    );
+    // signed over the V1 preimage, submitted as AddressV2
+    let payload = payload_hash(&e.env, &e.account, &inv, 1, exp, Creds::V1);
+    let sig = sc_val(&e.env, e.agent.sign(&e.env, &payload).into_val(&e.env));
+    e.env
+        .set_auths(&[entry(&e.account, inv, 1, exp, sig, Creds::V2)]);
+    let r = e.env.try_invoke_contract::<BytesN<32>, soroban_sdk::Error>(
+        &e.ad_manager,
+        &Symbol::new(&e.env, "lock_for_order"),
+        vec![&e.env, p_val],
+    );
+    assert!(r.is_err());
+    assert_eq!(liquidity(&e), 5_000_000);
 }

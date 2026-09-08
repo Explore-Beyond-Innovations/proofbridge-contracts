@@ -29,7 +29,7 @@ use soroban_sdk::{
     auth::{Context, CustomAccountInterface},
     contract, contractimpl,
     crypto::Hash,
-    vec, Address, BytesN, Env, IntoVal, Symbol, Vec,
+    vec, Address, BytesN, ContractExecutable, Env, IntoVal, Symbol, Vec,
 };
 
 pub use auth::{AccountSig, Ed25519Sig, SecpSig};
@@ -132,7 +132,7 @@ impl AgentAccount {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
         env.deployer()
-            .update_current_contract_wasm(new_wasm_hash.clone());
+            .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
         events::Upgraded { new_wasm_hash }.publish(&env);
         Ok(())
     }

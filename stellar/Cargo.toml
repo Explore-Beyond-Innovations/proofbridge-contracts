@@ -28,11 +28,11 @@ members = ["contracts/*", "lib/*"]
 ed25519-dalek = { version = "2.2" }
 hex = "0.4"
 sha3 = { version = "0.11", default-features = false }
-soroban-sdk = { version = "26.0.0-rc.1", features = ["alloc"] }
-soroban-poseidon = { git = "https://github.com/Explore-Beyond-Innovations/rs-soroban-poseidon.git", rev = "9bf9d7e930cb59304d9311f0acbe3d535cae0f70" }
-stellar-tokens = { git = "https://github.com/Explore-Beyond-Innovations/stellar-contracts.git", rev = "2942830fd063098f80e07cea5b72cea3d1c14b83" }
+soroban-sdk = { version = "28.0.0-rc.1", features = ["alloc"] }
+soroban-poseidon = { git = "https://github.com/Explore-Beyond-Innovations/rs-soroban-poseidon.git", rev = "c1847afffdcc3a71d38ab1dbf4a816c59622a5ea" }
+stellar-tokens = { git = "https://github.com/Explore-Beyond-Innovations/stellar-contracts.git", rev = "e0daf73aa8dd47d430ac12c18743dd3c8bbb4113" }
 stellar-strkey = "0.0.16"
-ultrahonk_soroban_verifier = { git = "https://github.com/Explore-Beyond-Innovations/rs-soroban-ultrahonk.git", rev = "d762995d8c181c05fe9a15962793dba6641a79ba" }
+ultrahonk_soroban_verifier = { git = "https://github.com/Explore-Beyond-Innovations/rs-soroban-ultrahonk.git", rev = "7f29f9add465c50da86f362e6190b85efad4e6ed" }
 rand = "0.8"
 
 # internal
