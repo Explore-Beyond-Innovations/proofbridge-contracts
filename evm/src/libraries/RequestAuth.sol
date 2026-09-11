@@ -51,7 +51,7 @@ library RequestAuth {
      * @notice The root verifier's envelope: `(settlementSigner, bridger, cosigData)`. Slot 0 is the account
      *         whose settlement key the verifier resolves: `params.adSettlementSigner`, never `adCreator`.
      */
-    function rootEnvelope(bytes32 settlementSigner, bytes32 bridger, bytes calldata cosigData)
+    function rootEnvelope(bytes32 settlementSigner, bytes32 bridger, bytes memory cosigData)
         internal
         pure
         returns (bytes memory)
