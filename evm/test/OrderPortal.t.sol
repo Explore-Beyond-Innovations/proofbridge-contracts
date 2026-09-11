@@ -97,6 +97,8 @@ contract OrderPortalTest is Test {
         p.salt = 12345;
         p.orderDecimals = 18;
         p.adDecimals = 18;
+        p.deadline = block.timestamp + 1 days;
+        p.adSettlementSigner = p.adCreator;
     }
 
     /*//////////////////////////////////////////////////////////////

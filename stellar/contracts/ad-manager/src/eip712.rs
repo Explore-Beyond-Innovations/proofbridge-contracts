@@ -1,110 +1,57 @@
-//! EIP-712 compatible hashing for the AdManager contract
-//!
-//! Re-exports shared EIP-712 utilities and provides the contract-specific
-//! struct_hash_order and hash_order functions that depend on the ad-manager's
-//! OrderParams type.
+//! EIP-712 order hashing for the AdManager: maps its `OrderParams` onto the shared 17-field
+//! `Order` (`proofbridge_core::eip712`), which owns the preimage layout.
 
+// some are used only by the tests
+#[allow(unused_imports)]
 pub use proofbridge_core::eip712::{
     abi_encode_address, abi_encode_string, abi_encode_uint256, contract_address_to_bytes32,
     hash_typed_data_v4, keccak256, ORDER_TYPEHASH,
 };
 
+use proofbridge_core::eip712::{abi_encode_u256, Order};
 use soroban_sdk::{BytesN, Env};
 
 use crate::types::OrderParams;
 
-// =============================================================================
-// Order Struct Hash (contract-specific)
-// =============================================================================
+/// The AdManager's view of the order: `ad_chain_id` and `ad_manager` are this chain and contract.
+pub fn order_of(params: &OrderParams, ad_chain_id: u128, ad_manager: &BytesN<32>) -> Order {
+    Order {
+        order_chain_token: params.order_chain_token.to_array(),
+        ad_chain_token: params.ad_chain_token.to_array(),
+        amount: params.amount,
+        bridger: params.bridger.to_array(),
+        order_chain_id: params.order_chain_id,
+        order_portal: params.src_order_portal.to_array(),
+        order_recipient: params.order_recipient.to_array(),
+        ad_chain_id,
+        ad_manager: ad_manager.to_array(),
+        ad_id_hash: abi_encode_string(&params.ad_id),
+        ad_creator: params.ad_creator.to_array(),
+        ad_recipient: params.ad_recipient.to_array(),
+        salt: abi_encode_u256(&params.salt),
+        order_decimals: params.order_decimals,
+        ad_decimals: params.ad_decimals,
+        deadline: params.deadline,
+        ad_settlement_signer: params.ad_settlement_signer.to_array(),
+    }
+}
 
-/// Compute the struct hash for an Order (ad-manager variant)
-///
-/// The ad-manager's OrderParams has `src_order_portal` and `order_chain_id` as
-/// fields, and takes `ad_chain_id` and `ad_manager` as external parameters.
+/// Struct hash of the order (ad-manager variant).
 pub fn struct_hash_order(
     params: &OrderParams,
     ad_chain_id: u128,
     ad_manager: &BytesN<32>,
 ) -> [u8; 32] {
-    // Total size: 16 fields * 32 bytes = 512 bytes (typehash + 15 fields)
-    let mut data = [0u8; 512];
-    let mut offset = 0;
-
-    // ORDER_TYPEHASH
-    data[offset..offset + 32].copy_from_slice(&ORDER_TYPEHASH);
-    offset += 32;
-
-    // orderChainToken
-    data[offset..offset + 32].copy_from_slice(&abi_encode_address(&params.order_chain_token));
-    offset += 32;
-
-    // adChainToken
-    data[offset..offset + 32].copy_from_slice(&abi_encode_address(&params.ad_chain_token));
-    offset += 32;
-
-    // amount
-    data[offset..offset + 32].copy_from_slice(&abi_encode_uint256(params.amount));
-    offset += 32;
-
-    // bridger
-    data[offset..offset + 32].copy_from_slice(&abi_encode_address(&params.bridger));
-    offset += 32;
-
-    // orderChainId
-    data[offset..offset + 32].copy_from_slice(&abi_encode_uint256(params.order_chain_id));
-    offset += 32;
-
-    // srcOrderPortal
-    data[offset..offset + 32].copy_from_slice(&abi_encode_address(&params.src_order_portal));
-    offset += 32;
-
-    // orderRecipient
-    data[offset..offset + 32].copy_from_slice(&abi_encode_address(&params.order_recipient));
-    offset += 32;
-
-    // adChainId
-    data[offset..offset + 32].copy_from_slice(&abi_encode_uint256(ad_chain_id));
-    offset += 32;
-
-    // adManager
-    data[offset..offset + 32].copy_from_slice(&abi_encode_address(ad_manager));
-    offset += 32;
-
-    // keccak256(bytes(adId))
-    let ad_id_hash = abi_encode_string(&params.ad_id);
-    data[offset..offset + 32].copy_from_slice(&ad_id_hash);
-    offset += 32;
-
-    // adCreator
-    data[offset..offset + 32].copy_from_slice(&abi_encode_address(&params.ad_creator));
-    offset += 32;
-
-    // adRecipient
-    data[offset..offset + 32].copy_from_slice(&abi_encode_address(&params.ad_recipient));
-    offset += 32;
-
-    // salt
-    data[offset..offset + 32].copy_from_slice(&abi_encode_uint256(params.salt));
-    offset += 32;
-
-    // orderDecimals (uint8 padded to uint256)
-    data[offset..offset + 32].copy_from_slice(&abi_encode_uint256(params.order_decimals as u128));
-    offset += 32;
-
-    // adDecimals (uint8 padded to uint256)
-    data[offset..offset + 32].copy_from_slice(&abi_encode_uint256(params.ad_decimals as u128));
-
-    keccak256(&data)
+    proofbridge_core::eip712::struct_hash_order(&order_of(params, ad_chain_id, ad_manager))
 }
 
-/// Compute the complete order hash
+/// The complete order hash.
 pub fn hash_order(
     env: &Env,
     params: &OrderParams,
     ad_chain_id: u128,
     ad_manager: &BytesN<32>,
 ) -> BytesN<32> {
-    let struct_h = struct_hash_order(params, ad_chain_id, ad_manager);
-    let order_hash = hash_typed_data_v4(&struct_h);
+    let order_hash = hash_typed_data_v4(&struct_hash_order(params, ad_chain_id, ad_manager));
     BytesN::from_array(env, &order_hash)
 }

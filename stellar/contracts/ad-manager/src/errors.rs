@@ -95,6 +95,8 @@ pub enum AdManagerError {
     // Address decode errors (40-41)
     /// Recipient bytes do not decode to a valid Stellar account address
     InvalidAccountAddress = 40,
+    /// The order's deadline has passed; it can no longer be unlocked.
+    OrderExpired = 46,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for AdManagerError {

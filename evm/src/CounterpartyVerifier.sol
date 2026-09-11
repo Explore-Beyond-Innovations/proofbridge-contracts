@@ -19,8 +19,8 @@ contract CounterpartyVerifier is IRootVerifier {
         bytes32 adChainRoot;
     }
 
-    /// metadata = abi.encode(maker, bridger, moduleData);
-    /// moduleData = abi.encode(version, auth, makerSlotId, bridgerSlotId, pkMaker, pkBridger, aggSig)
+    /// metadata = abi.encode(settlementSigner, bridger, moduleData): slot 0 is the order's adSettlementSigner.
+    /// moduleData = abi.encode(version, auth, signerSlotId, bridgerSlotId, pkSigner, pkBridger, aggSig)
     uint8 public constant METADATA_VERSION = 2;
 
     bytes32 private constant SETTLE_TAG = keccak256("ProofBridge.Settlement.v1");
@@ -33,20 +33,21 @@ contract CounterpartyVerifier is IRootVerifier {
     }
 
     function isRootValid(uint256 sourceChainId, bytes32 root, bytes calldata metadata) external view returns (bool) {
-        (bytes32 maker, bytes32 bridger, bytes memory moduleData) = abi.decode(metadata, (bytes32, bytes32, bytes));
+        (bytes32 settlementSigner, bytes32 bridger, bytes memory moduleData) =
+            abi.decode(metadata, (bytes32, bytes32, bytes));
         // Version is the first word; check it before decoding a layout that may not be ours.
         if (!isCurrentVersion(moduleData)) return false;
         (
             ,
             SettlementAuth memory auth,
-            uint32 makerSlotId,
+            uint32 signerSlotId,
             uint32 bridgerSlotId,
-            bytes memory pkMaker,
+            bytes memory pkSigner,
             bytes memory pkBridger,
             bytes memory aggSig
         ) = abi.decode(moduleData, (uint8, SettlementAuth, uint32, uint32, bytes, bytes, bytes));
 
-        if (pkMaker.length != 128 || pkBridger.length != 128 || aggSig.length != 256) return false;
+        if (pkSigner.length != 128 || pkBridger.length != 128 || aggSig.length != 256) return false;
 
         if (sourceChainId == auth.orderChainId) {
             if (root != auth.orderChainRoot) return false;
@@ -56,10 +57,13 @@ contract CounterpartyVerifier is IRootVerifier {
             return false;
         }
 
-        if (!commitmentMatches(maker, makerSlotId, pkMaker) || !commitmentMatches(bridger, bridgerSlotId, pkBridger)) {
+        if (
+            !commitmentMatches(settlementSigner, signerSlotId, pkSigner)
+                || !commitmentMatches(bridger, bridgerSlotId, pkBridger)
+        ) {
             return false;
         }
-        return verifyAggregate(auth, pkMaker, pkBridger, aggSig);
+        return verifyAggregate(auth, pkSigner, pkBridger, aggSig);
     }
 
     function isCurrentVersion(bytes memory moduleData) private pure returns (bool) {
@@ -73,7 +77,7 @@ contract CounterpartyVerifier is IRootVerifier {
 
     function verifyAggregate(
         SettlementAuth memory auth,
-        bytes memory pkMaker,
+        bytes memory pkSigner,
         bytes memory pkBridger,
         bytes memory aggSig
     ) private view returns (bool) {
@@ -85,7 +89,7 @@ contract CounterpartyVerifier is IRootVerifier {
             auth.orderChainRoot,
             auth.adChainRoot
         );
-        return BLS.verifyAggregate(pkMaker, pkBridger, BLS.hashToG2(preimage, bytes(DST_SIG)), aggSig);
+        return BLS.verifyAggregate(pkSigner, pkBridger, BLS.hashToG2(preimage, bytes(DST_SIG)), aggSig);
     }
 
     /// The registry stores keccak commitments; the full keys travel here. A missing,

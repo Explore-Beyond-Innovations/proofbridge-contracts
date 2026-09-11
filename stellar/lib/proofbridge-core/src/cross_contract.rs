@@ -165,18 +165,18 @@ pub fn build_event_public_inputs(
 // RootVerifier Helpers
 // =============================================================================
 
-/// Gate 2: metadata = maker(32) || bridger(32) || cosig_data, accounts from
-/// the hash-bound order params.
+/// The root verifier's envelope: `settlement_signer(32) || bridger(32) || cosig_data`. Slot 0 is the
+/// account whose settlement key the verifier resolves: the order's `ad_settlement_signer`.
 pub fn is_root_valid(
     env: &Env,
     module: &Address,
     source_chain_id: u128,
     root: &BytesN<32>,
-    maker: &BytesN<32>,
+    settlement_signer: &BytesN<32>,
     bridger: &BytesN<32>,
     cosig_data: &Bytes,
 ) -> bool {
-    let mut metadata = Bytes::from_slice(env, &maker.to_array());
+    let mut metadata = Bytes::from_slice(env, &settlement_signer.to_array());
     metadata.extend_from_slice(&bridger.to_array());
     metadata.append(cosig_data);
     RootVerifierClient::new(env, module).is_root_valid(&source_chain_id, root, &metadata)

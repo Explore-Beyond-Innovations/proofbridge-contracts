@@ -7,7 +7,7 @@
 //! must be byte-for-byte identical on both EVM and Stellar.
 
 use sha3::{Digest, Keccak256};
-use soroban_sdk::{Address, BytesN, Env, String};
+use soroban_sdk::{Address, BytesN, Env, String, U256};
 
 // =============================================================================
 // EIP-712 Constants
@@ -19,10 +19,11 @@ pub const DOMAIN_TYPEHASH_MIN: [u8; 32] = [
     0xd4, 0x94, 0x03, 0xeb, 0x4a, 0x12, 0xf3, 0x6d, 0xe8, 0xd3, 0xf9, 0xf3, 0xcb, 0x8e, 0x15, 0xc3,
 ];
 
-/// Precomputed: keccak256("Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt,uint8 orderDecimals,uint8 adDecimals)")
+/// keccak256 of the 17-field order type string (test-vectors/order-hash-v2.json `_meta.orderTypeString`);
+/// the escrows' parity tests assert this equals keccak256 of that string.
 pub const ORDER_TYPEHASH: [u8; 32] = [
-    0x14, 0x68, 0x39, 0x16, 0x00, 0x7e, 0xcb, 0x1a, 0x2b, 0x77, 0x2b, 0xfd, 0x1c, 0x31, 0x26, 0x34,
-    0x0f, 0x16, 0xb7, 0xe1, 0xda, 0x0d, 0x2f, 0x95, 0x5b, 0x8c, 0xa2, 0x85, 0x57, 0x1e, 0x06, 0xe4,
+    0x1c, 0x94, 0x56, 0x50, 0x71, 0x10, 0xc9, 0x56, 0x45, 0xe3, 0x59, 0x53, 0xa6, 0xeb, 0xe0, 0x53,
+    0xbf, 0x02, 0x1d, 0x7f, 0xac, 0xb3, 0xe3, 0x78, 0xf0, 0x19, 0x9a, 0xd6, 0xd5, 0x9d, 0x68, 0xc7,
 ];
 
 /// Precomputed: keccak256("Proofbridge")
@@ -70,6 +71,13 @@ pub fn abi_encode_uint256(value: u128) -> [u8; 32] {
     buf
 }
 
+/// ABI encode a full-width uint256 (big-endian)
+pub fn abi_encode_u256(value: &U256) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    value.to_be_bytes().copy_into_slice(&mut buf);
+    buf
+}
+
 /// ABI encode a string by hashing it (EIP-712 string encoding)
 pub fn abi_encode_string(s: &String) -> [u8; 32] {
     let len = s.len() as usize;
@@ -97,6 +105,62 @@ pub fn domain_separator_proofbridge() -> [u8; 32] {
     data[0..32].copy_from_slice(&DOMAIN_TYPEHASH_MIN);
     data[32..64].copy_from_slice(&NAME_HASH);
     data[64..96].copy_from_slice(&VERSION_HASH);
+    keccak256(&data)
+}
+
+// =============================================================================
+// The canonical 17-field Order
+// =============================================================================
+
+/// The signed order, field for field in type-string order. Each escrow fills it from its own
+/// `OrderParams` plus its chain context; this is the only place the preimage is laid out.
+pub struct Order {
+    pub order_chain_token: [u8; 32],
+    pub ad_chain_token: [u8; 32],
+    pub amount: u128,
+    pub bridger: [u8; 32],
+    pub order_chain_id: u128,
+    pub order_portal: [u8; 32],
+    pub order_recipient: [u8; 32],
+    pub ad_chain_id: u128,
+    pub ad_manager: [u8; 32],
+    pub ad_id_hash: [u8; 32],
+    pub ad_creator: [u8; 32],
+    pub ad_recipient: [u8; 32],
+    pub salt: [u8; 32],
+    pub order_decimals: u32,
+    pub ad_decimals: u32,
+    pub deadline: u64,
+    pub ad_settlement_signer: [u8; 32],
+}
+
+/// EIP-712 struct hash: keccak256 of the typehash and the 17 words (576 bytes). The word list is
+/// an array literal of fixed length, so a missing or extra field does not compile.
+pub fn struct_hash_order(o: &Order) -> [u8; 32] {
+    let words: [[u8; 32]; 18] = [
+        ORDER_TYPEHASH,
+        o.order_chain_token,
+        o.ad_chain_token,
+        abi_encode_uint256(o.amount),
+        o.bridger,
+        abi_encode_uint256(o.order_chain_id),
+        o.order_portal,
+        o.order_recipient,
+        abi_encode_uint256(o.ad_chain_id),
+        o.ad_manager,
+        o.ad_id_hash,
+        o.ad_creator,
+        o.ad_recipient,
+        o.salt,
+        abi_encode_uint256(o.order_decimals as u128),
+        abi_encode_uint256(o.ad_decimals as u128),
+        abi_encode_uint256(o.deadline as u128),
+        o.ad_settlement_signer,
+    ];
+    let mut data = [0u8; 576];
+    for (i, w) in words.iter().enumerate() {
+        data[i * 32..i * 32 + 32].copy_from_slice(w);
+    }
     keccak256(&data)
 }
 

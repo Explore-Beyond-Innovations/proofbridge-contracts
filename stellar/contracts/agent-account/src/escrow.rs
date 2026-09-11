@@ -17,13 +17,12 @@ pub fn required_settlement_signer(env: &Env) -> BytesN<32> {
     proofbridge_core::eip712::contract_address_to_bytes32(env)
 }
 
-/// The settlement identity a lock names. Until 2.3b this is `ad_creator`; 2.3b
-/// swaps this one line to `ad_settlement_signer`.
+/// The settlement identity a lock names: the order's `ad_settlement_signer` (2.3b).
 pub fn settlement_signer_of(
     env: &Env,
     lock: &Map<Symbol, Val>,
 ) -> Result<BytesN<32>, AccountError> {
-    field(env, lock, "ad_creator")
+    field(env, lock, "ad_settlement_signer")
 }
 
 fn field<T: TryFromVal<Env, Val>>(

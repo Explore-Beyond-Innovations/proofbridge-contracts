@@ -140,9 +140,11 @@ fn params(f: &Fixture) -> OrderParams {
         ad_id: String::from_str(&f.env, "ad-1"),
         ad_creator: f.signer.clone(),
         ad_recipient: b32(&f.env, 0xCC),
-        salt: 42,
+        salt: soroban_sdk::U256::from_u128(&f.env, 42),
         order_decimals: 7,
         ad_decimals: 7,
+        deadline: 4_102_444_800,
+        ad_settlement_signer: f.signer.clone(),
     }
 }
 
@@ -686,13 +688,13 @@ fn bad_args_fail_closed() {
     );
 }
 
-/// F4a: the decoder reads only the keys the policy needs, so the 2.3b
-/// 17-field order (or any wider shape) passes unchanged.
+/// F4a: the decoder reads only the keys the policy needs, so a shape wider
+/// than the 15-key order passes unchanged.
 #[test]
 fn wider_order_shape_decodes() {
     let f = fixture();
     let mut m = lock_map(&f);
-    for k in ["ad_settlement_signer", "deadline", "extra_a", "extra_b"] {
+    for k in ["extra_a", "extra_b"] {
         m.set(Symbol::new(&f.env, k), b32(&f.env, 0x33).into_val(&f.env));
     }
     assert_eq!(m.len(), 17);
@@ -1033,9 +1035,11 @@ fn escrow_params(e: &Escrow, amount: u128) -> OrderParams {
         ad_id: e.ad_id.clone(),
         ad_creator: address_to_bytes32(&e.env, &e.account),
         ad_recipient: b32(&e.env, 0xCC),
-        salt: 42,
+        salt: soroban_sdk::U256::from_u128(&e.env, 42),
         order_decimals: 7,
         ad_decimals: 7,
+        deadline: 4_102_444_800,
+        ad_settlement_signer: address_to_bytes32(&e.env, &e.account),
     }
 }
 
@@ -1166,7 +1170,7 @@ fn agent_lock_e2e(creds: Creds) {
 
     // Over the cap: the auth entry is well-formed and signed, the policy says no.
     let mut p = escrow_params(&e, 1_000_001);
-    p.salt = 43;
+    p.salt = soroban_sdk::U256::from_u128(&e.env, 43);
     let p_val: Val = p.into_val(&e.env);
     let inv = invocation(
         &e.ad_manager,

@@ -47,6 +47,18 @@ library RequestAuth {
      * @param domain A `LeafDomain` event constant (>= 2), fixed by the caller, never calldata.
      * @return inputs `[0, subject % p, targetRoot, domain]`.
      */
+    /**
+     * @notice The root verifier's envelope: `(settlementSigner, bridger, cosigData)`. Slot 0 is the account
+     *         whose settlement key the verifier resolves: `params.adSettlementSigner`, never `adCreator`.
+     */
+    function rootEnvelope(bytes32 settlementSigner, bytes32 bridger, bytes calldata cosigData)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return abi.encode(settlementSigner, bridger, cosigData);
+    }
+
     function buildEventInputs(IMerkleManager merkleManager, bytes32 targetRoot, bytes32 subject, uint256 domain)
         internal
         view

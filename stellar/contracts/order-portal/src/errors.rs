@@ -95,6 +95,8 @@ pub enum OrderPortalError {
     // ==========================================================================
     /// Recipient bytes do not decode to a valid Stellar account address
     InvalidAccountAddress = 70,
+    /// The order's deadline has passed; it can no longer be unlocked.
+    OrderExpired = 74,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {

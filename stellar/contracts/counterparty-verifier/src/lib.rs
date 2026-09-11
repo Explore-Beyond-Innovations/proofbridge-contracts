@@ -35,7 +35,7 @@ const SETTLE_TAG: [u8; 32] = [
 ];
 
 const METADATA_VERSION: u8 = 2;
-/// maker(32) || bridger(32) || moduleData: version(1) || chainIds(2*16)
+/// settlement_signer(32) || bridger(32) || moduleData: version(1) || chainIds(2*16)
 /// || orderHash/roots(3*32) || slotIds(2*4) || pks(2*96) || aggSig(192)
 const METADATA_LEN: u32 = 585;
 
@@ -86,8 +86,13 @@ impl CounterpartyVerifier {
 
         let registry: Address = env.storage().instance().get(&KEY_REGISTRY).unwrap();
         let client = KeyRegistryClient::new(&env, &registry);
-        if !commitment_matches(&env, &client, &m.maker, m.maker_slot_id, &m.pk_maker)
-            || !commitment_matches(&env, &client, &m.bridger, m.bridger_slot_id, &m.pk_bridger)
+        if !commitment_matches(
+            &env,
+            &client,
+            &m.settlement_signer,
+            m.signer_slot_id,
+            &m.pk_signer,
+        ) || !commitment_matches(&env, &client, &m.bridger, m.bridger_slot_id, &m.pk_bridger)
         {
             return false;
         }
@@ -102,32 +107,32 @@ struct Metadata {
     order_hash: BytesN<32>,
     order_chain_root: BytesN<32>,
     ad_chain_root: BytesN<32>,
-    maker: BytesN<32>,
+    settlement_signer: BytesN<32>,
     bridger: BytesN<32>,
-    maker_slot_id: u32,
+    signer_slot_id: u32,
     bridger_slot_id: u32,
-    pk_maker: BytesN<96>,
+    pk_signer: BytesN<96>,
     pk_bridger: BytesN<96>,
     agg_sig: BytesN<192>,
 }
 
 impl Metadata {
-    /// maker(0) || bridger(32) || version(64) || orderChainId(65) ||
+    /// settlement_signer(0) || bridger(32) || version(64) || orderChainId(65) ||
     /// adChainId(81) || orderHash(97) || orderChainRoot(129) ||
-    /// adChainRoot(161) || makerSlotId(193) || bridgerSlotId(197) ||
-    /// pkMaker(201) || pkBridger(297) || aggSig(393)
+    /// adChainRoot(161) || signerSlotId(193) || bridgerSlotId(197) ||
+    /// pkSigner(201) || pkBridger(297) || aggSig(393)
     fn decode(env: &Env, b: &Bytes) -> Metadata {
         Metadata {
-            maker: BytesN::from_array(env, &arr::<32>(b, 0)),
+            settlement_signer: BytesN::from_array(env, &arr::<32>(b, 0)),
             bridger: BytesN::from_array(env, &arr::<32>(b, 32)),
             order_chain_id: u128::from_be_bytes(arr::<16>(b, 65)),
             ad_chain_id: u128::from_be_bytes(arr::<16>(b, 81)),
             order_hash: BytesN::from_array(env, &arr::<32>(b, 97)),
             order_chain_root: BytesN::from_array(env, &arr::<32>(b, 129)),
             ad_chain_root: BytesN::from_array(env, &arr::<32>(b, 161)),
-            maker_slot_id: u32::from_be_bytes(arr::<4>(b, 193)),
+            signer_slot_id: u32::from_be_bytes(arr::<4>(b, 193)),
             bridger_slot_id: u32::from_be_bytes(arr::<4>(b, 197)),
-            pk_maker: BytesN::from_array(env, &arr::<96>(b, 201)),
+            pk_signer: BytesN::from_array(env, &arr::<96>(b, 201)),
             pk_bridger: BytesN::from_array(env, &arr::<96>(b, 297)),
             agg_sig: BytesN::from_array(env, &arr::<192>(b, 393)),
         }
@@ -171,7 +176,7 @@ fn verify_aggregate(env: &Env, m: &Metadata) -> bool {
     ));
 
     let pk_agg = bls.g1_add(
-        &G1Affine::from_bytes(m.pk_maker.clone()),
+        &G1Affine::from_bytes(m.pk_signer.clone()),
         &G1Affine::from_bytes(m.pk_bridger.clone()),
     );
     let agg_sig = G2Affine::from_bytes(m.agg_sig.clone());

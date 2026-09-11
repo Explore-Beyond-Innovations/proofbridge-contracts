@@ -557,6 +557,9 @@ impl AdManagerContract {
         if storage::is_nullifier_used(&env, &nullifier_hash) {
             return Err(AdManagerError::NullifierUsed);
         }
+        if env.ledger().timestamp() > params.deadline {
+            return Err(AdManagerError::OrderExpired);
+        }
 
         // Gate 2 - root authenticity (BLS co-signature). Mandatory: unlock is
         // impossible until the route's verifier module is configured.
@@ -567,7 +570,7 @@ impl AdManagerContract {
             &module,
             params.order_chain_id,
             &target_root,
-            &params.ad_creator,
+            &params.ad_settlement_signer,
             &params.bridger,
             &cosig_data,
         ) {

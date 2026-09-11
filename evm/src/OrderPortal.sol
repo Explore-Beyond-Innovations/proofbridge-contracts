@@ -77,6 +77,8 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
         uint256 salt;
         uint8 orderDecimals;
         uint8 adDecimals;
+        uint256 deadline;
+        bytes32 adSettlementSigner;
     }
 
     /// @notice Order lifecycle.
@@ -172,6 +174,7 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
     //////////////////////////////////////////////////////////////*/
 
     error OrderPortal__InvalidProof();
+    error OrderPortal__OrderExpired(uint256 deadline);
     error OrderPortal__NothingToClaim();
     error OrderPortal__SelfCallOnly();
     error OrderPortal__RoutesZeroAddress(address orderToken, bytes32 adToken);
@@ -335,10 +338,13 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
 
         if (nullifierUsed[nullifierHash]) revert OrderPortal__NullifierUsed(nullifierHash);
         if (orders[orderHash] != Status.Open) revert OrderPortal__OrderNotOpen(orderHash);
+        if (block.timestamp > params.deadline) revert OrderPortal__OrderExpired(params.deadline);
 
         // Gate 2 — root authenticity. Mandatory: reverts with
         // NoRootVerifier when no module is configured for the ad chain.
-        _requireRootValid(params.adChainId, targetRoot, abi.encode(params.adCreator, params.bridger, cosigData));
+        _requireRootValid(
+            params.adChainId, targetRoot, RequestAuth.rootEnvelope(params.adSettlementSigner, params.bridger, cosigData)
+        );
 
         bytes32[] memory publicInputs = RequestAuth.buildPublicInputs(
             i_merkleManager, nullifierHash, targetRoot, orderHash, _PUBLIC_INPUT_SIDE_ORDER
@@ -469,7 +475,9 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
             adRecipient: p.adRecipient,
             salt: p.salt,
             orderDecimals: p.orderDecimals,
-            adDecimals: p.adDecimals
+            adDecimals: p.adDecimals,
+            deadline: p.deadline,
+            adSettlementSigner: p.adSettlementSigner
         });
         return OrderHash.digest(o);
     }
@@ -480,6 +488,7 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
     function validateOrder(OrderParams calldata params) internal view returns (bytes32 orderHash) {
         if (params.amount == 0) revert OrderPortal__ZeroAmount();
         if (params.bridger != msg.sender.toBytes32()) revert OrderPortal__BridgerMustBeSender();
+        OrderHash.checkWidths(params.amount, block.chainid, params.adChainId, params.deadline);
         if (params.adRecipient == bytes32(0)) revert OrderPortal__ZeroAddress();
 
         // validate recipient address
