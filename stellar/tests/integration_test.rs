@@ -1340,3 +1340,83 @@ fn test_deposit_proof_rejected_as_an_event_claim() {
         .try_verify_proof(&inputs, &Bytes::from_slice(&s.env, PROOF_BRIDGER))
         .is_err());
 }
+
+// ---------------------------------------------------------------------------
+// T-26 (2.3d D6): replays ../../test-vectors/verifier-negative.json against the verifier wasm. Each
+// vector is a real proof with byte patches; it must verify or fail exactly as recorded.
+// ---------------------------------------------------------------------------
+
+const VERIFIER_NEGATIVE_JSON: &str = include_str!("../../test-vectors/verifier-negative.json");
+
+#[derive(Deserialize)]
+struct NegativeFile {
+    #[serde(rename = "_meta")]
+    meta: NegativeMeta,
+    bases: std::collections::BTreeMap<std::string::String, NegativeBase>,
+    vectors: std::vec::Vec<NegativeVector>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NegativeMeta {
+    vk_keccak: std::string::String,
+}
+
+#[derive(Deserialize)]
+struct NegativeBase {
+    proof: std::string::String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NegativeVector {
+    name: std::string::String,
+    base: std::string::String,
+    patch_offsets: std::vec::Vec<usize>,
+    patch_words: std::vec::Vec<std::string::String>,
+    proof_length: usize,
+    public_inputs: std::vec::Vec<std::string::String>,
+    expect: std::string::String,
+}
+
+fn unhex(s: &str) -> std::vec::Vec<u8> {
+    hex::decode(s.trim_start_matches("0x")).unwrap()
+}
+
+#[test]
+fn test_t26_verifier_negative_vectors() {
+    use sha3::{Digest, Keccak256};
+    let file: NegativeFile = serde_json::from_str(VERIFIER_NEGATIVE_JSON).unwrap();
+    assert_eq!(
+        std::format!("0x{}", hex::encode(Keccak256::digest(VK))),
+        file.meta.vk_keccak,
+        "the vectors were made with another key: regenerate them (bls-vectors gen:verifier-negative)"
+    );
+
+    let env = Env::default();
+    env.cost_estimate().budget().reset_unlimited();
+    let id = env.register(VERIFIER_WASM, (Bytes::from_slice(&env, VK),));
+    let verifier = verifier_contract::Client::new(&env, &id);
+
+    assert!(!file.vectors.is_empty());
+    for v in &file.vectors {
+        let mut proof = unhex(&file.bases[&v.base].proof);
+        for (off, w) in v.patch_offsets.iter().zip(&v.patch_words) {
+            proof[*off..*off + 32].copy_from_slice(&unhex(w));
+        }
+        proof.truncate(v.proof_length);
+        let inputs: std::vec::Vec<u8> = v.public_inputs.iter().flat_map(|w| unhex(w)).collect();
+        let result = verifier.try_verify_proof(
+            &Bytes::from_slice(&env, &inputs),
+            &Bytes::from_slice(&env, &proof),
+        );
+        let accepted = matches!(result, Ok(Ok(())));
+        assert_eq!(
+            accepted,
+            v.expect == "accept",
+            "{}: expected {}",
+            v.name,
+            v.expect
+        );
+    }
+}
