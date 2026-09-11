@@ -1,0 +1,439 @@
+{
+  "_meta": {
+    "spec": "issue #355 / 2.5b — T2 17-field order-hash parity (T-19, T-66); merge gate for 2.3b–2.3e",
+    "generator": "scripts/bls-vectors/src/gen-order-hash-v2.ts",
+    "digest": "EIP-712 Order typed-data hash: keccak256(0x1901 || domainSeparator || structHash), minimal domain (name,version)",
+    "orderTypeString": "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt,uint8 orderDecimals,uint8 adDecimals,uint256 deadline,bytes32 adSettlementSigner)",
+    "orderTypehash": "0x1c9456507110c95645e35953a6ebe053bf021d7facb3e378f0199ad6d59d68c7",
+    "domainSeparator": "0x30be5c0eff57121410bcfb088c479028b3b8059112c22dff7e7b55f1b3927d7d",
+    "fieldOrder": "the 15 T1 fields in their original order, then deadline (word 16), then adSettlementSigner (word 17) — appended so existing Soroban offset writes are untouched; struct_hash buffer [u8; 512] → [u8; 576]",
+    "widthInvariant": "amount/chainIds ≤ u128 (rejected wider, both chains); salt is full u256 (Soroban salt → U256); deadline ≤ u64; see `rejects`",
+    "envelope": "escrow → verifier metadata = (slot0, slot1, cosigData); slot 0 = params.adSettlementSigner (NOT adCreator) at all four call sites; the verifier resolves slot 0's settlement key (design/01 §1.8)",
+    "classification": "account32 with 12 leading zero bytes = left-padded EVM address, else native 32-byte key — the publisher's home-chain rule",
+    "leafDomains": {
+      "ORDER": 0,
+      "AD": 1,
+      "CANCEL": 2,
+      "SETTLED": 3,
+      "REGISTERED": 4
+    },
+    "leafEncoding": "leaf = poseidon2(field_mod(orderHash), domain) via proofbridge-mmr encodeLeaf; domain-4 (REGISTERED) leaves hash a registration digest, not an order hash — its inner preimage is pinned by 2.1b, only the domain value is reserved here"
+  },
+  "domain": {
+    "name": "Proofbridge",
+    "version": "1"
+  },
+  "count": 11,
+  "vectors": [
+    {
+      "name": "canonical-equal",
+      "note": "custody == settlement identity (7702 / non-agent shape). Passes VACUOUSLY through the envelope check — never rely on it alone.",
+      "splitCase": false,
+      "order": {
+        "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        "amount": "1000000",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "11155111",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "1000002",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "test-ad-1",
+        "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "salt": "12345",
+        "saltHex": "0x0000000000000000000000000000000000000000000000000000000000003039",
+        "orderDecimals": 7,
+        "adDecimals": 7,
+        "deadline": "1767225600",
+        "adSettlementSigner": "0x1717171717171717171717171717171717171717171717171717171717171717"
+      },
+      "envelope": {
+        "slot0": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "slot0Kind": "chain32",
+        "slot1": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "custody": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "custodyKind": "chain32"
+      },
+      "expected": {
+        "structHash": "0xf9ec950121ab4f5a3270d2e6a243304f489a82e523c2394077051bb64031327b",
+        "orderHash": "0xa4051971fa4ca8e6761659de7f41ac804d32c302d0b009109cc085dc28529d2b"
+      }
+    },
+    {
+      "name": "split-case-evm-signer",
+      "note": "THE split-case vector (custody ≠ identity): 32-byte custody, padded-EVM settlement signer. Required on all four unlock paths — the only shape that catches a missed envelope call site.",
+      "splitCase": true,
+      "order": {
+        "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        "amount": "1000000",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "11155111",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "1000002",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "test-ad-1",
+        "adCreator": "0xabababababababababababababababababababababababababababababababab",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "salt": "12345",
+        "saltHex": "0x0000000000000000000000000000000000000000000000000000000000003039",
+        "orderDecimals": 7,
+        "adDecimals": 7,
+        "deadline": "1234605616436508552",
+        "adSettlementSigner": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0"
+      },
+      "envelope": {
+        "slot0": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+        "slot0Kind": "evm",
+        "slot1": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "custody": "0xabababababababababababababababababababababababababababababababab",
+        "custodyKind": "chain32"
+      },
+      "expected": {
+        "structHash": "0xdf7b7d17ddc3fd2a3196e3a7b94ba9daeeee171f67d996d783ad95981ab0516e",
+        "orderHash": "0x07b83c34816804b636866e9f28ffc10ba0428df1fb462b2068192de6289002c8"
+      }
+    },
+    {
+      "name": "split-case-chain32-signer",
+      "note": "split case, other direction: padded-EVM custody, full-width 32-byte settlement signer.",
+      "splitCase": true,
+      "order": {
+        "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        "amount": "1000000",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "11155111",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "1000002",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "test-ad-1",
+        "adCreator": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "salt": "12345",
+        "saltHex": "0x0000000000000000000000000000000000000000000000000000000000003039",
+        "orderDecimals": 7,
+        "adDecimals": 7,
+        "deadline": "1234605616436508552",
+        "adSettlementSigner": "0xabababababababababababababababababababababababababababababababab"
+      },
+      "envelope": {
+        "slot0": "0xabababababababababababababababababababababababababababababababab",
+        "slot0Kind": "chain32",
+        "slot1": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "custody": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+        "custodyKind": "evm"
+      },
+      "expected": {
+        "structHash": "0xf3de8c01296da61a6d632ad301f8a40b75a646e6b88e2f9f361bf89029e80a2d",
+        "orderHash": "0xebccfb190106dbb7be63866b98b70e8000360c4e9a9185a54d243470515ca136"
+      }
+    },
+    {
+      "name": "full-width-salt",
+      "note": "salt with all 32 bytes non-zero (> u128 — legal once Soroban salt is U256, T-66). Fixes the …3039 vacuous-pass hole.",
+      "splitCase": false,
+      "order": {
+        "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        "amount": "1000000",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "11155111",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "1000002",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "test-ad-1",
+        "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "salt": "115277457729594790116954736402445306894007958952385251179246218836037356394376",
+        "saltHex": "0xfedcba9876543210f1e2d3c4b5a69788fedcba9876543210f1e2d3c4b5a69788",
+        "orderDecimals": 7,
+        "adDecimals": 7,
+        "deadline": "1234605616436508552",
+        "adSettlementSigner": "0x1717171717171717171717171717171717171717171717171717171717171717"
+      },
+      "envelope": {
+        "slot0": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "slot0Kind": "chain32",
+        "slot1": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "custody": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "custodyKind": "chain32"
+      },
+      "expected": {
+        "structHash": "0xf555a99833095d6854ec28da8596ae38215fe0f83f8885ec131b96829df4f708",
+        "orderHash": "0x1a7dd3528ede642a7edffef3e994572dff45458b394a22734fedcfff84ce1a32"
+      }
+    },
+    {
+      "name": "full-width-signer",
+      "note": "adSettlementSigner with all 32 bytes non-zero — catches word-17 truncation and the not-resized ([u8; 544]) buffer.",
+      "splitCase": true,
+      "order": {
+        "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        "amount": "1000000",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "11155111",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "1000002",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "test-ad-1",
+        "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "salt": "12345",
+        "saltHex": "0x0000000000000000000000000000000000000000000000000000000000003039",
+        "orderDecimals": 7,
+        "adDecimals": 7,
+        "deadline": "1234605616436508552",
+        "adSettlementSigner": "0xfefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe"
+      },
+      "envelope": {
+        "slot0": "0xfefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe",
+        "slot0Kind": "chain32",
+        "slot1": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "custody": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "custodyKind": "chain32"
+      },
+      "expected": {
+        "structHash": "0xa396d03657038149c2dd9bd149a84cbcb0c8074fa3cbfb2023f720c35a625ac1",
+        "orderHash": "0x2b72054e06504952c930f94ca703e454003a4f5b2a87d3d9a22ef659c859a8d6"
+      }
+    },
+    {
+      "name": "deadline-zero",
+      "note": "deadline = 0 (the T1-compat sentinel).",
+      "splitCase": false,
+      "order": {
+        "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        "amount": "1000000",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "11155111",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "1000002",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "test-ad-1",
+        "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "salt": "12345",
+        "saltHex": "0x0000000000000000000000000000000000000000000000000000000000003039",
+        "orderDecimals": 7,
+        "adDecimals": 7,
+        "deadline": "0",
+        "adSettlementSigner": "0x1717171717171717171717171717171717171717171717171717171717171717"
+      },
+      "envelope": {
+        "slot0": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "slot0Kind": "chain32",
+        "slot1": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "custody": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "custodyKind": "chain32"
+      },
+      "expected": {
+        "structHash": "0xafbdb5abeb0c3eb910d4d7f5e38a2755f97c483e9f06bb3471875322341186e5",
+        "orderHash": "0xdaee0ed5b0080913debcbab068f3227cc8fdffd41943144c9b29928f1c75aac2"
+      }
+    },
+    {
+      "name": "deadline-max-u64",
+      "note": "deadline = u64::MAX — proves the u64 (Soroban) / uint256 (EVM word) boundary; all 8 significant bytes set.",
+      "splitCase": false,
+      "order": {
+        "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        "amount": "1000000",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "11155111",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "1000002",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "test-ad-1",
+        "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "salt": "12345",
+        "saltHex": "0x0000000000000000000000000000000000000000000000000000000000003039",
+        "orderDecimals": 7,
+        "adDecimals": 7,
+        "deadline": "18446744073709551615",
+        "adSettlementSigner": "0x1717171717171717171717171717171717171717171717171717171717171717"
+      },
+      "envelope": {
+        "slot0": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "slot0Kind": "chain32",
+        "slot1": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "custody": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "custodyKind": "chain32"
+      },
+      "expected": {
+        "structHash": "0x3570e202602ee33da8ab4f2b66a446bfd3426e7af799c30c43c43d90a4d53a3a",
+        "orderHash": "0x8766c6039f3659f1392029bef173b5eb314ba9150d8a4abd0d2e2307f612226f"
+      }
+    },
+    {
+      "name": "empty-ad-id",
+      "note": "EIP-712 hashes strings as keccak(bytes); empty string is the floor case.",
+      "splitCase": false,
+      "order": {
+        "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        "amount": "1000000",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "11155111",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "1000002",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "",
+        "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "salt": "12345",
+        "saltHex": "0x0000000000000000000000000000000000000000000000000000000000003039",
+        "orderDecimals": 7,
+        "adDecimals": 7,
+        "deadline": "1234605616436508552",
+        "adSettlementSigner": "0x1717171717171717171717171717171717171717171717171717171717171717"
+      },
+      "envelope": {
+        "slot0": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "slot0Kind": "chain32",
+        "slot1": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "custody": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "custodyKind": "chain32"
+      },
+      "expected": {
+        "structHash": "0x624369aa0e65daf00bf74195789cd284c62b9c4c5b2fa821f1499e5064dc1178",
+        "orderHash": "0xbf5fcd77ea2c9fcd9743ff3229789ac0385bac1c563a8fd0a5cc187590bdfa75"
+      }
+    },
+    {
+      "name": "non-ascii-ad-id",
+      "note": "multi-byte UTF-8 adId — byte-length vs char-length drift.",
+      "splitCase": false,
+      "order": {
+        "orderChainToken": "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "adChainToken": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        "amount": "1000000",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "11155111",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "1000002",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "アド-⚡-ü",
+        "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "salt": "12345",
+        "saltHex": "0x0000000000000000000000000000000000000000000000000000000000003039",
+        "orderDecimals": 7,
+        "adDecimals": 7,
+        "deadline": "1234605616436508552",
+        "adSettlementSigner": "0x1717171717171717171717171717171717171717171717171717171717171717"
+      },
+      "envelope": {
+        "slot0": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "slot0Kind": "chain32",
+        "slot1": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "custody": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "custodyKind": "chain32"
+      },
+      "expected": {
+        "structHash": "0x7b2f92a0bb7a91a9e48b5071453e678e05377b2248b96aae512b0f24dd12cd81",
+        "orderHash": "0x0eda2f1c570aaf55708ec18ee07af9bfe595f4b99145bc97b29f8218c50acf97"
+      }
+    },
+    {
+      "name": "boundary-max",
+      "note": "every numeric at its widest legal value: amount/chainIds u128, salt u256, deadline u64, decimals 255.",
+      "splitCase": true,
+      "order": {
+        "orderChainToken": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "adChainToken": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "amount": "340282366920938463463374607431768211455",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "340282366920938463463374607431768211455",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "340282366920938463463374607431768211455",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "test-ad-1",
+        "adCreator": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "salt": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        "saltHex": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "orderDecimals": 255,
+        "adDecimals": 255,
+        "deadline": "18446744073709551615",
+        "adSettlementSigner": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "envelope": {
+        "slot0": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "slot0Kind": "chain32",
+        "slot1": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "custody": "0x1717171717171717171717171717171717171717171717171717171717171717",
+        "custodyKind": "chain32"
+      },
+      "expected": {
+        "structHash": "0xa1de39a624b7bddc673d0b639436bafba29f0c33f276007e73cee89d621b6299",
+        "orderHash": "0xf588b487d4f7289d9140d7091ce64ab71fa11e76ae64132753c4f28803fe8fb0"
+      }
+    },
+    {
+      "name": "boundary-min",
+      "note": "every field at its floor.",
+      "splitCase": false,
+      "order": {
+        "orderChainToken": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "adChainToken": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "amount": "0",
+        "bridger": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "orderChainId": "0",
+        "orderPortal": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "orderRecipient": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "adChainId": "0",
+        "adManager": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "adId": "a",
+        "adCreator": "0xabababababababababababababababababababababababababababababababab",
+        "adRecipient": "0x2828282828282828282828282828282828282828282828282828282828282828",
+        "salt": "0",
+        "saltHex": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "orderDecimals": 0,
+        "adDecimals": 0,
+        "deadline": "0",
+        "adSettlementSigner": "0xabababababababababababababababababababababababababababababababab"
+      },
+      "envelope": {
+        "slot0": "0xabababababababababababababababababababababababababababababababab",
+        "slot0Kind": "chain32",
+        "slot1": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "custody": "0xabababababababababababababababababababababababababababababababab",
+        "custodyKind": "chain32"
+      },
+      "expected": {
+        "structHash": "0xb521802ca343f8a687371e510771b6018ff49d9b75ac94a4ef122ab745a40cc2",
+        "orderHash": "0x0a17f80835db7a0da9b6493d6ee26138c39f3389ed49e337905f837f80a74359"
+      }
+    }
+  ],
+  "rejects": [
+    {
+      "name": "amount-over-u128",
+      "field": "amount",
+      "value": "340282366920938463463374607431768211456",
+      "rule": "EVM: require(amount <= type(uint128).max) at create_order/lockForOrder; Soroban: reject any amount word with non-zero high bytes. Amount arithmetic stays u128."
+    },
+    {
+      "name": "deadline-over-u64",
+      "field": "deadline",
+      "value": "18446744073709551616",
+      "rule": "deadline is u64 on Soroban; a wider value must be rejected at the boundary on both chains, never narrowed into the preimage."
+    }
+  ]
+}
