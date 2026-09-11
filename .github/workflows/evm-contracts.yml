@@ -26,7 +26,7 @@ jobs:
         with:
           submodules: recursive
 
-      # The deposit circuit lives in proofbridge-circuits; the VK build below needs it.
+      # The event circuit lives in proofbridge-circuits; the VK build below needs it.
       - name: Checkout proofbridge-circuits
         uses: actions/checkout@v4
         with:
@@ -70,8 +70,13 @@ jobs:
         run: forge build --sizes
         id: build
 
-      - name: Build deposit circuit
-        run: scripts/build_circuits.sh proof_circuits/deposits
+      - name: Build event circuit
+        run: scripts/build_circuits.sh proof_circuits/events
+        working-directory: .
+
+      # Verifier.sol must be exactly bb's output for the circuit's key.
+      - name: Verifier matches the circuit
+        run: scripts/gen-verifier.sh --check
         working-directory: .
 
       # Piped through a passed-count check: a renamed contract must fail the

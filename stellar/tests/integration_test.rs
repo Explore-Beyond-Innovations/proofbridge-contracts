@@ -154,6 +154,7 @@ struct TestParamsJson {
     contract_addresses: ContractAddressesJson,
     order_params: OrderParamsJson,
     chain_ids: ChainIdsJson,
+    event_roots: std::collections::BTreeMap<std::string::String, std::string::String>,
 }
 
 #[derive(Deserialize)]
@@ -216,6 +217,8 @@ struct TestParams {
     // Chain IDs
     order_chain_id: u128,
     ad_chain_id: u128,
+    // Event-claim roots for domains 2, 3, 4
+    event_roots: [[u8; 32]; 3],
 }
 
 fn hex_to_array(hex_str: &str) -> [u8; 32] {
@@ -267,6 +270,7 @@ fn load_test_params() -> TestParams {
         ad_decimals: json.order_params.ad_decimals,
         order_chain_id: json.chain_ids.order_chain_id,
         ad_chain_id: json.chain_ids.ad_chain_id,
+        event_roots: [2u32, 3, 4].map(|d| hex_to_array(&json.event_roots[&d.to_string()])),
     }
 }
 
@@ -1225,4 +1229,114 @@ fn test_unlock_metering() {
         assert!(cpu <= OP_UNLOCK_CPU_CEILING);
         assert!(mem <= OP_UNLOCK_MEM_CEILING);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Event claims (2.3d): the same circuit and the same verify_proof as deposits; the contract-built
+// public inputs (proofbridge_core::cross_contract::build_event_public_inputs) keep them apart.
+// ---------------------------------------------------------------------------
+
+use proofbridge_core::cross_contract::{
+    build_event_public_inputs, build_public_inputs as build_deposit_inputs, LEAF_DOMAIN_AD,
+    LEAF_DOMAIN_CANCEL, LEAF_DOMAIN_REGISTERED, LEAF_DOMAIN_SETTLED,
+};
+
+const EVENT_CLAIMS: [(u32, &[u8]); 3] = [
+    (
+        LEAF_DOMAIN_CANCEL,
+        include_bytes!("fixtures/event_claim_2.bin"),
+    ),
+    (
+        LEAF_DOMAIN_SETTLED,
+        include_bytes!("fixtures/event_claim_3.bin"),
+    ),
+    (
+        LEAF_DOMAIN_REGISTERED,
+        include_bytes!("fixtures/event_claim_4.bin"),
+    ),
+];
+
+struct EventSetup<'a> {
+    env: Env,
+    verifier: verifier_contract::Client<'a>,
+    merkle: Address,
+    tp: TestParams,
+}
+
+fn event_setup() -> EventSetup<'static> {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.cost_estimate().budget().reset_unlimited();
+    let verifier_id = env.register(VERIFIER_WASM, (Bytes::from_slice(&env, VK),));
+    let merkle = env.register(MERKLE_WASM, ());
+    merkle_contract::Client::new(&env, &merkle).initialize(&Address::generate(&env));
+    let verifier = verifier_contract::Client::new(&env, &verifier_id);
+    EventSetup {
+        env,
+        verifier,
+        merkle,
+        tp: load_test_params(),
+    }
+}
+
+fn event_root(s: &EventSetup, domain: u32) -> BytesN<32> {
+    bytes32_to_bytesn(&s.env, &s.tp.event_roots[(domain - 2) as usize])
+}
+
+#[test]
+fn test_event_claims_verify_for_every_event_domain() {
+    let s = event_setup();
+    let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
+    for (domain, proof) in EVENT_CLAIMS {
+        let inputs = build_event_public_inputs(
+            &s.env,
+            &s.merkle,
+            &event_root(&s, domain),
+            &order_hash,
+            domain,
+        );
+        s.verifier
+            .verify_proof(&inputs, &Bytes::from_slice(&s.env, proof));
+    }
+}
+
+#[test]
+fn test_event_claim_rejected_under_another_domain_or_as_a_deposit() {
+    let s = event_setup();
+    let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
+    let root = event_root(&s, LEAF_DOMAIN_CANCEL);
+    let proof = Bytes::from_slice(&s.env, EVENT_CLAIMS[0].1);
+
+    let other_domain =
+        build_event_public_inputs(&s.env, &s.merkle, &root, &order_hash, LEAF_DOMAIN_SETTLED);
+    assert!(s.verifier.try_verify_proof(&other_domain, &proof).is_err());
+
+    let zero = BytesN::from_array(&s.env, &[0u8; 32]);
+    let as_deposit = build_deposit_inputs(
+        &s.env,
+        &s.merkle,
+        &zero,
+        &root,
+        &order_hash,
+        LEAF_DOMAIN_AD as u8,
+    );
+    assert!(s.verifier.try_verify_proof(&as_deposit, &proof).is_err());
+}
+
+#[test]
+fn test_deposit_proof_rejected_as_an_event_claim() {
+    let s = event_setup();
+    let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
+    let order_root = bytes32_to_bytesn(&s.env, &s.tp.order_root);
+    let inputs = build_event_public_inputs(
+        &s.env,
+        &s.merkle,
+        &order_root,
+        &order_hash,
+        LEAF_DOMAIN_CANCEL,
+    );
+    assert!(s
+        .verifier
+        .try_verify_proof(&inputs, &Bytes::from_slice(&s.env, PROOF_BRIDGER))
+        .is_err());
 }

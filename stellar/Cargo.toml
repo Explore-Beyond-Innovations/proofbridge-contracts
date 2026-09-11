@@ -11,6 +11,7 @@ crate-type = ["rlib"]
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+proofbridge-core = { workspace = true }
 hex = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
