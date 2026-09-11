@@ -183,6 +183,8 @@ struct OrderParamsJson {
     salt: String,
     order_decimals: u32,
     ad_decimals: u32,
+    deadline: String,
+    ad_settlement_signer: String,
 }
 
 #[derive(Deserialize)]
@@ -214,6 +216,8 @@ struct TestParams {
     ad_id: std::string::String,
     order_decimals: u32,
     ad_decimals: u32,
+    deadline: u64,
+    ad_settlement_signer: [u8; 32],
     // Chain IDs
     order_chain_id: u128,
     ad_chain_id: u128,
@@ -268,6 +272,8 @@ fn load_test_params() -> TestParams {
         ad_id: json.order_params.ad_id,
         order_decimals: json.order_params.order_decimals,
         ad_decimals: json.order_params.ad_decimals,
+        deadline: json.order_params.deadline.parse().unwrap(),
+        ad_settlement_signer: strkey_to_array(&json.order_params.ad_settlement_signer),
         order_chain_id: json.chain_ids.order_chain_id,
         ad_chain_id: json.chain_ids.ad_chain_id,
         event_roots: [2u32, 3, 4].map(|d| hex_to_array(&json.event_roots[&d.to_string()])),
@@ -478,9 +484,11 @@ fn ad_manager_order_params(env: &Env, tp: &TestParams) -> ad_manager_contract::O
         ad_id: SorobanString::from_str(env, &tp.ad_id),
         ad_creator: bytes32_to_bytesn(env, &tp.ad_creator),
         ad_recipient: bytes32_to_bytesn(env, &tp.ad_recipient),
-        salt: tp.salt,
+        salt: soroban_sdk::U256::from_u128(env, tp.salt),
         order_decimals: tp.order_decimals,
         ad_decimals: tp.ad_decimals,
+        deadline: tp.deadline,
+        ad_settlement_signer: bytes32_to_bytesn(env, &tp.ad_settlement_signer),
     }
 }
 
@@ -496,9 +504,11 @@ fn order_portal_order_params(env: &Env, tp: &TestParams) -> order_portal_contrac
         ad_id: SorobanString::from_str(env, &tp.ad_id),
         ad_creator: bytes32_to_bytesn(env, &tp.ad_creator),
         ad_recipient: bytes32_to_bytesn(env, &tp.ad_recipient),
-        salt: tp.salt,
+        salt: soroban_sdk::U256::from_u128(env, tp.salt),
         order_decimals: tp.order_decimals,
         ad_decimals: tp.ad_decimals,
+        deadline: tp.deadline,
+        ad_settlement_signer: bytes32_to_bytesn(env, &tp.ad_settlement_signer),
     }
 }
 
@@ -1419,4 +1429,158 @@ fn test_t26_verifier_negative_vectors() {
             v.expect
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// 2.3b: the envelope's slot 0 is the order's ad_settlement_signer. The fixture is a split case
+// (settlement signer != custody address), the only shape in which a wrong slot shows.
+// ---------------------------------------------------------------------------
+
+#[soroban_sdk::contract]
+pub struct Slot0RootVerifier;
+
+#[soroban_sdk::contractimpl]
+impl Slot0RootVerifier {
+    pub fn expect(env: Env, slot0: BytesN<32>) {
+        env.storage()
+            .instance()
+            .set(&soroban_sdk::symbol_short!("slot0"), &slot0);
+    }
+
+    pub fn is_root_valid(
+        env: Env,
+        _source_chain_id: u128,
+        _root: BytesN<32>,
+        metadata: Bytes,
+    ) -> bool {
+        let expected: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&soroban_sdk::symbol_short!("slot0"))
+            .unwrap();
+        metadata.len() >= 32
+            && BytesN::<32>::try_from(metadata.slice(0..32))
+                .map(|head| head == expected)
+                .unwrap_or(false)
+    }
+}
+
+fn slot0_module(s: &TestSetup, expected: &BytesN<32>) -> Address {
+    let module = s.env.register(Slot0RootVerifier, ());
+    Slot0RootVerifierClient::new(&s.env, &module).expect(expected);
+    module
+}
+
+fn created_portal_order(s: &TestSetup) -> order_portal_contract::OrderParams {
+    let bridger_addr = {
+        let strkey = stellar_strkey::ed25519::PublicKey(s.tp.bridger).to_string();
+        Address::from_string(&SorobanString::from_str(&s.env, &strkey))
+    };
+    TokenContractClient::new(&s.env, &s.order_token_addr)
+        .mint(&bridger_addr, &(s.tp.amount as i128 * 10));
+    let params = order_portal_order_params(&s.env, &s.tp);
+    s.order_portal.create_order(&params);
+    params
+}
+
+fn portal_unlock(
+    s: &TestSetup,
+    params: &order_portal_contract::OrderParams,
+) -> Result<(), order_portal_contract::OrderPortalError> {
+    match s.order_portal.try_unlock(
+        params,
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
+        &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
+        &Bytes::new(&s.env),
+    ) {
+        Ok(_) => Ok(()),
+        Err(Ok(e)) => Err(e),
+        Err(Err(_)) => panic!("unlock failed with a host error"),
+    }
+}
+
+#[test]
+fn test_split_case_ad_manager_unlock_resolves_the_settlement_signer() {
+    let s = setup();
+    let params = locked_ad_order(&s);
+    assert_ne!(
+        params.ad_settlement_signer, params.ad_creator,
+        "the fixture must be a split case"
+    );
+
+    let custody = slot0_module(&s, &params.ad_creator);
+    s.ad_manager
+        .set_root_verifier(&s.tp.order_chain_id, &custody);
+    assert!(!ad_unlock(&s, &params, &Bytes::new(&s.env)));
+
+    let signer = slot0_module(&s, &params.ad_settlement_signer);
+    s.ad_manager
+        .set_root_verifier(&s.tp.order_chain_id, &signer);
+    assert!(ad_unlock(&s, &params, &Bytes::new(&s.env)));
+}
+
+#[test]
+fn test_split_case_order_portal_unlock_resolves_the_settlement_signer() {
+    let s = setup();
+    let params = created_portal_order(&s);
+    assert_ne!(
+        params.ad_settlement_signer, params.ad_creator,
+        "the fixture must be a split case"
+    );
+
+    let custody = slot0_module(&s, &params.ad_creator);
+    s.order_portal
+        .set_root_verifier(&s.tp.ad_chain_id, &custody);
+    assert_eq!(
+        portal_unlock(&s, &params),
+        Err(order_portal_contract::OrderPortalError::RootNotValid)
+    );
+
+    let signer = slot0_module(&s, &params.ad_settlement_signer);
+    s.order_portal.set_root_verifier(&s.tp.ad_chain_id, &signer);
+    assert_eq!(portal_unlock(&s, &params), Ok(()));
+}
+
+#[test]
+fn test_ad_manager_unlock_after_deadline_is_rejected() {
+    use soroban_sdk::testutils::Ledger;
+    let s = setup();
+    let params = locked_ad_order(&s);
+    let module = slot0_module(&s, &params.ad_settlement_signer);
+    s.ad_manager
+        .set_root_verifier(&s.tp.order_chain_id, &module);
+
+    s.env.ledger().set_timestamp(params.deadline + 1);
+    let late = s.ad_manager.try_unlock(
+        &params,
+        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+        &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
+    );
+    assert_eq!(
+        late,
+        Err(Ok(ad_manager_contract::AdManagerError::OrderExpired))
+    );
+
+    s.env.ledger().set_timestamp(params.deadline);
+    assert!(ad_unlock(&s, &params, &Bytes::new(&s.env)));
+}
+
+#[test]
+fn test_order_portal_unlock_after_deadline_is_rejected() {
+    use soroban_sdk::testutils::Ledger;
+    let s = setup();
+    let params = created_portal_order(&s);
+    let module = slot0_module(&s, &params.ad_settlement_signer);
+    s.order_portal.set_root_verifier(&s.tp.ad_chain_id, &module);
+
+    s.env.ledger().set_timestamp(params.deadline + 1);
+    assert_eq!(
+        portal_unlock(&s, &params),
+        Err(order_portal_contract::OrderPortalError::OrderExpired)
+    );
+    s.env.ledger().set_timestamp(params.deadline);
+    assert_eq!(portal_unlock(&s, &params), Ok(()));
 }

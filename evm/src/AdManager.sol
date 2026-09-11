@@ -98,6 +98,8 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         uint256 salt;
         uint8 orderDecimals;
         uint8 adDecimals;
+        uint256 deadline;
+        bytes32 adSettlementSigner;
     }
 
     /// @notice Order lifecycle status.
@@ -240,6 +242,7 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
     error AdManager__OrderNotOpen(bytes32 orderHash);
     error AdManager__NullifierUsed(bytes32 nullifierHash);
     error AdManager__InvalidProof();
+    error AdManager__OrderExpired(uint256 deadline);
     error AdManager__NothingToClaim();
     error AdManager__RouteMismatch(bytes32 committed, bytes32 offered);
     error AdManager__SelfCallOnly();
@@ -489,10 +492,15 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
 
         if (orders[orderHash] != Status.Open) revert AdManager__OrderNotOpen(orderHash);
         if (nullifierUsed[nullifierHash]) revert AdManager__NullifierUsed(nullifierHash);
+        if (block.timestamp > params.deadline) revert AdManager__OrderExpired(params.deadline);
 
         // Gate 2 — root authenticity. Mandatory: reverts with
         // NoRootVerifier when no module is configured for the source chain.
-        _requireRootValid(params.orderChainId, targetRoot, abi.encode(params.adCreator, params.bridger, cosigData));
+        _requireRootValid(
+            params.orderChainId,
+            targetRoot,
+            RequestAuth.rootEnvelope(params.adSettlementSigner, params.bridger, cosigData)
+        );
 
         bytes32[] memory publicInputs =
             RequestAuth.buildPublicInputs(i_merkleManager, nullifierHash, targetRoot, orderHash, _PUBLIC_INPUT_SIDE_AD);
@@ -633,7 +641,9 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
             adRecipient: p.adRecipient,
             salt: p.salt,
             orderDecimals: p.orderDecimals,
-            adDecimals: p.adDecimals
+            adDecimals: p.adDecimals,
+            deadline: p.deadline,
+            adSettlementSigner: p.adSettlementSigner
         });
         return OrderHash.digest(o);
     }
@@ -695,6 +705,7 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
 
         // Defense-in-depth: the signed adDecimals must match the on-chain ad token.
         DecimalScaling.assertMatchesOnChain(ad.token, params.adDecimals);
+        OrderHash.checkWidths(params.amount, params.orderChainId, block.chainid, params.deadline);
 
         orderHash = _hashOrder(params, block.chainid, address(this));
     }

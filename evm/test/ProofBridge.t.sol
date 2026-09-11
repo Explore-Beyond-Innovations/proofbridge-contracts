@@ -89,6 +89,8 @@ contract ProofBridge is Test {
         uint256 salt;
         uint8 orderDecimals;
         uint8 adDecimals;
+        uint256 deadline;
+        bytes32 adSettlementSigner;
     }
 
     function _b32(address a) internal pure returns (bytes32) {
@@ -207,6 +209,8 @@ contract ProofBridge is Test {
         p.salt = salt;
         p.orderDecimals = 18;
         p.adDecimals = 18;
+        p.deadline = block.timestamp + 1 days;
+        p.adSettlementSigner = p.adCreator;
     }
 
     function _defaultOrderChainParams(string memory adId, address adTokenAddr, uint256 amount, uint256 salt)
@@ -227,6 +231,8 @@ contract ProofBridge is Test {
         p.salt = salt;
         p.orderDecimals = 18;
         p.adDecimals = 18;
+        p.deadline = block.timestamp + 1 days;
+        p.adSettlementSigner = p.adCreator;
     }
 
     function _adId() internal returns (string memory adId) {
@@ -292,7 +298,7 @@ contract ProofBridge is Test {
     }
 
     function getTypedHash(Order memory order) public returns (bytes32 typedHash) {
-        string[] memory inputs = new string[](18);
+        string[] memory inputs = new string[](20);
 
         inputs[0] = "npx";
         inputs[1] = "tsx";
@@ -312,6 +318,8 @@ contract ProofBridge is Test {
         inputs[15] = vm.toString(order.salt);
         inputs[16] = vm.toString(uint256(order.orderDecimals));
         inputs[17] = vm.toString(uint256(order.adDecimals));
+        inputs[18] = vm.toString(order.deadline);
+        inputs[19] = vm.toString(order.adSettlementSigner);
 
         bytes memory result = vm.ffi(inputs);
 
@@ -387,7 +395,9 @@ contract ProofBridge is Test {
             adRecipient: orderChainParams.adRecipient,
             salt: orderChainParams.salt,
             orderDecimals: orderChainParams.orderDecimals,
-            adDecimals: orderChainParams.adDecimals
+            adDecimals: orderChainParams.adDecimals,
+            deadline: orderChainParams.deadline,
+            adSettlementSigner: orderChainParams.adSettlementSigner
         });
 
         // get on-chain hashes

@@ -163,6 +163,7 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
         p.salt = 4242;
         p.bridger = bridgerAcct;
         p.adCreator = makerAcct;
+        p.adSettlementSigner = makerAcct;
 
         orderToken.mint(vBridger, p.amount);
         bytes32 orderHash = portal.hashOrderPublic(p);

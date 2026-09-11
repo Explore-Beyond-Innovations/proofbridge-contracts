@@ -24,6 +24,8 @@ async function hashTypedData(): Promise<string> {
       salt: inputs[12],
       orderDecimals: inputs[13],
       adDecimals: inputs[14],
+      deadline: inputs[15],
+      adSettlementSigner: inputs[16],
     };
 
     let orderHash = TypedDataEncoder.hash(domain, orderTypes, orderValue);

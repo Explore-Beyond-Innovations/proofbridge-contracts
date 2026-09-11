@@ -144,9 +144,11 @@ mod validation_tests {
             ad_id: SorobanString::from_str(env, "test-ad"),
             ad_creator: make_bytes32(env, 0x77),
             ad_recipient,
-            salt: 42,
+            salt: soroban_sdk::U256::from_u128(env, 42),
             order_decimals: 7,
             ad_decimals: 7,
+            deadline: 4_102_444_800,
+            ad_settlement_signer: make_bytes32(env, 0x77),
         }
     }
 
@@ -523,63 +525,97 @@ mod order_lifecycle_tests {
     }
 }
 
-// Cross-language EIP-712 order-hash parity (issue #205 / 1.6b). The same
-// fixture drives the JS and EVM suites; all three recompute `expected.orderHash`.
+// 17-field EIP-712 order-hash parity (T-19, T-66) against the frozen 2.5b fixture; the same file
+// drives the EVM and relayer suites.
 mod order_hash_parity {
     extern crate std;
-    use crate::eip712::hash_order;
+    use crate::eip712::{hash_order, keccak256, struct_hash_order, ORDER_TYPEHASH};
     use crate::types::OrderParams;
-    use soroban_sdk::{BytesN, Env, String as SorobanString};
+    use soroban_sdk::{Bytes, BytesN, Env, String as SorobanString, U256};
 
-    const V: &str = include_str!("../../../../test-vectors/order-hash.json");
+    const V: &str = include_str!("../../../../test-vectors/order-hash-v2.json");
+
+    fn arr32(hex_str: &str) -> [u8; 32] {
+        let b = hex::decode(hex_str.trim_start_matches("0x")).expect("invalid hex");
+        let mut a = [0u8; 32];
+        a.copy_from_slice(&b);
+        a
+    }
 
     fn bn32(env: &Env, hex_str: &str) -> BytesN<32> {
-        let bytes = hex::decode(hex_str.trim_start_matches("0x")).expect("invalid hex");
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        BytesN::from_array(env, &arr)
+        BytesN::from_array(env, &arr32(hex_str))
+    }
+
+    fn u256(env: &Env, hex_str: &str) -> U256 {
+        U256::from_be_bytes(env, &Bytes::from_array(env, &arr32(hex_str)))
     }
 
     #[test]
-    fn order_hash_matches_fixture() {
-        let env = Env::default();
-        let j: serde_json::Value = serde_json::from_str(V).expect("valid fixture json");
-        let vectors = j["vectors"].as_array().expect("vectors array");
-        assert_eq!(vectors.len() as u64, j["count"].as_u64().unwrap());
-        assert!(!vectors.is_empty(), "fixture must carry vectors");
+    fn typehash_is_the_fixture_string() {
+        let j: serde_json::Value = serde_json::from_str(V).unwrap();
+        let type_string = j["_meta"]["orderTypeString"].as_str().unwrap();
+        assert_eq!(keccak256(type_string.as_bytes()), ORDER_TYPEHASH);
+        assert_eq!(
+            ORDER_TYPEHASH,
+            arr32(j["_meta"]["orderTypehash"].as_str().unwrap())
+        );
+    }
 
+    #[test]
+    fn every_vector_hashes_as_frozen() {
+        let env = Env::default();
+        let j: serde_json::Value = serde_json::from_str(V).unwrap();
+        let vectors = j["vectors"].as_array().unwrap();
+        assert_eq!(vectors.len() as u64, j["count"].as_u64().unwrap());
+        assert!(vectors.len() >= 11, "vector set shrank");
         for v in vectors {
             let o = &v["order"];
+            let s = |k: &str| o[k].as_str().unwrap();
             let params = OrderParams {
-                order_chain_token: bn32(&env, o["orderChainToken"].as_str().unwrap()),
-                ad_chain_token: bn32(&env, o["adChainToken"].as_str().unwrap()),
-                amount: o["amount"].as_str().unwrap().parse::<u128>().unwrap(),
-                bridger: bn32(&env, o["bridger"].as_str().unwrap()),
-                order_recipient: bn32(&env, o["orderRecipient"].as_str().unwrap()),
-                ad_chain_id: o["adChainId"].as_str().unwrap().parse::<u128>().unwrap(),
-                ad_manager: bn32(&env, o["adManager"].as_str().unwrap()),
-                ad_id: SorobanString::from_str(&env, o["adId"].as_str().unwrap()),
-                ad_creator: bn32(&env, o["adCreator"].as_str().unwrap()),
-                ad_recipient: bn32(&env, o["adRecipient"].as_str().unwrap()),
-                salt: o["salt"].as_str().unwrap().parse::<u128>().unwrap(),
+                order_chain_token: bn32(&env, s("orderChainToken")),
+                ad_chain_token: bn32(&env, s("adChainToken")),
+                amount: s("amount").parse::<u128>().unwrap(),
+                bridger: bn32(&env, s("bridger")),
+                order_recipient: bn32(&env, s("orderRecipient")),
+                ad_chain_id: s("adChainId").parse::<u128>().unwrap(),
+                ad_manager: bn32(&env, s("adManager")),
+                ad_id: SorobanString::from_str(&env, s("adId")),
+                ad_creator: bn32(&env, s("adCreator")),
+                ad_recipient: bn32(&env, s("adRecipient")),
+                salt: u256(&env, s("saltHex")),
                 order_decimals: o["orderDecimals"].as_u64().unwrap() as u32,
                 ad_decimals: o["adDecimals"].as_u64().unwrap() as u32,
+                deadline: s("deadline").parse::<u64>().unwrap(),
+                ad_settlement_signer: bn32(&env, s("adSettlementSigner")),
             };
-
-            let order_chain_id = o["orderChainId"].as_str().unwrap().parse::<u128>().unwrap();
-            let order_portal = bn32(&env, o["orderPortal"].as_str().unwrap());
-
-            let hash = hash_order(&env, &params, order_chain_id, &order_portal);
-            let expected = v["expected"]["orderHash"].as_str().unwrap();
-            std::println!(
-                "[order-hash][rust-order-portal] {} 0x{}",
-                v["name"].as_str().unwrap(),
-                hex::encode(hash.to_array())
+            let order_chain_id = s("orderChainId").parse::<u128>().unwrap();
+            let order_portal = bn32(&env, s("orderPortal"));
+            let struct_hash = struct_hash_order(&params, order_chain_id, &order_portal.to_array());
+            let digest = hash_order(&env, &params, order_chain_id, &order_portal);
+            let name = v["name"].as_str().unwrap();
+            assert_eq!(
+                struct_hash,
+                arr32(v["expected"]["structHash"].as_str().unwrap()),
+                "{}",
+                name
             );
             assert_eq!(
-                hash.to_array().to_vec(),
-                hex::decode(expected.trim_start_matches("0x")).unwrap()
+                digest.to_array(),
+                arr32(v["expected"]["orderHash"].as_str().unwrap()),
+                "{}",
+                name
             );
         }
+    }
+
+    // The rejects can't be represented in the Soroban types, so they can never be hashed here.
+    #[test]
+    fn rejects_do_not_fit_the_types() {
+        let j: serde_json::Value = serde_json::from_str(V).unwrap();
+        let r = j["rejects"].as_array().unwrap();
+        assert_eq!(r[0]["field"], "amount");
+        assert!(r[0]["value"].as_str().unwrap().parse::<u128>().is_err());
+        assert_eq!(r[1]["field"], "deadline");
+        assert!(r[1]["value"].as_str().unwrap().parse::<u64>().is_err());
     }
 }

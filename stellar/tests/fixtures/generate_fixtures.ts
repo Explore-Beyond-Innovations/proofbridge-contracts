@@ -106,10 +106,10 @@ const DOMAIN_TYPEHASH_MIN = keccak256(
 const NAME_HASH = keccak256(Buffer.from("Proofbridge"));
 // keccak256("1")
 const VERSION_HASH = keccak256(Buffer.from("1"));
-// keccak256("Order(bytes32 orderChainToken,...,uint8 orderDecimals,uint8 adDecimals)")
+// keccak256 of the 17-field order type string (test-vectors/order-hash-v2.json)
 const ORDER_TYPEHASH = keccak256(
   Buffer.from(
-    "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt,uint8 orderDecimals,uint8 adDecimals)"
+    "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt,uint8 orderDecimals,uint8 adDecimals,uint256 deadline,bytes32 adSettlementSigner)"
   )
 );
 
@@ -185,6 +185,8 @@ function structHashOrder(params: {
   salt: bigint;
   orderDecimals: number;
   adDecimals: number;
+  deadline: bigint;
+  adSettlementSigner: string;
 }): Buffer {
   const data = Buffer.concat([
     ORDER_TYPEHASH,
@@ -203,6 +205,8 @@ function structHashOrder(params: {
     abiEncodeUint256(params.salt),
     abiEncodeUint256(BigInt(params.orderDecimals)),
     abiEncodeUint256(BigInt(params.adDecimals)),
+    abiEncodeUint256(params.deadline),
+    abiEncodeAddress(params.adSettlementSigner),
   ]);
   return keccak256(data);
 }
@@ -283,6 +287,11 @@ async function main() {
   const salt = BigInt(12345);
   const orderDecimals = 7;
   const adDecimals = 7;
+  const deadline = BigInt(4102444800); // 2100-01-01
+  // A split case: the settlement signer is not the custody address (ad_creator), the only shape
+  // in which a wrong envelope slot shows.
+  const adSettlementSignerHex = "0x" + "39".repeat(32);
+  const adSettlementSigner = toStellarAccountAddress(adSettlementSignerHex);
 
   // ----- Compute order hash using Stellar-compatible EIP-712 -----
   // Ad-manager computes: hash_order(params, config.chain_id, contract_address_to_bytes32)
@@ -305,6 +314,8 @@ async function main() {
     salt,
     orderDecimals,
     adDecimals,
+    deadline,
+    adSettlementSigner: adSettlementSignerHex,
   };
 
   const structHash = structHashOrder(orderParamsHex);
@@ -465,6 +476,8 @@ async function main() {
       salt: salt.toString(),
       orderDecimals,
       adDecimals,
+      deadline: deadline.toString(),
+      adSettlementSigner,
     },
     chainIds: {
       orderChainId: Number(orderChainId),

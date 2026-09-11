@@ -359,6 +359,9 @@ impl OrderPortalContract {
         if storage::is_nullifier_used(&env, &nullifier_hash) {
             return Err(OrderPortalError::NullifierUsed);
         }
+        if env.ledger().timestamp() > params.deadline {
+            return Err(OrderPortalError::OrderExpired);
+        }
 
         let public_inputs = cross_contract::build_public_inputs(
             &env,
@@ -376,7 +379,7 @@ impl OrderPortalContract {
             &module,
             params.ad_chain_id,
             &target_root,
-            &params.ad_creator,
+            &params.ad_settlement_signer,
             &params.bridger,
             &cosig_data,
         ) {

@@ -1,6 +1,6 @@
 //! Data structures for the AdManager contract
 
-use soroban_sdk::{contracttype, Address, BytesN, String};
+use soroban_sdk::{contracttype, Address, BytesN, String, U256};
 
 pub use proofbridge_core::token::NATIVE_TOKEN_ADDRESS;
 pub use proofbridge_core::types::{ContractConfig, Status};
@@ -62,9 +62,13 @@ pub struct OrderParams {
     /// Expected maker recipient on order chain
     pub ad_recipient: BytesN<32>,
     /// Unique nonce to avoid hash collisions
-    pub salt: u128,
+    pub salt: U256,
     /// Decimals of `order_chain_token` on the source chain
     pub order_decimals: u32,
     /// Decimals of `ad_chain_token` on this chain
     pub ad_decimals: u32,
+    /// Unix time (seconds) after which the order can no longer be unlocked; hashed
+    pub deadline: u64,
+    /// The account whose settlement key co-signs for the maker (envelope slot 0); hashed
+    pub ad_settlement_signer: BytesN<32>,
 }
