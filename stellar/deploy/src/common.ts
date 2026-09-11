@@ -19,8 +19,8 @@ export function wasmDir(): string {
 
 export function vkPath(): string {
   return (
-    process.env.STELLAR_DEPOSIT_VK ??
-    path.join(stellarRoot(), "..", "..", "proof_circuits", "deposits", "target", "vk")
+    process.env.STELLAR_EVENT_VK ??
+    path.join(stellarRoot(), "..", "..", "proof_circuits", "events", "target", "vk")
   );
 }
 

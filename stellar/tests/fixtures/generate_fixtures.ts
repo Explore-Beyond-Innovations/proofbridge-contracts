@@ -5,6 +5,7 @@
  * (full 32-byte addresses, not truncated to 20 bytes like EVM).
  *
  * Produces binary files that Rust tests load via include_bytes!:
+ *   - event_claim_{2,3,4}.bin / public_inputs_event_{2,3,4}.bin (event claims, same circuit)
  *   - proof_bridger.bin          (14592 bytes)
  *   - proof_ad_creator.bin       (14592 bytes)
  *   - public_inputs_bridger.bin  (128 bytes)
@@ -32,7 +33,7 @@ import * as path from "path";
 
 const CIRCUIT_PATH = path.resolve(
   __dirname,
-  "../../../../proof_circuits/deposits/target/deposit_circuit.json"
+  "../../../../proof_circuits/events/target/event_circuit.json"
 );
 
 const OUTPUT_DIR = path.resolve(__dirname);
@@ -233,7 +234,7 @@ function buildPublicInputs(
 // ---------- main ----------
 
 async function main() {
-  console.log("Loading deposit circuit...");
+  console.log("Loading event circuit...");
   const circuit = JSON.parse(fs.readFileSync(CIRCUIT_PATH, "utf8"));
 
   console.log("Initializing Barretenberg...");
@@ -340,28 +341,28 @@ async function main() {
     secret: secretHex,
   };
 
-  // Bridger proof: ad_contract=true ⇒ leaf side 1 ⇒ ORDER chain tree/root (chain_flag=1)
+  // Bridger proof: leaf_domain=1 ⇒ leaf side 1 ⇒ ORDER chain tree/root (chain_flag=1)
   console.log("\nGenerating bridger proof (order chain, chain_flag=1)...");
   const { witness: bridgerWitness } = await noir.execute({
     ...commonInput,
     ...leanInputs(orderTree.merkleProof),
     nullifier_hash: bridgerNullifier.toString(),
     target_root: orderRoot,
-    ad_contract: true,
+    leaf_domain: "1",
   });
   const bridgerResult = await honk.generateProof(bridgerWitness, {
     keccak: true,
   });
   console.log("Bridger proof size:", bridgerResult.proof.length, "bytes");
 
-  // Ad creator proof: ad_contract=false ⇒ leaf side 0 ⇒ AD chain tree/root (chain_flag=0)
+  // Ad creator proof: leaf_domain=0 ⇒ leaf side 0 ⇒ AD chain tree/root (chain_flag=0)
   console.log("Generating ad creator proof (ad chain, chain_flag=0)...");
   const { witness: adCreatorWitness } = await noir.execute({
     ...commonInput,
     ...leanInputs(adTree.merkleProof),
     nullifier_hash: adCreatorNullifier.toString(),
     target_root: adRoot,
-    ad_contract: false,
+    leaf_domain: "0",
   });
   const adCreatorResult = await honk.generateProof(adCreatorWitness, {
     keccak: true,
@@ -404,9 +405,31 @@ async function main() {
 
   const vkSrc = path.resolve(
     __dirname,
-    "../../../../proof_circuits/deposits/target/vk"
+    "../../../../proof_circuits/events/target/vk"
   );
   fs.copyFileSync(vkSrc, path.join(OUTPUT_DIR, "vk"));
+
+  // ----- Event claims: the same order's leaf under each event domain, no secret -----
+  const eventRoots: Record<number, string> = {};
+  for (const domain of [2, 3, 4]) {
+    console.log(`Generating event claim (domain ${domain})...`);
+    const tree = await buildSideTree(orderHashMod.toString(), domain);
+    const { witness } = await noir.execute({
+      nullifier_hash: "0",
+      order_hash: orderHashMod.toString(),
+      target_root: tree.root,
+      leaf_domain: String(domain),
+      secret: "0",
+      ...leanInputs(tree.merkleProof),
+    });
+    const claim = await honk.generateProof(witness, { keccak: true });
+    fs.writeFileSync(path.join(OUTPUT_DIR, `event_claim_${domain}.bin`), Buffer.from(claim.proof));
+    fs.writeFileSync(
+      path.join(OUTPUT_DIR, `public_inputs_event_${domain}.bin`),
+      buildPublicInputs("0x0", orderHashMod.toString(), tree.root, domain)
+    );
+    eventRoots[domain] = tree.root;
+  }
 
   // Write test params (Stellar strkey addresses for display, used by Rust tests)
   const testParams = {
@@ -415,6 +438,7 @@ async function main() {
     orderHashMod: orderHashMod.toString(),
     adRoot,
     orderRoot,
+    eventRoots,
     bridgerNullifier: bridgerNullifier.toString(),
     adCreatorNullifier: adCreatorNullifier.toString(),
     elementIndex: adTree.elementIndex,

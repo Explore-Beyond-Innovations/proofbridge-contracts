@@ -36,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The deposit circuit lives in proofbridge-circuits; the VK build below needs it.
+      # The event circuit lives in proofbridge-circuits; the VK build below needs it.
       - name: Checkout proofbridge-circuits
         uses: actions/checkout@v4
         with:
@@ -100,8 +100,8 @@ jobs:
           stellar contract build --optimize --package bls-key-registry
         working-directory: stellar
 
-      - name: Build deposit circuit
-        run: scripts/build_circuits.sh proof_circuits/deposits
+      - name: Build event circuit
+        run: scripts/build_circuits.sh proof_circuits/events
 
       - name: Build verifier test circuits
         run: scripts/build_circuits.sh stellar/contracts/verifier/tests --prove

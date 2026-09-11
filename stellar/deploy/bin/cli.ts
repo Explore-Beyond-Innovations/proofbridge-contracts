@@ -8,7 +8,7 @@
 //
 // Reads the `stellar` CLI environment:
 //   STELLAR_NETWORK (default: testnet), STELLAR_SOURCE_ACCOUNT (default: admin)
-// Optional: STELLAR_WASM_DIR, STELLAR_DEPOSIT_VK, STELLAR_DEPLOYMENTS_DIR,
+// Optional: STELLAR_WASM_DIR, STELLAR_EVENT_VK, STELLAR_DEPLOYMENTS_DIR,
 //           DEPLOY_ENV, GIT_COMMIT, CHAIN_NAME.
 
 import { deployCore } from "../src/deploy-core.js";

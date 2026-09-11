@@ -130,6 +130,37 @@ pub fn build_public_inputs(
     inputs
 }
 
+/// What an MMR leaf records, and the proof's last public input. ORDER/AD are deposits (the side
+/// the leaf is unlocked on) and prove the trade secret; the rest are event claims and prove none.
+/// Always a contract constant, never an argument. Mirrors `Side` in proofbridge-mmr.
+pub const LEAF_DOMAIN_ORDER: u32 = 0;
+pub const LEAF_DOMAIN_AD: u32 = 1;
+pub const LEAF_DOMAIN_CANCEL: u32 = 2;
+pub const LEAF_DOMAIN_SETTLED: u32 = 3;
+pub const LEAF_DOMAIN_REGISTERED: u32 = 4;
+
+/// Public inputs for an event claim: `[0, subject % p, target_root, domain]` (128 bytes). No secret,
+/// so the nullifier is zero; `domain` is a `LEAF_DOMAIN_*` event constant fixed by the caller.
+pub fn build_event_public_inputs(
+    env: &Env,
+    merkle_manager: &Address,
+    target_root: &BytesN<32>,
+    subject: &BytesN<32>,
+    domain: u32,
+) -> Bytes {
+    let subject_mod = get_field_mod(env, merkle_manager, subject);
+
+    let mut domain_word = [0u8; 32];
+    domain_word[28..].copy_from_slice(&domain.to_be_bytes());
+
+    let mut inputs = Bytes::new(env);
+    inputs.append(&Bytes::from_slice(env, &[0u8; 32]));
+    inputs.append(&Bytes::from_slice(env, &subject_mod.to_array()));
+    inputs.append(&Bytes::from_slice(env, &target_root.to_array()));
+    inputs.append(&Bytes::from_slice(env, &domain_word));
+    inputs
+}
+
 // =============================================================================
 // RootVerifier Helpers
 // =============================================================================

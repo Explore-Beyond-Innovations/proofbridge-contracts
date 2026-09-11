@@ -38,4 +38,23 @@ library RequestAuth {
         inputs[2] = targetRoot;
         inputs[3] = bytes32(sideFlag);
     }
+
+    /**
+     * @notice Assemble the public inputs for an event claim: no secret, so the nullifier is zero.
+     * @param merkleManager MerkleManager used to field-mod the subject.
+     * @param targetRoot Source-chain merkle root the claim is proven against.
+     * @param subject The leaf's subject (the order hash for cancel / settled).
+     * @param domain A `LeafDomain` event constant (>= 2), fixed by the caller, never calldata.
+     * @return inputs `[0, subject % p, targetRoot, domain]`.
+     */
+    function buildEventInputs(IMerkleManager merkleManager, bytes32 targetRoot, bytes32 subject, uint256 domain)
+        internal
+        view
+        returns (bytes32[] memory inputs)
+    {
+        inputs = new bytes32[](4);
+        inputs[1] = merkleManager.fieldMod(subject);
+        inputs[2] = targetRoot;
+        inputs[3] = bytes32(domain);
+    }
 }

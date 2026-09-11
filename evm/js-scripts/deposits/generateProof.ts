@@ -9,7 +9,7 @@ import { leanInputs } from "proofbridge-mmr";
 
 const circuitPath = path.resolve(
   __dirname,
-  "../../../../proof_circuits/deposits/target/deposit_circuit.json"
+  "../../../../proof_circuits/events/target/event_circuit.json"
 );
 
 const circuit = JSON.parse(fs.readFileSync(circuitPath, "utf8"));
@@ -40,7 +40,7 @@ export default async function generateProof(): Promise<string> {
       nullifier_hash: nullifierHash,
       order_hash: modOrderHash(orderHash).toString(),
       target_root: merkleProof.root,
-      ad_contract: isAdContract,
+      leaf_domain: isAdContract ? "1" : "0",
       secret: secret,
       ...leanInputs(merkleProof),
     };
