@@ -1,0 +1,191 @@
+{
+  "_meta": {
+    "spec": "issue #355 / 2.5b — T2 leaf-domain + forged-extension parity (T-42; consumed by 2.3d/2.3f/2.1b tests)",
+    "generator": "scripts/bls-vectors/src/gen-t2-mmr.ts",
+    "leafEncoding": "leaf = poseidon2(field_mod(orderHash), domain); the tree node is poseidon2(leafIndex, leaf); root = hash_3(DOMAIN_TAG, size, fold(peaks)) — proofbridge-mmr is the single source",
+    "domains": {
+      "ORDER": 0,
+      "AD": 1,
+      "CANCEL": 2,
+      "SETTLED": 3,
+      "REGISTERED": 4
+    },
+    "domainMeaning": "the domain names the side/kind the leaf is CONSUMED on: 0 order-side unlock, 1 ad-side unlock, 2 cancel, 3 settled, 4 registered (2.1b, inner digest pinned there)",
+    "source": "leaf digests derive from order-hash-v2.json; regenerate that first"
+  },
+  "leafVectors": [
+    {
+      "name": "canonical-equal",
+      "orderHash": "0xa4051971fa4ca8e6761659de7f41ac804d32c302d0b009109cc085dc28529d2b",
+      "leaves": {
+        "ORDER": "0x26c5977be2738173f71d28acdbb0114e3a095ca759e1349421cc601c3a64b59f",
+        "AD": "0x2f0f71f6f18ed3b47c30503a10b98b08309e57d63c3a6ba4e6f813cdb0ec3b7e",
+        "CANCEL": "0x1e71cae68f4a80644016d35349172685954a59235d1f62998faa5f81f07f6b7b",
+        "SETTLED": "0x1abd5552c0e5928c318bfa439a001453fa1e68bf1b59a21774b89f54aad14e8f",
+        "REGISTERED": "0x014f6e268923b9fa6ecb14e770fa21349c45616e9eb6eb46c4b173a6b41f7279"
+      }
+    },
+    {
+      "name": "split-case-evm-signer",
+      "orderHash": "0x07b83c34816804b636866e9f28ffc10ba0428df1fb462b2068192de6289002c8",
+      "leaves": {
+        "ORDER": "0x17c66a1d7a5e1173c1567f08c14bda4420272cd0c51cf47e6bdaba40f9d72552",
+        "AD": "0x2b657fe8c542a2d63ed51e6d3b40e97b425d1cbbdeae5602f167d72940557d28",
+        "CANCEL": "0x1d67d8912dbc0c1f7c85f9fc577dac29e4187ee296b201ff718d974b5854abf2",
+        "SETTLED": "0x02de3c0cf0424f618d2638990d7973d8a00ab38665b47340deb8e7bfac3020a2",
+        "REGISTERED": "0x108d8e469069bae393ba3d91f872856db5b799ddcf8c614d8be821c93f44fcc8"
+      }
+    },
+    {
+      "name": "split-case-chain32-signer",
+      "orderHash": "0xebccfb190106dbb7be63866b98b70e8000360c4e9a9185a54d243470515ca136",
+      "leaves": {
+        "ORDER": "0x1a7e02fbb917ed363bf9f43d12a9df0340126c7d69b2359dffa78ef4853f3a7a",
+        "AD": "0x00069d40021711577eccb87baa985c2b5886524bb380b387cdda0c7224a2f09d",
+        "CANCEL": "0x135cebc01b4b11519b9bf6f7e172d468ebc724519657f366a2e034ff1d683164",
+        "SETTLED": "0x2a3918631516658c0f96d013ebfb7e67960806f9c794ed7416645ca424b3057e",
+        "REGISTERED": "0x2f46662fd4926ea19c43ea48f5ba60b54f3030c997fd9f6c7dd384ae7250e2db"
+      }
+    },
+    {
+      "name": "full-width-salt",
+      "orderHash": "0x1a7dd3528ede642a7edffef3e994572dff45458b394a22734fedcfff84ce1a32",
+      "leaves": {
+        "ORDER": "0x05e46e476ac6cceaa568a8d30044f7b0615ed2f78b1d7c6d439010c465409053",
+        "AD": "0x2317a0fe9ed16601abd1ccc3bf2b09c58b89012ce30692b3da3f680efe9a602d",
+        "CANCEL": "0x2ad7c59a4b918f551f09fd6c6ba26faa440b9b33f43f133f8d1086cf42017422",
+        "SETTLED": "0x170357001234294aeb49bf238fb4af1cc6e7fe7b70b369cc2eaa6202925b6f08",
+        "REGISTERED": "0x243fe605722d6494716adfb3b0e1f921f05800ee3306f6ceb75b9aceacf4b061"
+      }
+    },
+    {
+      "name": "full-width-signer",
+      "orderHash": "0x2b72054e06504952c930f94ca703e454003a4f5b2a87d3d9a22ef659c859a8d6",
+      "leaves": {
+        "ORDER": "0x21de15e5b7481231cbfefe978f61989e0e5694577cc90d74a129deef73cb2ee6",
+        "AD": "0x13abb5d3b5f691a837436735b713aa7d4f17eb275921c5e242897f11c8cd7dac",
+        "CANCEL": "0x17f38c82616f47aaa3604c78a165211c006c5d1ab31473bbf6ded99c1bb53765",
+        "SETTLED": "0x1f786b0ed0fdf7b16ca461690029fd5884de9ec0f0511d77f6ee8f407ad222ca",
+        "REGISTERED": "0x2f9d1343dbe2be3a87304c3fa2750b95495f6c6f03dbb71e66c9bc7e27c287f9"
+      }
+    },
+    {
+      "name": "deadline-zero",
+      "orderHash": "0xdaee0ed5b0080913debcbab068f3227cc8fdffd41943144c9b29928f1c75aac2",
+      "leaves": {
+        "ORDER": "0x1e2c4f317f046d9bee0c59de3c7fc130cc40ba9785a63390ee962e8dc7ed2527",
+        "AD": "0x0f1f111c3e0234fac8c805303f0e9f66913543028997f360670052b977226a60",
+        "CANCEL": "0x2b9774b79ede2be9483e483a7ab1926781635a5b07400a5ce3b794863a9abf00",
+        "SETTLED": "0x21f3d8437a165ba41ba807242e56cd7d6d3b5a6247b59f51ba8c17e9d050bae7",
+        "REGISTERED": "0x28b1d590846b05b541ac45fec6e988cf2b7327efbde96f945daa1c98bdee813e"
+      }
+    },
+    {
+      "name": "deadline-max-u64",
+      "orderHash": "0x8766c6039f3659f1392029bef173b5eb314ba9150d8a4abd0d2e2307f612226f",
+      "leaves": {
+        "ORDER": "0x1ecd82babecb32c4774faed4b1fa956e468c937c4a6e4995c0680c3fe78b1a41",
+        "AD": "0x2f605e91a0c3f43f027784e2ac3e0b62370dbfcae90557393dcf0d48483f2368",
+        "CANCEL": "0x1736f038bdf07ae5165114f0f0cd5ee927ad10e2c1e6e94d7c1c87988fe0664d",
+        "SETTLED": "0x2679adeb3460c2ce4dda5a1f5e09d9f45306b794765086d822169de3efd8324c",
+        "REGISTERED": "0x2bb303ee00de46316d7366b74b528a43dc9d76745169158587ff7b3c2a18c52d"
+      }
+    },
+    {
+      "name": "empty-ad-id",
+      "orderHash": "0xbf5fcd77ea2c9fcd9743ff3229789ac0385bac1c563a8fd0a5cc187590bdfa75",
+      "leaves": {
+        "ORDER": "0x18d47e6eb5673d0829bd3e9ef70bbbc876408d43d03a3788817fabd1ca20cb5e",
+        "AD": "0x082973fe1c4d62329cb17a95b577b2c64e56bfb02d2e5376cd8f1fb25a8cfe32",
+        "CANCEL": "0x148568a62bc84813a855d9eb3135fc1972eec348bce54345b99675d2ba78701e",
+        "SETTLED": "0x2e24aab351a10d3518878ae43953829451851113a3bfaa398d706728a31798cf",
+        "REGISTERED": "0x0fc739012871e40b6f7e2a3d8b75b6eb6a6fa9a38b207a1439c67261bcff1d82"
+      }
+    },
+    {
+      "name": "non-ascii-ad-id",
+      "orderHash": "0x0eda2f1c570aaf55708ec18ee07af9bfe595f4b99145bc97b29f8218c50acf97",
+      "leaves": {
+        "ORDER": "0x098e295595e70e870703504e3bfe9133f8bb95c13cbb9ca1baee7184eb5059d7",
+        "AD": "0x1d2e26f5e95a7a3223c35ee916b8d32bf51d65ecd45584ab114a492bdbaf3543",
+        "CANCEL": "0x2978646f59de6d160268e454ef112c6eeab88c23f2a2275961167d33b9a22474",
+        "SETTLED": "0x2fffa8b46b3cc9fcf89deac029bfc499fe2c75df28646f41cad66f9d32f90617",
+        "REGISTERED": "0x29a92c61dee90cb84f89d46632591dd8c82105352ced34c62a402574ae725341"
+      }
+    },
+    {
+      "name": "boundary-max",
+      "orderHash": "0xf588b487d4f7289d9140d7091ce64ab71fa11e76ae64132753c4f28803fe8fb0",
+      "leaves": {
+        "ORDER": "0x08888281277a660817271f13d6c80a007ab6fd304c8aa5ae56de30e0650c8299",
+        "AD": "0x04f0b4a9ed11cb7b63c3250ec29c2377f2a41a1db54b8d9ceb0939f4a3a884f9",
+        "CANCEL": "0x0cb7835e2f9e9ce569803a9018efd9551db3c59b5c59033cceb5c7c3a94ac14f",
+        "SETTLED": "0x11712867308a75b67968b1d5c1f3e9085ff9e2e410b2d62a1c63f3c7638e848e",
+        "REGISTERED": "0x299944c697774c76468c7b29eb55fa14ce75a748e5a92606a24fe042e2181c06"
+      }
+    },
+    {
+      "name": "boundary-min",
+      "orderHash": "0x0a17f80835db7a0da9b6493d6ee26138c39f3389ed49e337905f837f80a74359",
+      "leaves": {
+        "ORDER": "0x00b68859266939d54e073ba18018bc01accddaae223bf894bc58d291780e5e52",
+        "AD": "0x148a69013c5264ddcb128bef0675373f78ae83807bf0dd6eb1f5cbaeb278d12f",
+        "CANCEL": "0x2441a5bbbcfc81fe50fce358290982d46278ed70b2be8f228a400555753a13fe",
+        "SETTLED": "0x041333ab0996edb10bdbab2f14c9c510fcf07618242894654219013d50bec332",
+        "REGISTERED": "0x2ea17885710f63157dc1c38f45420a1de8f713875cdbaa454e22b93e1a2106b7"
+      }
+    }
+  ],
+  "forgedExtension": {
+    "history": [
+      {
+        "orderHash": "0xa4051971fa4ca8e6761659de7f41ac804d32c302d0b009109cc085dc28529d2b",
+        "domain": "ORDER",
+        "leaf": "0x26c5977be2738173f71d28acdbb0114e3a095ca759e1349421cc601c3a64b59f",
+        "rootAfter": "0x08daf42e81d10a0fc62835ef0dc61429e71dbd12eb1eb9fd4fc5481b667a12f9",
+        "width": 1
+      },
+      {
+        "orderHash": "0x07b83c34816804b636866e9f28ffc10ba0428df1fb462b2068192de6289002c8",
+        "domain": "AD",
+        "leaf": "0x2b657fe8c542a2d63ed51e6d3b40e97b425d1cbbdeae5602f167d72940557d28",
+        "rootAfter": "0x093030f9a4023d28c7b0c5f308460f6970562e21d9ccce94e29a0b77796ee153",
+        "width": 2
+      },
+      {
+        "orderHash": "0xebccfb190106dbb7be63866b98b70e8000360c4e9a9185a54d243470515ca136",
+        "domain": "SETTLED",
+        "leaf": "0x2a3918631516658c0f96d013ebfb7e67960806f9c794ed7416645ca424b3057e",
+        "rootAfter": "0x1ac2df6c43d7737ac2b191efd04b9e90e4898baece53e8519cbbd2f10bac069c",
+        "width": 3
+      },
+      {
+        "orderHash": "0x1a7dd3528ede642a7edffef3e994572dff45458b394a22734fedcfff84ce1a32",
+        "domain": "CANCEL",
+        "leaf": "0x2ad7c59a4b918f551f09fd6c6ba26faa440b9b33f43f133f8d1086cf42017422",
+        "rootAfter": "0x1ef052b510c57fe54bc52dcfc6f6963fb926d722be24d1402add76bf50f68fbc",
+        "width": 4
+      }
+    ],
+    "honestRoots": [
+      "0x08daf42e81d10a0fc62835ef0dc61429e71dbd12eb1eb9fd4fc5481b667a12f9",
+      "0x093030f9a4023d28c7b0c5f308460f6970562e21d9ccce94e29a0b77796ee153",
+      "0x1ac2df6c43d7737ac2b191efd04b9e90e4898baece53e8519cbbd2f10bac069c",
+      "0x1ef052b510c57fe54bc52dcfc6f6963fb926d722be24d1402add76bf50f68fbc"
+    ],
+    "forged": {
+      "orderHash": "0x0a17f80835db7a0da9b6493d6ee26138c39f3389ed49e337905f837f80a74359",
+      "domain": "CANCEL",
+      "leaf": "0x2441a5bbbcfc81fe50fce358290982d46278ed70b2be8f228a400555753a13fe",
+      "elementIndex": 8,
+      "width": 5,
+      "root": "0x2c9b32e8561dbb46567e165bebd121b54b7e2fa6057a8b90e01f547b9d17565d",
+      "peaks": [
+        "0x12b333bf91b4609e2d89bd5d974d9c90d6c8e7d3b6ea89a2c63efbbde77ea48e",
+        "0x304552efb8c96b306bef052c28b12f2435012e1726de277c8adc629eaf930e43"
+      ],
+      "siblings": []
+    },
+    "assertion": "verify(forged.root, forged.width, forged.elementIndex, forged.leaf, forged.peaks, forged.siblings) MUST return true — the proof math cannot reject a forged extension. The defense is isAnchored: forged.root must fail it (never anchored), every honestRoots entry passes once anchored, and an anchor is usable only after ANCHOR_DELAY (T-63)."
+  }
+}
