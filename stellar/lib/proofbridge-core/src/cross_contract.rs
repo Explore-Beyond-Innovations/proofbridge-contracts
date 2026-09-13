@@ -36,6 +36,14 @@ pub trait RootVerifierInterface {
     fn is_root_valid(env: Env, source_chain_id: u128, root: BytesN<32>, metadata: Bytes) -> bool;
 }
 
+/// The authenticator for unilateral-event proofs (2.3f): is this root of the source chain
+/// notarized and past its delay? Consumers never learn who signs.
+#[allow(dead_code)]
+#[contractclient(name = "RootAnchorClient")]
+pub trait RootAnchorInterface {
+    fn is_anchored(env: Env, source_chain_id: u128, root: BytesN<32>) -> bool;
+}
+
 // =============================================================================
 // MerkleManager Helpers
 // =============================================================================
@@ -180,4 +188,13 @@ pub fn is_root_valid(
     metadata.extend_from_slice(&bridger.to_array());
     metadata.append(cosig_data);
     RootVerifierClient::new(env, module).is_root_valid(&source_chain_id, root, &metadata)
+}
+
+// =============================================================================
+// RootAnchor Helpers
+// =============================================================================
+
+/// True iff the anchor module has notarized `root` for `source_chain_id` and its delay has passed.
+pub fn is_anchored(env: &Env, anchor: &Address, source_chain_id: u128, root: &BytesN<32>) -> bool {
+    RootAnchorClient::new(env, anchor).is_anchored(&source_chain_id, root)
 }

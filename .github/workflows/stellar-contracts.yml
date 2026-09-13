@@ -98,6 +98,7 @@ jobs:
           stellar contract build --optimize --package counterparty-verifier
           stellar contract build --optimize --package agent-account
           stellar contract build --optimize --package bls-key-registry
+          stellar contract build --optimize --package root-anchor
         working-directory: stellar
 
       - name: Build event circuit
