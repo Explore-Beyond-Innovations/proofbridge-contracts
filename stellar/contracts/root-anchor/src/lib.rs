@@ -157,10 +157,11 @@ impl RootAnchor {
 
         let mut rec = storage::get_anchor(&env, source_chain_id, &root).unwrap_or(AnchorRec {
             ledger_seq: 0,
+            anchored: false,
             anchored_at: 0,
             approvals: 0,
         });
-        if rec.anchored_at != 0 {
+        if rec.anchored {
             return Ok(());
         }
 
@@ -188,6 +189,7 @@ impl RootAnchor {
         .publish(&env);
 
         if rec.approvals >= storage::get_threshold(&env) {
+            rec.anchored = true;
             rec.anchored_at = env.ledger().timestamp();
             if ledger_seq > latest {
                 storage::set_latest_seq(&env, source_chain_id, ledger_seq);
@@ -213,7 +215,7 @@ impl RootAnchor {
     /// The whole consumer surface. Deliberately not gated by pause (D4).
     pub fn is_anchored(env: Env, source_chain_id: u128, root: BytesN<32>) -> bool {
         match storage::get_anchor(&env, source_chain_id, &root) {
-            Some(rec) if rec.anchored_at != 0 => {
+            Some(rec) if rec.anchored => {
                 env.ledger().timestamp()
                     >= rec.anchored_at + storage::get_delay(&env, source_chain_id)
             }
