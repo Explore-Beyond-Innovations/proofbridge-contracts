@@ -31,4 +31,10 @@ pub enum RegistryError {
     KeyPreviouslyUsed = 14,
     /// set_valid_until is shorten-only and never 0.
     BadValidUntil = 15,
+    /// 2.1b: proof-carried registration is not wired or not enabled
+    ProofRegistrationDisabled = 16,
+    /// The home-chain root the leaf proof cites is not anchored (or still inside its delay)
+    RootNotAnchored = 17,
+    /// The leaf inclusion proof did not verify for the rebuilt registration subject
+    InvalidLeafProof = 18,
 }

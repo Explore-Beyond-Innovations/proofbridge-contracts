@@ -442,6 +442,47 @@ async function main() {
     eventRoots[domain] = tree.root;
   }
 
+  // ----- 2.1b: a registration leaf (domain 4) for the vector maker's account + key -----
+  // Subject = keccak256(account32 ‖ keccak256(pkNative) ‖ epoch_be8), epoch 0, so the
+  // vectors' nonce-0 proof of possession doubles as the epoch-0 one on both chains.
+  console.log("Generating registration claim (domain 4)...");
+  const blsVectors = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, "../../../test-vectors/bls-encodings.json"), "utf8")
+  );
+  const regVec = blsVectors.registration.makerOnStellarTestnet;
+  const regAccount = hexToBytes32(regVec.account);
+  const regPk = Buffer.from(regVec.pkNative.replace(/^0x/i, ""), "hex");
+  const regCommitment = keccak256(regPk);
+  const regEpoch = Buffer.alloc(8, 0);
+  const regSubject =
+    "0x" + keccak256(Buffer.concat([regAccount, regCommitment, regEpoch])).toString("hex");
+  const regSubjectMod = modOrderHash(regSubject);
+  const regTree = await buildSideTree(regSubjectMod.toString(), 4);
+  {
+    const { witness } = await noir.execute({
+      nullifier_hash: "0",
+      order_hash: regSubjectMod.toString(),
+      target_root: regTree.root,
+      leaf_domain: "4",
+      secret: "0",
+      ...leanInputs(regTree.merkleProof),
+    });
+    const claim = await honk.generateProof(witness, { keccak: true });
+    fs.writeFileSync(path.join(OUTPUT_DIR, "registration_claim.bin"), Buffer.from(claim.proof));
+    fs.writeFileSync(
+      path.join(OUTPUT_DIR, "public_inputs_registration.bin"),
+      buildPublicInputs("0x0", regSubjectMod.toString(), regTree.root, 4)
+    );
+  }
+  const registration = {
+    account: regVec.account,
+    blsCommitment: "0x" + regCommitment.toString("hex"),
+    epoch: "0",
+    subject: regSubject,
+    subjectMod: regSubjectMod.toString(),
+    root: regTree.root,
+  };
+
   // Write test params (Stellar strkey addresses for display, used by Rust tests)
   const testParams = {
     secret: secretHex,
@@ -450,6 +491,7 @@ async function main() {
     adRoot,
     orderRoot,
     eventRoots,
+    registration,
     bridgerNullifier: bridgerNullifier.toString(),
     adCreatorNullifier: adCreatorNullifier.toString(),
     elementIndex: adTree.elementIndex,

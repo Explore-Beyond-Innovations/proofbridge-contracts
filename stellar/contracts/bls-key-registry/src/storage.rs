@@ -19,6 +19,27 @@ const KEY_SLOT: Symbol = symbol_short!("slot");
 const KEY_NONCE: Symbol = symbol_short!("nonce");
 /// (KEY_USED, account, commitment) -> bool; a commitment never re-enters a slot.
 const KEY_USED: Symbol = symbol_short!("used");
+/// 2.1b proof-carried registration wiring (instance); absent = disabled.
+const KEY_PROOFREG: Symbol = symbol_short!("proofreg");
+
+/// The references `register_by_proof` needs and the flag that ships off (design 03 §3.6).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProofRegistration {
+    pub anchor: Address,
+    pub verifier: Address,
+    /// Only for `field_mod`; the leaf itself lives in the other chain's MMR.
+    pub merkle_manager: Address,
+    pub enabled: bool,
+}
+
+pub fn get_proof_registration(env: &Env) -> Option<ProofRegistration> {
+    env.storage().instance().get(&KEY_PROOFREG)
+}
+
+pub fn set_proof_registration(env: &Env, cfg: &ProofRegistration) {
+    env.storage().instance().set(&KEY_PROOFREG, cfg);
+}
 
 /// Every write (and every use-time read) re-extends the account's records; the
 /// T1 registry never did, and an archived slot would strand settlement.

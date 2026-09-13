@@ -71,3 +71,24 @@ pub struct AdminTransferred {
     pub from: Address,
     pub to: Address,
 }
+
+/// 2.1b: a slot added on a home-chain leaf proof instead of an owner signature.
+#[contractevent(topics = ["key_prf"], data_format = "vec")]
+pub struct KeyRegisteredByProof {
+    #[topic]
+    pub account: BytesN<32>,
+    #[topic]
+    pub slot_id: u32,
+    pub bls_pub_key: BytesN<96>,
+    pub epoch: u64,
+    pub source_chain_id: u128,
+}
+
+/// 2.1b: the proof-registration wiring changed; the flip is configuration, never a redeploy.
+#[contractevent(topics = ["proofreg"], data_format = "vec")]
+pub struct ProofRegistrationSet {
+    pub anchor: Address,
+    pub verifier: Address,
+    pub merkle_manager: Address,
+    pub enabled: bool,
+}
