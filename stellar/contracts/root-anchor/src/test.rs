@@ -115,8 +115,26 @@ fn anchor_is_true_with_zero_delay() {
     assert!(f.client.is_anchored(&CHAIN, &r));
     let rec = f.client.anchor_of(&CHAIN, &r).unwrap();
     assert_eq!(rec.ledger_seq, 10);
+    assert!(rec.anchored);
     assert_eq!(rec.anchored_at, T0);
     assert_eq!(rec.approvals, 1);
+}
+
+#[test]
+fn anchors_at_ledger_timestamp_zero() {
+    // A consumer's test ledger may start at 0; the flag, not the timestamp, says "anchored".
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let s1 = Address::generate(&env);
+    let id = env.register(RootAnchor, ());
+    let client = RootAnchorClient::new(&env, &id);
+    client.initialize(&admin, &vec![&env, s1.clone()], &1);
+
+    let r = root(&env, 0xA1);
+    client.anchor(&s1, &CHAIN, &r, &10);
+    assert!(client.is_anchored(&CHAIN, &r));
+    assert_eq!(client.anchor_of(&CHAIN, &r).unwrap().anchored_at, 0);
 }
 
 #[test]

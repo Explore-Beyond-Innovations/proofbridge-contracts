@@ -33,7 +33,10 @@ const KEY_APPRV: Symbol = symbol_short!("apprv");
 pub struct AnchorRec {
     /// The source-chain ledger the root was read at; fixed by the first approval
     pub ledger_seq: u64,
-    /// When the threshold was reached; 0 while approvals still accumulate
+    /// Whether the threshold has been reached. An explicit flag rather than `anchored_at != 0`:
+    /// a test ledger starts at timestamp 0, and a real one may not be assumed non-zero either.
+    pub anchored: bool,
+    /// The ledger timestamp when the threshold was reached; the delay counts from here
     pub anchored_at: u64,
     /// Distinct signers who approved this (chain, root, ledger_seq)
     pub approvals: u32,
