@@ -988,6 +988,14 @@ fn escrow_fixture() -> Escrow {
     am.set_token_route(&ad_token, &order_token, &order_chain_id);
 
     test_token::TokenContractClient::new(&env, &token).mint(&account, &10_000_000_i128);
+
+    // 2.3c: the ad declares its settlement signer (here the account itself, matching the lock
+    // params below) and the escrow requires it registered — a mock registry marks it so.
+    let signer = address_to_bytes32(&env, &account);
+    let key_registry = env.register(MockKeyRegistry, ());
+    MockKeyRegistryClient::new(&env, &key_registry).set(&signer, &true);
+    am.set_key_registry(&key_registry);
+
     let ad_id = String::from_str(&env, "ad-1");
     am.create_ad(
         &account,
@@ -996,6 +1004,7 @@ fn escrow_fixture() -> Escrow {
         &5_000_000_u128,
         &order_chain_id,
         &b32(&env, 0xCC),
+        &signer,
     );
 
     let agent = Agent::new(7);
@@ -1326,4 +1335,25 @@ fn e2e_credential_type_and_preimage_must_match() {
     );
     assert!(r.is_err());
     assert_eq!(liquidity(&e), 5_000_000);
+}
+
+/// Stands in for bls-key-registry.has_usable_slot for the escrow fixture (2.3c): an account is
+/// registered iff a test marked it so.
+#[soroban_sdk::contract]
+pub struct MockKeyRegistry;
+
+#[soroban_sdk::contractimpl]
+impl MockKeyRegistry {
+    pub fn set(env: Env, account: BytesN<32>, ok: bool) {
+        env.storage()
+            .instance()
+            .set(&(soroban_sdk::symbol_short!("usable"), account), &ok);
+    }
+
+    pub fn has_usable_slot(env: Env, account: BytesN<32>) -> bool {
+        env.storage()
+            .instance()
+            .get(&(soroban_sdk::symbol_short!("usable"), account))
+            .unwrap_or(false)
+    }
 }
