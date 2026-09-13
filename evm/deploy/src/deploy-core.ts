@@ -247,6 +247,27 @@ export async function deployCore(
     }
   }
 
+  // ── point the AdManager at the registry (2.3c) ────────────────────
+  // createAd / setSettlementSigner fail closed until this is set: an ad's
+  // settlement signer must hold a live, unexpired key.
+  {
+    const adManager = attachContract(adManagerAddr, "AdManager", "AdManager", signer);
+    const cur: string = await adManager.getFunction("keyRegistry")();
+    if (cur.toLowerCase() === blsKeyRegistryAddr.toLowerCase()) {
+      console.log(`  [skip] AdManager.setKeyRegistry already set`);
+    } else {
+      try {
+        const tx = await adManager.getFunction("setKeyRegistry")(blsKeyRegistryAddr, {
+          nonce: nonces.next(),
+        });
+        await tx.wait();
+        console.log(`  [wire] AdManager.setKeyRegistry(${blsKeyRegistryAddr})`);
+      } catch (err) {
+        console.warn(`  [wire] setKeyRegistry FAILED (signer may not be AdManager admin): ${err}`);
+      }
+    }
+  }
+
   // ── grant MANAGER_ROLE to AdManager + OrderPortal ─────────────────
   // Re-granted every run (idempotent); caught in case admin is a multisig that'll grant out of band.
   const merkleManager = attachContract(

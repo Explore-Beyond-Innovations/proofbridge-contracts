@@ -15,6 +15,7 @@ import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {AddressCast} from "./libraries/AddressCast.sol";
 import {RootVerifierRegistry} from "./libraries/RootVerifierRegistry.sol";
 import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
+import {IKeyRegistry} from "./interfaces/IKeyRegistry.sol";
 
 /**
  * @title AdManager (Proofbridge)
@@ -65,6 +66,9 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
      * @param balance Total token balance deposited into the ad.
      * @param locked Portion of {balance} currently reserved for open orders.
      * @param open Whether the ad is accepting new locks/funding.
+     * @param orderChainToken Order-chain token this ad committed to at creation.
+     * @param settlementSigner The account whose settlement key co-signs for the maker; every lock's
+     *        `params.adSettlementSigner` must equal it (2.3c). Re-pointable by the maker at any time.
      */
     struct Ad {
         uint256 orderChainId;
@@ -75,6 +79,7 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         uint256 locked;
         bool open;
         bytes32 orderChainToken;
+        bytes32 settlementSigner;
     }
 
     /**
@@ -121,6 +126,10 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
 
     /// @notice Wrapped native token
     IwNativeToken public wNativeToken;
+
+    /// @notice The BLS key registry consulted whenever an ad's settlement signer is set (2.3c D2).
+    ///         Admin-set; unset means `createAd` and `setSettlementSigner` fail closed.
+    IKeyRegistry public keyRegistry;
 
     /// @notice Source-chain configs.
     mapping(uint256 => ChainInfo) public chains;
@@ -169,8 +178,23 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
      * @notice Emitted when an ad is created.
      */
     event AdCreated(
-        string indexed adId, address indexed maker, address indexed token, uint256 initAmount, uint256 orderChainId
+        string indexed adId,
+        address indexed maker,
+        address indexed token,
+        uint256 initAmount,
+        uint256 orderChainId,
+        bytes32 settlementSigner
     );
+
+    /**
+     * @notice Emitted when the key registry the escrow consults is set.
+     */
+    event KeyRegistrySet(address indexed registry);
+
+    /**
+     * @notice Emitted when a maker re-points an ad's settlement signer (the third kill lever).
+     */
+    event SettlementSignerSet(string indexed adId, bytes32 previous, bytes32 next);
 
     /**
      * @notice Emitted when an ad is funded.
@@ -250,6 +274,10 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
 
     error AdManager__MerkleManagerAppendFailed();
     error AdManager__UsedAdId();
+    error AdManager__NoKeyRegistry();
+    error AdManager__SettlementSignerZero();
+    error AdManager__SignerNotRegistered(bytes32 signer);
+    error AdManager__SettlementSignerMismatch(bytes32 expected, bytes32 provided);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -310,6 +338,15 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         _setRootVerifier(chainId, verifier);
     }
 
+    /**
+     * @notice Set the key registry consulted when an ad's settlement signer is set.
+     */
+    function setKeyRegistry(IKeyRegistry registry) external onlyRole(ADMIN_ROLE) {
+        if (address(registry) == address(0)) revert AdManager__ZeroAddress();
+        keyRegistry = registry;
+        emit KeyRegistrySet(address(registry));
+    }
+
     /*//////////////////////////////////////////////////////////////
                           ADMIN: TOKEN ROUTES
     //////////////////////////////////////////////////////////////*/
@@ -345,11 +382,13 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         address adToken,
         uint256 initialAmount,
         uint256 orderChainId,
-        bytes32 adRecipient
+        bytes32 adRecipient,
+        bytes32 settlementSigner
     ) external payable nonReentrant whenNotPaused {
         if (adToken == address(0)) revert AdManager__TokenZeroAddress();
         if (adRecipient == bytes32(0)) revert AdManager__RecipientZero();
         if (initialAmount == 0) revert AdManager__ZeroAmount();
+        _requireRegistered(settlementSigner);
 
         bytes32 routedOrderToken = tokenRoute[adToken][orderChainId];
 
@@ -374,11 +413,24 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
             balance: initialAmount,
             locked: 0,
             open: true,
-            orderChainToken: routedOrderToken
+            orderChainToken: routedOrderToken,
+            settlementSigner: settlementSigner
         });
 
         adIds[adId] = true;
-        emit AdCreated(adId, msg.sender, adToken, initialAmount, orderChainId);
+        emit AdCreated(adId, msg.sender, adToken, initialAmount, orderChainId, settlementSigner);
+    }
+
+    /**
+     * @notice Re-point an ad's settlement signer. Custody-authorized, callable at any time —
+     *         including with locks in flight: an open order settles against the signer frozen in
+     *         its own hash, never against this field (design 01 §1.5).
+     */
+    function setSettlementSigner(string memory adId, bytes32 identity) external nonReentrant whenNotPaused {
+        Ad storage ad = __getAdOwned(adId, msg.sender);
+        _requireRegistered(identity);
+        emit SettlementSignerSet(adId, ad.settlementSigner, identity);
+        ad.settlementSigner = identity;
     }
 
     /**
@@ -465,8 +517,10 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
 
         ad.locked += adAmount;
         orders[orderHash] = Status.Open;
+        // 2.3c D1: count only the party this escrow authenticated (the maker). The bridger is
+        // counted by the OrderPortal that authenticated them; a lock naming a stranger must not
+        // move the stranger's counter.
         inFlightOf[params.adCreator]++;
-        inFlightOf[params.bridger]++;
 
         // locks are unlocked on the order side (ad_contract = 0), so bind the leaf with side 0
         if (!i_merkleManager.appendOrderHash(orderHash, 0)) revert AdManager__MerkleManagerAppendFailed();
@@ -509,8 +563,7 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
 
         nullifierUsed[nullifierHash] = true;
         orders[orderHash] = Status.Filled;
-        inFlightOf[params.adCreator]--;
-        inFlightOf[params.bridger]--;
+        inFlightOf[params.adCreator]--; // mirrors lockForOrder (2.3c D1)
 
         // Pay recipient on this chain from the ad's escrowed token.
         // Scale to ad-chain units to match what was reserved in lockForOrder.
@@ -651,6 +704,16 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
     /**
      * @notice Load an ad and assert `maker` is the owner.
      */
+    /**
+     * @dev The registry gate on every settlement-signer set (2.3c D2): fails closed with no
+     *      registry, refuses the zero identity, and refuses an account with no live, unexpired key.
+     */
+    function _requireRegistered(bytes32 signer) private view {
+        if (address(keyRegistry) == address(0)) revert AdManager__NoKeyRegistry();
+        if (signer == bytes32(0)) revert AdManager__SettlementSignerZero();
+        if (!keyRegistry.hasUsableSlot(signer)) revert AdManager__SignerNotRegistered(signer);
+    }
+
     function __getAdOwned(string memory adId, address maker) internal view returns (Ad storage ad) {
         ad = ads[adId];
         if (ad.maker == address(0)) revert AdManager__AdNotFound();
@@ -694,8 +757,13 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         if (routed == bytes32(0)) revert AdManager__MissingRoute(params.orderChainToken, block.chainid);
         if (routed != params.orderChainToken) revert AdManager__OrderTokenMismatch(routed, params.orderChainToken);
 
-        // Identity and token checks.
+        // Identity and token checks. Custody is checked (adCreator == maker) and so is the settlement
+        // identity the ad declared (2.3c): a lock naming any other signer is refused here, not left to
+        // the maker's account policy.
         if (params.adCreator != ad.maker.toBytes32()) revert AdManager__NotMaker();
+        if (params.adSettlementSigner != ad.settlementSigner) {
+            revert AdManager__SettlementSignerMismatch(ad.settlementSigner, params.adSettlementSigner);
+        }
         if (params.adChainToken != ad.token.toBytes32()) {
             revert AdManager__AdTokenMismatch(ad.token.toBytes32(), params.adChainToken);
         }

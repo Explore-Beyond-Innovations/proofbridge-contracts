@@ -109,7 +109,9 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
             _openOrder(lastAdId, address(adToken), 60 ether, 997, bridger, recipient);
 
         assertTrue(adManager.hasOpenPositions(p.adCreator));
-        assertTrue(adManager.hasOpenPositions(p.bridger));
+        // 2.3c D1: the AdManager counts only the maker it authenticated. The bridger is counted by
+        // the OrderPortal that authenticated them (see the portal case below).
+        assertFalse(adManager.hasOpenPositions(p.bridger));
 
         bytes32 targetRoot = bytes32(uint256(3));
         vm.prank(bridger);

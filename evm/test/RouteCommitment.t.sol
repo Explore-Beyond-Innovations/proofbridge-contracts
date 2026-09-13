@@ -25,7 +25,7 @@ contract RouteCommitmentTest is AdManagerTest {
 
     function test_adStoresCommittedRouteAtCreation() public {
         test_fundAd_makerOnly();
-        (,,,,,,, bytes32 committed) = adManager.ads(lastAdId);
+        (,,,,,,, bytes32 committed,) = adManager.ads(lastAdId);
         assertEq(committed, _b32(orderToken), "route not committed");
     }
 
@@ -78,7 +78,7 @@ contract RouteCommitmentTest is AdManagerTest {
         adManager.lockForOrder(rp);
 
         if (shouldSucceed) {
-            (,,,,, uint256 locked,,) = adManager.ads(adId);
+            (,,,,, uint256 locked,,,) = adManager.ads(adId);
             assertGt(locked, 0, "lock did not take");
         }
     }

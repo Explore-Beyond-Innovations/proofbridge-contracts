@@ -4,6 +4,7 @@ pragma solidity ^0.8.34;
 import {Test} from "forge-std/Test.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 import {OrderHash} from "../src/libraries/OrderHash.sol";
+import {AddressCast} from "../src/libraries/AddressCast.sol";
 
 contract WidthHarness {
     function check(uint256 amount, uint256 orderChainId, uint256 adChainId, uint256 deadline) external pure {
@@ -29,6 +30,18 @@ contract OrderHashParityTest is Test {
 
     function test_domainSeparatorMatchesFixture() public view {
         assertEq(OrderHash.domainSeparator(), v.readBytes32("._meta.domainSeparator"));
+    }
+
+    /// T-20 (2.3c D5, risk 01 F15): the settlement signer's wire form inside the hash is the form the
+    /// escrow compares against `Ad.settlementSigner`. The split-case vector carries a padded-EVM
+    /// signer; it must round-trip through the pinned helpers with the top 12 bytes zero. A left/right
+    /// pad drift fails here, and the Soroban suite asserts the same vector through `address_to_bytes32`.
+    function test_settlementSignerEncodingRoundTrips() public view {
+        assertEq(v.readString(".vectors[1].name"), "split-case-evm-signer");
+        bytes32 signer = v.readBytes32(".vectors[1].order.adSettlementSigner");
+        assertEq(uint256(signer) >> 160, 0, "padded-EVM signer must be left-padded");
+        address identity = AddressCast.toAddressChecked(signer);
+        assertEq(AddressCast.toBytes32(identity), signer);
     }
 
     function _uint(string memory key) internal view returns (uint256) {

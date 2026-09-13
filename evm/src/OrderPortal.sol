@@ -303,7 +303,8 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
         if (!i_merkleManager.appendOrderHash(orderHash, 1)) revert OrderPortal__MerkleManagerAppendFailed();
 
         orders[orderHash] = Status.Open;
-        inFlightOf[params.adCreator]++;
+        // 2.3c D1: count only the party this escrow authenticated (the bridger, `msg.sender`). The
+        // maker is counted by the AdManager that authenticated them.
         inFlightOf[params.bridger]++;
 
         emit OrderCreated(
@@ -354,8 +355,7 @@ contract OrderPortal is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVe
 
         nullifierUsed[nullifierHash] = true;
         orders[orderHash] = Status.Filled;
-        inFlightOf[params.adCreator]--;
-        inFlightOf[params.bridger]--;
+        inFlightOf[params.bridger]--; // mirrors createOrder (2.3c D1)
 
         address orderTokenAddr = params.orderChainToken.toAddressChecked();
         address adRecipientAddr = params.adRecipient.toAddressChecked();

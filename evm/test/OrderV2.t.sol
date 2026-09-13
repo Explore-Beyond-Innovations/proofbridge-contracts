@@ -17,6 +17,13 @@ contract AdManagerOrderV2Test is AdManagerTest {
 
     function _lock(bytes32 signer) internal returns (AdManager.OrderParams memory p) {
         test_fundAd_makerOnly();
+        // 2.3c: the ad must declare the signer the order names, so the split case re-points it first —
+        // which also exercises the lever with a live ad.
+        if (signer != _b32(maker)) {
+            keyRegistry.set(signer, true);
+            vm.prank(maker);
+            adManager.setSettlementSigner(lastAdId, signer);
+        }
         p = _defaultParams(lastAdId);
         p.adChainToken = _b32(address(adToken));
         p.amount = 60 ether;

@@ -20,7 +20,7 @@ contract AdManagerPauseTest is AdManagerTest {
 
         vm.prank(maker);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        adManager.createAd("pausedAd", address(adToken), 0, orderChainId, _b32(adRecipient));
+        adManager.createAd("pausedAd", address(adToken), 0, orderChainId, _b32(adRecipient), _b32(maker));
 
         vm.prank(maker);
         vm.expectRevert(Pausable.EnforcedPause.selector);

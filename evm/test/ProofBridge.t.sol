@@ -9,6 +9,7 @@ import {IVerifier} from "src/Verifier.sol";
 import {MerkleManager, IMerkleManager} from "src/MerkleManager.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
+import {MockKeyRegistry} from "./mocks/MockKeyRegistry.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
 import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
 
@@ -148,6 +149,10 @@ contract ProofBridge is Test {
         adManager.setTokenRoute(NATIVE_TOKEN_ADDRESS, _b32(address(orderToken)), orderChainId);
         // Root authenticity is mandatory at unlock: wire a permissive mock.
         adManager.setRootVerifier(orderChainId, address(new MockRootVerifier(true)));
+        // 2.3c: the maker is the settlement signer and must hold a usable key.
+        MockKeyRegistry keyRegistry = new MockKeyRegistry();
+        keyRegistry.set(_b32(maker), true);
+        adManager.setKeyRegistry(keyRegistry);
         vm.stopPrank();
 
         // Setup Ads
@@ -158,7 +163,7 @@ contract ProofBridge is Test {
         // Approve with initial tokens
         adToken.approve(address(adManager), initAmt);
         // Create the ad
-        adManager.createAd(adId, address(adToken), initAmt, orderChainId, _b32(adRecipient));
+        adManager.createAd(adId, address(adToken), initAmt, orderChainId, _b32(adRecipient), _b32(maker));
         // Set last id to the created ad
         adManager.setLastId(adId);
         // Approve the ad with tokens
@@ -170,7 +175,9 @@ contract ProofBridge is Test {
         // Create native ad
         adId = "native-ad";
         vm.deal(maker, initAmt);
-        adManager.createAd{value: initAmt}(adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, _b32(adRecipient));
+        adManager.createAd{value: initAmt}(
+            adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, _b32(adRecipient), _b32(maker)
+        );
 
         vm.stopPrank();
 
