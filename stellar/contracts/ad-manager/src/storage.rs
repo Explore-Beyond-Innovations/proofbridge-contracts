@@ -42,6 +42,8 @@ const KEY_NULLIFIERS: Symbol = symbol_short!("nulls");
 const KEY_AD_IDS: Symbol = symbol_short!("adids");
 /// Prefix for root-verifier modules: (KEY_RVERIF, chain_id) -> Address
 const KEY_RVERIF: Symbol = symbol_short!("rverif");
+/// The key registry consulted when an ad's settlement signer is set (2.3c D2).
+const KEY_KEYREG: Symbol = symbol_short!("keyreg");
 /// Prefix for in-flight order counts: (KEY_INFLT, account) -> u64
 const KEY_INFLT: Symbol = symbol_short!("inflt");
 /// Prefix for unclaimed payouts: (KEY_CLAIM, recipient, token) -> u128
@@ -213,6 +215,14 @@ pub fn set_root_verifier(env: &Env, chain_id: u128, module: &Address) {
 
 pub fn get_root_verifier(env: &Env, chain_id: u128) -> Option<Address> {
     env.storage().persistent().get(&(KEY_RVERIF, chain_id))
+}
+
+pub fn set_key_registry(env: &Env, registry: &Address) {
+    env.storage().instance().set(&KEY_KEYREG, registry);
+}
+
+pub fn get_key_registry(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&KEY_KEYREG)
 }
 
 pub fn get_in_flight(env: &Env, account: &BytesN<32>) -> u64 {

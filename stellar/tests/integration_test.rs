@@ -309,6 +309,10 @@ struct TestSetup<'a> {
     order_portal: order_portal_contract::Client<'a>,
     // Admin
     admin_addr: Address,
+    // The ad's maker: the account the fixture's `ad_creator` encodes (2.3c binds them at lock).
+    maker_addr: Address,
+    // The key registry the ad-manager consults for settlement signers (a mock; one test uses the real one).
+    key_registry: Address,
     // Token addresses (deployed test-token contracts)
     ad_token_addr: Address,
     order_token_addr: Address,
@@ -435,9 +439,18 @@ fn setup_with_verifiers(wire_root_verifiers: bool) -> TestSetup<'static> {
         &bytes32_to_bytesn(&env, &tp.ad_chain_token),
     );
 
-    // Mint tokens to admin via the SAC-convention token
+    // The maker is the account the fixture's `ad_creator` encodes: 2.3c checks
+    // `params.ad_creator == address_to_bytes32(ad.maker)` at lock, so the ad must be
+    // created by that address rather than the random admin.
+    let maker_addr = Address::from_string(&SorobanString::from_str(
+        &env,
+        &stellar_strkey::ed25519::PublicKey(tp.ad_creator).to_string(),
+    ));
+
+    // Mint tokens to admin and maker via the SAC-convention token
     let ad_token_client = TokenContractClient::new(&env, &ad_token_addr);
     ad_token_client.mint(&admin_addr, &(tp.amount as i128 * 10));
+    ad_token_client.mint(&maker_addr, &(tp.amount as i128 * 10));
 
     // Root-verification gate is mandatory: wire a permissive mock by default.
     if wire_root_verifiers {
@@ -447,14 +460,22 @@ fn setup_with_verifiers(wire_root_verifiers: bool) -> TestSetup<'static> {
         order_portal.set_root_verifier(&tp.ad_chain_id, &mock);
     }
 
+    // 2.3c: the settlement signer must hold a usable key. A mock registry marks the fixture's
+    // (split-case) signer registered; `test_t14_real_registry_gates_the_signer` uses the real one.
+    let key_registry = env.register(MockKeyRegistry, ());
+    MockKeyRegistryClient::new(&env, &key_registry)
+        .set(&bytes32_to_bytesn(&env, &tp.ad_settlement_signer), &true);
+    ad_manager.set_key_registry(&key_registry);
+
     // --- Ad-manager: create_ad (creator wallet auth, mocked) ---
     ad_manager.create_ad(
-        &admin_addr,
+        &maker_addr,
         &SorobanString::from_str(&env, &tp.ad_id),
         &bytes32_to_bytesn(&env, &tp.ad_chain_token),
         &tp.amount,
         &tp.order_chain_id,
         &bytes32_to_bytesn(&env, &tp.ad_recipient),
+        &bytes32_to_bytesn(&env, &tp.ad_settlement_signer),
     );
 
     TestSetup {
@@ -463,6 +484,8 @@ fn setup_with_verifiers(wire_root_verifiers: bool) -> TestSetup<'static> {
         ad_manager,
         order_portal,
         admin_addr,
+        maker_addr,
+        key_registry,
         ad_token_addr,
         order_token_addr,
     }
@@ -825,7 +848,9 @@ fn test_gate2_mock_true_unlocks_and_clears_in_flight() {
     s.ad_manager.set_root_verifier(&s.tp.order_chain_id, &mock);
 
     assert!(s.ad_manager.has_open_positions(&params.ad_creator));
-    assert!(s.ad_manager.has_open_positions(&params.bridger));
+    // 2.3c D1: the ad-manager counts only the maker it authenticated; the bridger is counted
+    // by the order-portal that authenticated them.
+    assert!(!s.ad_manager.has_open_positions(&params.bridger));
 
     let empty = Bytes::new(&s.env);
     assert!(ad_unlock(&s, &params, &empty));
@@ -1583,4 +1608,383 @@ fn test_order_portal_unlock_after_deadline_is_rejected() {
     );
     s.env.ledger().set_timestamp(params.deadline);
     assert_eq!(portal_unlock(&s, &params), Ok(()));
+}
+
+// ===========================================================================
+// 2.3c (#340): the escrow binding, the re-pointing lever, and inFlightOf on
+// consenting parties. T-12, T-13, T-14, T-20. Plan: 2.3-build/03-escrow-binding.md.
+// ===========================================================================
+
+/// Stands in for bls-key-registry.has_usable_slot: an account is registered iff a test marked it so.
+#[soroban_sdk::contract]
+pub struct MockKeyRegistry;
+
+#[soroban_sdk::contractimpl]
+impl MockKeyRegistry {
+    pub fn set(env: Env, account: BytesN<32>, ok: bool) {
+        env.storage()
+            .instance()
+            .set(&(soroban_sdk::symbol_short!("usable"), account), &ok);
+    }
+
+    pub fn has_usable_slot(env: Env, account: BytesN<32>) -> bool {
+        env.storage()
+            .instance()
+            .get(&(soroban_sdk::symbol_short!("usable"), account))
+            .unwrap_or(false)
+    }
+}
+
+fn other_account(env: &Env, tag: u8) -> BytesN<32> {
+    BytesN::from_array(env, &[tag; 32])
+}
+
+fn mark_usable(s: &TestSetup, account: &BytesN<32>) {
+    MockKeyRegistryClient::new(&s.env, &s.key_registry).set(account, &true);
+}
+
+fn unlock_fixture_order(s: &TestSetup, params: &ad_manager_contract::OrderParams) {
+    s.ad_manager.unlock(
+        params,
+        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+        &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
+    );
+}
+
+// --- T-12: only the authenticated party is counted --------------------------
+
+#[test]
+fn test_t12_lock_counts_maker_only() {
+    let s = setup();
+    let params = locked_ad_order(&s);
+    assert!(s.ad_manager.has_open_positions(&params.ad_creator));
+    // The bridger is counted by the order-portal that authenticated them, never here.
+    assert!(!s.ad_manager.has_open_positions(&params.bridger));
+}
+
+#[test]
+fn test_t12_lock_naming_third_party_bridger_leaves_their_counter_at_zero() {
+    let s = setup();
+    let mut params = ad_manager_order_params(&s.env, &s.tp);
+    let stranger = other_account(&s.env, 0x33);
+    params.bridger = stranger.clone();
+    s.ad_manager.lock_for_order(&params);
+    assert!(!s.ad_manager.has_open_positions(&stranger));
+    assert!(s.ad_manager.has_open_positions(&params.ad_creator));
+}
+
+// --- T-13: the counter clears on the terminal (unlock, today) ----------------
+
+#[test]
+fn test_t13_lock_then_unlock_clears_maker() {
+    let s = setup();
+    let params = locked_ad_order(&s);
+    unlock_fixture_order(&s, &params);
+    assert!(!s.ad_manager.has_open_positions(&params.ad_creator));
+    assert!(!s.ad_manager.has_open_positions(&params.bridger));
+}
+
+// --- T-14: the createAd gate (D2) -------------------------------------------
+
+#[test]
+fn test_t14_create_ad_zero_signer_errors() {
+    let s = setup();
+    let res = s.ad_manager.try_create_ad(
+        &s.maker_addr,
+        &SorobanString::from_str(&s.env, "zero-signer"),
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token),
+        &s.tp.amount,
+        &s.tp.order_chain_id,
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_recipient),
+        &BytesN::from_array(&s.env, &[0u8; 32]),
+    );
+    assert_eq!(
+        res,
+        Err(Ok(
+            ad_manager_contract::AdManagerError::SettlementSignerZero
+        ))
+    );
+}
+
+#[test]
+fn test_t14_create_ad_unregistered_signer_errors() {
+    let s = setup();
+    let res = s.ad_manager.try_create_ad(
+        &s.maker_addr,
+        &SorobanString::from_str(&s.env, "unregistered"),
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token),
+        &s.tp.amount,
+        &s.tp.order_chain_id,
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_recipient),
+        &other_account(&s.env, 0x44),
+    );
+    assert_eq!(
+        res,
+        Err(Ok(ad_manager_contract::AdManagerError::SignerNotRegistered))
+    );
+}
+
+#[test]
+fn test_t14_create_ad_without_registry_fails_closed() {
+    // A fresh ad-manager with no registry set refuses every createAd.
+    let s = setup();
+    let bare_id = s.env.register(AD_MANAGER_WASM, ());
+    let bare = ad_manager_contract::Client::new(&s.env, &bare_id);
+    let verifier = s
+        .env
+        .register(VERIFIER_WASM, (Bytes::from_slice(&s.env, VK),));
+    let merkle = s.env.register(MERKLE_WASM, ());
+    merkle_contract::Client::new(&s.env, &merkle).initialize(&s.admin_addr);
+    bare.initialize(
+        &s.admin_addr,
+        &verifier,
+        &merkle,
+        &s.ad_token_addr,
+        &s.tp.ad_chain_id,
+    );
+    bare.set_chain(
+        &s.tp.order_chain_id,
+        &bytes32_to_bytesn(&s.env, &s.tp.order_portal_id),
+        &true,
+    );
+    bare.set_token_route(
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_chain_token),
+        &s.tp.order_chain_id,
+    );
+
+    let res = bare.try_create_ad(
+        &s.maker_addr,
+        &SorobanString::from_str(&s.env, "no-registry"),
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token),
+        &s.tp.amount,
+        &s.tp.order_chain_id,
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_recipient),
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_settlement_signer),
+    );
+    assert_eq!(
+        res,
+        Err(Ok(ad_manager_contract::AdManagerError::NoKeyRegistry))
+    );
+}
+
+// --- T-14: set_settlement_signer, the third lever (D3) ----------------------
+
+#[test]
+fn test_t14_set_settlement_signer_with_locks_in_flight_succeeds() {
+    let s = setup();
+    let _params = locked_ad_order(&s);
+    let next = other_account(&s.env, 0x55);
+    mark_usable(&s, &next);
+
+    let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
+    s.ad_manager.set_settlement_signer(&ad_id, &next);
+
+    let ad = s.ad_manager.get_ad(&ad_id).unwrap();
+    assert_eq!(ad.settlement_signer, next);
+}
+
+#[test]
+fn test_t14_set_settlement_signer_unregistered_errors() {
+    let s = setup();
+    let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
+    let res = s
+        .ad_manager
+        .try_set_settlement_signer(&ad_id, &other_account(&s.env, 0x66));
+    assert_eq!(
+        res,
+        Err(Ok(ad_manager_contract::AdManagerError::SignerNotRegistered))
+    );
+}
+
+#[test]
+fn test_t14_locked_order_still_settles_under_old_signer_after_repoint() {
+    let s = setup();
+    let params = locked_ad_order(&s);
+
+    let next = other_account(&s.env, 0x77);
+    mark_usable(&s, &next);
+    s.ad_manager
+        .set_settlement_signer(&SorobanString::from_str(&s.env, &s.tp.ad_id), &next);
+
+    // The order settles against the signer frozen in its hash, never the ad's current field.
+    unlock_fixture_order(&s, &params);
+    assert!(!s.ad_manager.has_open_positions(&params.ad_creator));
+}
+
+// --- T-14: the lock-time equalities (design 01 §1.4; closes risk 01 F14) ------
+
+#[test]
+fn test_t14_lock_with_undeclared_signer_errors() {
+    let s = setup();
+    let mut params = ad_manager_order_params(&s.env, &s.tp);
+    params.ad_settlement_signer = other_account(&s.env, 0x88);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&params),
+        Err(Ok(
+            ad_manager_contract::AdManagerError::SettlementSignerMismatch
+        ))
+    );
+}
+
+#[test]
+fn test_t14_lock_naming_another_maker_errors() {
+    // Before 2.3c Soroban compared `ad_creator` to nothing (F14); now it must be the ad's maker.
+    let s = setup();
+    let mut params = ad_manager_order_params(&s.env, &s.tp);
+    params.ad_creator = other_account(&s.env, 0x99);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&params),
+        Err(Ok(ad_manager_contract::AdManagerError::NotMaker))
+    );
+}
+
+#[test]
+fn test_t14_lock_after_repoint_requires_the_new_signer() {
+    let s = setup();
+    let next = other_account(&s.env, 0xaa);
+    mark_usable(&s, &next);
+    s.ad_manager
+        .set_settlement_signer(&SorobanString::from_str(&s.env, &s.tp.ad_id), &next);
+
+    let mut params = ad_manager_order_params(&s.env, &s.tp);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&params),
+        Err(Ok(
+            ad_manager_contract::AdManagerError::SettlementSignerMismatch
+        ))
+    );
+    params.ad_settlement_signer = next;
+    s.ad_manager.lock_for_order(&params);
+}
+
+// --- T-14 against the real registry: the client shape is right ---------------
+
+#[test]
+fn test_t14_real_registry_gates_the_signer() {
+    let s = setup();
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
+    let hexv =
+        |v: &serde_json::Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
+
+    let regid: [u8; 32] = hexv(&vectors["chains"]["stellarTestnet"]["registryId"])
+        .try_into()
+        .unwrap();
+    let at = Address::from_string(&SorobanString::from_str(
+        &s.env,
+        &stellar_strkey::Contract(regid).to_string(),
+    ));
+    let registry = s.env.register_at(&at, bls_key_registry_contract::WASM, ());
+    let client = bls_key_registry_contract::Client::new(&s.env, &registry);
+    let chain_id: u128 = vectors["chains"]["stellarTestnet"]["chainId"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    client.initialize(&s.admin_addr, &chain_id);
+
+    let r = &vectors["registration"]["makerOnStellarTestnet"];
+    let account = BytesN::from_array(&s.env, &hexv(&r["account"]).try_into().unwrap());
+    let wallet_pk: [u8; 32] = hexv(&vectors["keys"]["makerWallet"]["pk"])
+        .try_into()
+        .unwrap();
+    let owner = Address::from_string(&SorobanString::from_str(
+        &s.env,
+        &stellar_strkey::ed25519::PublicKey(wallet_pk).to_string(),
+    ));
+    let pk = BytesN::from_array(&s.env, &hexv(&r["pkNative"]).try_into().unwrap());
+    let pop = BytesN::from_array(&s.env, &hexv(&r["pop"]).try_into().unwrap());
+    client.register(
+        &account,
+        &bls_key_registry_contract::OwnerAuth::Stellar(owner),
+        &pk,
+        &pop,
+        &0,
+    );
+
+    // Point the escrow at the real registry: a registered identity passes, a stranger does not.
+    s.ad_manager.set_key_registry(&registry);
+    let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
+    s.ad_manager.set_settlement_signer(&ad_id, &account);
+    assert_eq!(
+        s.ad_manager
+            .try_set_settlement_signer(&ad_id, &other_account(&s.env, 0xbb)),
+        Err(Ok(ad_manager_contract::AdManagerError::SignerNotRegistered))
+    );
+}
+
+// --- T-20: the settlement signer's wire form is the comparison form ----------
+
+#[test]
+fn test_t20_settlement_signer_encoding_round_trips() {
+    // The frozen split-case vector carries a padded-EVM signer. The same bytes the hash suite
+    // proves sit in the digest must be what `evm_address_to_bytes32` produces from the address
+    // (risk 01 F15) — a left/right pad drift fails here and in the EVM parity suite.
+    let env = Env::default();
+    let v: serde_json::Value =
+        serde_json::from_str(include_str!("../../test-vectors/order-hash-v2.json")).unwrap();
+    assert_eq!(
+        v["vectors"][1]["name"].as_str().unwrap(),
+        "split-case-evm-signer"
+    );
+    let signer: [u8; 32] = hex::decode(
+        v["vectors"][1]["order"]["adSettlementSigner"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x"),
+    )
+    .unwrap()
+    .try_into()
+    .unwrap();
+    assert!(
+        signer[..12].iter().all(|b| *b == 0),
+        "padded-EVM signer must be left-padded"
+    );
+    let addr: [u8; 20] = signer[12..].try_into().unwrap();
+    assert_eq!(
+        proofbridge_core::secp::evm_address_to_bytes32(&env, &addr),
+        BytesN::from_array(&env, &signer)
+    );
+}
+
+// --- T-12 / T-13 on the order-portal: it counts the bridger it authenticated ----
+
+fn bridger_address(s: &TestSetup) -> Address {
+    let strkey = stellar_strkey::ed25519::PublicKey(s.tp.bridger).to_string();
+    Address::from_string(&SorobanString::from_str(&s.env, &strkey))
+}
+
+fn created_fixture_order(s: &TestSetup) -> order_portal_contract::OrderParams {
+    let order_token_client = TokenContractClient::new(&s.env, &s.order_token_addr);
+    order_token_client.mint(&bridger_address(s), &(s.tp.amount as i128 * 10));
+    let params = order_portal_order_params(&s.env, &s.tp);
+    s.order_portal.create_order(&params);
+    params
+}
+
+#[test]
+fn test_t12_create_order_counts_bridger_only() {
+    let s = setup();
+    let params = created_fixture_order(&s);
+    assert!(s.order_portal.has_open_positions(&params.bridger));
+    // The maker is counted by the ad-manager that authenticated them, never here.
+    assert!(!s.order_portal.has_open_positions(&params.ad_creator));
+}
+
+#[test]
+fn test_t13_create_then_unlock_clears_bridger() {
+    let s = setup();
+    let params = created_fixture_order(&s);
+    s.order_portal.unlock(
+        &params,
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
+        &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
+        &Bytes::new(&s.env),
+    );
+    assert!(!s.order_portal.has_open_positions(&params.bridger));
+    assert!(!s.order_portal.has_open_positions(&params.ad_creator));
 }

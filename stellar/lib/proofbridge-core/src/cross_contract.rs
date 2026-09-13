@@ -36,6 +36,13 @@ pub trait RootVerifierInterface {
     fn is_root_valid(env: Env, source_chain_id: u128, root: BytesN<32>, metadata: Bytes) -> bool;
 }
 
+/// The one registry read the escrows make (2.3c D2): a live, unexpired key slot.
+#[allow(dead_code)]
+#[contractclient(name = "KeyRegistryClient")]
+pub trait KeyRegistryInterface {
+    fn has_usable_slot(env: Env, account: BytesN<32>) -> bool;
+}
+
 // =============================================================================
 // MerkleManager Helpers
 // =============================================================================
@@ -180,4 +187,13 @@ pub fn is_root_valid(
     metadata.extend_from_slice(&bridger.to_array());
     metadata.append(cosig_data);
     RootVerifierClient::new(env, module).is_root_valid(&source_chain_id, root, &metadata)
+}
+
+// =============================================================================
+// KeyRegistry Helpers
+// =============================================================================
+
+/// True iff `account` holds at least one live, unexpired key slot in the registry.
+pub fn has_usable_slot(env: &Env, registry: &Address, account: &BytesN<32>) -> bool {
+    KeyRegistryClient::new(env, registry).has_usable_slot(account)
 }

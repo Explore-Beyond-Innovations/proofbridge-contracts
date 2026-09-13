@@ -97,6 +97,14 @@ pub enum AdManagerError {
     InvalidAccountAddress = 40,
     /// The order's deadline has passed; it can no longer be unlocked.
     OrderExpired = 46,
+    /// No key registry is set; createAd / set_settlement_signer fail closed (2.3c D2)
+    NoKeyRegistry = 47,
+    /// The settlement signer is the zero account
+    SettlementSignerZero = 48,
+    /// The settlement signer has no live, unexpired key in the registry
+    SignerNotRegistered = 49,
+    /// The order's ad_settlement_signer is not the one this ad declared
+    SettlementSignerMismatch = 50,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for AdManagerError {

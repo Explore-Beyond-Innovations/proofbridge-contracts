@@ -297,11 +297,8 @@ impl OrderPortalContract {
         cross_contract::append_to_merkle(&env, &config.merkle_manager, &order_hash, 1)?;
 
         storage::set_order_status(&env, &order_hash, Status::Open);
-        storage::set_in_flight(
-            &env,
-            &params.ad_creator,
-            storage::get_in_flight(&env, &params.ad_creator) + 1,
-        );
+        // 2.3c D1: count only the party this escrow authenticated (the bridger). The maker is
+        // counted by the ad-manager that authenticated them.
         storage::set_in_flight(
             &env,
             &params.bridger,
@@ -390,11 +387,7 @@ impl OrderPortalContract {
 
         storage::set_nullifier_used(&env, &nullifier_hash);
         storage::set_order_status(&env, &order_hash, Status::Filled);
-        storage::set_in_flight(
-            &env,
-            &params.ad_creator,
-            storage::get_in_flight(&env, &params.ad_creator) - 1,
-        );
+        // Mirrors create_order (2.3c D1).
         storage::set_in_flight(
             &env,
             &params.bridger,

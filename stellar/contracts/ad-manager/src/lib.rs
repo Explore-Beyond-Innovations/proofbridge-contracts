@@ -180,6 +180,15 @@ impl AdManagerContract {
         Ok(())
     }
 
+    /// Set the key registry consulted when an ad's settlement signer is set (2.3c D2).
+    pub fn set_key_registry(env: Env, registry: Address) -> Result<(), AdManagerError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        storage::set_key_registry(&env, &registry);
+        events::KeyRegistrySet { registry }.publish(&env);
+        Ok(())
+    }
+
     pub fn remove_chain(env: Env, order_chain_id: u128) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
@@ -268,6 +277,7 @@ impl AdManagerContract {
         initial_amount: u128,
         order_chain_id: u128,
         ad_recipient: BytesN<32>,
+        settlement_signer: BytesN<32>,
     ) -> Result<(), AdManagerError> {
         if storage::is_paused(&env) {
             return Err(AdManagerError::ContractPaused);
@@ -283,6 +293,7 @@ impl AdManagerContract {
         if initial_amount == 0 {
             return Err(AdManagerError::ZeroAmount);
         }
+        validation::require_registered(&env, &settlement_signer)?;
         let routed_order_token = storage::get_token_route(&env, &ad_token, order_chain_id);
         if routed_order_token.is_none() {
             return Err(AdManagerError::ChainNotSupported);
@@ -311,6 +322,7 @@ impl AdManagerContract {
             locked: 0,
             open: true,
             order_chain_token: routed_order_token.unwrap(),
+            settlement_signer: settlement_signer.clone(),
         };
         storage::set_ad(&env, &ad_id, &ad);
         storage::set_ad_id_used(&env, &ad_id);
@@ -321,6 +333,37 @@ impl AdManagerContract {
             token: ad_token.clone(),
             init_amount: initial_amount,
             order_chain_id,
+            settlement_signer,
+        }
+        .publish(&env);
+
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Re-point an ad's settlement signer. Custody-authorized, callable at any time — including
+    /// with locks in flight: an open order settles against the signer frozen in its own hash,
+    /// never against this field (design 01 §1.5, the third kill lever).
+    pub fn set_settlement_signer(
+        env: Env,
+        ad_id: String,
+        identity: BytesN<32>,
+    ) -> Result<(), AdManagerError> {
+        if storage::is_paused(&env) {
+            return Err(AdManagerError::ContractPaused);
+        }
+        let mut ad = storage::get_ad(&env, &ad_id).ok_or(AdManagerError::AdNotFound)?;
+        ad.maker.require_auth();
+        validation::require_registered(&env, &identity)?;
+
+        let previous = ad.settlement_signer.clone();
+        ad.settlement_signer = identity.clone();
+        storage::set_ad(&env, &ad_id, &ad);
+
+        events::SettlementSignerSet {
+            ad_id,
+            previous,
+            next: identity,
         }
         .publish(&env);
 
@@ -499,15 +542,13 @@ impl AdManagerContract {
         ad.locked += ad_amount;
         storage::set_ad(&env, &params.ad_id, &ad);
         storage::set_order_status(&env, &order_hash, Status::Open);
+        // 2.3c D1: count only the party this escrow authenticated (the maker). The bridger is
+        // counted by the order-portal that authenticated them; a lock naming a stranger must not
+        // move the stranger's counter.
         storage::set_in_flight(
             &env,
             &params.ad_creator,
             storage::get_in_flight(&env, &params.ad_creator) + 1,
-        );
-        storage::set_in_flight(
-            &env,
-            &params.bridger,
-            storage::get_in_flight(&env, &params.bridger) + 1,
         );
 
         cross_contract::append_to_merkle(&env, &config.merkle_manager, &order_hash, 0)?;
@@ -588,15 +629,11 @@ impl AdManagerContract {
 
         storage::set_nullifier_used(&env, &nullifier_hash);
         storage::set_order_status(&env, &order_hash, Status::Filled);
+        // Mirrors lock_for_order (2.3c D1).
         storage::set_in_flight(
             &env,
             &params.ad_creator,
             storage::get_in_flight(&env, &params.ad_creator) - 1,
-        );
-        storage::set_in_flight(
-            &env,
-            &params.bridger,
-            storage::get_in_flight(&env, &params.bridger) - 1,
         );
 
         // Update ad and transfer tokens (scale signed amount to ad-chain precision)
