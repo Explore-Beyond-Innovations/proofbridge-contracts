@@ -2,6 +2,8 @@
 pragma solidity ^0.8.34;
 
 import {AdManagerTest} from "./Admanager.t.sol";
+import {IAdManager} from "src/interfaces/IAdManager.sol";
+import {IEscrow} from "src/interfaces/IEscrow.sol";
 import {AdManager} from "src/AdManager.sol";
 
 /// A recipient that can refuse native payouts, then relent — models a
@@ -28,7 +30,7 @@ contract PayoutFallbackTest is AdManagerTest {
         receiver = new ToggleReceiver();
     }
 
-    function _unlockNativeTo(address recipient, bytes32 nullifier) internal returns (AdManager.OrderParams memory p) {
+    function _unlockNativeTo(address recipient, bytes32 nullifier) internal returns (IAdManager.OrderParams memory p) {
         test_createAd_with_native_token_success();
         bytes32 orderHash;
         (p, orderHash) = _openOrder("nativeAd", NATIVE_TOKEN_ADDRESS, 50 ether, 777, bridger, recipient);
@@ -40,7 +42,7 @@ contract PayoutFallbackTest is AdManagerTest {
 
     function test_happyPath_paysDirectly_nothingClaimable() public {
         receiver.setAccepting(true);
-        AdManager.OrderParams memory p = _unlockNativeTo(address(receiver), bytes32("HP"));
+        IAdManager.OrderParams memory p = _unlockNativeTo(address(receiver), bytes32("HP"));
 
         assertEq(address(receiver).balance, p.amount, "not paid directly");
         assertEq(adManager.claimable(address(receiver), NATIVE_TOKEN_ADDRESS), 0);
@@ -48,7 +50,7 @@ contract PayoutFallbackTest is AdManagerTest {
 
     function test_failingRecipient_neverBlocksUnlock_creditsInstead() public {
         // receiver rejects payouts: unlock must still settle
-        AdManager.OrderParams memory p = _unlockNativeTo(address(receiver), bytes32("FB"));
+        IAdManager.OrderParams memory p = _unlockNativeTo(address(receiver), bytes32("FB"));
 
         assertEq(address(receiver).balance, 0, "push should have failed");
         assertEq(adManager.claimable(address(receiver), NATIVE_TOKEN_ADDRESS), p.amount, "not credited");
@@ -63,7 +65,7 @@ contract PayoutFallbackTest is AdManagerTest {
         assertEq(address(receiver).balance, p.amount);
         assertEq(adManager.claimable(address(receiver), NATIVE_TOKEN_ADDRESS), 0);
 
-        vm.expectRevert(AdManager.AdManager__NothingToClaim.selector);
+        vm.expectRevert(IEscrow.Escrow__NothingToClaim.selector);
         adManager.claim(address(receiver), NATIVE_TOKEN_ADDRESS);
     }
 
@@ -79,14 +81,14 @@ contract PayoutFallbackTest is AdManagerTest {
             uint256 amount = bound(uint256(keccak256(abi.encode(seed, i))), 1, available / 2);
             receiver.setAccepting(i % 2 == 0);
 
-            (AdManager.OrderParams memory p, bytes32 orderHash) =
+            (IAdManager.OrderParams memory p, bytes32 orderHash) =
                 _openOrder(adId, NATIVE_TOKEN_ADDRESS, amount, 9000 + i, bridger, address(receiver));
 
             bytes32 targetRoot = bytes32(uint256(100 + i));
             vm.prank(bridger);
             adManager.unlock(p, bytes32(uint256(9000 + i)), targetRoot, hex"", hex"");
 
-            (,,,, uint256 adBalance,,,,) = adManager.ads(adId);
+            (,,,,,,, uint256 adBalance,) = adManager.ads(adId);
             uint256 owed = adManager.claimable(address(receiver), NATIVE_TOKEN_ADDRESS);
             assertEq(_wNativeToken.balanceOf(address(adManager)), adBalance + owed, "escrow insolvent");
         }
@@ -98,17 +100,17 @@ contract PayoutFallbackTest is AdManagerTest {
             adManager.claim(address(receiver), NATIVE_TOKEN_ADDRESS);
             assertEq(address(receiver).balance - before, owedFinal, "claim paid wrong amount");
         }
-        (,,,, uint256 adBalanceEnd,,,,) = adManager.ads(adId);
+        (,,,,,,, uint256 adBalanceEnd,) = adManager.ads(adId);
         assertEq(_wNativeToken.balanceOf(address(adManager)), adBalanceEnd, "credits not settled");
     }
 
     function test_claim_withNoCredit_reverts() public {
-        vm.expectRevert(AdManager.AdManager__NothingToClaim.selector);
+        vm.expectRevert(IEscrow.Escrow__NothingToClaim.selector);
         adManager.claim(makeAddr("nobody"), address(adToken));
     }
 
     function test_directPayout_selfCallOnly() public {
-        vm.expectRevert(AdManager.AdManager__SelfCallOnly.selector);
+        vm.expectRevert(IEscrow.Escrow__SelfCallOnly.selector);
         adManager.directPayout(makeAddr("x"), address(adToken), 1);
     }
 }

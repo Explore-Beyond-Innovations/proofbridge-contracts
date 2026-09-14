@@ -2,6 +2,9 @@
 pragma solidity ^0.8.34;
 
 import {Test} from "forge-std/Test.sol";
+import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
+import {IAdManager} from "src/interfaces/IAdManager.sol";
+import {IOrderPortal} from "src/interfaces/IOrderPortal.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {AdManagerTest} from "./Admanager.t.sol";
 import {OrderPortalTest} from "./OrderPortal.t.sol";
@@ -26,7 +29,7 @@ contract AdManagerPauseTest is AdManagerTest {
         vm.expectRevert(Pausable.EnforcedPause.selector);
         adManager.fundAd(adId, 1 ether);
 
-        AdManager.OrderParams memory p = _defaultParams(adId);
+        IAdManager.OrderParams memory p = _defaultParams(adId);
         bytes32 orderHash = adManager.hashOrderPublic(p);
         vm.prank(maker);
         vm.expectRevert(Pausable.EnforcedPause.selector);
@@ -80,12 +83,12 @@ contract AdManagerPauseTest is AdManagerTest {
 contract OrderPortalPauseTest is OrderPortalTest {
     function test_pause_blocksCreateAndUnlock() public {
         test_setTokenRoute_setsAndEmits_whenSupported();
-        (OrderPortal.OrderParams memory p, bytes32 orderHash) = _openOrder(65 ether, 321);
+        (IOrderPortal.OrderParams memory p, bytes32 orderHash) = _openOrder(65 ether, 321);
 
         vm.prank(admin);
         portal.pause();
 
-        OrderPortal.OrderParams memory p2 = _defaultParams();
+        IOrderPortal.OrderParams memory p2 = _defaultParams();
         p2.salt = 322;
         bytes32 oh2 = portal.hashOrderPublic(p2);
         vm.prank(bridger);
@@ -122,15 +125,15 @@ contract RegistryPauseTest is Test {
     function test_pause_blocksRegisterAndRevoke() public {
         registry.pause();
 
-        BLSKeyRegistry.OwnerAuth memory auth = BLSKeyRegistry.OwnerAuth(BLSKeyRegistry.Scheme.Eip712, new bytes(65));
-        vm.expectRevert(BLSKeyRegistry.EnforcedPause.selector);
+        IBLSKeyRegistry.OwnerAuth memory auth = IBLSKeyRegistry.OwnerAuth(IBLSKeyRegistry.Scheme.Eip712, new bytes(65));
+        vm.expectRevert(IBLSKeyRegistry.EnforcedPause.selector);
         registry.register(bytes32(uint256(1)), auth, new bytes(128), new bytes(256), 0);
 
-        vm.expectRevert(BLSKeyRegistry.EnforcedPause.selector);
+        vm.expectRevert(IBLSKeyRegistry.EnforcedPause.selector);
         registry.revoke(bytes32(uint256(1)), auth, 0);
 
         registry.unpause();
-        vm.expectRevert(BLSKeyRegistry.IdentityKey.selector);
+        vm.expectRevert(IBLSKeyRegistry.IdentityKey.selector);
         registry.register(bytes32(uint256(1)), auth, new bytes(128), new bytes(256), 0);
     }
 
@@ -140,14 +143,14 @@ contract RegistryPauseTest is Test {
         assertEq(registry.pendingAdmin(), next);
 
         vm.prank(makeAddr("rando"));
-        vm.expectRevert(BLSKeyRegistry.NotPendingAdmin.selector);
+        vm.expectRevert(IBLSKeyRegistry.NotPendingAdmin.selector);
         registry.acceptAdmin();
 
         vm.prank(next);
         registry.acceptAdmin();
         assertEq(registry.admin(), next);
 
-        vm.expectRevert(BLSKeyRegistry.NotAdmin.selector);
+        vm.expectRevert(IBLSKeyRegistry.NotAdmin.selector);
         registry.pause();
         vm.prank(next);
         registry.pause();

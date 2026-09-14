@@ -2,6 +2,8 @@
 pragma solidity ^0.8.34;
 
 import {Test, console} from "forge-std/Test.sol";
+import {IEscrow} from "src/interfaces/IEscrow.sol";
+import {IOrderPortal} from "src/interfaces/IOrderPortal.sol";
 import {OrderPortal} from "src/OrderPortal.sol";
 import {MockVerifier} from "src/mocks/MockVerifier.sol";
 import {MerkleManager} from "src/MerkleManager.sol";
@@ -83,7 +85,7 @@ contract OrderPortalTest is Test {
     /*//////////////////////////////////////////////////////////////
            HELPER
     //////////////////////////////////////////////////////////////*/
-    function _defaultParams() internal view returns (OrderPortal.OrderParams memory p) {
+    function _defaultParams() internal view returns (IOrderPortal.OrderParams memory p) {
         p.orderChainToken = _b32(address(orderToken));
         p.adChainToken = adToken;
         p.amount = 100 ether;
@@ -107,18 +109,16 @@ contract OrderPortalTest is Test {
     function test_setChain_onlyAdmin() public {
         vm.prank(nonAdmin);
         vm.expectRevert();
-        portal.setChain(adChainId, _b32(adManager), true);
+        portal.setPeerEscrow(adChainId, _b32(adManager));
     }
 
     function test_setChain_setsAndEmits() public {
         vm.prank(admin);
         vm.expectEmit(true, true, true, true);
-        emit OrderPortal.ChainSet(adChainId, _b32(adManager), true);
-        portal.setChain(adChainId, _b32(adManager), true);
+        emit IEscrow.PeerEscrowSet(adChainId, _b32(adManager));
+        portal.setPeerEscrow(adChainId, _b32(adManager));
 
-        (bool supported, bytes32 storedManager) = portal.chains(adChainId);
-        assertTrue(supported, "chain not supported");
-        assertEq(storedManager, _b32(adManager), "adManager mismatch");
+        assertEq(portal.peerEscrow(adChainId), _b32(adManager), "adManager mismatch");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -126,26 +126,24 @@ contract OrderPortalTest is Test {
     //////////////////////////////////////////////////////////////*/
     function test_removeChain_onlyAdmin() public {
         vm.startPrank(admin);
-        portal.setChain(adChainId, _b32(adManager), true);
+        portal.setPeerEscrow(adChainId, _b32(adManager));
         vm.stopPrank();
 
         vm.prank(nonAdmin);
         vm.expectRevert();
-        portal.removeChain(adChainId);
+        portal.setPeerEscrow(adChainId, bytes32(0));
     }
 
     function test_removeChain_clearsAndEmits() public {
         vm.startPrank(admin);
-        portal.setChain(adChainId, _b32(adManager), true);
+        portal.setPeerEscrow(adChainId, _b32(adManager));
         vm.expectEmit(true, true, true, true);
-        // Contract emits ChainSet(chainId, bytes32(0), false) on removal
-        emit OrderPortal.ChainSet(adChainId, bytes32(0), false);
-        portal.removeChain(adChainId);
+        // Removal emits PeerEscrowSet(chainId, bytes32(0))
+        emit IEscrow.PeerEscrowSet(adChainId, bytes32(0));
+        portal.setPeerEscrow(adChainId, bytes32(0));
         vm.stopPrank();
 
-        (bool supported, bytes32 storedManager) = portal.chains(adChainId);
-        assertFalse(supported, "chain still supported");
-        assertEq(storedManager, bytes32(0), "adManager not cleared");
+        assertEq(portal.peerEscrow(adChainId), bytes32(0), "adManager not cleared");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -159,14 +157,12 @@ contract OrderPortalTest is Test {
 
     function test_setTokenRoute_rejectsZeroAddresses() public {
         vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSelector(OrderPortal.OrderPortal__RoutesZeroAddress.selector, address(0), adToken)
-        );
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__RouteZeroAddress.selector, address(0), adToken));
         portal.setTokenRoute(address(0), adChainId, adToken);
 
         vm.prank(admin);
         vm.expectRevert(
-            abi.encodeWithSelector(OrderPortal.OrderPortal__RoutesZeroAddress.selector, address(orderToken), bytes32(0))
+            abi.encodeWithSelector(IEscrow.Escrow__RouteZeroAddress.selector, address(orderToken), bytes32(0))
         );
         portal.setTokenRoute(address(orderToken), adChainId, bytes32(0));
     }
@@ -177,7 +173,7 @@ contract OrderPortalTest is Test {
     function test_setTokenRoute_rejectsUnsupportedDstChainId() public {
         // dstChainId not set via setChain => unsupported
         vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(OrderPortal.OrderPortal__AdChainNotSupported.selector, adChainId));
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__ChainNotSupported.selector, adChainId));
         portal.setTokenRoute(address(orderToken), adChainId, adToken);
     }
 
@@ -187,10 +183,10 @@ contract OrderPortalTest is Test {
 
     function test_setTokenRoute_setsAndEmits_whenSupported() public {
         vm.startPrank(admin);
-        portal.setChain(adChainId, _b32(adManager), true);
+        portal.setPeerEscrow(adChainId, _b32(adManager));
 
         vm.expectEmit(true, true, true, true);
-        emit OrderPortal.TokenRouteSet(address(orderToken), adChainId, adToken);
+        emit IEscrow.TokenRouteSet(address(orderToken), adChainId, adToken);
         portal.setTokenRoute(address(orderToken), adChainId, adToken);
         vm.stopPrank();
 
@@ -204,10 +200,10 @@ contract OrderPortalTest is Test {
 
     function test_setNativeTokenRoute_setsAndEmits_whenSupported() public {
         vm.startPrank(admin);
-        portal.setChain(adChainId, _b32(adManager), true);
+        portal.setPeerEscrow(adChainId, _b32(adManager));
 
         vm.expectEmit(true, true, true, true);
-        emit OrderPortal.TokenRouteSet(NATIVE_TOKEN_ADDRESS, adChainId, adToken);
+        emit IEscrow.TokenRouteSet(NATIVE_TOKEN_ADDRESS, adChainId, adToken);
         portal.setTokenRoute(NATIVE_TOKEN_ADDRESS, adChainId, adToken);
         vm.stopPrank();
 
@@ -220,7 +216,7 @@ contract OrderPortalTest is Test {
     //////////////////////////////////////////////////////////////*/
     function test_removeTokenRoute_onlyAdmin() public {
         vm.startPrank(admin);
-        portal.setChain(adChainId, _b32(adManager), true);
+        portal.setPeerEscrow(adChainId, _b32(adManager));
         portal.setTokenRoute(address(orderToken), adChainId, adToken);
         vm.stopPrank();
 
@@ -231,11 +227,11 @@ contract OrderPortalTest is Test {
 
     function test_removeTokenRoute_clearsAndEmits() public {
         vm.startPrank(admin);
-        portal.setChain(adChainId, _b32(adManager), true);
+        portal.setPeerEscrow(adChainId, _b32(adManager));
         portal.setTokenRoute(address(orderToken), adChainId, adToken);
 
         vm.expectEmit(true, true, true, true);
-        emit OrderPortal.TokenRouteRemoved(address(orderToken), adChainId);
+        emit IEscrow.TokenRouteRemoved(address(orderToken), adChainId);
         portal.removeTokenRoute(address(orderToken), adChainId);
         vm.stopPrank();
 
@@ -248,13 +244,13 @@ contract OrderPortalTest is Test {
     //////////////////////////////////////////////////////////////*/
     function test_createOrder_rejects_zeroAmount() public {
         test_setTokenRoute_setsAndEmits_whenSupported();
-        OrderPortal.OrderParams memory p = _defaultParams();
+        IOrderPortal.OrderParams memory p = _defaultParams();
         p.amount = 0;
 
         bytes32 orderHash = portal.hashOrderPublic(p);
 
         vm.prank(bridger);
-        vm.expectRevert(OrderPortal.OrderPortal__ZeroAmount.selector);
+        vm.expectRevert(IEscrow.Escrow__ZeroAmount.selector);
         portal.createOrder(p);
     }
 
@@ -263,13 +259,13 @@ contract OrderPortalTest is Test {
     //////////////////////////////////////////////////////////////*/
     function test_createOrder_rejects_dstChainUnsupported() public {
         test_setTokenRoute_setsAndEmits_whenSupported();
-        OrderPortal.OrderParams memory p = _defaultParams();
+        IOrderPortal.OrderParams memory p = _defaultParams();
         p.adChainId = 9_999_999; // not configured
 
         bytes32 orderHash = portal.hashOrderPublic(p);
 
         vm.prank(bridger);
-        vm.expectRevert(abi.encodeWithSelector(OrderPortal.OrderPortal__AdChainNotSupported.selector, p.adChainId));
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__ChainNotSupported.selector, p.adChainId));
         portal.createOrder(p);
     }
 
@@ -278,14 +274,14 @@ contract OrderPortalTest is Test {
     //////////////////////////////////////////////////////////////*/
     function test_createOrder_rejects_adManagerMismatch() public {
         test_setTokenRoute_setsAndEmits_whenSupported();
-        OrderPortal.OrderParams memory p = _defaultParams();
+        IOrderPortal.OrderParams memory p = _defaultParams();
         address otherAdMgr = makeAddr("otherAdMgr");
         p.adManager = _b32(otherAdMgr); // differs from configured dstAdMgr
 
         bytes32 orderHash = portal.hashOrderPublic(p);
 
         vm.prank(bridger);
-        vm.expectRevert(abi.encodeWithSelector(OrderPortal.OrderPortal__AdManagerMismatch.selector, adManager));
+        vm.expectRevert(abi.encodeWithSelector(IOrderPortal.OrderPortal__AdManagerMismatch.selector, adManager));
         portal.createOrder(p);
     }
 
@@ -295,13 +291,13 @@ contract OrderPortalTest is Test {
     function test_createOrder_rejects_missingTokenRoute() public {
         test_setTokenRoute_setsAndEmits_whenSupported();
         // No tokenRoute set yet
-        OrderPortal.OrderParams memory p = _defaultParams();
+        IOrderPortal.OrderParams memory p = _defaultParams();
         p.orderChainToken = _b32(other);
 
         bytes32 orderHash = portal.hashOrderPublic(p);
 
         vm.prank(bridger);
-        vm.expectRevert(OrderPortal.OrderPortal__MissingRoute.selector);
+        vm.expectPartialRevert(IEscrow.Escrow__MissingRoute.selector);
         portal.createOrder(p);
     }
 
@@ -314,12 +310,12 @@ contract OrderPortalTest is Test {
         vm.prank(admin);
         portal.setTokenRoute(address(orderToken), adChainId, _b32(other));
 
-        OrderPortal.OrderParams memory p = _defaultParams();
+        IOrderPortal.OrderParams memory p = _defaultParams();
 
         bytes32 orderHash = portal.hashOrderPublic(p);
 
         vm.prank(bridger);
-        vm.expectRevert(OrderPortal.OrderPortal__AdTokenMismatch.selector);
+        vm.expectPartialRevert(IEscrow.Escrow__PeerTokenMismatch.selector);
         portal.createOrder(p);
     }
 
@@ -328,7 +324,7 @@ contract OrderPortalTest is Test {
     //////////////////////////////////////////////////////////////*/
     function test_createOrder_rejects_adRecipient_dirtyUpperBytes() public {
         test_setTokenRoute_setsAndEmits_whenSupported();
-        OrderPortal.OrderParams memory p = _defaultParams();
+        IOrderPortal.OrderParams memory p = _defaultParams();
 
         // Keep the low-20 the same as a valid recipient but set a non-zero
         // byte above the EVM-address range. validateOrder must reject via
@@ -350,7 +346,7 @@ contract OrderPortalTest is Test {
     function test_createOrder_success_storesOpen_pullsFunds_emitsEvent() public {
         test_setTokenRoute_setsAndEmits_whenSupported();
 
-        OrderPortal.OrderParams memory p = _defaultParams();
+        IOrderPortal.OrderParams memory p = _defaultParams();
 
         // Approvals & balances
         vm.startPrank(bridger);
@@ -362,7 +358,7 @@ contract OrderPortalTest is Test {
         bytes32 expectedHash = portal.hashOrderPublic(p);
 
         vm.expectEmit(true, true, true, true);
-        emit OrderPortal.OrderCreated(
+        emit IOrderPortal.OrderCreated(
             expectedHash,
             _b32(bridger),
             _b32(address(orderToken)),
@@ -382,8 +378,8 @@ contract OrderPortalTest is Test {
         assertEq(orderHash, expectedHash, "orderHash mismatch");
 
         // Status is Open
-        (OrderPortal.Status status) = portal.orders(orderHash);
-        assertEq(uint256(status), uint256(OrderPortal.Status.Open), "status not Open");
+        (IEscrow.Status status) = portal.orders(orderHash);
+        assertEq(uint256(status), uint256(IEscrow.Status.Open), "status not Open");
 
         // Funds moved
         uint256 balSenderAfter = orderToken.balanceOf(bridger);
@@ -398,7 +394,7 @@ contract OrderPortalTest is Test {
     function test_createOrder_with_NativeToken_success_storesOpen_pullsFunds_emitsEvent() public {
         test_setNativeTokenRoute_setsAndEmits_whenSupported();
 
-        OrderPortal.OrderParams memory p = _defaultParams();
+        IOrderPortal.OrderParams memory p = _defaultParams();
         p.orderChainToken = _b32(NATIVE_TOKEN_ADDRESS);
 
         vm.deal(bridger, p.amount);
@@ -412,7 +408,7 @@ contract OrderPortalTest is Test {
         bytes32 expectedHash = portal.hashOrderPublic(p);
 
         vm.expectEmit(true, true, true, true);
-        emit OrderPortal.OrderCreated(
+        emit IOrderPortal.OrderCreated(
             expectedHash,
             _b32(bridger),
             _b32(NATIVE_TOKEN_ADDRESS),
@@ -432,8 +428,8 @@ contract OrderPortalTest is Test {
         assertEq(orderHash, expectedHash, "orderHash mismatch");
 
         // Status is Open
-        (OrderPortal.Status status) = portal.orders(orderHash);
-        assertEq(uint256(status), uint256(OrderPortal.Status.Open), "status not Open");
+        (IEscrow.Status status) = portal.orders(orderHash);
+        assertEq(uint256(status), uint256(IEscrow.Status.Open), "status not Open");
 
         // Funds moved
         uint256 balSenderAfter = bridger.balance;
@@ -448,7 +444,7 @@ contract OrderPortalTest is Test {
     function test_createOrder_duplicate_sameParams_revertsOrderExists() public {
         test_setTokenRoute_setsAndEmits_whenSupported();
 
-        OrderPortal.OrderParams memory p = _defaultParams();
+        IOrderPortal.OrderParams memory p = _defaultParams();
 
         vm.startPrank(bridger);
         orderToken.approve(address(portal), p.amount * 2);
@@ -457,7 +453,7 @@ contract OrderPortalTest is Test {
 
         bytes32 h1 = portal.createOrder(p);
 
-        vm.expectRevert(abi.encodeWithSelector(OrderPortal.OrderPortal__OrderExists.selector, h1));
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExists.selector, h1));
         portal.createOrder(p);
         vm.stopPrank();
     }
@@ -465,7 +461,7 @@ contract OrderPortalTest is Test {
     // Create an order from `bridger` and return its hash + params used
     function _openOrder(uint256 _amount, uint256 _salt)
         internal
-        returns (OrderPortal.OrderParams memory p, bytes32 orderHash)
+        returns (IOrderPortal.OrderParams memory p, bytes32 orderHash)
     {
         p = _defaultParams();
         p.amount = _amount;
@@ -482,7 +478,7 @@ contract OrderPortalTest is Test {
     // createOrder with Native token
     function _openOrderWithNativeToken(uint256 _amount, uint256 _salt)
         internal
-        returns (OrderPortal.OrderParams memory p, bytes32 orderHash)
+        returns (IOrderPortal.OrderParams memory p, bytes32 orderHash)
     {
         p = _defaultParams();
         p.amount = _amount;
@@ -501,12 +497,12 @@ contract OrderPortalTest is Test {
      * unlock: rejects when order not open
      //////////////////////////////////////////////////////////////*/
     function test_unlock_rejects_whenOrderNotOpen() public {
-        OrderPortal.OrderParams memory p = _defaultParams();
+        IOrderPortal.OrderParams memory p = _defaultParams();
         bytes32 orderHash = portal.hashOrderPublic(p); // no order created
 
         bytes32 t_root = bytes32(uint256(0));
 
-        vm.expectRevert(abi.encodeWithSelector(OrderPortal.OrderPortal__OrderNotOpen.selector, orderHash));
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderNotOpen.selector, orderHash));
         portal.unlock(p, bytes32("N"), t_root, hex"", hex"");
     }
 
@@ -516,14 +512,14 @@ contract OrderPortalTest is Test {
     function test_unlock_rejects_whenNullifierAlreadyUsed() public {
         test_setTokenRoute_setsAndEmits_whenSupported();
 
-        (OrderPortal.OrderParams memory p,) = _openOrder(80 ether, 777);
+        (IOrderPortal.OrderParams memory p,) = _openOrder(80 ether, 777);
         bytes32 orderHash = portal.hashOrderPublic(p);
 
         bytes32 t_root = bytes32(uint256(0));
 
         // First unlock OK
         vm.expectEmit(true, true, true, true);
-        emit OrderPortal.OrderUnlocked(
+        emit IEscrow.OrderUnlocked(
             portal.hashOrderPublic(p),
             p.adRecipient, // NOTE: contract emits dstRecipient in 2nd arg
             bytes32("N")
@@ -531,7 +527,7 @@ contract OrderPortalTest is Test {
         portal.unlock(p, bytes32("N"), t_root, hex"AA", hex"");
 
         // Second unlock with same nullifier reverts
-        vm.expectRevert(abi.encodeWithSelector(OrderPortal.OrderPortal__NullifierUsed.selector, bytes32("N")));
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NullifierUsed.selector, bytes32("N")));
         portal.unlock(p, bytes32("N"), t_root, hex"BB", hex"");
     }
 
@@ -540,7 +536,7 @@ contract OrderPortalTest is Test {
      //////////////////////////////////////////////////////////////*/
     function test_unlock_verifierFalse_revertsInvalidProof_andNoStateChange() public {
         test_setTokenRoute_setsAndEmits_whenSupported();
-        (OrderPortal.OrderParams memory p, bytes32 orderHash) = _openOrder(70 ether, 999);
+        (IOrderPortal.OrderParams memory p, bytes32 orderHash) = _openOrder(70 ether, 999);
 
         // Balances before
         uint256 balPortalBefore = orderToken.balanceOf(address(portal));
@@ -551,12 +547,12 @@ contract OrderPortalTest is Test {
 
         bytes32 t_root = bytes32(uint256(0));
 
-        vm.expectRevert(OrderPortal.OrderPortal__InvalidProof.selector);
+        vm.expectRevert(IEscrow.Escrow__InvalidProof.selector);
         portal.unlock(p, bytes32("X"), t_root, hex"", hex"");
 
         // Status & balances unchanged
-        (OrderPortal.Status status) = portal.orders(orderHash);
-        assertEq(uint256(status), uint256(OrderPortal.Status.Open), "status changed unexpectedly");
+        (IEscrow.Status status) = portal.orders(orderHash);
+        assertEq(uint256(status), uint256(IEscrow.Status.Open), "status changed unexpectedly");
 
         assertEq(orderToken.balanceOf(address(portal)), balPortalBefore, "portal balance changed");
         assertEq(
@@ -572,7 +568,7 @@ contract OrderPortalTest is Test {
      //////////////////////////////////////////////////////////////*/
     function test_unlock_success_setsFilled_transfers_emits() public {
         test_setTokenRoute_setsAndEmits_whenSupported();
-        (OrderPortal.OrderParams memory p, bytes32 orderHash) = _openOrder(65 ether, 123);
+        (IOrderPortal.OrderParams memory p, bytes32 orderHash) = _openOrder(65 ether, 123);
 
         uint256 balPortalBefore = orderToken.balanceOf(address(portal));
         uint256 balRecipientBefore = orderToken.balanceOf(address(uint160(uint256(p.adRecipient))));
@@ -583,13 +579,13 @@ contract OrderPortalTest is Test {
         bytes32 t_root = bytes32(uint256(0));
 
         vm.expectEmit(true, true, true, true);
-        emit OrderPortal.OrderUnlocked(orderHash, p.adRecipient, nullifier);
+        emit IEscrow.OrderUnlocked(orderHash, p.adRecipient, nullifier);
 
         portal.unlock(p, nullifier, t_root, proof, hex"");
 
         // Status moved to Filled
-        (OrderPortal.Status status) = portal.orders(orderHash);
-        assertEq(uint256(status), uint256(OrderPortal.Status.Filled), "status not Filled");
+        (IEscrow.Status status) = portal.orders(orderHash);
+        assertEq(uint256(status), uint256(IEscrow.Status.Filled), "status not Filled");
 
         // Funds transferred from portal to dstRecipient
         assertEq(orderToken.balanceOf(address(portal)), balPortalBefore - p.amount, "portal not debited");
@@ -605,12 +601,12 @@ contract OrderPortalTest is Test {
      //////////////////////////////////////////////////////////////*/
     function test_unlock_cannotUnlockTwice_sameOrder() public {
         test_setTokenRoute_setsAndEmits_whenSupported();
-        (OrderPortal.OrderParams memory p, bytes32 orderHash) = _openOrder(40 ether, 321);
+        (IOrderPortal.OrderParams memory p, bytes32 orderHash) = _openOrder(40 ether, 321);
         bytes32 t_root = bytes32(uint256(0));
 
         portal.unlock(p, bytes32("one"), t_root, hex"", hex"");
 
-        vm.expectRevert(abi.encodeWithSelector(OrderPortal.OrderPortal__OrderNotOpen.selector, orderHash));
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderNotOpen.selector, orderHash));
         portal.unlock(p, bytes32("two"), t_root, hex"", hex"");
     }
 
@@ -620,7 +616,7 @@ contract OrderPortalTest is Test {
      //////////////////////////////////////////////////////////////*/
     function test_unlock_with_NativeToken_success_setsFilled_transfers_emits() public {
         test_setNativeTokenRoute_setsAndEmits_whenSupported();
-        (OrderPortal.OrderParams memory p, bytes32 orderHash) = _openOrderWithNativeToken(55 ether, 456);
+        (IOrderPortal.OrderParams memory p, bytes32 orderHash) = _openOrderWithNativeToken(55 ether, 456);
 
         uint256 balPortalBefore = _wNativeToken.balanceOf(address(portal));
         uint256 balRecipientBefore = address(uint160(uint256(p.adRecipient))).balance;
@@ -631,13 +627,13 @@ contract OrderPortalTest is Test {
         bytes32 t_root = bytes32(uint256(0));
 
         vm.expectEmit(true, true, true, true);
-        emit OrderPortal.OrderUnlocked(orderHash, p.adRecipient, nullifier);
+        emit IEscrow.OrderUnlocked(orderHash, p.adRecipient, nullifier);
 
         portal.unlock(p, nullifier, t_root, proof, hex"");
 
         // Status moved to Filled
-        (OrderPortal.Status status) = portal.orders(orderHash);
-        assertEq(uint256(status), uint256(OrderPortal.Status.Filled), "status not Filled");
+        (IEscrow.Status status) = portal.orders(orderHash);
+        assertEq(uint256(status), uint256(IEscrow.Status.Filled), "status not Filled");
 
         // Funds transferred from portal to dstRecipient
         assertEq(_wNativeToken.balanceOf(address(portal)), balPortalBefore - p.amount, "portal not debited");

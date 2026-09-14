@@ -42,22 +42,6 @@ contract RootAnchor is IRootAnchor, TwoStepAdmin, Pausable {
                                  TYPES
     //////////////////////////////////////////////////////////////*/
 
-    /**
-     * @notice One notarized root of one source chain.
-     * @param ledgerSeq The highest source-chain ledger any approval named; the monotonic check runs against it.
-     * @param anchoredAt When the threshold was reached; 0 while approvals are still accumulating.
-     * @param approvals Distinct signers who approved under (`setEpoch`, `gen`).
-     * @param setEpoch The signer-set epoch the approvals belong to; a rotation resets the count.
-     * @param gen Bumped by {revokeAnchor}, so every earlier approval stamp stops matching.
-     */
-    struct Anchor {
-        uint64 ledgerSeq;
-        uint64 anchoredAt;
-        uint32 approvals;
-        uint32 setEpoch;
-        uint32 gen;
-    }
-
     /*//////////////////////////////////////////////////////////////
                                  STATE
     //////////////////////////////////////////////////////////////*/
@@ -90,25 +74,9 @@ contract RootAnchor is IRootAnchor, TwoStepAdmin, Pausable {
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event AnchorApproved(uint256 indexed chainId, bytes32 indexed root, address indexed signer, uint32 approvals);
-    event Anchored(uint256 indexed chainId, bytes32 indexed root, uint64 ledgerSeq, uint64 anchoredAt);
-    event AnchorRevoked(uint256 indexed chainId, bytes32 indexed root, uint32 gen);
-    event SignersSet(address[] signers, uint32 threshold, uint32 epoch);
-    event AnchorDelaySet(uint256 indexed chainId, uint64 delay);
-    event MonotonicSet(bool monotonic);
-    event LatestSeqReset(uint256 indexed chainId, uint64 seq);
-
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
-
-    error RootAnchor__ZeroAddress();
-    error RootAnchor__NotSigner();
-    error RootAnchor__BadThreshold();
-    error RootAnchor__DuplicateSigner(address signer);
-    error RootAnchor__SeqNotMonotonic(uint64 latest, uint64 given);
-    error RootAnchor__DelayTooLong(uint64 max, uint64 given);
-    error RootAnchor__NoSuchAnchor();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR

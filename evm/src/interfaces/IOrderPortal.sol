@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.34;
+
+import {IEscrow} from "./IEscrow.sol";
+
+/**
+ * @title IOrderPortal — the bridger's leg: deposits against an ad, unlocked by the maker.
+ */
+interface IOrderPortal is IEscrow {
+    /**
+     * @notice The order as the order chain sees it. All address-like fields are 32 bytes for
+     *         cross-chain parity; EVM-local values are left-padded (top 12 bytes zero).
+     */
+    struct OrderParams {
+        bytes32 orderChainToken;
+        bytes32 adChainToken;
+        uint256 amount;
+        bytes32 bridger;
+        bytes32 orderRecipient;
+        uint256 adChainId;
+        bytes32 adManager;
+        string adId;
+        bytes32 adCreator;
+        bytes32 adRecipient;
+        uint256 salt;
+        uint8 orderDecimals;
+        uint8 adDecimals;
+        uint256 deadline;
+        bytes32 adSettlementSigner;
+    }
+
+    event OrderCreated(
+        bytes32 indexed orderHash,
+        bytes32 indexed bridger,
+        bytes32 indexed orderChainToken,
+        uint256 amount,
+        uint256 adChainId,
+        bytes32 adChainToken,
+        bytes32 adManager,
+        string adId,
+        bytes32 adCreator,
+        bytes32 adRecipient
+    );
+
+    error OrderPortal__AdManagerMismatch(bytes32 expected);
+    error OrderPortal__BridgerMustBeSender();
+
+    function createOrder(OrderParams calldata params) external payable returns (bytes32 orderHash);
+    function unlock(
+        OrderParams calldata params,
+        bytes32 nullifierHash,
+        bytes32 targetRoot,
+        bytes calldata proof,
+        bytes calldata cosigData
+    ) external;
+}

@@ -1,0 +1,156 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.34;
+
+import {IEscrow} from "./IEscrow.sol";
+import {IKeyRegistry} from "./IKeyRegistry.sol";
+
+/**
+ * @title IAdManager — the maker's leg: liquidity ads, locks, and unlocks by the bridger.
+ */
+interface IAdManager is IEscrow {
+    /*//////////////////////////////////////////////////////////////
+                                 TYPES
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Liquidity ad created by a maker on this (ad) chain.
+     * @dev Packed: `maker` + `open` share a slot. Field order is the `ads()` tuple order.
+     * @param maker Owner of the ad (local EVM address).
+     * @param open Whether the ad accepts new locks and funding.
+     * @param token ERC20 (or the native sentinel) escrowed for payouts on this chain.
+     * @param orderChainId Peer chain the ad serves.
+     * @param adRecipient Maker-controlled recipient id on the order chain (32-byte form).
+     * @param orderChainToken Order-chain token the ad committed to at creation.
+     * @param settlementSigner The account whose settlement key co-signs for the maker; every lock's
+     *        `params.adSettlementSigner` must equal it (2.3c). Re-pointable by the maker at any time.
+     * @param balance Total token balance deposited into the ad.
+     * @param locked Portion of {balance} reserved for open orders.
+     */
+    struct Ad {
+        address maker;
+        bool open;
+        address token;
+        uint256 orderChainId;
+        bytes32 adRecipient;
+        bytes32 orderChainToken;
+        bytes32 settlementSigner;
+        uint256 balance;
+        uint256 locked;
+    }
+
+    /**
+     * @notice The order as the ad chain sees it. All address-like fields are 32 bytes for
+     *         cross-chain parity; EVM-local values are left-padded (top 12 bytes zero).
+     */
+    struct OrderParams {
+        bytes32 orderChainToken;
+        bytes32 adChainToken;
+        uint256 amount;
+        bytes32 bridger;
+        uint256 orderChainId;
+        bytes32 srcOrderPortal;
+        bytes32 orderRecipient;
+        string adId;
+        bytes32 adCreator;
+        bytes32 adRecipient;
+        uint256 salt;
+        uint8 orderDecimals;
+        uint8 adDecimals;
+        uint256 deadline;
+        bytes32 adSettlementSigner;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                 EVENTS
+    //////////////////////////////////////////////////////////////*/
+
+    event AdCreated(
+        string indexed adId,
+        address indexed maker,
+        address indexed token,
+        uint256 initAmount,
+        uint256 orderChainId,
+        bytes32 settlementSigner
+    );
+    event KeyRegistrySet(address indexed registry);
+    /// @notice A maker re-pointed an ad's settlement signer (the third kill lever).
+    event SettlementSignerSet(string indexed adId, bytes32 previous, bytes32 next);
+    event AdFunded(string indexed adId, address indexed maker, uint256 amount, uint256 newBalance);
+    event AdWithdrawn(string indexed adId, address indexed maker, uint256 amount, uint256 newBalance);
+    event AdClosed(string indexed adId, address indexed maker);
+    event OrderLocked(
+        string indexed adId,
+        bytes32 indexed orderHash,
+        address maker,
+        address token,
+        uint256 amount,
+        bytes32 bridger,
+        bytes32 recipient
+    );
+
+    /*//////////////////////////////////////////////////////////////
+                                 ERRORS
+    //////////////////////////////////////////////////////////////*/
+
+    error AdManager__TokenZeroAddress();
+    error AdManager__AdNotFound();
+    error AdManager__NotMaker();
+    error AdManager__AdClosed();
+    error AdManager__ActiveLocks();
+    error AdManager__BridgerZero();
+    error AdManager__RecipientZero();
+    error AdManager__UsedAdId();
+    error AdManager__OrderPortalMismatch(bytes32 expected, bytes32 provided);
+    error AdManager__OrderChainMismatch(uint256 expected, uint256 provided);
+    error AdManager__RouteMismatch(bytes32 committed, bytes32 offered);
+    error AdManager__AdTokenMismatch(bytes32 expected, bytes32 provided);
+    error AdManager__AdRecipientMismatch(bytes32 expected, bytes32 provided);
+    error AdManager__NoKeyRegistry();
+    error AdManager__SettlementSignerZero();
+    error AdManager__SignerNotRegistered(bytes32 signer);
+    error AdManager__SettlementSignerMismatch(bytes32 expected, bytes32 provided);
+
+    /*//////////////////////////////////////////////////////////////
+                                 FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    function setKeyRegistry(IKeyRegistry registry) external;
+
+    function createAd(
+        string calldata adId,
+        address adToken,
+        uint256 initialAmount,
+        uint256 orderChainId,
+        bytes32 adRecipient,
+        bytes32 settlementSigner
+    ) external payable;
+    function setSettlementSigner(string calldata adId, bytes32 identity) external;
+    function fundAd(string calldata adId, uint256 amount) external payable;
+    function withdrawFromAd(string calldata adId, uint256 amount, address to) external;
+    function closeAd(string calldata adId, address to) external;
+    function lockForOrder(OrderParams calldata params) external returns (bytes32 orderHash);
+    function unlock(
+        OrderParams calldata params,
+        bytes32 nullifierHash,
+        bytes32 targetRoot,
+        bytes calldata proof,
+        bytes calldata cosigData
+    ) external;
+
+    function keyRegistry() external view returns (IKeyRegistry);
+    function ads(string calldata adId)
+        external
+        view
+        returns (
+            address maker,
+            bool open,
+            address token,
+            uint256 orderChainId,
+            bytes32 adRecipient,
+            bytes32 orderChainToken,
+            bytes32 settlementSigner,
+            uint256 balance,
+            uint256 locked
+        );
+    function availableLiquidity(string calldata adId) external view returns (uint256);
+}

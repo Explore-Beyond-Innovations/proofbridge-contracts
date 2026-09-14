@@ -69,7 +69,7 @@ contract RootAnchorTest is Test {
     function test_anchor_isTrueWithZeroDelay() public {
         vm.prank(s1);
         vm.expectEmit(true, true, false, true);
-        emit RootAnchor.Anchored(CHAIN, ROOT_A, 10, uint64(block.timestamp));
+        emit IRootAnchor.Anchored(CHAIN, ROOT_A, 10, uint64(block.timestamp));
         ra.anchor(CHAIN, ROOT_A, 10);
         assertTrue(ra.isAnchored(CHAIN, ROOT_A));
         assertEq(ra.anchoredAt(CHAIN, ROOT_A), uint64(block.timestamp));
@@ -87,7 +87,7 @@ contract RootAnchorTest is Test {
         vm.prank(s1);
         ra.anchor(CHAIN, ROOT_A, 10);
         vm.prank(s1);
-        vm.expectRevert(abi.encodeWithSelector(RootAnchor.RootAnchor__SeqNotMonotonic.selector, 10, 9));
+        vm.expectRevert(abi.encodeWithSelector(IRootAnchor.RootAnchor__SeqNotMonotonic.selector, 10, 9));
         ra.anchor(CHAIN, ROOT_B, 9);
     }
 
@@ -95,7 +95,7 @@ contract RootAnchorTest is Test {
         vm.prank(s1);
         ra.anchor(CHAIN, ROOT_A, 10);
         vm.prank(s1);
-        vm.expectRevert(abi.encodeWithSelector(RootAnchor.RootAnchor__SeqNotMonotonic.selector, 10, 10));
+        vm.expectRevert(abi.encodeWithSelector(IRootAnchor.RootAnchor__SeqNotMonotonic.selector, 10, 10));
         ra.anchor(CHAIN, ROOT_B, 10);
     }
 
@@ -120,19 +120,19 @@ contract RootAnchorTest is Test {
 
     function test_nonSigner_reverts() public {
         vm.prank(stranger);
-        vm.expectRevert(RootAnchor.RootAnchor__NotSigner.selector);
+        vm.expectRevert(IRootAnchor.RootAnchor__NotSigner.selector);
         ra.anchor(CHAIN, ROOT_A, 10);
     }
 
     function test_reanchor_isNoop() public {
         vm.prank(s1);
         ra.anchor(CHAIN, ROOT_A, 10);
-        RootAnchor.Anchor memory before = ra.anchorOf(CHAIN, ROOT_A);
+        IRootAnchor.Anchor memory before = ra.anchorOf(CHAIN, ROOT_A);
 
         vm.warp(block.timestamp + 100);
         vm.prank(s1);
         ra.anchor(CHAIN, ROOT_A, 10);
-        RootAnchor.Anchor memory after_ = ra.anchorOf(CHAIN, ROOT_A);
+        IRootAnchor.Anchor memory after_ = ra.anchorOf(CHAIN, ROOT_A);
 
         assertEq(after_.anchoredAt, before.anchoredAt);
         assertEq(after_.approvals, before.approvals);
@@ -171,7 +171,7 @@ contract RootAnchorTest is Test {
         // Resolve the constant first: a call inside the argument list would be expectRevert's target.
         uint64 max = ra.MAX_ANCHOR_DELAY();
         vm.startPrank(admin);
-        vm.expectRevert(abi.encodeWithSelector(RootAnchor.RootAnchor__DelayTooLong.selector, max, max + 1));
+        vm.expectRevert(abi.encodeWithSelector(IRootAnchor.RootAnchor__DelayTooLong.selector, max, max + 1));
         ra.setAnchorDelay(CHAIN, max + 1);
         ra.setAnchorDelay(CHAIN, max);
         vm.stopPrank();
@@ -187,7 +187,7 @@ contract RootAnchorTest is Test {
         _set(_one(s2), 1);
 
         vm.prank(s1);
-        vm.expectRevert(RootAnchor.RootAnchor__NotSigner.selector);
+        vm.expectRevert(IRootAnchor.RootAnchor__NotSigner.selector);
         ra.anchor(CHAIN, ROOT_A, 10);
 
         vm.prank(s2);
@@ -286,7 +286,7 @@ contract RootAnchorTest is Test {
         ra.anchor(CHAIN, ROOT_B, 20); // B anchors at 20
 
         vm.prank(s2);
-        vm.expectRevert(abi.encodeWithSelector(RootAnchor.RootAnchor__SeqNotMonotonic.selector, 20, 10));
+        vm.expectRevert(abi.encodeWithSelector(IRootAnchor.RootAnchor__SeqNotMonotonic.selector, 20, 10));
         ra.anchor(CHAIN, ROOT_A, 10);
     }
 
@@ -303,7 +303,7 @@ contract RootAnchorTest is Test {
         // Caught inside the delay: revoked before it ever becomes usable.
         vm.prank(admin);
         vm.expectEmit(true, true, false, true);
-        emit RootAnchor.AnchorRevoked(CHAIN, ROOT_A, 1);
+        emit IRootAnchor.AnchorRevoked(CHAIN, ROOT_A, 1);
         ra.revokeAnchor(CHAIN, ROOT_A);
         vm.warp(block.timestamp + 600);
         assertFalse(ra.isAnchored(CHAIN, ROOT_A));
@@ -338,7 +338,7 @@ contract RootAnchorTest is Test {
 
     function test_revokeAnchor_unknownRoot_reverts() public {
         vm.prank(admin);
-        vm.expectRevert(RootAnchor.RootAnchor__NoSuchAnchor.selector);
+        vm.expectRevert(IRootAnchor.RootAnchor__NoSuchAnchor.selector);
         ra.revokeAnchor(CHAIN, ROOT_A);
     }
 
@@ -346,7 +346,7 @@ contract RootAnchorTest is Test {
         vm.prank(s1);
         ra.anchor(CHAIN, ROOT_A, type(uint64).max); // a buggy publisher pins the route
         vm.prank(s1);
-        vm.expectRevert(abi.encodeWithSelector(RootAnchor.RootAnchor__SeqNotMonotonic.selector, type(uint64).max, 11));
+        vm.expectRevert(abi.encodeWithSelector(IRootAnchor.RootAnchor__SeqNotMonotonic.selector, type(uint64).max, 11));
         ra.anchor(CHAIN, ROOT_B, 11);
 
         vm.startPrank(admin);
@@ -368,9 +368,9 @@ contract RootAnchorTest is Test {
         two[0] = s1;
         two[1] = s2;
         vm.startPrank(admin);
-        vm.expectRevert(RootAnchor.RootAnchor__BadThreshold.selector);
+        vm.expectRevert(IRootAnchor.RootAnchor__BadThreshold.selector);
         ra.setSigners(two, 0);
-        vm.expectRevert(RootAnchor.RootAnchor__BadThreshold.selector);
+        vm.expectRevert(IRootAnchor.RootAnchor__BadThreshold.selector);
         ra.setSigners(two, 3);
         vm.stopPrank();
     }
@@ -380,13 +380,13 @@ contract RootAnchorTest is Test {
         dup[0] = s1;
         dup[1] = s1;
         vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(RootAnchor.RootAnchor__DuplicateSigner.selector, s1));
+        vm.expectRevert(abi.encodeWithSelector(IRootAnchor.RootAnchor__DuplicateSigner.selector, s1));
         ra.setSigners(dup, 1);
     }
 
     function test_setSigners_zeroAddress_reverts() public {
         vm.prank(admin);
-        vm.expectRevert(RootAnchor.RootAnchor__ZeroAddress.selector);
+        vm.expectRevert(IRootAnchor.RootAnchor__ZeroAddress.selector);
         ra.setSigners(_one(address(0)), 1);
     }
 

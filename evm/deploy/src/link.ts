@@ -29,7 +29,7 @@ export interface LinkResult {
   routeTxs: number;
 }
 
-/** Wires setChain + setTokenRoute on this chain's AdManager + OrderPortal from the peer manifest. Idempotent. */
+/** Wires setPeerEscrow + setTokenRoute on this chain's AdManager + OrderPortal from the peer manifest. Idempotent. */
 export async function link(opts: LinkOptions): Promise<LinkResult> {
   const rpcUrl = opts.rpcUrl ?? requireEnv("EVM_RPC_URL");
   const privateKey = opts.privateKey ?? requireEnv("EVM_ADMIN_PRIVATE_KEY");
@@ -78,38 +78,36 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
   let chainTxs = 0;
 
   {
-    const cur = await adManager.getFunction("chains")(peerChainId);
-    if (cur.supported && sameHex(cur.orderPortal, peer.contracts.orderPortal.addressBytes32)) {
-      console.log(`  [skip] AdManager.setChain(${peerChainId}) already set`);
+    const cur = await adManager.getFunction("peerEscrow")(peerChainId);
+    if (sameHex(cur, peer.contracts.orderPortal.addressBytes32)) {
+      console.log(`  [skip] AdManager.setPeerEscrow(${peerChainId}) already set`);
     } else {
-      const tx = await adManager.getFunction("setChain")(
+      const tx = await adManager.getFunction("setPeerEscrow")(
         peerChainId,
         peer.contracts.orderPortal.addressBytes32,
-        true,
         { nonce: nonces.next() },
       );
       await tx.wait();
       chainTxs++;
       console.log(
-        `  [link] AdManager.setChain(${peerChainId}, peerOrderPortal=${peer.contracts.orderPortal.address})`,
+        `  [link] AdManager.setPeerEscrow(${peerChainId}, peerOrderPortal=${peer.contracts.orderPortal.address})`,
       );
     }
   }
   {
-    const cur = await orderPortal.getFunction("chains")(peerChainId);
-    if (cur.supported && sameHex(cur.adManager, peer.contracts.adManager.addressBytes32)) {
-      console.log(`  [skip] OrderPortal.setChain(${peerChainId}) already set`);
+    const cur = await orderPortal.getFunction("peerEscrow")(peerChainId);
+    if (sameHex(cur, peer.contracts.adManager.addressBytes32)) {
+      console.log(`  [skip] OrderPortal.setPeerEscrow(${peerChainId}) already set`);
     } else {
-      const tx = await orderPortal.getFunction("setChain")(
+      const tx = await orderPortal.getFunction("setPeerEscrow")(
         peerChainId,
         peer.contracts.adManager.addressBytes32,
-        true,
         { nonce: nonces.next() },
       );
       await tx.wait();
       chainTxs++;
       console.log(
-        `  [link] OrderPortal.setChain(${peerChainId}, peerAdManager=${peer.contracts.adManager.address})`,
+        `  [link] OrderPortal.setPeerEscrow(${peerChainId}, peerAdManager=${peer.contracts.adManager.address})`,
       );
     }
   }
@@ -191,8 +189,8 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
       continue;
     }
 
-    // Direction A: local is ad-side.
-    // AdManager.setTokenRoute(address adToken, bytes32 orderToken, uint256 orderChainId)
+    // Direction A: local is ad-side. Both escrows share one signature now:
+    // setTokenRoute(address localToken, uint256 peerChainId, bytes32 peerToken).
     {
       const cur = await adManager.getFunction("tokenRoute")(localTok.address, peerChainId);
       if (sameHex(cur, peerTok.addressBytes32)) {
@@ -200,8 +198,8 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
       } else {
         const tx = await adManager.getFunction("setTokenRoute")(
           localTok.address, // adToken
-          peerTok.addressBytes32, // orderToken (bytes32)
           peerChainId, // orderChainId
+          peerTok.addressBytes32, // orderToken (bytes32)
           { nonce: nonces.next() },
         );
         await tx.wait();
@@ -210,7 +208,6 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     }
     // Direction B: local is order-side.
     // OrderPortal.setTokenRoute(address orderToken, uint256 adChainId, bytes32 adToken)
-    // Args 2/3 swap vs AdManager — mis-ordering here would silently mis-wire routes.
     {
       const cur = await orderPortal.getFunction("tokenRoute")(localTok.address, peerChainId);
       if (sameHex(cur, peerTok.addressBytes32)) {

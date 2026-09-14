@@ -12,6 +12,8 @@ abstract contract TwoStepAdmin is AccessControl {
     event AdminTransferred(address indexed from, address indexed to);
 
     error NotPendingAdmin();
+    /// @notice A zero or self transfer: accepting either would leave the contract with no admin.
+    error InvalidAdmin(address to);
 
     function _initAdmin(address admin_) internal {
         admin = admin_;
@@ -19,6 +21,7 @@ abstract contract TwoStepAdmin is AccessControl {
     }
 
     function transferAdmin(address to) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (to == address(0) || to == admin) revert InvalidAdmin(to);
         pendingAdmin = to;
         emit AdminTransferStarted(admin, to);
     }

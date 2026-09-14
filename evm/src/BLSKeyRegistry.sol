@@ -6,37 +6,18 @@ import {SCL_EIP6565} from "@scl/lib/libSCL_EIP6565.sol";
 import {SCL_sha512} from "@scl/hash/SCL_sha512.sol";
 import {p as ED_P} from "@scl/fields/SCL_wei25519.sol";
 import {IRootAnchor} from "./interfaces/IRootAnchor.sol";
+import {IBLSKeyRegistry, IPositionGuard} from "./interfaces/IBLSKeyRegistry.sol";
 import {IVerifier} from "./Verifier.sol";
 import {RegistrationSubject} from "./libraries/RegistrationSubject.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {LeafDomain} from "./libraries/LeafDomain.sol";
-
-interface IPositionGuard {
-    function hasOpenPositions(bytes32 account) external view returns (bool);
-}
 
 /// @title BLSKeyRegistry v2 — maps a 32-byte account id to up to five BLS key slots.
 /// @notice State changes are authenticated by the owner's wallet sig + BLS
 ///         proof-of-possession, never by msg.sender. `register` / `revoke` consume
 ///         the per-account nonce; `setValidUntil` is shorten-only and nonce-free so
 ///         a pre-signed retirement never expires (design 03 §3.4, 05 §5.6).
-contract BLSKeyRegistry {
-    enum Scheme {
-        Eip712, // EVM-home: typed sig, recovered address must be `account`
-        Sep53 // Stellar-home: ed25519 over SHA256("Stellar Signed Message:\n" || hex(digest))
-    }
-
-    struct OwnerAuth {
-        Scheme scheme;
-        bytes data; // Eip712: r||s||v (65 B) · Sep53: abi.encode(r, s, edX, edY)
-    }
-
-    struct KeySlot {
-        bytes32 commitment; // keccak256(blsPubKey)
-        uint64 validUntil; // 0 = no expiry; else usable while block.timestamp < validUntil
-        uint64 registeredAt;
-    }
-
+contract BLSKeyRegistry is IBLSKeyRegistry {
     struct RegistryEntry {
         uint32 nextSlotId; // monotonic, never reused
         uint32[] liveSlots; // stored slot ids, length <= MAX_ACTIVE_SLOTS
@@ -84,42 +65,6 @@ contract BLSKeyRegistry {
     /// The home chains a leaf may come from — the "one notarized EVM source" invariant as a check.
     uint256[] private _proofSources;
     bool public proofRegistrationEnabled;
-
-    event KeyRegistered(bytes32 indexed account, uint32 indexed slotId, bytes blsPubKey, uint256 nonce);
-    event KeyRegisteredByProof(
-        bytes32 indexed account, uint32 indexed slotId, bytes blsPubKey, uint64 epoch, uint256 sourceChainId
-    );
-    event ProofRegistrationSet(address rootAnchor, address verifier, uint256[] sources, bool enabled);
-    event SlotValidUntilSet(bytes32 indexed account, uint32 indexed slotId, uint64 validUntil);
-    event SlotPruned(bytes32 indexed account, uint32 indexed slotId);
-    event Paused(address account);
-    event Unpaused(address account);
-    event AdminTransferStarted(address indexed from, address indexed to);
-    event AdminTransferred(address indexed from, address indexed to);
-    event KeyRevoked(bytes32 indexed account, uint256 nonce);
-    event PositionGuardsSet(address[] guards);
-
-    error BadNonce();
-    error IdentityKey();
-    error InvalidPop();
-    error OwnerMismatch();
-    error NotRegistered();
-    error AccountInFlight();
-    error BadLength();
-    error NotAdmin();
-    error NotPendingAdmin();
-    error EnforcedPause();
-    error RegistryFull();
-    error NoSuchSlot();
-    error SlotExpired();
-    error KeyPreviouslyUsed();
-    error BadValidUntil();
-    error UnknownScheme();
-    error ProofRegistrationDisabled();
-    error ProofRegistrationRefsUnset();
-    error SourceNotAllowed(uint256 chainId);
-    error RootNotAnchored(uint256 chainId, bytes32 root);
-    error InvalidLeafProof();
 
     constructor(address admin_) {
         admin = admin_;

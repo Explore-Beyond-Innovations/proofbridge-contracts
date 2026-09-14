@@ -2,6 +2,7 @@
 pragma solidity ^0.8.34;
 
 import {Test} from "forge-std/Test.sol";
+import {IRegistrar} from "src/interfaces/IRegistrar.sol";
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {Registrar} from "src/Registrar.sol";
 import {RegistrationSubject} from "src/libraries/RegistrationSubject.sol";
@@ -80,7 +81,7 @@ contract RegistrarTest is Test {
         bytes32 expected = registrar.subjectOf(_b32(account), COMMITMENT, 1, DST_CHAIN, DST_REGISTRY);
 
         vm.expectEmit(true, true, false, true);
-        emit Registrar.RegistrationLeaf(_b32(account), COMMITMENT, 1, DST_CHAIN, DST_REGISTRY, expected);
+        emit IRegistrar.RegistrationLeaf(_b32(account), COMMITMENT, 1, DST_CHAIN, DST_REGISTRY, expected);
         vm.prank(account);
         bytes32 subject = registrar.registerLeaf(_b32(account), COMMITMENT, 1, DST_CHAIN, DST_REGISTRY, "");
 
@@ -92,7 +93,7 @@ contract RegistrarTest is Test {
     function test_stranger_directCall_reverts() public {
         address account = makeAddr("account");
         vm.prank(makeAddr("stranger"));
-        vm.expectRevert(Registrar.Registrar__NotAccount.selector);
+        vm.expectRevert(IRegistrar.Registrar__NotAccount.selector);
         registrar.registerLeaf(_b32(account), COMMITMENT, 1, DST_CHAIN, DST_REGISTRY, "");
     }
 
@@ -110,7 +111,7 @@ contract RegistrarTest is Test {
         (, uint256 otherPk) = makeAddrAndKey("other");
         bytes memory sig = _sign(otherPk, _b32(eoa), 2);
 
-        vm.expectRevert(Registrar.Registrar__BadAuth.selector);
+        vm.expectRevert(IRegistrar.Registrar__BadAuth.selector);
         registrar.registerLeaf(_b32(eoa), COMMITMENT, 2, DST_CHAIN, DST_REGISTRY, sig);
     }
 
@@ -119,11 +120,11 @@ contract RegistrarTest is Test {
         bytes memory sig = _sign(pk, _b32(eoa), 2);
 
         // Same signature, different epoch / chain / registry: a different leaf, not authorized.
-        vm.expectRevert(Registrar.Registrar__BadAuth.selector);
+        vm.expectRevert(IRegistrar.Registrar__BadAuth.selector);
         registrar.registerLeaf(_b32(eoa), COMMITMENT, 3, DST_CHAIN, DST_REGISTRY, sig);
-        vm.expectRevert(Registrar.Registrar__BadAuth.selector);
+        vm.expectRevert(IRegistrar.Registrar__BadAuth.selector);
         registrar.registerLeaf(_b32(eoa), COMMITMENT, 2, DST_CHAIN + 1, DST_REGISTRY, sig);
-        vm.expectRevert(Registrar.Registrar__BadAuth.selector);
+        vm.expectRevert(IRegistrar.Registrar__BadAuth.selector);
         registrar.registerLeaf(_b32(eoa), COMMITMENT, 2, DST_CHAIN, bytes32(uint256(0xBEEF)), sig);
     }
 
@@ -136,7 +137,7 @@ contract RegistrarTest is Test {
 
     function test_erc1271_reverts_whenTheAccountRefuses() public {
         Mock1271Account account = new Mock1271Account();
-        vm.expectRevert(Registrar.Registrar__BadAuth.selector);
+        vm.expectRevert(IRegistrar.Registrar__BadAuth.selector);
         registrar.registerLeaf(_b32(address(account)), COMMITMENT, 1, DST_CHAIN, DST_REGISTRY, hex"01");
     }
 
@@ -162,9 +163,9 @@ contract RegistrarTest is Test {
         vm.startPrank(account);
         registrar.registerLeaf(_b32(account), COMMITMENT, 5, DST_CHAIN, DST_REGISTRY, "");
 
-        vm.expectRevert(abi.encodeWithSelector(Registrar.Registrar__StaleEpoch.selector, 6, 5));
+        vm.expectRevert(abi.encodeWithSelector(IRegistrar.Registrar__StaleEpoch.selector, 6, 5));
         registrar.registerLeaf(_b32(account), COMMITMENT, 5, DST_CHAIN, DST_REGISTRY, "");
-        vm.expectRevert(abi.encodeWithSelector(Registrar.Registrar__StaleEpoch.selector, 6, 2));
+        vm.expectRevert(abi.encodeWithSelector(IRegistrar.Registrar__StaleEpoch.selector, 6, 2));
         registrar.registerLeaf(_b32(account), COMMITMENT, 2, DST_CHAIN, DST_REGISTRY, "");
 
         // Gaps are fine; only the order is fixed.
@@ -180,7 +181,7 @@ contract RegistrarTest is Test {
         registrar.registerLeaf(_b32(eoa), COMMITMENT, 2, DST_CHAIN, DST_REGISTRY, sig);
 
         // Whoever holds the signature cannot land it again: the epoch is consumed.
-        vm.expectRevert(abi.encodeWithSelector(Registrar.Registrar__StaleEpoch.selector, 3, 2));
+        vm.expectRevert(abi.encodeWithSelector(IRegistrar.Registrar__StaleEpoch.selector, 3, 2));
         registrar.registerLeaf(_b32(eoa), COMMITMENT, 2, DST_CHAIN, DST_REGISTRY, sig);
         assertEq(mm.getWidth(), 1);
     }

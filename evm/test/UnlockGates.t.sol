@@ -2,6 +2,9 @@
 pragma solidity ^0.8.34;
 
 import {stdJson} from "forge-std/StdJson.sol";
+import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
+import {IAdManager} from "src/interfaces/IAdManager.sol";
+import {IOrderPortal} from "src/interfaces/IOrderPortal.sol";
 import {AdManagerTest} from "./Admanager.t.sol";
 import {OrderPortalTest} from "./OrderPortal.t.sol";
 import {AdManager} from "src/AdManager.sol";
@@ -40,7 +43,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         return _vectorCosig(vjson);
     }
 
-    AdManager.OrderParams gp;
+    IAdManager.OrderParams gp;
 
     /// Configures the module and locks an order via the standard helpers.
     function _prepareUnlock(address module, bytes32 targetRoot) internal {
@@ -48,7 +51,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         adManager.setRootVerifier(orderChainId, module);
 
         test_fundAd_makerOnly();
-        (AdManager.OrderParams memory p, bytes32 orderHash) =
+        (IAdManager.OrderParams memory p, bytes32 orderHash) =
             _openOrder(lastAdId, address(adToken), 60 ether, 999, bridger, recipient);
         gp = p;
     }
@@ -96,7 +99,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         adManager.setRootVerifier(orderChainId, address(0));
 
         test_fundAd_makerOnly();
-        (AdManager.OrderParams memory p,) = _openOrder(lastAdId, address(adToken), 60 ether, 998, bridger, recipient);
+        (IAdManager.OrderParams memory p,) = _openOrder(lastAdId, address(adToken), 60 ether, 998, bridger, recipient);
         bytes32 targetRoot = bytes32(uint256(7));
         vm.prank(bridger);
         vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.NoRootVerifier.selector, orderChainId));
@@ -122,7 +125,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         keyRegistry.set(signer, true);
         vm.prank(maker);
         adManager.setSettlementSigner(lastAdId, signer);
-        AdManager.OrderParams memory p = _defaultParams(lastAdId);
+        IAdManager.OrderParams memory p = _defaultParams(lastAdId);
         p.salt = 4244;
         p.adSettlementSigner = signer;
         vm.prank(maker);
@@ -132,8 +135,8 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         assertFalse(adManager.hasOpenPositions(_b32(maker)), "custody is not counted");
 
         // The guard runs before the owner check, so the auth payload is irrelevant here.
-        BLSKeyRegistry.OwnerAuth memory anyAuth = BLSKeyRegistry.OwnerAuth(BLSKeyRegistry.Scheme.Eip712, hex"");
-        vm.expectRevert(BLSKeyRegistry.AccountInFlight.selector);
+        IBLSKeyRegistry.OwnerAuth memory anyAuth = IBLSKeyRegistry.OwnerAuth(IBLSKeyRegistry.Scheme.Eip712, hex"");
+        vm.expectRevert(IBLSKeyRegistry.AccountInFlight.selector);
         reg.revoke(signer, anyAuth, 1);
 
         adManager.unlock(p, bytes32("NR2"), bytes32(uint256(3)), hex"", hex"");
@@ -142,7 +145,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
 
     function test_inFlight_tracksLockAndUnlock() public {
         test_fundAd_makerOnly();
-        (AdManager.OrderParams memory p, bytes32 orderHash) =
+        (IAdManager.OrderParams memory p, bytes32 orderHash) =
             _openOrder(lastAdId, address(adToken), 60 ether, 997, bridger, recipient);
 
         assertTrue(adManager.hasOpenPositions(p.adCreator));
@@ -189,7 +192,7 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
         return _vectorCosig(vjson);
     }
 
-    OrderPortal.OrderParams gp;
+    IOrderPortal.OrderParams gp;
 
     /// Configures the module and creates an order whose parties are the
     /// vector signers (the bridger must be the sender).
@@ -198,7 +201,7 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
         portal.setRootVerifier(adChainId, module);
         test_setTokenRoute_setsAndEmits_whenSupported();
 
-        OrderPortal.OrderParams memory p = _defaultParams();
+        IOrderPortal.OrderParams memory p = _defaultParams();
         p.salt = 4242;
         p.bridger = bridgerAcct;
         p.adCreator = makerAcct;
@@ -276,7 +279,7 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
         portal.setRootVerifier(adChainId, mockModule);
         test_setTokenRoute_setsAndEmits_whenSupported();
 
-        OrderPortal.OrderParams memory p = _defaultParams();
+        IOrderPortal.OrderParams memory p = _defaultParams();
         p.salt = 4243;
         p.bridger = bridgerAcct;
         orderToken.mint(vBridger, p.amount);
@@ -287,15 +290,15 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
         vm.stopPrank();
 
         assertTrue(portal.hasOpenPositions(bridgerAcct));
-        BLSKeyRegistry.OwnerAuth memory revokeAuth = BLSKeyRegistry.OwnerAuth(
-            BLSKeyRegistry.Scheme.Eip712,
+        IBLSKeyRegistry.OwnerAuth memory revokeAuth = IBLSKeyRegistry.OwnerAuth(
+            IBLSKeyRegistry.Scheme.Eip712,
             abi.encodePacked(
                 vjson.readBytes32(".registration.bridgerOnSepolia.revokeAtNonce1.ownerSig.sig.r"),
                 vjson.readBytes32(".registration.bridgerOnSepolia.revokeAtNonce1.ownerSig.sig.s"),
                 uint8(vjson.readUint(".registration.bridgerOnSepolia.revokeAtNonce1.ownerSig.sig.v"))
             )
         );
-        vm.expectRevert(BLSKeyRegistry.AccountInFlight.selector);
+        vm.expectRevert(IBLSKeyRegistry.AccountInFlight.selector);
         reg.revoke(bridgerAcct, revokeAuth, 1);
 
         bytes32 targetRoot = bytes32(uint256(3));
@@ -313,10 +316,10 @@ function _registerVectorParties(string memory vjson) {
 
 function _registerOne(string memory vjson, string memory who, bool sep53) {
     string memory base = string.concat(".registration.", who);
-    BLSKeyRegistry.OwnerAuth memory auth;
+    IBLSKeyRegistry.OwnerAuth memory auth;
     if (sep53) {
-        auth = BLSKeyRegistry.OwnerAuth(
-            BLSKeyRegistry.Scheme.Sep53,
+        auth = IBLSKeyRegistry.OwnerAuth(
+            IBLSKeyRegistry.Scheme.Sep53,
             abi.encode(
                 uint256(stdJson.readBytes32(vjson, string.concat(base, ".ownerSig.scl.r"))),
                 uint256(stdJson.readBytes32(vjson, string.concat(base, ".ownerSig.scl.s"))),
@@ -325,8 +328,8 @@ function _registerOne(string memory vjson, string memory who, bool sep53) {
             )
         );
     } else {
-        auth = BLSKeyRegistry.OwnerAuth(
-            BLSKeyRegistry.Scheme.Eip712,
+        auth = IBLSKeyRegistry.OwnerAuth(
+            IBLSKeyRegistry.Scheme.Eip712,
             abi.encodePacked(
                 stdJson.readBytes32(vjson, string.concat(base, ".ownerSig.sig.r")),
                 stdJson.readBytes32(vjson, string.concat(base, ".ownerSig.sig.s")),
