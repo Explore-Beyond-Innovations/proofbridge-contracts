@@ -25,7 +25,8 @@ import {Termination} from "./libraries/Termination.sol";
  *         deadline anyone may claim a cancel, which opens the window `[deadline, deadline + buffer)`;
  *         the co-signed `unlock` (accepted until `deadline + buffer − margin`) or a `presentSettled`
  *         proof settles it; an unchallenged window releases the lock and records the CANCEL leaf the
- *         order leg refunds against. Everything not specific to ads lives in {EscrowBase}.
+ *         order leg refunds against; `recordSettled` appends the SETTLED leaf after a fill.
+ *         Everything not specific to ads lives in {EscrowBase}.
  */
 contract AdManager is EscrowBase, IAdManager {
     using AddressCast for address;
@@ -251,6 +252,11 @@ contract AdManager is EscrowBase, IAdManager {
         orders[orderHash] = Status.Cancelled;
         _appendLeaf(orderHash, LeafDomain.CANCEL);
         emit OrderCancelled(orderHash, false);
+    }
+
+    /// @inheritdoc IAdManager
+    function recordSettled(OrderParams calldata params) external nonReentrant whenNotPaused {
+        _recordSettled(_hashOrder(params, block.chainid, address(this)));
     }
 
     /// @inheritdoc IAdManager

@@ -155,6 +155,9 @@ interface IAdManager is IEscrow {
     /// @notice Settle the lock on a secret-free proof that the order leg already paid the maker (its
     ///         SETTLED leaf under a root the anchor notarized). `Open` or `Claimed`; no nullifier.
     function presentSettled(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof) external;
+    /// @notice Append the lock's SETTLED leaf after a fill (D8). Permissionless, single-shot, its own
+    ///         transaction — the relayer batches it behind the fill.
+    function recordSettled(OrderParams calldata params) external;
 
     function keyRegistry() external view returns (IKeyRegistry);
     function ads(string calldata adId)

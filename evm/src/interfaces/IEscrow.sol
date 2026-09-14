@@ -46,9 +46,11 @@ interface IEscrow {
     event TokenRouteRemoved(address indexed localToken, uint256 indexed peerChainId);
     /// @notice An order settled on this chain with a valid proof (the leg is `Filled`).
     event OrderUnlocked(bytes32 indexed orderHash, bytes32 indexed recipient, bytes32 indexed nullifierHash);
-    /// @notice The leg reached `Filled` and its SETTLED leaf was appended; `byEvidence` is true for
-    ///         `presentSettled` (a proof of the other leg), false for the co-signed `unlock`.
+    /// @notice The leg reached `Filled`; `byEvidence` is true for `presentSettled` (a proof of the
+    ///         other leg), false for the co-signed `unlock`. The SETTLED leaf follows via `recordSettled`.
     event OrderSettled(bytes32 indexed orderHash, bool byEvidence);
+    /// @notice The leg's SETTLED leaf was appended (`recordSettled`).
+    event SettledRecorded(bytes32 indexed orderHash);
     /// @notice A presentation window opened on this leg; it may be finalized at `finalizeAt`.
     event ClaimOpened(bytes32 indexed orderHash, Termination.ClaimEntry entry, uint64 finalizeAt);
     /// @notice The leg reached `Cancelled`; `byEvidence` is true for the follower's `refundByCancel`
@@ -89,6 +91,10 @@ interface IEscrow {
     error Escrow__NotClaimed(bytes32 orderHash);
     error Escrow__NoRootAnchor();
     error Escrow__RootNotAnchored(uint256 chainId, bytes32 root);
+    /// @notice `recordSettled`: the order is not `Filled`.
+    error Escrow__NotFilled(bytes32 orderHash);
+    /// @notice `recordSettled`: the order's SETTLED leaf is already in the MMR.
+    error Escrow__SettledRecorded(bytes32 orderHash);
 
     /*//////////////////////////////////////////////////////////////
                                  ADMIN
@@ -136,6 +142,8 @@ interface IEscrow {
         external
         view
         returns (uint64 openedAt, uint64 finalizeAt, Termination.ClaimEntry entry);
+    /// @notice Whether the order's SETTLED leaf is in the MMR.
+    function settledRecorded(bytes32 orderHash) external view returns (bool);
     /// @notice BLSKeyRegistry revoke guard: true while the account has a leg open on this escrow.
     function hasOpenPositions(bytes32 account) external view returns (bool);
     function getLatestMerkleRoot() external view returns (bytes32);

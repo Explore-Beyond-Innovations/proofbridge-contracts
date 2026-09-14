@@ -67,6 +67,9 @@ interface IOrderPortal is IEscrow {
     /// @notice Settle the deposit to the maker on a proof of the ad leg's SETTLED leaf under an
     ///         anchored root. `Open` or `Claimed`; no nullifier.
     function presentSettled(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof) external;
+    /// @notice Append the deposit's SETTLED leaf after a fill (D8). Permissionless, single-shot, its
+    ///         own transaction — the relayer batches it behind the fill.
+    function recordSettled(OrderParams calldata params) external;
     /// @notice Open the backstop window at `now ≥ deadline + longBackstop` (an anchor outage): the
     ///         window is claim-anchored and may be finalized at `now + buffer`. Permissionless.
     function claimBackstop(OrderParams calldata params) external;

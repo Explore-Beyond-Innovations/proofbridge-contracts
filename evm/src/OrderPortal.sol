@@ -23,8 +23,9 @@ import {Termination} from "./libraries/Termination.sol";
  *         the termination follower (2.3e): it refunds only against a proof of the ad leg's CANCEL
  *         leaf under an anchored root, never on a clock; the maker's co-signed `unlock` stops
  *         `claimStagger` before the deadline so a cancel claim always leaves time to land it; and
- *         a far backstop (`deadline + longBackstop`) opens a window, never a bare refund.
- *         Everything not specific to deposits lives in {EscrowBase}.
+ *         a far backstop (`deadline + longBackstop`) opens a window, never a bare refund;
+ *         `recordSettled` appends the SETTLED leaf after a fill. Everything not specific to
+ *         deposits lives in {EscrowBase}.
  */
 contract OrderPortal is EscrowBase, IOrderPortal {
     using AddressCast for address;
@@ -117,6 +118,11 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         // D4: no deadline read anywhere on this path.
         _cancel(orderHash, params.bridger, true);
         _refundBridger(orderHash, params);
+    }
+
+    /// @inheritdoc IOrderPortal
+    function recordSettled(OrderParams calldata params) external nonReentrant whenNotPaused {
+        _recordSettled(_hashOrder(params, block.chainid, address(this)));
     }
 
     /// @inheritdoc IOrderPortal

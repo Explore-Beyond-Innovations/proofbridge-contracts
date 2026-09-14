@@ -350,6 +350,8 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         adManager.unlock(p, bytes32("R1"), bytes32(uint256(1)), hex"", hex"");
 
         assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Filled));
+        assertEq(adManager.getMerkleLeafCount(), leaves, "the fill itself appends nothing");
+        adManager.recordSettled(p);
         assertEq(adManager.getMerkleLeafCount(), leaves + 1, "T-59: the SETTLED leaf, no cancel leaf");
         (, uint64 finalizeAt,) = adManager.claims(h);
         assertEq(finalizeAt, 0, "window closed");
@@ -393,6 +395,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         assertEq(adToken.balanceOf(recipient), 60 ether, "the bridger's recipient is paid");
         assertEq(_balance(), balanceBefore - 60 ether);
         assertEq(_locked(), 0);
+        adManager.recordSettled(p);
         assertEq(adManager.getMerkleLeafCount(), leaves + 1, "T-59: SETTLED appended");
         assertEq(adManager.inFlightOf(p.adSettlementSigner), 0, "T-44");
         assertFalse(adManager.nullifierUsed(bytes32(0)), "no nullifier consumed");
@@ -444,6 +447,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
     function test_T41_filledPrimary_noCancelLeafIsReachable() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lock(13);
         adManager.unlock(p, bytes32("F1"), bytes32(0), hex"", hex"");
+        adManager.recordSettled(p);
         uint256 leaves = adManager.getMerkleLeafCount();
         assertEq(leaves, 2, "ORDER + SETTLED");
 
@@ -474,6 +478,36 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         adManager.cancelNeverLocked(p);
         vm.expectRevert(Pausable.EnforcedPause.selector);
         adManager.presentSettled(p, bytes32(0), hex"");
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        adManager.recordSettled(p);
+    }
+
+    /// T-59: the SETTLED leaf is recordable exactly once, only for `Filled`, never after a cancel.
+    function test_T59_recordSettled_singleShot_onlyWhenFilled() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lock(17);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotFilled.selector, h));
+        adManager.recordSettled(p);
+
+        adManager.unlock(p, bytes32("R2"), bytes32(0), hex"", hex"");
+        assertFalse(adManager.settledRecorded(h));
+        vm.expectEmit(true, true, true, true);
+        emit IEscrow.SettledRecorded(h);
+        adManager.recordSettled(p);
+        assertTrue(adManager.settledRecorded(h));
+        assertEq(adManager.getMerkleLeafCount(), 2, "ORDER + SETTLED");
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__SettledRecorded.selector, h));
+        adManager.recordSettled(p);
+        assertEq(adManager.getMerkleLeafCount(), 2);
+
+        // A cancelled order never gets one.
+        IAdManager.OrderParams memory q = _defaultParams(lastAdId);
+        q.salt = 18;
+        bytes32 hq = adManager.hashOrderPublic(q);
+        vm.warp(q.deadline);
+        adManager.cancelNeverLocked(q);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotFilled.selector, hq));
+        adManager.recordSettled(q);
+        assertEq(adManager.getMerkleLeafCount(), 3, "the CANCEL leaf only");
     }
 
     /*//////////////////////////// T-59 with the real verifier ////////////////////////////*/
@@ -720,6 +754,7 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
 
         assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Filled));
         assertEq(orderToken.balanceOf(adRecipient), p.amount, "the maker's recipient is paid");
+        portal.recordSettled(p);
         assertEq(portal.getMerkleLeafCount(), leaves + 1, "T-59: SETTLED appended");
         assertEq(portal.inFlightOf(p.bridger), 0, "T-44");
 
@@ -777,7 +812,11 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         vm.expectEmit(true, true, true, true);
         emit IEscrow.OrderSettled(h, false);
         portal.unlock(p, bytes32("U1"), bytes32(0), hex"", hex"");
+        assertEq(portal.getMerkleLeafCount(), 1, "the fill itself appends nothing");
+        portal.recordSettled(p);
         assertEq(portal.getMerkleLeafCount(), 2, "AD + SETTLED");
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__SettledRecorded.selector, h));
+        portal.recordSettled(p);
 
         _anchorRoot(bytes32(uint256(11)));
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, h, IEscrow.Status.Filled));
@@ -812,6 +851,8 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         portal.claimBackstop(p);
         vm.expectRevert(Pausable.EnforcedPause.selector);
         portal.finalizeBackstop(p);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        portal.recordSettled(p);
     }
 
     /*//////////////////////////// T-40 with the real verifier ////////////////////////////*/

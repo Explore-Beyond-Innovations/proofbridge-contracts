@@ -34,11 +34,13 @@ import {TwoStepAdmin} from "../libraries/TwoStepAdmin.sol";
  *
  *        None ──lock/create──▶ Open ──claim*──▶ Claimed ──finalize*──▶ Cancelled
  *          │                    │                  │
- *          │                    └──unlock / presentSettled──┘──▶ Filled (+ SETTLED leaf)
+ *          │                    └──unlock / presentSettled──┘──▶ Filled ──recordSettled──▶ (+ SETTLED leaf)
  *          └──cancelNeverLocked (primary only)──▶ Cancelled (+ CANCEL leaf)
  *
  *      `Filled` and `Cancelled` are terminal. Nothing terminal happens on a clock alone: a clock only
- *      opens a window, and evidence inside the window always wins over the refund after it.
+ *      opens a window, and evidence inside the window always wins over the refund after it. The
+ *      SETTLED leaf is its own transaction on both chains (Soroban's per-tx budget forces it there;
+ *      EVM matches so the relayer batches one shape), permissionless and single-shot.
  */
 abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVerifierRegistry {
     using SafeERC20 for IERC20;
@@ -94,6 +96,9 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
 
     /// @notice The open presentation window per order, if any (`Claimed` ⇔ a record exists).
     mapping(bytes32 orderHash => Termination.Claim) public claims;
+
+    /// @notice Whether the order's SETTLED leaf is in the MMR (`recordSettled`, once per fill).
+    mapping(bytes32 orderHash => bool) public settledRecorded;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -330,16 +335,25 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     }
 
     /**
-     * @dev `Open | Claimed → Filled` (2.3e D8): every fill appends this leg's SETTLED leaf, so the
-     *      other escrow's presenter can prove this one paid; the window, if any, closes; count out.
-     *      The evidence path consumes no nullifier — the terminal status is its replay guard.
+     * @dev `Open | Claimed → Filled`: the window, if any, closes; count out. The evidence path
+     *      consumes no nullifier — the terminal status is its replay guard. The SETTLED leaf (2.3e
+     *      D8) follows in `_recordSettled`, a separate transaction.
      */
     function _fill(bytes32 orderHash, bytes32 account, bool byEvidence) internal {
         orders[orderHash] = Status.Filled;
         delete claims[orderHash];
         _countOut(account);
-        _appendLeaf(orderHash, LeafDomain.SETTLED);
         emit OrderSettled(orderHash, byEvidence);
+    }
+
+    /// @dev Append this leg's SETTLED leaf for a `Filled` order, once (D8): what lets the other
+    ///      escrow's presenter prove this one paid. Permissionless; the caller only names the order.
+    function _recordSettled(bytes32 orderHash) internal {
+        if (orders[orderHash] != Status.Filled) revert Escrow__NotFilled(orderHash);
+        if (settledRecorded[orderHash]) revert Escrow__SettledRecorded(orderHash);
+        settledRecorded[orderHash] = true;
+        _appendLeaf(orderHash, LeafDomain.SETTLED);
+        emit SettledRecorded(orderHash);
     }
 
     /// @dev Open a presentation window on an `Open` leg; only a `finalize*` or evidence closes it.
