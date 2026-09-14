@@ -233,17 +233,50 @@ export async function deployCore(
       "BLSKeyRegistry",
       signer,
     );
+    const setGuards = registry.getFunction("setPositionGuards");
     try {
-      const tx = await registry.getFunction("setPositionGuards")(
-        [adManagerAddr, orderPortalAddr],
-        { nonce: nonces.next() },
-      );
+      // Estimate before taking a nonce: a revert here (signer not the registry admin) must not
+      // leave a gap the next tx.wait() hangs on.
+      await setGuards.estimateGas([adManagerAddr, orderPortalAddr]);
+      const tx = await setGuards([adManagerAddr, orderPortalAddr], { nonce: nonces.next() });
       await tx.wait();
       console.log(`  [wire] BLSKeyRegistry.setPositionGuards([AdManager, OrderPortal])`);
     } catch (err) {
       console.warn(
         `  [wire] setPositionGuards FAILED (signer may not be registry admin): ${err}`,
       );
+    }
+  }
+
+  // ── point the AdManager at the registry (2.3c) ────────────────────
+  // createAd / setSettlementSigner / lockForOrder fail closed until this is set: an ad's
+  // settlement signer must hold a live, unexpired key. A fail-closed wire that does not land
+  // is a deploy failure, not a warning: nothing else in the run is usable without it.
+  {
+    const adManager = attachContract(adManagerAddr, "AdManager", "AdManager", signer);
+    let cur: string;
+    try {
+      cur = await adManager.getFunction("keyRegistry")();
+    } catch (err) {
+      // A reused pre-2.3c AdManager has no `keyRegistry()`: the call lands in its fallback.
+      throw new Error(
+        `AdManager at ${adManagerAddr} has no keyRegistry() (pre-2.3c bytecode?); redeploy it instead of reusing: ${err}`,
+      );
+    }
+    if (cur.toLowerCase() === blsKeyRegistryAddr.toLowerCase()) {
+      console.log(`  [skip] AdManager.setKeyRegistry already set`);
+    } else {
+      const setKeyRegistry = adManager.getFunction("setKeyRegistry");
+      try {
+        await setKeyRegistry.estimateGas(blsKeyRegistryAddr);
+      } catch (err) {
+        throw new Error(
+          `AdManager.setKeyRegistry(${blsKeyRegistryAddr}) would revert (signer not the AdManager admin?): ${err}`,
+        );
+      }
+      const tx = await setKeyRegistry(blsKeyRegistryAddr, { nonce: nonces.next() });
+      await tx.wait();
+      console.log(`  [wire] AdManager.setKeyRegistry(${blsKeyRegistryAddr})`);
     }
   }
 

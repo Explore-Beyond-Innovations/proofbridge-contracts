@@ -4,6 +4,7 @@ pragma solidity ^0.8.34;
 import {Test} from "forge-std/Test.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 import {OrderHash} from "../src/libraries/OrderHash.sol";
+import {AddressCast} from "../src/libraries/AddressCast.sol";
 
 contract WidthHarness {
     function check(uint256 amount, uint256 orderChainId, uint256 adChainId, uint256 deadline) external pure {
@@ -29,6 +30,22 @@ contract OrderHashParityTest is Test {
 
     function test_domainSeparatorMatchesFixture() public view {
         assertEq(OrderHash.domainSeparator(), v.readBytes32("._meta.domainSeparator"));
+    }
+
+    /// T-20 (2.3c D5, risk 01 F15): the settlement signer's wire form inside the hash is the form the
+    /// escrow compares against `Ad.settlementSigner`. The generator pins the 20-byte address and its
+    /// 32-byte form independently (`_meta.settlementSignerEncoding`); the pinned helper must produce
+    /// the latter from the former, and the split-case vector must carry exactly those bytes. A
+    /// same-direction drift of generator and helper fails on the pinned pair.
+    function test_settlementSignerEncodingRoundTrips() public view {
+        address evmAddress = v.readAddress("._meta.settlementSignerEncoding.evmAddress");
+        bytes32 account32 = v.readBytes32("._meta.settlementSignerEncoding.account32");
+        assertEq(AddressCast.toBytes32(evmAddress), account32, "toBytes32 must left-pad the address");
+        assertEq(AddressCast.toAddressChecked(account32), evmAddress);
+
+        assertEq(v.readString(".vectors[1].name"), "split-case-evm-signer");
+        assertEq(v.readBytes32(".vectors[1].order.adSettlementSigner"), account32, "the split-case signer");
+        assertNotEq(v.readBytes32(".vectors[1].order.adCreator"), account32, "custody != identity");
     }
 
     function _uint(string memory key) internal view returns (uint256) {

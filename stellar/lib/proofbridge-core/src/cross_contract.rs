@@ -46,6 +46,13 @@ pub trait RootAnchorInterface {
     fn anchored_at(env: Env, source_chain_id: u128, root: BytesN<32>) -> u64;
 }
 
+/// The one registry read the escrows make (2.3c D2): a live, unexpired key slot.
+#[allow(dead_code)]
+#[contractclient(name = "KeyRegistryClient")]
+pub trait KeyRegistryInterface {
+    fn has_usable_slot(env: Env, account: BytesN<32>) -> bool;
+}
+
 // =============================================================================
 // MerkleManager Helpers
 // =============================================================================
@@ -243,4 +250,13 @@ pub fn is_anchored(env: &Env, anchor: &Address, source_chain_id: u128, root: &By
         RootAnchorClient::new(env, anchor).try_is_anchored(&source_chain_id, root),
         Ok(Ok(true))
     )
+}
+
+// =============================================================================
+// KeyRegistry Helpers
+// =============================================================================
+
+/// True iff `account` holds at least one live, unexpired key slot in the registry.
+pub fn has_usable_slot(env: &Env, registry: &Address, account: &BytesN<32>) -> bool {
+    KeyRegistryClient::new(env, registry).has_usable_slot(account)
 }

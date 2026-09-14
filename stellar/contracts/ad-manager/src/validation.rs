@@ -3,7 +3,7 @@
 //! Validates order parameters against ad configuration, chain configuration,
 //! and token routes.
 
-use soroban_sdk::Env;
+use soroban_sdk::{BytesN, Env};
 
 use proofbridge_core::decimal_scaling;
 use proofbridge_core::errors::map_decimal_scaling_error;
@@ -87,5 +87,28 @@ pub fn validate_order(env: &Env, ad: &Ad, params: &OrderParams) -> Result<(), Ad
         return Err(AdManagerError::AdRecipientMismatch);
     }
 
+    // Identity checks (2.3c, design 01 §1.4): custody — the order names this ad's maker — and the
+    // settlement identity the ad declared. Both are the escrow's invariant, not the maker's account
+    // policy; before 2.3c `ad_creator` was compared to nothing here (risk 01 F14).
+    if params.ad_creator != proofbridge_core::eip712::address_to_bytes32(env, &ad.maker) {
+        return Err(AdManagerError::NotMaker);
+    }
+    if params.ad_settlement_signer != ad.settlement_signer {
+        return Err(AdManagerError::SettlementSignerMismatch);
+    }
+
+    Ok(())
+}
+
+/// The registry gate on every settlement-signer set (2.3c D2): fails closed with no registry,
+/// refuses the zero identity, and refuses an account with no live, unexpired key.
+pub fn require_registered(env: &Env, signer: &BytesN<32>) -> Result<(), AdManagerError> {
+    let registry = storage::get_key_registry(env).ok_or(AdManagerError::NoKeyRegistry)?;
+    if auth::is_zero_bytes32(signer) {
+        return Err(AdManagerError::SettlementSignerZero);
+    }
+    if !proofbridge_core::cross_contract::has_usable_slot(env, &registry, signer) {
+        return Err(AdManagerError::SignerNotRegistered);
+    }
     Ok(())
 }

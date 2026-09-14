@@ -436,16 +436,21 @@ mod validation_tests {
         let bridger = make_bytes32(env, 0xDD);
         let order_recipient = make_bytes32(env, 0xEE);
         let order_chain_id: u128 = 1;
+        // 2.3c: validate_order binds the order's ad_creator to the ad's maker and its
+        // ad_settlement_signer to the ad's declared signer, so the fixture aligns both.
+        let maker = Address::generate(env);
+        let settlement_signer = make_bytes32(env, 0x77);
 
         let ad = Ad {
             order_chain_id,
             ad_recipient: ad_recipient.clone(),
-            maker: Address::generate(env),
+            maker: maker.clone(),
             token: ad_token.clone(),
             balance: 1_000_000,
             locked: 0,
             open: true,
             order_chain_token: order_chain_token.clone(),
+            settlement_signer: settlement_signer.clone(),
         };
 
         let params = crate::types::OrderParams {
@@ -457,7 +462,7 @@ mod validation_tests {
             src_order_portal: make_bytes32(env, 0xFF),
             order_recipient: order_recipient.clone(),
             ad_id: SorobanString::from_str(env, "test-ad"),
-            ad_creator: make_bytes32(env, 0x77),
+            ad_creator: proofbridge_core::eip712::address_to_bytes32(env, &maker),
             ad_recipient: ad_recipient.clone(),
             salt: soroban_sdk::U256::from_u128(env, 42),
             order_decimals: 7,
@@ -854,6 +859,7 @@ mod storage_tests {
                 locked: 100_000,
                 open: true,
                 order_chain_token: BytesN::from_array(&env, &[0xBB; 32]),
+                settlement_signer: BytesN::from_array(&env, &[0x77; 32]),
             };
 
             storage::set_ad(&env, &ad_id, &ad);
@@ -969,6 +975,7 @@ mod ad_lifecycle_tests {
                 locked: 0,
                 open: true,
                 order_chain_token: BytesN::from_array(&env, &[0xBB; 32]),
+                settlement_signer: BytesN::from_array(&env, &[0x77; 32]),
             };
             storage::set_ad(&env, &ad_id, &ad);
             storage::set_ad_id_used(&env, &ad_id);
@@ -1133,6 +1140,7 @@ mod ad_lifecycle_tests {
                 locked: 0,
                 open: true,
                 order_chain_token: BytesN::from_array(&env, &[0xBB; 32]),
+                settlement_signer: BytesN::from_array(&env, &[0x77; 32]),
             };
             let ad2 = Ad {
                 order_chain_id: 2,
@@ -1143,6 +1151,7 @@ mod ad_lifecycle_tests {
                 locked: 2_000_000,
                 open: true,
                 order_chain_token: BytesN::from_array(&env, &[0xBB; 32]),
+                settlement_signer: BytesN::from_array(&env, &[0x77; 32]),
             };
 
             storage::set_ad(&env, &ad1_id, &ad1);
@@ -1213,6 +1222,7 @@ mod order_lifecycle_tests {
                 locked: 0,
                 open: true,
                 order_chain_token: BytesN::from_array(&env, &[0xBB; 32]),
+                settlement_signer: BytesN::from_array(&env, &[0x77; 32]),
             };
             storage::set_ad(&env, &ad_id, &ad);
 
@@ -1255,6 +1265,7 @@ mod order_lifecycle_tests {
                 locked: 0,
                 open: true,
                 order_chain_token: BytesN::from_array(&env, &[0xBB; 32]),
+                settlement_signer: BytesN::from_array(&env, &[0x77; 32]),
             };
             storage::set_ad(&env, &ad_id, &ad);
 

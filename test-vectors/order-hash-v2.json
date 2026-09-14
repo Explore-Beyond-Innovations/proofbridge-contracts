@@ -10,6 +10,11 @@
     "widthInvariant": "amount/chainIds ≤ u128 (rejected wider, both chains); salt is full u256 (Soroban salt → U256); deadline ≤ u64; see `rejects`",
     "envelope": "escrow → verifier metadata = (slot0, slot1, cosigData); slot 0 = params.adSettlementSigner (NOT adCreator) at all four call sites; the verifier resolves slot 0's settlement key (design/01 §1.8)",
     "classification": "account32 with 12 leading zero bytes = left-padded EVM address, else native 32-byte key — the publisher's home-chain rule",
+    "settlementSignerEncoding": {
+      "rule": "an EVM settlement signer enters the order hash as toBytes32(address) (12 zero bytes || 20-byte address); the split-case-evm-signer vector's adSettlementSigner is exactly account32",
+      "evmAddress": "0xd2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+      "account32": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0"
+    },
     "leafDomains": {
       "ORDER": 0,
       "AD": 1,

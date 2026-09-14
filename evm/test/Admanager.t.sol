@@ -9,6 +9,7 @@ import {IVerifier} from "src/Verifier.sol";
 import {IMerkleManager} from "src/MerkleManager.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
+import {MockKeyRegistry} from "./mocks/MockKeyRegistry.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
 import {AddressCast} from "src/libraries/AddressCast.sol";
 import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
@@ -27,6 +28,7 @@ contract AdManagerTest is Test {
     MerkleManager internal merkleManager;
     ERC20Mock internal adToken;
     wNativeToken internal _wNativeToken;
+    MockKeyRegistry internal keyRegistry;
     uint256 constant W_DECIMALS = 18;
 
     address admin;
@@ -66,6 +68,9 @@ contract AdManagerTest is Test {
         verifier = new MockVerifier(true);
         merkleManager = new MerkleManager(admin, address(new Poseidon2Yul()));
         _wNativeToken = new wNativeToken("Wrapped Native Token", "WNATIVE", W_DECIMALS);
+        // 2.3c: the maker is the default settlement signer and must hold a usable key.
+        keyRegistry = new MockKeyRegistry();
+        keyRegistry.set(_b32(maker), true);
 
         adManager = new MockAdManager(
             admin,
@@ -77,6 +82,7 @@ contract AdManagerTest is Test {
         vm.startPrank(admin);
         merkleManager.grantRole(merkleManager.MANAGER_ROLE(), address(adManager));
         adManager.setRootVerifier(orderChainId, address(new MockRootVerifier(true)));
+        adManager.setKeyRegistry(keyRegistry);
         vm.stopPrank();
 
         adChainId = block.chainid;
@@ -254,7 +260,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__TokenZeroAddress.selector);
-        adManager.createAd(adId, address(0), initAmt, orderChainId, _b32(address(0xDEAD)));
+        adManager.createAd(adId, address(0), initAmt, orderChainId, _b32(address(0xDEAD)), _b32(maker));
     }
 
     // Test that createAd rejects when no route exists for the chain
@@ -266,7 +272,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(AdManager.AdManager__ChainNotSupported.selector, orderChainId));
-        adManager.createAd(adId, address(adToken), initAmt, orderChainId, _b32(address(0xDEAD)));
+        adManager.createAd(adId, address(adToken), initAmt, orderChainId, _b32(address(0xDEAD)), _b32(maker));
     }
 
     // Test that createAd succeeds when route exists, emits event, and stores ad data
@@ -283,8 +289,8 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectEmit(true, true, true, true);
-        emit AdManager.AdCreated("1", maker, address(adToken), initAmt, orderChainId);
-        adManager.createAd(adId, address(adToken), initAmt, orderChainId, _b32(adRecipient));
+        emit AdManager.AdCreated("1", maker, address(adToken), initAmt, orderChainId, _b32(maker));
+        adManager.createAd(adId, address(adToken), initAmt, orderChainId, _b32(adRecipient), _b32(maker));
 
         (
             uint256 linkedOrderChainId,
@@ -293,7 +299,8 @@ contract AdManagerTest is Test {
             address token,
             uint256 balance,
             uint256 locked,
-            bool open,
+            bool open,,
+            bytes32 settlementSigner
         ) = adManager.ads(adId);
 
         lastAdId = adId;
@@ -305,6 +312,7 @@ contract AdManagerTest is Test {
         assertEq(balance, initAmt);
         assertEq(locked, 0);
         assertTrue(open);
+        assertEq(settlementSigner, _b32(maker));
     }
 
     function test_createAd_with_native_token_success() public {
@@ -319,8 +327,10 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectEmit(true, true, true, true);
-        emit AdManager.AdCreated(adId, maker, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId);
-        adManager.createAd{value: initAmt}(adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, _b32(adRecipient));
+        emit AdManager.AdCreated(adId, maker, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, _b32(maker));
+        adManager.createAd{value: initAmt}(
+            adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, _b32(adRecipient), _b32(maker)
+        );
 
         (
             uint256 linkedOrderChainId,
@@ -329,7 +339,8 @@ contract AdManagerTest is Test {
             address token,
             uint256 balance,
             uint256 locked,
-            bool open,
+            bool open,,
+            bytes32 settlementSigner
         ) = adManager.ads(adId);
 
         assertEq(linkedOrderChainId, orderChainId);
@@ -339,6 +350,7 @@ contract AdManagerTest is Test {
         assertEq(balance, initAmt);
         assertEq(locked, 0);
         assertTrue(open);
+        assertEq(settlementSigner, _b32(maker));
 
         uint256 wNativeBalance = _wNativeToken.balanceOf(address(adManager));
         assertEq(wNativeBalance, initAmt);
@@ -356,7 +368,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(AdManager.AdManager__InsufficientLiquidity.selector);
-        adManager.createAd(adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, _b32(adRecipient));
+        adManager.createAd(adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, _b32(adRecipient), _b32(maker));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -376,7 +388,7 @@ contract AdManagerTest is Test {
         vm.prank(maker);
         adManager.fundAd(adId, fundAmt);
 
-        (,,,, uint256 balance,,,) = adManager.ads(adId);
+        (,,,, uint256 balance,,,,) = adManager.ads(adId);
         assertEq(balance, initAmt + fundAmt);
     }
 
@@ -420,7 +432,7 @@ contract AdManagerTest is Test {
         vm.deal(maker, fundAmt);
         vm.prank(maker);
         adManager.fundAd{value: fundAmt}(adId, fundAmt);
-        (,,,, uint256 balance,,,) = adManager.ads(adId);
+        (,,,, uint256 balance,,,,) = adManager.ads(adId);
 
         assertEq(balance, initAmt + fundAmt);
     }
@@ -585,7 +597,7 @@ contract AdManagerTest is Test {
 
         p.adRecipient = _b32(recipient);
 
-        (, bytes32 expected,,,,,,) = adManager.ads(p.adId);
+        (, bytes32 expected,,,,,,,) = adManager.ads(p.adId);
 
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
@@ -690,7 +702,7 @@ contract AdManagerTest is Test {
         string memory adId = lastAdId;
         AdManager.OrderParams memory p = _defaultParams(adId);
 
-        (,, address adMaker, address token,, uint256 lockedBefore, bool open,) = adManager.ads(adId);
+        (,, address adMaker, address token,, uint256 lockedBefore, bool open,,) = adManager.ads(adId);
         assertTrue(open);
         assertEq(lockedBefore, 0);
 
@@ -703,7 +715,7 @@ contract AdManagerTest is Test {
         bytes32 orderHash = adManager.lockForOrder(p);
         assertEq(orderHash, expectedHash, "order hash mismatch");
 
-        (,,,,, uint256 lockedAfter,,) = adManager.ads(adId);
+        (,,,,, uint256 lockedAfter,,,) = adManager.ads(adId);
         assertEq(lockedAfter, lockedBefore + p.amount, "locked not incremented");
 
         (AdManager.Status status) = adManager.orders(orderHash);
@@ -859,7 +871,7 @@ contract AdManagerTest is Test {
         assertEq(balAfter - balBefore, fundAmt + initAmt, "remaining not transferred");
 
         // Ad is closed, balance set to 0
-        (,,,, uint256 balance, uint256 locked, bool open,) = adManager.ads(adId);
+        (,,,, uint256 balance, uint256 locked, bool open,,) = adManager.ads(adId);
         assertEq(balance, 0, "balance not zeroed");
         assertEq(locked, 0, "locked should be zero (no open locks)");
         assertFalse(open, "ad not closed");
@@ -880,7 +892,7 @@ contract AdManagerTest is Test {
         uint256 balAfter = recipient.balance;
         assertEq(balAfter - balBefore, initAmt, "remaining not transferred");
 
-        (,,,, uint256 balance, uint256 locked, bool open,) = adManager.ads(adId);
+        (,,,, uint256 balance, uint256 locked, bool open,,) = adManager.ads(adId);
 
         assertEq(balance, 0, "balance not zeroed");
         assertEq(locked, 0, "locked should be zero (no open locks)");
@@ -964,7 +976,7 @@ contract AdManagerTest is Test {
             _openOrder(adId, address(adToken), 70 ether, 999, bridger, recipient);
 
         // Snapshot state
-        (,,,,, uint256 lockedBefore,,) = adManager.ads(p.adId);
+        (,,,,, uint256 lockedBefore,,,) = adManager.ads(p.adId);
         (AdManager.Status statusBefore) = adManager.orders(orderHash);
         assertEq(uint256(statusBefore), uint256(AdManager.Status.Open));
 
@@ -980,7 +992,7 @@ contract AdManagerTest is Test {
         // State unchanged
         (AdManager.Status statusAfter) = adManager.orders(orderHash);
         assertEq(uint256(statusAfter), uint256(AdManager.Status.Open), "status changed");
-        (,,,,, uint256 lockedAfter,,) = adManager.ads(p.adId);
+        (,,,,, uint256 lockedAfter,,,) = adManager.ads(p.adId);
         assertEq(lockedAfter, lockedBefore, "locked changed");
     }
 
@@ -998,7 +1010,7 @@ contract AdManagerTest is Test {
 
         // Balances and locked snapshot
         uint256 balBefore = adToken.balanceOf(address(uint160(uint256(p.orderRecipient))));
-        (,,,,, uint256 lockedBefore,,) = adManager.ads(p.adId);
+        (,,,,, uint256 lockedBefore,,,) = adManager.ads(p.adId);
 
         // Expect event
         vm.expectEmit(true, true, true, true);
@@ -1015,7 +1027,7 @@ contract AdManagerTest is Test {
         assertEq(uint256(status), uint256(AdManager.Status.Filled), "status not filled");
 
         // Locked reduced
-        (,,,,, uint256 lockedAfter,,) = adManager.ads(p.adId);
+        (,,,,, uint256 lockedAfter,,,) = adManager.ads(p.adId);
         assertEq(lockedAfter, lockedBefore - p.amount, "locked not reduced");
 
         // Tokens transferred to orderRecipient
@@ -1039,7 +1051,7 @@ contract AdManagerTest is Test {
             _openOrder(adId, NATIVE_TOKEN_ADDRESS, 50 ether, 222, bridger, recipient);
 
         uint256 balBefore = recipient.balance;
-        (,,,,, uint256 lockedBefore,,) = adManager.ads(p.adId);
+        (,,,,, uint256 lockedBefore,,,) = adManager.ads(p.adId);
 
         bytes32 targetRoot = bytes32(uint256(10));
 
@@ -1055,7 +1067,7 @@ contract AdManagerTest is Test {
         assertEq(uint256(status), uint256(AdManager.Status.Filled), "status not filled");
 
         // locked reduced
-        (,,,,, uint256 lockedAfter,,) = adManager.ads(p.adId);
+        (,,,,, uint256 lockedAfter,,,) = adManager.ads(p.adId);
         assertEq(lockedAfter, lockedBefore - p.amount, "locked not reduced");
 
         uint256 balAfter = recipient.balance;
@@ -1082,7 +1094,7 @@ contract AdManagerTest is Test {
         (AdManager.OrderParams memory p, bytes32 orderHash) =
             _openOrder(adId, address(adToken), lockAmt, 111, bridger, recipient);
 
-        (,,,, uint256 balanceBefore, uint256 lockedBefore,,) = adManager.ads(p.adId);
+        (,,,, uint256 balanceBefore, uint256 lockedBefore,,,) = adManager.ads(p.adId);
         uint256 contractBalBefore = adToken.balanceOf(address(adManager));
 
         bytes32 targetRoot = bytes32(uint256(5));
@@ -1090,7 +1102,7 @@ contract AdManagerTest is Test {
         vm.prank(bridger);
         adManager.unlock(p, bytes32("NBAL"), targetRoot, hex"", hex"");
 
-        (,,,, uint256 balanceAfter, uint256 lockedAfter,,) = adManager.ads(p.adId);
+        (,,,, uint256 balanceAfter, uint256 lockedAfter,,,) = adManager.ads(p.adId);
         uint256 contractBalAfter = adToken.balanceOf(address(adManager));
 
         assertEq(lockedAfter, lockedBefore - lockAmt, "locked not reduced");
@@ -1136,7 +1148,7 @@ contract AdManagerTest is Test {
         vm.prank(maker);
         adManager.withdrawFromAd(adId, remaining, recipient);
 
-        (,,,, uint256 balanceFinal,,,) = adManager.ads(adId);
+        (,,,, uint256 balanceFinal,,,,) = adManager.ads(adId);
         assertEq(balanceFinal, 0, "ad.balance should be zero after full withdraw");
         assertEq(adToken.balanceOf(address(adManager)), 0, "escrow should be zero");
     }

@@ -35,6 +35,9 @@ pub struct Ad {
     pub open: bool,
     /// Order-chain token this ad committed to at creation
     pub order_chain_token: BytesN<32>,
+    /// The account whose settlement key co-signs for the maker; every lock's
+    /// `ad_settlement_signer` must equal it (2.3c). Re-pointable by the maker at any time.
+    pub settlement_signer: BytesN<32>,
 }
 
 /// Parameters describing a cross-chain order (ad-manager variant)

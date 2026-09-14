@@ -103,13 +103,52 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         adManager.unlock(p, bytes32("NS"), targetRoot, hex"", hex"");
     }
 
+    /// C0: in the split case the guard counts the settlement signer the unlock verifies, so the
+    /// owner of that key cannot revoke it out from under an open lock — even though custody (the
+    /// maker's address) is a different account and is not counted at all.
+    function test_inFlight_splitCase_guardsTheSettlementSigner() public {
+        BLSKeyRegistry reg = BLSKeyRegistry(REGISTRY);
+        vm.store(REGISTRY, bytes32(0), bytes32(uint256(uint160(address(this)))));
+        address[] memory guards = new address[](1);
+        guards[0] = address(adManager);
+        reg.setPositionGuards(guards);
+        address module = address(new MockRootVerifier(true));
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, module);
+
+        // The vector maker's registered key becomes the ad's settlement signer; custody stays `maker`.
+        bytes32 signer = vjson.readBytes32(".registration.makerOnSepolia.account");
+        test_fundAd_makerOnly();
+        keyRegistry.set(signer, true);
+        vm.prank(maker);
+        adManager.setSettlementSigner(lastAdId, signer);
+        AdManager.OrderParams memory p = _defaultParams(lastAdId);
+        p.salt = 4244;
+        p.adSettlementSigner = signer;
+        vm.prank(maker);
+        adManager.lockForOrder(p);
+
+        assertTrue(adManager.hasOpenPositions(signer));
+        assertFalse(adManager.hasOpenPositions(_b32(maker)), "custody is not counted");
+
+        // The guard runs before the owner check, so the auth payload is irrelevant here.
+        BLSKeyRegistry.OwnerAuth memory anyAuth = BLSKeyRegistry.OwnerAuth(BLSKeyRegistry.Scheme.Eip712, hex"");
+        vm.expectRevert(BLSKeyRegistry.AccountInFlight.selector);
+        reg.revoke(signer, anyAuth, 1);
+
+        adManager.unlock(p, bytes32("NR2"), bytes32(uint256(3)), hex"", hex"");
+        assertFalse(adManager.hasOpenPositions(signer));
+    }
+
     function test_inFlight_tracksLockAndUnlock() public {
         test_fundAd_makerOnly();
         (AdManager.OrderParams memory p, bytes32 orderHash) =
             _openOrder(lastAdId, address(adToken), 60 ether, 997, bridger, recipient);
 
         assertTrue(adManager.hasOpenPositions(p.adCreator));
-        assertTrue(adManager.hasOpenPositions(p.bridger));
+        // 2.3c D1: the AdManager counts only the maker it authenticated. The bridger is counted by
+        // the OrderPortal that authenticated them (see the portal case below).
+        assertFalse(adManager.hasOpenPositions(p.bridger));
 
         bytes32 targetRoot = bytes32(uint256(3));
         vm.prank(bridger);

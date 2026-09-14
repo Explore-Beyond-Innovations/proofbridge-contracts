@@ -58,6 +58,22 @@ pub struct AdCreated {
     pub token: BytesN<32>,
     pub init_amount: u128,
     pub order_chain_id: u128,
+    pub settlement_signer: BytesN<32>,
+}
+
+/// The key registry the escrow consults was set (2.3c D2).
+#[contractevent(topics = ["keyreg_set"], data_format = "vec")]
+pub struct KeyRegistrySet {
+    pub registry: Address,
+}
+
+/// A maker re-pointed an ad's settlement signer — the third kill lever (2.3c D3).
+#[contractevent(topics = ["signer_set"], data_format = "vec")]
+pub struct SettlementSignerSet {
+    #[topic]
+    pub ad_id: String,
+    pub previous: BytesN<32>,
+    pub next: BytesN<32>,
 }
 
 #[contractevent(topics = ["ad_fund"], data_format = "vec")]
