@@ -986,6 +986,17 @@ fn escrow_fixture() -> Escrow {
     );
     am.set_chain(&order_chain_id, &portal, &true);
     am.set_token_route(&ad_token, &order_token, &order_chain_id);
+    // 2.3e: timing is fail-closed; the smallest legal clocks.
+    am.set_route_timing(
+        &order_chain_id,
+        &ad_manager::RouteTiming {
+            min_window: 0,
+            buffer: 1_800,
+            margin: 0,
+            long_backstop: 86_400,
+            claim_stagger: 0,
+        },
+    );
 
     test_token::TokenContractClient::new(&env, &token).mint(&account, &10_000_000_i128);
 

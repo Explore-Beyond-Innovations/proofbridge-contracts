@@ -3,7 +3,7 @@
 use soroban_sdk::{symbol_short, Address, BytesN, Env, String, Symbol};
 
 use crate::errors::AdManagerError;
-use crate::types::{Ad, ChainInfo, ContractConfig, Status};
+use crate::types::{Ad, ChainInfo, ClaimRecord, ContractConfig, RouteTiming, Status};
 
 // =============================================================================
 // Storage Keys - Instance Storage (Contract-level)
@@ -48,6 +48,14 @@ const KEY_KEYREG: Symbol = symbol_short!("keyreg");
 const KEY_INFLT: Symbol = symbol_short!("inflt");
 /// Prefix for unclaimed payouts: (KEY_CLAIM, recipient, token) -> u128
 const KEY_CLAIM: Symbol = symbol_short!("claim");
+/// Prefix for route timing (2.3e D6): (KEY_TIMING, chain_id) -> RouteTiming
+const KEY_TIMING: Symbol = symbol_short!("timing");
+/// The notary the evidence paths read (2.3e D7), instance storage.
+const KEY_ANCHOR: Symbol = symbol_short!("anchor");
+/// Prefix for open presentation windows: (KEY_CLAIMS, order_hash) -> ClaimRecord
+const KEY_CLAIMS: Symbol = symbol_short!("claims");
+/// Prefix for recorded settled leaves: (KEY_SETTLED, order_hash) -> bool
+const KEY_SETTLED: Symbol = symbol_short!("settled");
 
 // =============================================================================
 // Initialization
@@ -155,10 +163,64 @@ pub fn get_order_status(env: &Env, order_hash: &BytesN<32>) -> Status {
     env.storage().persistent().get(&key).unwrap_or(Status::None)
 }
 
-/// Set order status
+/// Set order status; every flip re-extends the record (2.3h's TTL runbook lists this write).
 pub fn set_order_status(env: &Env, order_hash: &BytesN<32>, status: Status) {
     let key = (KEY_ORDERS, order_hash.clone());
     env.storage().persistent().set(&key, &status);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+}
+
+// =============================================================================
+// Termination (2.3e)
+// =============================================================================
+
+pub fn get_route_timing(env: &Env, chain_id: u128) -> Option<RouteTiming> {
+    env.storage().persistent().get(&(KEY_TIMING, chain_id))
+}
+
+pub fn set_route_timing(env: &Env, chain_id: u128, timing: &RouteTiming) {
+    let key = (KEY_TIMING, chain_id);
+    env.storage().persistent().set(&key, timing);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+}
+
+pub fn get_root_anchor(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&KEY_ANCHOR)
+}
+
+pub fn set_root_anchor(env: &Env, anchor: &Address) {
+    env.storage().instance().set(&KEY_ANCHOR, anchor);
+}
+
+pub fn get_claim(env: &Env, order_hash: &BytesN<32>) -> Option<ClaimRecord> {
+    env.storage()
+        .persistent()
+        .get(&(KEY_CLAIMS, order_hash.clone()))
+}
+
+pub fn set_claim(env: &Env, order_hash: &BytesN<32>, claim: &ClaimRecord) {
+    let key = (KEY_CLAIMS, order_hash.clone());
+    env.storage().persistent().set(&key, claim);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+}
+
+pub fn is_settled_recorded(env: &Env, order_hash: &BytesN<32>) -> bool {
+    env.storage()
+        .persistent()
+        .get(&(KEY_SETTLED, order_hash.clone()))
+        .unwrap_or(false)
+}
+
+pub fn set_settled_recorded(env: &Env, order_hash: &BytesN<32>) {
+    let key = (KEY_SETTLED, order_hash.clone());
+    env.storage().persistent().set(&key, &true);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+}
+
+pub fn remove_claim(env: &Env, order_hash: &BytesN<32>) {
+    env.storage()
+        .persistent()
+        .remove(&(KEY_CLAIMS, order_hash.clone()));
 }
 
 // =============================================================================

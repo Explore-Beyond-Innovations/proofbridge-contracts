@@ -3,7 +3,7 @@
 use soroban_sdk::{contracttype, Address, BytesN, String, U256};
 
 pub use proofbridge_core::token::NATIVE_TOKEN_ADDRESS;
-pub use proofbridge_core::types::{ContractConfig, Status};
+pub use proofbridge_core::types::{ClaimEntry, ClaimRecord, ContractConfig, RouteTiming, Status};
 
 /// Source chain configuration
 #[contracttype]

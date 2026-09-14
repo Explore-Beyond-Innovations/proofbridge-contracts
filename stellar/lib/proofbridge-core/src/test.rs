@@ -85,3 +85,40 @@ mod auth_tests {
         assert!(!auth::is_zero_bytes32(&almost));
     }
 }
+
+// =============================================================================
+// Route timing (2.3e D6)
+// =============================================================================
+
+mod timing_tests {
+    use crate::timing::{validate, MIN_BUFFER};
+    use crate::types::RouteTiming;
+
+    fn t(
+        min_window: u64,
+        buffer: u64,
+        margin: u64,
+        long_backstop: u64,
+        claim_stagger: u64,
+    ) -> RouteTiming {
+        RouteTiming {
+            min_window,
+            buffer,
+            margin,
+            long_backstop,
+            claim_stagger,
+        }
+    }
+
+    #[test]
+    fn validation_matrix() {
+        assert_eq!(validate(&t(0, MIN_BUFFER - 1, 0, 86_400, 0)), Err(1));
+        assert_eq!(validate(&t(3_600, 3_600, 3_600, 86_400, 0)), Err(2));
+        assert_eq!(validate(&t(0, 7_200, 0, 3_600, 0)), Err(3));
+        assert_eq!(validate(&t(1_800, 3_600, 0, 86_400, 1_800)), Err(4));
+        assert_eq!(validate(&t(60, 3_600, 120, 86_400, 0)), Err(5));
+        // The D6 defaults, the smallest legal set, and the stagger switched off with a zero window.
+        assert_eq!(validate(&t(3_600, 7_200, 120, 259_200, 1_800)), Ok(()));
+        assert_eq!(validate(&t(0, MIN_BUFFER, 0, MIN_BUFFER, 0)), Ok(()));
+    }
+}
