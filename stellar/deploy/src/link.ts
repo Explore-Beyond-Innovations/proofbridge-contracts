@@ -4,7 +4,7 @@ import {
 } from "@proofbridge/deployment-manifest";
 import { DEFAULT_STELLAR_CHAIN_ID } from "./common.js";
 import { invokeContract } from "./stellar-cli.js";
-import { manifestPath } from "./manifest.js";
+import { manifestPath, writeManifest } from "./manifest.js";
 
 export interface StellarLinkOptions {
   /** Path to this chain's own manifest. Defaults to deployments/<chainId>.json. */
@@ -143,6 +143,37 @@ export async function link(
     console.log(
       "  [link] BLS gate not wired (transitional pre-auth); rerun with --enforce-bls to enable",
     );
+  }
+
+  // ── Anchor delay for the peer route (2.3f) ─────────────────────────
+  // Seconds an anchor of the peer chain must age before is_anchored is true:
+  // ANCHOR_DELAY_S (default 0 — local / dev; the spec wants minutes-to-an-hour live).
+  if (local.contracts.rootAnchor) {
+    const delay = process.env.ANCHOR_DELAY_S ?? "0";
+    const cur = invokeContract(
+      local.contracts.rootAnchor.address,
+      "anchor_delay",
+      ["--source_chain_id", peerChainId],
+      { send: false },
+    ).trim();
+    if (cur.replace(/"/g, "") === delay) {
+      console.log(`  [skip] RootAnchor.set_anchor_delay(${peerChainId}) already ${delay}s`);
+    } else {
+      invokeContract(local.contracts.rootAnchor.address, "set_anchor_delay", [
+        "--source_chain_id",
+        peerChainId,
+        "--delay",
+        delay,
+      ]);
+      chainTxs++;
+      console.log(`  [link] RootAnchor.set_anchor_delay(${peerChainId}, ${delay}s)`);
+    }
+    if (local.rootAnchorConfig) {
+      local.rootAnchorConfig.anchorDelays[peerChainId] = delay;
+      await writeManifest(localPath, local);
+    }
+  } else {
+    console.log("  [link] no RootAnchor in the local manifest; redeploy core to add the notary");
   }
 
   // ── Per-pair token routes (two directions per pairKey) ────────────

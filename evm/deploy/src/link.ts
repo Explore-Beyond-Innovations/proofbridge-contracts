@@ -4,7 +4,7 @@ import {
 } from "@proofbridge/deployment-manifest";
 import { connect, requireEnv } from "./common.js";
 import { attachContract } from "./artifacts.js";
-import { manifestPath } from "./manifest.js";
+import { manifestPath, writeManifest } from "./manifest.js";
 
 export interface LinkOptions {
   rpcUrl?: string;
@@ -148,6 +148,36 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     console.log(
       "  [link] BLS gate not wired (transitional pre-auth); rerun with --enforce-bls to enable",
     );
+  }
+
+  // ── Anchor delay for the peer route (2.3f) ─────────────────────────
+  // Seconds an anchor of the peer chain must age before isAnchored is true:
+  // ANCHOR_DELAY_S (default 0 — local / dev; the spec wants minutes-to-an-hour live).
+  if (local.contracts.rootAnchor) {
+    const delay = BigInt(process.env.ANCHOR_DELAY_S ?? "0");
+    const anchor = attachContract(
+      local.contracts.rootAnchor.address,
+      "RootAnchor",
+      "RootAnchor",
+      signer,
+    );
+    const cur = BigInt(await anchor.getFunction("anchorDelay")(peerChainId));
+    if (cur === delay) {
+      console.log(`  [skip] RootAnchor.setAnchorDelay(${peerChainId}) already ${delay}s`);
+    } else {
+      const tx = await anchor.getFunction("setAnchorDelay")(peerChainId, delay, {
+        nonce: nonces.next(),
+      });
+      await tx.wait();
+      chainTxs++;
+      console.log(`  [link] RootAnchor.setAnchorDelay(${peerChainId}, ${delay}s)`);
+    }
+    if (local.rootAnchorConfig) {
+      local.rootAnchorConfig.anchorDelays[peerChainId.toString()] = delay.toString();
+      await writeManifest(localPath, local);
+    }
+  } else {
+    console.log("  [link] no RootAnchor in the local manifest; redeploy core to add the notary");
   }
 
   // ── Per-pair token routes (two directions per pairKey) ────────────

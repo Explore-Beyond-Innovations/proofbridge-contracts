@@ -46,6 +46,8 @@ export interface DeployStellarCoreResult {
     orderPortal: string;
     blsKeyRegistry: string;
     counterpartyVerifier: string;
+    rootAnchor: string;
+    registrar: string;
   };
 }
 
@@ -188,8 +190,48 @@ export async function deployCore(
     JSON.stringify([adManager, orderPortal]),
   ]);
 
+  // ── Point the AdManager at the registry (2.3c; idempotent) ─────────
+  // create_ad / set_settlement_signer / lock_for_order fail closed until this is set: an
+  // ad's settlement signer must hold a live, unexpired key.
+  invokeContract(adManager, "set_key_registry", ["--registry", blsKeyRegistry]);
+
+  // ── RootAnchor (2.3f) + Registrar (2.1b) ───────────────────────────
+  // T2 notary: the publisher key(s) in ANCHOR_PUBLISHER (comma-separated G-addresses,
+  // default admin) at ANCHOR_THRESHOLD (default 1). Per-route delays are set at link time.
+  const anchorSigners = envOrDefault("ANCHOR_PUBLISHER", adminStrkey)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const anchorThreshold = Number(envOrDefault("ANCHOR_THRESHOLD", "1"));
+  let rootAnchor = reused(existing?.contracts.rootAnchor?.address);
+  if (!rootAnchor) {
+    rootAnchor = deployContract(path.join(wasmBase, "root_anchor.wasm"));
+    invokeContract(rootAnchor, "initialize", [
+      "--admin",
+      adminStrkey,
+      "--signers",
+      JSON.stringify(anchorSigners),
+      "--threshold",
+      String(anchorThreshold),
+    ]);
+    console.log(`  [deploy] RootAnchor: ${rootAnchor}`);
+  } else {
+    console.log(`  [reuse] RootAnchor: ${rootAnchor}`);
+  }
+
+  // The home-chain REGISTERED-leaf appender; a manager on the MerkleManager (set below). The
+  // registry's proof path stays switched off (2.1b §7); nothing wires it here.
+  let registrar = reused(existing?.contracts.registrar?.address);
+  if (!registrar) {
+    registrar = deployContract(path.join(wasmBase, "registrar.wasm"));
+    invokeContract(registrar, "initialize", ["--merkle_manager", merkleManager]);
+    console.log(`  [deploy] Registrar: ${registrar}`);
+  } else {
+    console.log(`  [reuse] Registrar: ${registrar}`);
+  }
+
   // ── Grant MANAGER permission on MerkleManager (idempotent) ─────
-  for (const manager of [adManager, orderPortal]) {
+  for (const manager of [adManager, orderPortal, registrar]) {
     invokeContract(merkleManager, "set_manager", [
       "--manager",
       manager,
@@ -214,7 +256,13 @@ export async function deployCore(
       orderPortal,
       blsKeyRegistry,
       counterpartyVerifier,
+      rootAnchor,
+      registrar,
     },
+    // What the anchor was configured with; per-route delays are added by link.
+    rootAnchorConfig: existing?.contracts.rootAnchor
+      ? existing.rootAnchorConfig
+      : { signers: anchorSigners, threshold: anchorThreshold, anchorDelays: {} },
     // Preserve tokens already in the manifest (test / curated). XLM entry is (re)set by deploy-test-tokens.
     tokens: (existing?.tokens.map((t) => ({
       pairKey: t.pairKey,
@@ -243,6 +291,8 @@ export async function deployCore(
       orderPortal,
       blsKeyRegistry,
       counterpartyVerifier,
+      rootAnchor,
+      registrar,
     },
   };
 }

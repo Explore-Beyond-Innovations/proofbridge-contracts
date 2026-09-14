@@ -7,6 +7,7 @@ import {
   CHAIN_DEPLOYMENT_MANIFEST_VERSION,
   readManifest,
   writeManifest,
+  type RootAnchorConfig,
 } from "@proofbridge/deployment-manifest";
 import { deploymentsDir } from "./common.js";
 import { strkeyToHex } from "./stellar-cli.js";
@@ -65,8 +66,11 @@ export interface BuildStellarManifestInput {
     orderPortal: string;
     blsKeyRegistry?: string;
     counterpartyVerifier?: string;
+    rootAnchor?: string;
+    registrar?: string;
   };
   tokens: StellarTokenInput[];
+  rootAnchorConfig?: RootAnchorConfig;
 }
 
 export function buildManifest(
@@ -100,8 +104,15 @@ export function buildManifest(
           }
         : {}),
       orderPortal: stellarContractEntry(input.contracts.orderPortal),
+      ...(input.contracts.rootAnchor
+        ? { rootAnchor: stellarContractEntry(input.contracts.rootAnchor) }
+        : {}),
+      ...(input.contracts.registrar
+        ? { registrar: stellarContractEntry(input.contracts.registrar) }
+        : {}),
     },
     tokens: input.tokens.map(tokenEntry),
+    ...(input.rootAnchorConfig ? { rootAnchorConfig: input.rootAnchorConfig } : {}),
     meta: {
       deployedAt: new Date().toISOString(),
       deployer: input.deployer,

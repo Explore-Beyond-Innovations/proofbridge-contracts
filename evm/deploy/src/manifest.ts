@@ -7,6 +7,7 @@ import {
   CHAIN_DEPLOYMENT_MANIFEST_VERSION,
   readManifest,
   writeManifest,
+  type RootAnchorConfig,
 } from "@proofbridge/deployment-manifest";
 import { deploymentsDir, evmAddressToBytes32 } from "./common.js";
 
@@ -67,8 +68,11 @@ export interface BuildManifestInput {
     sclEip6565?: string;
     blsKeyRegistry?: string;
     counterpartyVerifier?: string;
+    rootAnchor?: string;
+    registrar?: string;
   };
   tokens: EvmTokenInput[];
+  rootAnchorConfig?: RootAnchorConfig;
 }
 
 export function buildManifest(
@@ -106,8 +110,15 @@ export function buildManifest(
             ),
           }
         : {}),
+      ...(input.contracts.rootAnchor
+        ? { rootAnchor: evmContractEntry(input.contracts.rootAnchor) }
+        : {}),
+      ...(input.contracts.registrar
+        ? { registrar: evmContractEntry(input.contracts.registrar) }
+        : {}),
     },
     tokens: input.tokens.map(tokenEntry),
+    ...(input.rootAnchorConfig ? { rootAnchorConfig: input.rootAnchorConfig } : {}),
     meta: {
       deployedAt: new Date().toISOString(),
       deployer: input.deployer,

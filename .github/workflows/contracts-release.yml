@@ -92,6 +92,7 @@ jobs:
           stellar contract build --optimize --package counterparty-verifier
           stellar contract build --optimize --package agent-account
           stellar contract build --optimize --package root-anchor
+          stellar contract build --optimize --package registrar
 
       - name: Build EVM artifacts
         working-directory: evm
@@ -118,9 +119,12 @@ jobs:
           cp stellar/target/wasm32v1-none/release/test_token.wasm      "$WASM_DIR/"
           cp stellar/target/wasm32v1-none/release/agent_account.wasm   "$WASM_DIR/"
           cp stellar/target/wasm32v1-none/release/root_anchor.wasm     "$WASM_DIR/"
+          cp stellar/target/wasm32v1-none/release/registrar.wasm       "$WASM_DIR/"
+          cp stellar/target/wasm32v1-none/release/bls_key_registry.wasm     "$WASM_DIR/"
+          cp stellar/target/wasm32v1-none/release/counterparty_verifier.wasm "$WASM_DIR/"
 
           # Copy only the artifacts the deployer actually loads.
-          for c in OrderPortal AdManager MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20 RootAnchor; do
+          for c in OrderPortal AdManager MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20 BLSKeyRegistry CounterpartyVerifier RootAnchor Registrar; do
             mkdir -p "$EVM_OUT/${c}.sol"
             cp evm/out/${c}.sol/*.json "$EVM_OUT/${c}.sol/"
           done
