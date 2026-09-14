@@ -89,6 +89,6 @@ pub struct KeyRegisteredByProof {
 pub struct ProofRegistrationSet {
     pub anchor: Address,
     pub verifier: Address,
-    pub merkle_manager: Address,
+    pub sources: Vec<u128>,
     pub enabled: bool,
 }

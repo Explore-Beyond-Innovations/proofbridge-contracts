@@ -6,6 +6,7 @@ import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/Signa
 import {IMerkleManager} from "./MerkleManager.sol";
 import {AddressCast} from "./libraries/AddressCast.sol";
 import {LeafDomain} from "./libraries/LeafDomain.sol";
+import {RegistrationSubject} from "./libraries/RegistrationSubject.sol";
 
 /**
  * @title Registrar (Proofbridge)
@@ -19,8 +20,11 @@ import {LeafDomain} from "./libraries/LeafDomain.sol";
  *         leaves until the registry's flag is turned on (T3).
  * @dev Authorization is the account's own: a direct call (`msg.sender` is the account, so its auth
  *      logic already ran) or a signature over the EIP-712 `RegistrationLeaf` — EIP-1271 for a
- *      contract account, ecrecover for an EOA. The subject is `keccak256(account32 ‖ blsCommitment ‖
- *      epoch)` with `epoch` as 8 big-endian bytes, so both chains hash identical bytes.
+ *      contract account, ecrecover for an EOA. The leaf is the message the account consents to, so it
+ *      names the destination like every registry digest does (`RegistrationSubject`): one leaf, one
+ *      registry. `epoch` is caller-chosen but strictly increasing per account, so a relayed signature
+ *      lands once, the direct path cannot append duplicates, and an account's leaves are totally ordered
+ *      for the registration-leaf monitor.
  */
 contract Registrar is EIP712 {
     using AddressCast for address;
@@ -30,8 +34,9 @@ contract Registrar is EIP712 {
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    bytes32 public constant REGISTRATION_LEAF_TYPEHASH =
-        keccak256("RegistrationLeaf(bytes32 account32,bytes32 blsCommitment,uint64 epoch)");
+    bytes32 public constant REGISTRATION_LEAF_TYPEHASH = keccak256(
+        "RegistrationLeaf(bytes32 account32,bytes32 blsCommitment,uint64 epoch,uint256 dstChainId,bytes32 dstRegistryId)"
+    );
 
     /*//////////////////////////////////////////////////////////////
                                  STATE
@@ -40,11 +45,21 @@ contract Registrar is EIP712 {
     /// @notice The home chain's MMR; the registrar holds its `MANAGER_ROLE`.
     IMerkleManager public immutable i_merkleManager;
 
+    /// @notice The lowest epoch the account's next leaf may carry; each leaf raises it past its own.
+    mapping(bytes32 => uint64) public nextEpoch;
+
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event RegistrationLeaf(bytes32 indexed account32, bytes32 indexed blsCommitment, uint64 epoch, bytes32 subject);
+    event RegistrationLeaf(
+        bytes32 indexed account32,
+        bytes32 indexed blsCommitment,
+        uint64 epoch,
+        uint256 dstChainId,
+        bytes32 dstRegistryId,
+        bytes32 subject
+    );
 
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -53,6 +68,7 @@ contract Registrar is EIP712 {
     error Registrar__ZeroAddress();
     error Registrar__NotAccount();
     error Registrar__BadAuth();
+    error Registrar__StaleEpoch(uint64 nextEpoch, uint64 given);
     error Registrar__AppendFailed();
 
     /*//////////////////////////////////////////////////////////////
@@ -70,39 +86,65 @@ contract Registrar is EIP712 {
 
     /**
      * @notice Append the registration leaf for `account32` after the account's own authorization.
+     * @param epoch Caller-chosen, at least {nextEpoch}; the leaf raises it to `epoch + 1`.
+     * @param dstChainId The chain of the registry this leaf registers on.
+     * @param dstRegistryId That registry's 32-byte id (its address, left-padded, on EVM).
      * @param sig Empty for a direct call by the account; otherwise an EIP-712 signature over
      *        {leafDigest} — EIP-1271 for a contract account, ecrecover for an EOA.
-     * @return subject The leaf's subject, `keccak256(account32 ‖ blsCommitment ‖ epoch)`.
+     * @return subject The leaf's subject, {subjectOf}.
      */
-    function registerLeaf(bytes32 account32, bytes32 blsCommitment, uint64 epoch, bytes calldata sig)
-        external
-        returns (bytes32 subject)
-    {
+    function registerLeaf(
+        bytes32 account32,
+        bytes32 blsCommitment,
+        uint64 epoch,
+        uint256 dstChainId,
+        bytes32 dstRegistryId,
+        bytes calldata sig
+    ) external returns (bytes32 subject) {
+        uint64 next = nextEpoch[account32];
+        if (epoch < next) revert Registrar__StaleEpoch(next, epoch);
+
         if (sig.length == 0) {
             if (msg.sender.toBytes32() != account32) revert Registrar__NotAccount();
         } else {
             address account = account32.toAddressChecked();
-            if (!SignatureChecker.isValidSignatureNow(account, leafDigest(account32, blsCommitment, epoch), sig)) {
-                revert Registrar__BadAuth();
-            }
+            bytes32 digest = leafDigest(account32, blsCommitment, epoch, dstChainId, dstRegistryId);
+            if (!SignatureChecker.isValidSignatureNow(account, digest, sig)) revert Registrar__BadAuth();
         }
+        nextEpoch[account32] = epoch + 1;
 
-        subject = subjectOf(account32, blsCommitment, epoch);
+        subject = RegistrationSubject.subject(dstChainId, dstRegistryId, account32, blsCommitment, epoch);
         if (!i_merkleManager.appendOrderHash(subject, LeafDomain.REGISTERED)) revert Registrar__AppendFailed();
-        emit RegistrationLeaf(account32, blsCommitment, epoch, subject);
+        emit RegistrationLeaf(account32, blsCommitment, epoch, dstChainId, dstRegistryId, subject);
     }
 
     /*//////////////////////////////////////////////////////////////
                                  VIEWS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice The leaf subject both chains derive: 32 + 32 + 8 bytes, `epoch` big-endian.
-    function subjectOf(bytes32 account32, bytes32 blsCommitment, uint64 epoch) public pure returns (bytes32) {
-        return keccak256(abi.encodePacked(account32, blsCommitment, epoch));
+    /// @notice The leaf subject both chains derive; see `RegistrationSubject`.
+    function subjectOf(
+        bytes32 account32,
+        bytes32 blsCommitment,
+        uint64 epoch,
+        uint256 dstChainId,
+        bytes32 dstRegistryId
+    ) external pure returns (bytes32) {
+        return RegistrationSubject.subject(dstChainId, dstRegistryId, account32, blsCommitment, epoch);
     }
 
     /// @notice The EIP-712 digest a relayed registration signs.
-    function leafDigest(bytes32 account32, bytes32 blsCommitment, uint64 epoch) public view returns (bytes32) {
-        return _hashTypedDataV4(keccak256(abi.encode(REGISTRATION_LEAF_TYPEHASH, account32, blsCommitment, epoch)));
+    function leafDigest(
+        bytes32 account32,
+        bytes32 blsCommitment,
+        uint64 epoch,
+        uint256 dstChainId,
+        bytes32 dstRegistryId
+    ) public view returns (bytes32) {
+        return _hashTypedDataV4(
+            keccak256(
+                abi.encode(REGISTRATION_LEAF_TYPEHASH, account32, blsCommitment, epoch, dstChainId, dstRegistryId)
+            )
+        );
     }
 }

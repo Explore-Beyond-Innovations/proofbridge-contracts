@@ -7,7 +7,7 @@ import {SCL_sha512} from "@scl/hash/SCL_sha512.sol";
 import {p as ED_P} from "@scl/fields/SCL_wei25519.sol";
 import {IRootAnchor} from "./interfaces/IRootAnchor.sol";
 import {IVerifier} from "./Verifier.sol";
-import {IMerkleManager} from "./MerkleManager.sol";
+import {RegistrationSubject} from "./libraries/RegistrationSubject.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {LeafDomain} from "./libraries/LeafDomain.sol";
 
@@ -52,6 +52,8 @@ contract BLSKeyRegistry {
     bytes32 private constant REVOKE_TAG = keccak256("ProofBridge.BLSKeyRegistry.Revoke.v1");
     bytes32 private constant POP_TAG = keccak256("ProofBridge.BLSKeyRegistry.PoP.v1");
     bytes32 private constant SET_VALID_UNTIL_TAG = keccak256("ProofBridge.BLSKeyRegistry.SetValidUntil.v1");
+    /// keccak256 of the 128-byte G1 identity encoding: never a key (it passes a naive PoP pairing).
+    bytes32 private constant IDENTITY_COMMITMENT = 0x012893657d8eb2efad4de0a91bcd0e39ad9837745dec3ea923737ea803fc8e3d;
 
     bytes32 private constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -79,15 +81,15 @@ contract BLSKeyRegistry {
     /// registration-specific anchor delay, and the watchtower's registration-leaf monitor.
     IRootAnchor public rootAnchor;
     IVerifier public proofVerifier;
-    /// Only for `fieldMod`; the leaf itself lives in the *other* chain's MMR.
-    IMerkleManager public fieldModSource;
+    /// The home chains a leaf may come from — the "one notarized EVM source" invariant as a check.
+    uint256[] private _proofSources;
     bool public proofRegistrationEnabled;
 
     event KeyRegistered(bytes32 indexed account, uint32 indexed slotId, bytes blsPubKey, uint256 nonce);
     event KeyRegisteredByProof(
         bytes32 indexed account, uint32 indexed slotId, bytes blsPubKey, uint64 epoch, uint256 sourceChainId
     );
-    event ProofRegistrationSet(address rootAnchor, address verifier, address merkleManager, bool enabled);
+    event ProofRegistrationSet(address rootAnchor, address verifier, uint256[] sources, bool enabled);
     event SlotValidUntilSet(bytes32 indexed account, uint32 indexed slotId, uint64 validUntil);
     event SlotPruned(bytes32 indexed account, uint32 indexed slotId);
     event Paused(address account);
@@ -115,6 +117,7 @@ contract BLSKeyRegistry {
     error UnknownScheme();
     error ProofRegistrationDisabled();
     error ProofRegistrationRefsUnset();
+    error SourceNotAllowed(uint256 chainId);
     error RootNotAnchored(uint256 chainId, bytes32 root);
     error InvalidLeafProof();
 
@@ -156,23 +159,28 @@ contract BLSKeyRegistry {
         emit PositionGuardsSet(guards);
     }
 
-    /// Wire (or unwire) proof-carried registration. Enabling requires every reference; the flip is
-    /// a configuration change, never a redeploy (2.1b D3).
-    function setProofRegistration(IRootAnchor anchor_, IVerifier verifier_, IMerkleManager merkleManager_, bool enabled)
+    /// Wire (or unwire) proof-carried registration: the anchor, the verifier and the home chains a
+    /// leaf may come from. Enabling requires all three; the flip is a configuration change, never a
+    /// redeploy (2.1b D3). This chain is never a source: its own leaves belong to another registry.
+    function setProofRegistration(IRootAnchor anchor_, IVerifier verifier_, uint256[] calldata sources, bool enabled)
         external
     {
         if (msg.sender != admin) revert NotAdmin();
         if (
-            enabled
-                && (address(anchor_) == address(0)
-                    || address(verifier_) == address(0)
-                    || address(merkleManager_) == address(0))
+            enabled && (address(anchor_).code.length == 0 || address(verifier_).code.length == 0 || sources.length == 0)
         ) revert ProofRegistrationRefsUnset();
+        for (uint256 i = 0; i < sources.length; i++) {
+            if (sources[i] == block.chainid) revert SourceNotAllowed(sources[i]);
+        }
         rootAnchor = anchor_;
         proofVerifier = verifier_;
-        fieldModSource = merkleManager_;
+        _proofSources = sources;
         proofRegistrationEnabled = enabled;
-        emit ProofRegistrationSet(address(anchor_), address(verifier_), address(merkleManager_), enabled);
+        emit ProofRegistrationSet(address(anchor_), address(verifier_), sources, enabled);
+    }
+
+    function proofSources() external view returns (uint256[] memory) {
+        return _proofSources;
     }
 
     /// Adds a slot; never guarded (additive, design 03 §3.3). Returns the slot id.
@@ -186,29 +194,30 @@ contract BLSKeyRegistry {
         if (paused) revert EnforcedPause();
         if (blsPubKey.length != 128 || pop.length != 256) revert BadLength();
         if (nonce != nonceOf[account]) revert BadNonce();
-        if (keccak256(blsPubKey) == keccak256(new bytes(128))) revert IdentityKey();
+        bytes32 commitment = keccak256(blsPubKey);
+        if (commitment == IDENTITY_COMMITMENT) revert IdentityKey();
 
-        bytes memory msgG2 = BLS.hashToG2(popMsg(account, blsPubKey, nonce), bytes(DST_POP));
-        if (!BLS.verifySingle(blsPubKey, msgG2, pop)) revert InvalidPop();
-
+        _requirePop(account, blsPubKey, pop, nonce);
         checkOwner(
             account,
             owner,
-            keccak256(abi.encode(REGISTER_TYPEHASH, keccak256(blsPubKey), keccak256(pop), nonce)),
+            keccak256(abi.encode(REGISTER_TYPEHASH, commitment, keccak256(pop), nonce)),
             regDigest(account, blsPubKey, nonce)
         );
 
-        slotId = _addSlot(account, keccak256(blsPubKey));
+        slotId = _addSlot(account, commitment);
         nonceOf[account] = nonce + 1;
         emit KeyRegistered(account, slotId, blsPubKey, nonce);
     }
 
     /// Adds a slot on an inclusion proof of the account's home-chain `REGISTERED` leaf against an
     /// anchored root, instead of an owner signature (2.1b, design 03 §3.6). Flagged off in T2.
-    /// @dev No nonce: `usedCommitment` is the replay guard, so a leaf registers its key at most once.
+    /// @dev Cheap rejections first: flag, lengths, identity, the replay guard, the source allow-list and
+    ///      the anchor lookup all run before the pairing and the Honk verify. No nonce: `usedCommitment`
+    ///      is the replay guard, so a leaf registers its key at most once, and `nonceOf` is untouched.
     ///      The POP binds `epoch` where `register` binds the nonce, so the leaf and the key's proof of
-    ///      possession share it (D2, D7). The subject is `keccak256(account ‖ keccak256(blsPubKey) ‖ epoch)`,
-    ///      `epoch` as 8 big-endian bytes — what the home-chain `Registrar` appended.
+    ///      possession share it (D2, D7). The subject is rebuilt from this chain and registry
+    ///      (`RegistrationSubject`), so a leaf is good for exactly one registry.
     function registerByProof(
         bytes32 account,
         bytes calldata blsPubKey,
@@ -222,37 +231,44 @@ contract BLSKeyRegistry {
         if (!proofRegistrationEnabled) revert ProofRegistrationDisabled();
         if (blsPubKey.length != 128 || pop.length != 256) revert BadLength();
         bytes32 commitment = keccak256(blsPubKey);
-        if (commitment == keccak256(new bytes(128))) revert IdentityKey();
+        if (commitment == IDENTITY_COMMITMENT) revert IdentityKey();
+        if (usedCommitment[account][commitment]) revert KeyPreviouslyUsed();
+        if (!_isProofSource(sourceChainId)) revert SourceNotAllowed(sourceChainId);
+        if (!rootAnchor.isAnchored(sourceChainId, targetRoot)) revert RootNotAnchored(sourceChainId, targetRoot);
 
         _requirePop(account, blsPubKey, pop, epoch);
-        _requireAnchoredLeaf(account, commitment, epoch, sourceChainId, targetRoot, proof);
+        _requireLeafProof(account, commitment, epoch, targetRoot, proof);
 
         slotId = _addSlot(account, commitment);
         emit KeyRegisteredByProof(account, slotId, blsPubKey, epoch, sourceChainId);
     }
 
-    /// The key's proof of possession, bound to `epoch` in the nonce position (2.1b D7).
-    function _requirePop(bytes32 account, bytes calldata blsPubKey, bytes calldata pop, uint64 epoch) private view {
-        bytes memory msgG2 = BLS.hashToG2(popMsg(account, blsPubKey, uint256(epoch)), bytes(DST_POP));
+    /// The key's proof of possession: `nonce` is the account nonce for `register`, the leaf's epoch
+    /// for `registerByProof` (2.1b D7).
+    function _requirePop(bytes32 account, bytes calldata blsPubKey, bytes calldata pop, uint256 nonce) private view {
+        bytes memory msgG2 = BLS.hashToG2(popMsg(account, blsPubKey, nonce), bytes(DST_POP));
         if (!BLS.verifySingle(blsPubKey, msgG2, pop)) revert InvalidPop();
     }
 
-    /// The home-chain leaf: anchored root first, then the inclusion proof of the registration subject.
-    function _requireAnchoredLeaf(
+    /// The home-chain leaf's inclusion proof, for the subject this registry would have been named in.
+    function _requireLeafProof(
         bytes32 account,
         bytes32 commitment,
         uint64 epoch,
-        uint256 sourceChainId,
         bytes32 targetRoot,
         bytes calldata proof
     ) private view {
-        if (!rootAnchor.isAnchored(sourceChainId, targetRoot)) {
-            revert RootNotAnchored(sourceChainId, targetRoot);
-        }
-        bytes32 subject = keccak256(abi.encodePacked(account, commitment, epoch));
-        bytes32[] memory inputs =
-            RequestAuth.buildEventInputs(fieldModSource, targetRoot, subject, LeafDomain.REGISTERED);
+        bytes32 subject = RegistrationSubject.subject(block.chainid, registryId(), account, commitment, epoch);
+        bytes32[] memory inputs = RequestAuth.buildEventInputs(targetRoot, subject, LeafDomain.REGISTERED);
         if (!proofVerifier.verify(proof, inputs)) revert InvalidLeafProof();
+    }
+
+    function _isProofSource(uint256 chainId) private view returns (bool) {
+        uint256[] storage sources = _proofSources;
+        for (uint256 i = 0; i < sources.length; i++) {
+            if (sources[i] == chainId) return true;
+        }
+        return false;
     }
 
     /// Shorten-only, nonce-free, never guarded, and not pausable: the retirement lever

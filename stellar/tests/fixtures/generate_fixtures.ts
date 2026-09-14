@@ -443,19 +443,28 @@ async function main() {
   }
 
   // ----- 2.1b: a registration leaf (domain 4) for the vector maker's account + key -----
-  // Subject = keccak256(account32 ‖ keccak256(pkNative) ‖ epoch_be8), epoch 0, so the
-  // vectors' nonce-0 proof of possession doubles as the epoch-0 one on both chains.
+  // Subject = keccak256(TAG ‖ dstChainId ‖ dstRegistryId ‖ account32 ‖ keccak256(pkNative) ‖ epoch),
+  // every field 32 bytes (proofbridge_core::cross_contract::registration_subject /
+  // RegistrationSubject.sol), minted for the vectors' Stellar registry at epoch 0, so the vectors'
+  // nonce-0 proof of possession doubles as the epoch-0 one on both chains.
   console.log("Generating registration claim (domain 4)...");
   const blsVectors = JSON.parse(
     fs.readFileSync(path.resolve(__dirname, "../../../test-vectors/bls-encodings.json"), "utf8")
   );
   const regVec = blsVectors.registration.makerOnStellarTestnet;
+  const regChain = blsVectors.chains.stellarTestnet;
+  const regTag = keccak256(Buffer.from("ProofBridge.BLSKeyRegistry.RegistrationLeaf.v1"));
+  const regChainId = Buffer.from(BigInt(regChain.chainId).toString(16).padStart(64, "0"), "hex");
+  const regRegistryId = hexToBytes32(regChain.registryId);
   const regAccount = hexToBytes32(regVec.account);
   const regPk = Buffer.from(regVec.pkNative.replace(/^0x/i, ""), "hex");
   const regCommitment = keccak256(regPk);
-  const regEpoch = Buffer.alloc(8, 0);
+  const regEpoch = Buffer.alloc(32, 0);
   const regSubject =
-    "0x" + keccak256(Buffer.concat([regAccount, regCommitment, regEpoch])).toString("hex");
+    "0x" +
+    keccak256(
+      Buffer.concat([regTag, regChainId, regRegistryId, regAccount, regCommitment, regEpoch])
+    ).toString("hex");
   const regSubjectMod = modOrderHash(regSubject);
   const regTree = await buildSideTree(regSubjectMod.toString(), 4);
   {
@@ -475,6 +484,8 @@ async function main() {
     );
   }
   const registration = {
+    dstChainId: regChain.chainId,
+    dstRegistryId: regChain.registryId,
     account: regVec.account,
     blsCommitment: "0x" + regCommitment.toString("hex"),
     epoch: "0",

@@ -28,8 +28,8 @@ const KEY_PROOFREG: Symbol = symbol_short!("proofreg");
 pub struct ProofRegistration {
     pub anchor: Address,
     pub verifier: Address,
-    /// Only for `field_mod`; the leaf itself lives in the other chain's MMR.
-    pub merkle_manager: Address,
+    /// The home chains a leaf may come from — the "one notarized source" invariant as a check.
+    pub sources: Vec<u128>,
     pub enabled: bool,
 }
 

@@ -37,4 +37,8 @@ pub enum RegistryError {
     RootNotAnchored = 17,
     /// The leaf inclusion proof did not verify for the rebuilt registration subject
     InvalidLeafProof = 18,
+    /// The leaf's home chain is not one the registry accepts leaves from (or is this chain)
+    SourceNotAllowed = 19,
+    /// Enabling proof registration with no source chains
+    ProofRegistrationRefsUnset = 20,
 }

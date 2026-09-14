@@ -6,8 +6,11 @@
 //! The foreign registry then accepts the key on an inclusion proof of that leaf against an
 //! anchored home-chain root. Nothing consumes the leaves until the registry's flag is turned on.
 //!
-//! Subject = `keccak256(account32 ‖ bls_commitment ‖ epoch)` with `epoch` as 8 big-endian bytes,
-//! so both chains hash identical bytes.
+//! The leaf is the message the account consents to, so it names the destination chain and registry
+//! like every registry digest does (`proofbridge_core::cross_contract::registration_subject`): one
+//! leaf, one registry. `epoch` is caller-chosen but strictly increasing per account, so the direct
+//! path cannot append duplicates and an account's leaves are totally ordered for the
+//! registration-leaf monitor.
 
 #![no_std]
 
@@ -17,10 +20,10 @@ mod events;
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Bytes, BytesN, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, BytesN, Env, Symbol};
 
 use proofbridge_core::{
-    cross_contract::{MerkleManagerClient, LEAF_DOMAIN_REGISTERED},
+    cross_contract::{registration_subject, MerkleManagerClient, LEAF_DOMAIN_REGISTERED},
     eip712::address_to_bytes32,
     ttl,
 };
@@ -29,6 +32,8 @@ pub use errors::RegistrarError;
 
 const KEY_INIT: Symbol = symbol_short!("init");
 const KEY_MM: Symbol = symbol_short!("mm");
+/// (KEY_NEXT, account32) -> u64: the lowest epoch the account's next leaf may carry (persistent).
+const KEY_NEXT: Symbol = symbol_short!("next");
 
 #[contract]
 pub struct Registrar;
@@ -50,13 +55,16 @@ impl Registrar {
         env.storage().instance().get(&KEY_MM)
     }
 
-    /// Append the registration leaf for `account` after its own authorization. The registrar must
-    /// be a manager on the MerkleManager. Returns the leaf's subject.
+    /// Append the registration leaf for `account` after its own authorization. `epoch` must be at
+    /// least `next_epoch(account)`; the leaf raises it to `epoch + 1`. The registrar must be a
+    /// manager on the MerkleManager. Returns the leaf's subject.
     pub fn register_leaf(
         env: Env,
         account: Address,
         bls_commitment: BytesN<32>,
         epoch: u64,
+        dst_chain_id: u128,
+        dst_registry_id: BytesN<32>,
     ) -> Result<BytesN<32>, RegistrarError> {
         let mm: Address = env
             .storage()
@@ -66,13 +74,23 @@ impl Registrar {
         account.require_auth();
 
         let account32 = address_to_bytes32(&env, &account);
-        let subject = Self::subject_of(
-            env.clone(),
-            account32.clone(),
-            bls_commitment.clone(),
+        let key = (KEY_NEXT, account32.clone());
+        let next: u64 = env.storage().persistent().get(&key).unwrap_or(0);
+        if epoch < next {
+            return Err(RegistrarError::StaleEpoch);
+        }
+        let bumped = epoch.checked_add(1).ok_or(RegistrarError::StaleEpoch)?;
+        env.storage().persistent().set(&key, &bumped);
+        ttl::extend_persistent(&env, &key);
+
+        let subject = registration_subject(
+            &env,
+            dst_chain_id,
+            &dst_registry_id,
+            &account32,
+            &bls_commitment,
             epoch,
         );
-
         match MerkleManagerClient::new(&env, &mm).try_append_order_hash(
             &env.current_contract_address(),
             &subject,
@@ -86,6 +104,8 @@ impl Registrar {
             account32,
             bls_commitment,
             epoch,
+            dst_chain_id,
+            dst_registry_id,
             subject: subject.clone(),
         }
         .publish(&env);
@@ -93,16 +113,32 @@ impl Registrar {
         Ok(subject)
     }
 
-    /// The leaf subject both chains derive: 32 + 32 + 8 bytes, `epoch` big-endian.
+    /// The lowest epoch `account32`'s next leaf may carry.
+    pub fn next_epoch(env: Env, account32: BytesN<32>) -> u64 {
+        let key = (KEY_NEXT, account32);
+        let next: u64 = env.storage().persistent().get(&key).unwrap_or(0);
+        if next > 0 {
+            ttl::extend_persistent(&env, &key);
+        }
+        next
+    }
+
+    /// The leaf subject both chains derive; see `registration_subject`.
     pub fn subject_of(
         env: Env,
         account32: BytesN<32>,
         bls_commitment: BytesN<32>,
         epoch: u64,
+        dst_chain_id: u128,
+        dst_registry_id: BytesN<32>,
     ) -> BytesN<32> {
-        let mut data = Bytes::from_slice(&env, &account32.to_array());
-        data.extend_from_slice(&bls_commitment.to_array());
-        data.extend_from_slice(&epoch.to_be_bytes());
-        env.crypto().keccak256(&data).to_bytes()
+        registration_subject(
+            &env,
+            dst_chain_id,
+            &dst_registry_id,
+            &account32,
+            &bls_commitment,
+            epoch,
+        )
     }
 }

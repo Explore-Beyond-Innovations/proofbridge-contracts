@@ -15,5 +15,7 @@ pub struct RegistrationLeaf {
     #[topic]
     pub bls_commitment: BytesN<32>,
     pub epoch: u64,
+    pub dst_chain_id: u128,
+    pub dst_registry_id: BytesN<32>,
     pub subject: BytesN<32>,
 }
