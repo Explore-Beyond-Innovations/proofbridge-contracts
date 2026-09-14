@@ -8,10 +8,14 @@ import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/Reentrancy
 import {IEscrow} from "../interfaces/IEscrow.sol";
 import {IVerifier} from "../interfaces/IVerifier.sol";
 import {IMerkleManager} from "../interfaces/IMerkleManager.sol";
+import {IRootAnchor} from "../interfaces/IRootAnchor.sol";
 import {IwNativeToken, SafeNativeToken} from "../wNativeToken.sol";
 import {AddressCast} from "../libraries/AddressCast.sol";
+import {LeafDomain} from "../libraries/LeafDomain.sol";
 import {RequestAuth} from "../libraries/RequestAuth.sol";
 import {RootVerifierRegistry} from "../libraries/RootVerifierRegistry.sol";
+import {RouteTiming} from "../libraries/RouteTiming.sol";
+import {Termination} from "../libraries/Termination.sol";
 import {TwoStepAdmin} from "../libraries/TwoStepAdmin.sol";
 
 /**
@@ -21,14 +25,27 @@ import {TwoStepAdmin} from "../libraries/TwoStepAdmin.sol";
  * @notice Everything the two escrows share: the admin surface (pause, peers, routes, root
  *         verifiers), the order ledger (`orders`, `nullifierUsed`, `inFlightOf`), the pull-payment
  *         escrow (`claimable`), funds in/out for ERC20 and the native sentinel, the proof core an
- *         unlock runs, and the MMR seam. `AdManager` and `OrderPortal` add their own leg on top.
+ *         unlock runs, the termination primitive's shared half (route timing, the claim record, the
+ *         anchored event proof, the terminal transitions), and the MMR seam. `AdManager` and
+ *         `OrderPortal` add their own leg on top.
  * @dev Storage is laid out here first; the inheritors append. Immutables never touch storage.
+ *
+ *      Order state machine (2.3e), the same on both legs:
+ *
+ *        None ──lock/create──▶ Open ──claim*──▶ Claimed ──finalize*──▶ Cancelled
+ *          │                    │                  │
+ *          │                    └──unlock / presentSettled──┘──▶ Filled (+ SETTLED leaf)
+ *          └──cancelNeverLocked (primary only)──▶ Cancelled (+ CANCEL leaf)
+ *
+ *      `Filled` and `Cancelled` are terminal. Nothing terminal happens on a clock alone: a clock only
+ *      opens a window, and evidence inside the window always wins over the refund after it.
  */
 abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVerifierRegistry {
     using SafeERC20 for IERC20;
     using SafeNativeToken for IwNativeToken;
     using AddressCast for address;
     using AddressCast for bytes32;
+    using RouteTiming for mapping(uint256 => RouteTiming.Timing);
 
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
@@ -68,6 +85,15 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
 
     /// @notice Payouts awaiting `claim`: recipient → token → amount.
     mapping(address recipient => mapping(address token => uint256)) public claimable;
+
+    /// @notice Termination clocks per peer chain (2.3e D6). Unset (`buffer == 0`) fails closed.
+    mapping(uint256 chainId => RouteTiming.Timing) public routeTiming;
+
+    /// @notice The notary the evidence paths read (2.3e D7). Unset fails closed; settlement never reads it.
+    IRootAnchor public rootAnchor;
+
+    /// @notice The open presentation window per order, if any (`Claimed` ⇔ a record exists).
+    mapping(bytes32 orderHash => Termination.Claim) public claims;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -119,6 +145,20 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     function removeTokenRoute(address localToken, uint256 peerChainId) external onlyRole(ADMIN_ROLE) {
         delete tokenRoute[localToken][peerChainId];
         emit TokenRouteRemoved(localToken, peerChainId);
+    }
+
+    /// @inheritdoc IEscrow
+    function setRouteTiming(uint256 chainId, RouteTiming.Timing calldata timing) external onlyRole(ADMIN_ROLE) {
+        RouteTiming.validate(timing);
+        routeTiming[chainId] = timing;
+        emit RouteTimingSet(chainId, timing);
+    }
+
+    /// @inheritdoc IEscrow
+    function setRootAnchor(IRootAnchor anchor) external onlyRole(ADMIN_ROLE) {
+        if (address(anchor) == address(0)) revert Escrow__ZeroAddress();
+        rootAnchor = anchor;
+        emit RootAnchorSet(address(anchor));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -198,18 +238,70 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
         inFlightOf[account]--;
     }
 
-    function _requireBeforeDeadline(uint256 deadline) internal view {
-        if (block.timestamp > deadline) revert Escrow__OrderExpired(deadline);
+    /// @dev The route's clocks, or `RouteTiming__NotSet` (the `NoRootVerifier` posture).
+    function _timing(uint256 chainId) internal view returns (RouteTiming.Timing storage) {
+        return routeTiming.load(chainId);
+    }
+
+    /// @dev `deadline ≥ now + minWindow` at every lock/create (2.3e D5): the precondition that makes
+    ///      `cancelNeverLocked`'s "no lock can follow the deadline" hold.
+    function _requireMinWindow(uint256 chainId, uint256 deadline) internal view {
+        uint256 minAllowed = block.timestamp + _timing(chainId).minWindow;
+        if (deadline < minAllowed) revert Escrow__DeadlineTooSoon(deadline, minAllowed);
+    }
+
+    /// @dev Reverts unless `at` has been reached.
+    function _requireReached(uint256 at) internal view {
+        if (block.timestamp < at) revert Escrow__TooEarly(at);
+    }
+
+    /// @dev Reverts unless `cutoff` has not been passed (inclusive).
+    function _requireNotPast(uint256 cutoff) internal view {
+        if (block.timestamp > cutoff) revert Escrow__OrderExpired(cutoff);
+    }
+
+    /// @dev The leg is `Open` or in a presentation window: evidence may still settle it.
+    function _requirePresentable(bytes32 orderHash) internal view returns (Status s) {
+        s = orders[orderHash];
+        if (s != Status.Open && s != Status.Claimed) revert Escrow__NotClaimable(orderHash, s);
+    }
+
+    /// @dev The leg must be exactly `expected` (`Open` before a claim, `None` before a never-locked cancel).
+    function _requireStatus(bytes32 orderHash, Status expected) internal view {
+        Status s = orders[orderHash];
+        if (s != expected) revert Escrow__NotClaimable(orderHash, s);
     }
 
     /*//////////////////////////////////////////////////////////////
                                PROOF CORE
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Cheap gates first: the nullifier is fresh and the leg is open.
+    /// @dev Cheap gates first: the nullifier is fresh and the leg is still settleable (`Open`, or
+    ///      `Claimed` — the co-signed unlock is the presentation, 2.3e D2).
     function _requireSettleable(bytes32 orderHash, bytes32 nullifierHash) internal view {
         if (nullifierUsed[nullifierHash]) revert Escrow__NullifierUsed(nullifierHash);
-        if (orders[orderHash] != Status.Open) revert Escrow__OrderNotOpen(orderHash);
+        Status s = orders[orderHash];
+        if (s != Status.Open && s != Status.Claimed) revert Escrow__OrderNotOpen(orderHash);
+    }
+
+    /// @dev Gate for the evidence paths: the root must be notarized by the wired anchor (2.3e D7).
+    function _requireAnchored(uint256 chainId, bytes32 root) internal view {
+        IRootAnchor a = rootAnchor;
+        if (address(a) == address(0)) revert Escrow__NoRootAnchor();
+        if (!a.isAnchored(chainId, root)) revert Escrow__RootNotAnchored(chainId, root);
+    }
+
+    /**
+     * @dev The secret-free event proof: `[0, orderHash % p, root, domain]` through the same verifier
+     *      as deposits. `domain` is a `LeafDomain` event constant fixed by the caller, never calldata.
+     */
+    function _requireEventProof(bytes32 targetRoot, bytes32 orderHash, bytes calldata proof, uint256 domain)
+        internal
+        view
+    {
+        if (!i_verifier.verify(proof, RequestAuth.buildEventInputs(targetRoot, orderHash, domain))) {
+            revert Escrow__InvalidProof();
+        }
     }
 
     /**
@@ -231,11 +323,44 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
         if (!i_verifier.verify(proof, publicInputs)) revert Escrow__InvalidProof();
     }
 
-    /// @dev The state half of a settlement: consume the nullifier, `Open → Filled`, count out.
+    /// @dev The state half of a co-signed settlement: consume the nullifier, then `_fill`.
     function _settle(bytes32 orderHash, bytes32 nullifierHash, bytes32 account) internal {
         nullifierUsed[nullifierHash] = true;
+        _fill(orderHash, account, false);
+    }
+
+    /**
+     * @dev `Open | Claimed → Filled` (2.3e D8): every fill appends this leg's SETTLED leaf, so the
+     *      other escrow's presenter can prove this one paid; the window, if any, closes; count out.
+     *      The evidence path consumes no nullifier — the terminal status is its replay guard.
+     */
+    function _fill(bytes32 orderHash, bytes32 account, bool byEvidence) internal {
         orders[orderHash] = Status.Filled;
+        delete claims[orderHash];
         _countOut(account);
+        _appendLeaf(orderHash, LeafDomain.SETTLED);
+        emit OrderSettled(orderHash, byEvidence);
+    }
+
+    /// @dev Open a presentation window on an `Open` leg; only a `finalize*` or evidence closes it.
+    function _openClaim(bytes32 orderHash, Termination.ClaimEntry entry, uint256 finalizeAt) internal {
+        claims[orderHash] = Termination.Claim(uint64(block.timestamp), uint64(finalizeAt), entry);
+        orders[orderHash] = Status.Claimed;
+        emit ClaimOpened(orderHash, entry, uint64(finalizeAt));
+    }
+
+    /// @dev The leg must be `Claimed` and its window over; returns nothing, the caller then `_cancel`s.
+    function _requireFinalizable(bytes32 orderHash) internal view {
+        if (orders[orderHash] != Status.Claimed) revert Escrow__NotClaimed(orderHash);
+        _requireReached(claims[orderHash].finalizeAt);
+    }
+
+    /// @dev `→ Cancelled`: close the window, count out. The leaf and the funds are the caller's.
+    function _cancel(bytes32 orderHash, bytes32 account, bool byEvidence) internal {
+        orders[orderHash] = Status.Cancelled;
+        delete claims[orderHash];
+        _countOut(account);
+        emit OrderCancelled(orderHash, byEvidence);
     }
 
     /*//////////////////////////////////////////////////////////////

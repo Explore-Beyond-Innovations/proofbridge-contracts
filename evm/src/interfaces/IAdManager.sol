@@ -87,6 +87,8 @@ interface IAdManager is IEscrow {
         bytes32 bridger,
         bytes32 recipient
     );
+    /// @notice A lock was released back to the ad's free balance by an unchallenged cancel.
+    event LockCancelled(string indexed adId, bytes32 indexed orderHash, uint256 amount);
 
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -136,6 +138,23 @@ interface IAdManager is IEscrow {
         bytes calldata proof,
         bytes calldata cosigData
     ) external;
+
+    /*//////////////////////////////////////////////////////////////
+                        TERMINATION — THE PRIMARY (2.3e)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Open the cancel window on an `Open` lock at `now ≥ deadline`. Permissionless, no fee.
+    ///         The window is deadline-anchored: it may be finalized at `deadline + buffer`.
+    function claimCancel(OrderParams calldata params) external;
+    /// @notice After an unchallenged window: release the lock, mark `Cancelled`, append the CANCEL
+    ///         leaf the follower refunds against.
+    function finalizeCancel(OrderParams calldata params) external;
+    /// @notice Attest that an order the bridger deposited for was never locked here: `None` and
+    ///         `now ≥ deadline` → `Cancelled` + CANCEL leaf. No funds move; nothing was counted.
+    function cancelNeverLocked(OrderParams calldata params) external;
+    /// @notice Settle the lock on a secret-free proof that the order leg already paid the maker (its
+    ///         SETTLED leaf under a root the anchor notarized). `Open` or `Claimed`; no nullifier.
+    function presentSettled(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof) external;
 
     function keyRegistry() external view returns (IKeyRegistry);
     function ads(string calldata adId)

@@ -11,14 +11,20 @@ import {DecimalScaling} from "./libraries/DecimalScaling.sol";
 import {LeafDomain} from "./libraries/LeafDomain.sol";
 import {OrderHash} from "./libraries/OrderHash.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
+import {RouteTiming} from "./libraries/RouteTiming.sol";
+import {Termination} from "./libraries/Termination.sol";
 
 /**
  * @title OrderPortal (Proofbridge)
  * @author Proofbridge
  * @custom:security-contact security@proofbridge.xyz
  * @notice The bridger's leg. Bridgers deposit `orderChainToken` against a maker's ad; the maker
- *         unlocks the deposit on this chain with a proof of their lock on the ad chain. Everything
- *         not specific to deposits lives in {EscrowBase}.
+ *         unlocks the deposit on this chain with a proof of their lock on the ad chain. This leg is
+ *         the termination follower (2.3e): it refunds only against a proof of the ad leg's CANCEL
+ *         leaf under an anchored root, never on a clock; the maker's co-signed `unlock` stops
+ *         `claimStagger` before the deadline so a cancel claim always leaves time to land it; and
+ *         a far backstop (`deadline + longBackstop`) opens a window, never a bare refund.
+ *         Everything not specific to deposits lives in {EscrowBase}.
  */
 contract OrderPortal is EscrowBase, IOrderPortal {
     using AddressCast for address;
@@ -44,6 +50,7 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         returns (bytes32 orderHash)
     {
         orderHash = _validateOrder(params);
+        _requireMinWindow(params.adChainId, params.deadline);
         _openOrder(orderHash);
         _pullFunds(params.orderChainToken.toAddressChecked(), params.amount);
         // The deposit is consumed on the ad side: its leaf carries the AD domain.
@@ -79,8 +86,8 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         bytes calldata cosigData
     ) external nonReentrant whenNotPaused {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
-        _requireBeforeDeadline(params.deadline);
         _requireSettleable(orderHash, nullifierHash);
+        _requireNotPast(_unlockCutoff(orderHash, params));
         // Gate 2 — root authenticity (the co-signed root); mandatory, reverts NoRootVerifier when unwired.
         _requireRootValid(
             params.adChainId, targetRoot, RequestAuth.rootEnvelope(params.adSettlementSigner, params.bridger, cosigData)
@@ -88,9 +95,61 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         _requireDepositProof(orderHash, nullifierHash, targetRoot, proof, _PUBLIC_INPUT_SIDE_ORDER);
 
         _settle(orderHash, nullifierHash, params.bridger);
-        _payOrCredit(params.adRecipient.toAddressChecked(), params.orderChainToken.toAddressChecked(), params.amount);
+        _payMaker(params);
 
         emit OrderUnlocked(orderHash, params.adRecipient, nullifierHash);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        TERMINATION — THE FOLLOWER (2.3e)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @inheritdoc IOrderPortal
+    function refundByCancel(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof)
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        _requirePresentable(orderHash);
+        _requireAnchored(params.adChainId, targetRoot);
+        _requireEventProof(targetRoot, orderHash, proof, LeafDomain.CANCEL);
+        // D4: no deadline read anywhere on this path.
+        _cancel(orderHash, params.bridger, true);
+        _refundBridger(orderHash, params);
+    }
+
+    /// @inheritdoc IOrderPortal
+    function presentSettled(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof)
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        _requirePresentable(orderHash);
+        _requireAnchored(params.adChainId, targetRoot);
+        _requireEventProof(targetRoot, orderHash, proof, LeafDomain.SETTLED);
+
+        _fill(orderHash, params.bridger, true);
+        _payMaker(params);
+    }
+
+    /// @inheritdoc IOrderPortal
+    function claimBackstop(OrderParams calldata params) external nonReentrant whenNotPaused {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        _requireStatus(orderHash, Status.Open);
+        RouteTiming.Timing storage t = _timing(params.adChainId);
+        _requireReached(params.deadline + t.longBackstop);
+        // Claim-anchored (D1): this clock starts days late; no evidence race straddles it.
+        _openClaim(orderHash, Termination.ClaimEntry.Backstop, block.timestamp + t.buffer);
+    }
+
+    /// @inheritdoc IOrderPortal
+    function finalizeBackstop(OrderParams calldata params) external nonReentrant whenNotPaused {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        _requireFinalizable(orderHash);
+        _cancel(orderHash, params.bridger, false);
+        _refundBridger(orderHash, params);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -123,6 +182,28 @@ contract OrderPortal is EscrowBase, IOrderPortal {
             adSettlementSigner: p.adSettlementSigner
         });
         return OrderHash.digest(o);
+    }
+
+    /// @dev The maker's payout: the deposit, to the ad's recipient.
+    function _payMaker(OrderParams calldata p) private {
+        _payOrCredit(p.adRecipient.toAddressChecked(), p.orderChainToken.toAddressChecked(), p.amount);
+    }
+
+    /// @dev The bridger's refund: the deposit, back to them.
+    function _refundBridger(bytes32 orderHash, OrderParams calldata p) private {
+        _payOrCredit(p.bridger.toAddressChecked(), p.orderChainToken.toAddressChecked(), p.amount);
+        emit OrderRefunded(orderHash, p.bridger, p.amount);
+    }
+
+    /**
+     * @dev The last second the co-signed unlock is accepted (D2). `Open`: `deadline − claimStagger`,
+     *      so the maker's cancel claim on the ad chain always leaves the watchtower time to land this
+     *      leg. `Claimed` (a backstop window): up to `finalizeAt − margin`.
+     */
+    function _unlockCutoff(bytes32 orderHash, OrderParams calldata p) private view returns (uint256) {
+        RouteTiming.Timing storage t = _timing(p.adChainId);
+        if (orders[orderHash] == Status.Claimed) return claims[orderHash].finalizeAt - t.margin;
+        return p.deadline - t.claimStagger;
     }
 
     /// @dev Every create-time rule, cheapest first.

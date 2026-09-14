@@ -11,6 +11,7 @@ import {IVerifier} from "src/Verifier.sol";
 import {IMerkleManager} from "src/MerkleManager.sol";
 import {IwNativeToken} from "src/wNativeToken.sol";
 import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
+import {RouteTiming} from "src/libraries/RouteTiming.sol";
 
 /// 2.3c (#340): the escrow binding (design 01 §1.4), the re-pointing lever (§1.5), and
 /// `inFlightOf` counted for the settlement identity each escrow's unlock verifies (D1). T-12, T-13, T-14.
@@ -135,6 +136,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         vm.startPrank(admin);
         bare.setPeerEscrow(orderChainId, _b32(orderPortal));
         bare.setTokenRoute(address(adToken), orderChainId, _b32(orderToken));
+        bare.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
         vm.stopPrank();
 
         vm.startPrank(maker);

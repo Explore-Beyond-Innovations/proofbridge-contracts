@@ -13,9 +13,13 @@ import {console2} from "forge-std/console2.sol";
 // intrinsic cost and per-byte calldata gas of a real transaction, so these numbers
 // are regression tripwires, NOT transaction-cost estimates — do not size a fee or
 // gas-limit budget from them (add intrinsic + calldata for a submit estimate).
+//
+// 2.3e (D8): every `Filled` appends the leg's SETTLED leaf — one Poseidon2 MMR append
+// (~184k) on top of the settlement. Baselines moved 74k → 266k (escrow-only) and
+// 374k → 558k (full); the ceilings below are those plus ~10%.
 
 contract OrderPortalUnlockGas is OrderPortalGateTest {
-    uint256 constant ORDER_PORTAL_UNLOCK_GAS_CEILING = 400_000;
+    uint256 constant ORDER_PORTAL_UNLOCK_GAS_CEILING = 615_000;
 
     // Full unlock through the real CounterpartyVerifier: includes the ~285k BLS
     // aggregate-verify (EIP-2537 pairing) that dominates the cosig path. This is the
@@ -34,7 +38,7 @@ contract OrderPortalUnlockGas is OrderPortalGateTest {
 }
 
 contract AdManagerUnlockGas is AdManagerGateTest {
-    uint256 constant AD_MANAGER_UNLOCK_ESCROW_GAS_CEILING = 82_000;
+    uint256 constant AD_MANAGER_UNLOCK_ESCROW_GAS_CEILING = 295_000;
 
     // Escrow-settlement path ONLY: metered through MockRootVerifier(true) with an
     // empty cosig, so it excludes the BLS aggregate-verify. A real AdManager unlock

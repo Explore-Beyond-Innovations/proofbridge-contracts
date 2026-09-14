@@ -4,6 +4,9 @@ pragma solidity ^0.8.34;
 import {IVerifier} from "./IVerifier.sol";
 import {IMerkleManager} from "./IMerkleManager.sol";
 import {IwNativeToken} from "../wNativeToken.sol";
+import {IRootAnchor} from "./IRootAnchor.sol";
+import {RouteTiming} from "../libraries/RouteTiming.sol";
+import {Termination} from "../libraries/Termination.sol";
 
 /**
  * @title IEscrow — what both escrows (AdManager, OrderPortal) share.
@@ -17,11 +20,19 @@ interface IEscrow {
                                  TYPES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Order lifecycle. `None` is "never seen on this chain".
+    /**
+     * @notice Order lifecycle. `None` is "never seen on this chain"; `Filled` and `Cancelled` are
+     *         terminal; `Claimed` is a presentation window (2.3e); `Disputed` / `Resolved` are
+     *         reserved for 2.3g so it never renumbers.
+     */
     enum Status {
         None,
         Open,
-        Filled
+        Filled,
+        Claimed,
+        Cancelled,
+        Disputed,
+        Resolved
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -35,6 +46,16 @@ interface IEscrow {
     event TokenRouteRemoved(address indexed localToken, uint256 indexed peerChainId);
     /// @notice An order settled on this chain with a valid proof (the leg is `Filled`).
     event OrderUnlocked(bytes32 indexed orderHash, bytes32 indexed recipient, bytes32 indexed nullifierHash);
+    /// @notice The leg reached `Filled` and its SETTLED leaf was appended; `byEvidence` is true for
+    ///         `presentSettled` (a proof of the other leg), false for the co-signed `unlock`.
+    event OrderSettled(bytes32 indexed orderHash, bool byEvidence);
+    /// @notice A presentation window opened on this leg; it may be finalized at `finalizeAt`.
+    event ClaimOpened(bytes32 indexed orderHash, Termination.ClaimEntry entry, uint64 finalizeAt);
+    /// @notice The leg reached `Cancelled`; `byEvidence` is true for the follower's `refundByCancel`
+    ///         (a proof of the primary's cancel leaf), false for every clock-driven finalize.
+    event OrderCancelled(bytes32 indexed orderHash, bool byEvidence);
+    event RouteTimingSet(uint256 indexed chainId, RouteTiming.Timing timing);
+    event RootAnchorSet(address indexed rootAnchor);
     /// @notice A payout could not be pushed and was credited for `claim`.
     event PayoutCredited(address indexed recipient, address indexed token, uint256 amount);
     event PayoutClaimed(address indexed recipient, address indexed token, uint256 amount);
@@ -58,6 +79,16 @@ interface IEscrow {
     error Escrow__MerkleManagerAppendFailed();
     error Escrow__NothingToClaim();
     error Escrow__SelfCallOnly();
+    /// @notice `deadline` is closer than the route's `minWindow` (2.3e D5).
+    error Escrow__DeadlineTooSoon(uint256 deadline, uint256 minAllowed);
+    /// @notice The clock the caller relies on has not been reached yet.
+    error Escrow__TooEarly(uint256 at);
+    /// @notice The order is not in a state this path accepts (`Open`, `Claimed`, or `None`, as documented).
+    error Escrow__NotClaimable(bytes32 orderHash, Status status);
+    /// @notice No presentation window is open on the order.
+    error Escrow__NotClaimed(bytes32 orderHash);
+    error Escrow__NoRootAnchor();
+    error Escrow__RootNotAnchored(uint256 chainId, bytes32 root);
 
     /*//////////////////////////////////////////////////////////////
                                  ADMIN
@@ -71,6 +102,10 @@ interface IEscrow {
     function setRootVerifier(uint256 chainId, address verifier) external;
     function setTokenRoute(address localToken, uint256 peerChainId, bytes32 peerToken) external;
     function removeTokenRoute(address localToken, uint256 peerChainId) external;
+    /// @notice Set the termination clocks for a peer chain (validated; 2.3e D6).
+    function setRouteTiming(uint256 chainId, RouteTiming.Timing calldata timing) external;
+    /// @notice Set the notary the evidence paths (`presentSettled`, `refundByCancel`) read (2.3e D7).
+    function setRootAnchor(IRootAnchor anchor) external;
 
     /*//////////////////////////////////////////////////////////////
                                  ACTIONS
@@ -92,6 +127,15 @@ interface IEscrow {
     function nullifierUsed(bytes32 nullifierHash) external view returns (bool);
     function inFlightOf(bytes32 account) external view returns (uint256);
     function claimable(address recipient, address token) external view returns (uint256);
+    function routeTiming(uint256 chainId)
+        external
+        view
+        returns (uint64 minWindow, uint64 buffer, uint64 margin, uint64 longBackstop, uint64 claimStagger);
+    function rootAnchor() external view returns (IRootAnchor);
+    function claims(bytes32 orderHash)
+        external
+        view
+        returns (uint64 openedAt, uint64 finalizeAt, Termination.ClaimEntry entry);
     /// @notice BLSKeyRegistry revoke guard: true while the account has a leg open on this escrow.
     function hasOpenPositions(bytes32 account) external view returns (bool);
     function getLatestMerkleRoot() external view returns (bytes32);
