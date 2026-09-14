@@ -2,6 +2,7 @@
 pragma solidity ^0.8.34;
 
 import {IMerkleManager} from "../MerkleManager.sol";
+import {MMRPoseidon2} from "@solidity-mmr/MMRPoseidon2.sol";
 
 /**
  * @title RequestAuth
@@ -40,14 +41,6 @@ library RequestAuth {
     }
 
     /**
-     * @notice Assemble the public inputs for an event claim: no secret, so the nullifier is zero.
-     * @param merkleManager MerkleManager used to field-mod the subject.
-     * @param targetRoot Source-chain merkle root the claim is proven against.
-     * @param subject The leaf's subject (the order hash for cancel / settled).
-     * @param domain A `LeafDomain` event constant (>= 2), fixed by the caller, never calldata.
-     * @return inputs `[0, subject % p, targetRoot, domain]`.
-     */
-    /**
      * @notice The root verifier's envelope: `(settlementSigner, bridger, cosigData)`. Slot 0 is the account
      *         whose settlement key the verifier resolves: `params.adSettlementSigner`, never `adCreator`.
      */
@@ -59,13 +52,21 @@ library RequestAuth {
         return abi.encode(settlementSigner, bridger, cosigData);
     }
 
-    function buildEventInputs(IMerkleManager merkleManager, bytes32 targetRoot, bytes32 subject, uint256 domain)
+    /**
+     * @notice Assemble the public inputs for an event claim: no secret, so the nullifier is zero.
+     * @dev Pure: the field reduction is the MMR library's own, so a consumer needs no MerkleManager.
+     * @param targetRoot Source-chain merkle root the claim is proven against.
+     * @param subject The leaf's subject (the order hash for cancel / settled, the registration subject).
+     * @param domain A `LeafDomain` event constant (>= 2), fixed by the caller, never calldata.
+     * @return inputs `[0, subject % p, targetRoot, domain]`.
+     */
+    function buildEventInputs(bytes32 targetRoot, bytes32 subject, uint256 domain)
         internal
-        view
+        pure
         returns (bytes32[] memory inputs)
     {
         inputs = new bytes32[](4);
-        inputs[1] = merkleManager.fieldMod(subject);
+        inputs[1] = MMRPoseidon2._fieldMod(subject);
         inputs[2] = targetRoot;
         inputs[3] = bytes32(domain);
     }

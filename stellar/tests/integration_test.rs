@@ -1157,38 +1157,14 @@ fn real_registry_with_vector_maker(
     BytesN<32>,
     Address,
 ) {
+    let (client, account, pk, pop) = vector_registry(s);
     let vectors: serde_json::Value =
         serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
-    let hexv =
-        |v: &serde_json::Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
-
-    let regid: [u8; 32] = hexv(&vectors["chains"]["stellarTestnet"]["registryId"])
-        .try_into()
-        .unwrap();
-    let at = Address::from_string(&SorobanString::from_str(
-        &s.env,
-        &stellar_strkey::Contract(regid).to_string(),
-    ));
-    let registry = s.env.register_at(&at, bls_key_registry_contract::WASM, ());
-    let client = bls_key_registry_contract::Client::new(&s.env, &registry);
-    let chain_id: u128 = vectors["chains"]["stellarTestnet"]["chainId"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-    client.initialize(&s.admin_addr, &chain_id);
-
-    let r = &vectors["registration"]["makerOnStellarTestnet"];
-    let account = BytesN::from_array(&s.env, &hexv(&r["account"]).try_into().unwrap());
-    let wallet_pk: [u8; 32] = hexv(&vectors["keys"]["makerWallet"]["pk"])
-        .try_into()
-        .unwrap();
+    let wallet_pk: [u8; 32] = hex_to_array(vectors["keys"]["makerWallet"]["pk"].as_str().unwrap());
     let owner = Address::from_string(&SorobanString::from_str(
         &s.env,
         &stellar_strkey::ed25519::PublicKey(wallet_pk).to_string(),
     ));
-    let pk = BytesN::from_array(&s.env, &hexv(&r["pkNative"]).try_into().unwrap());
-    let pop = BytesN::from_array(&s.env, &hexv(&r["pop"]).try_into().unwrap());
     client.register(
         &account,
         &bls_key_registry_contract::OwnerAuth::Stellar(owner.clone()),
@@ -1339,13 +1315,8 @@ fn test_event_claims_verify_for_every_event_domain() {
     let s = event_setup();
     let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
     for (domain, proof) in EVENT_CLAIMS {
-        let inputs = build_event_public_inputs(
-            &s.env,
-            &s.merkle,
-            &event_root(&s, domain),
-            &order_hash,
-            domain,
-        );
+        let inputs =
+            build_event_public_inputs(&s.env, &event_root(&s, domain), &order_hash, domain);
         s.verifier
             .verify_proof(&inputs, &Bytes::from_slice(&s.env, proof));
     }
@@ -1358,8 +1329,7 @@ fn test_event_claim_rejected_under_another_domain_or_as_a_deposit() {
     let root = event_root(&s, LEAF_DOMAIN_CANCEL);
     let proof = Bytes::from_slice(&s.env, EVENT_CLAIMS[0].1);
 
-    let other_domain =
-        build_event_public_inputs(&s.env, &s.merkle, &root, &order_hash, LEAF_DOMAIN_SETTLED);
+    let other_domain = build_event_public_inputs(&s.env, &root, &order_hash, LEAF_DOMAIN_SETTLED);
     assert!(s.verifier.try_verify_proof(&other_domain, &proof).is_err());
 
     let zero = BytesN::from_array(&s.env, &[0u8; 32]);
@@ -1379,13 +1349,7 @@ fn test_deposit_proof_rejected_as_an_event_claim() {
     let s = event_setup();
     let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
     let order_root = bytes32_to_bytesn(&s.env, &s.tp.order_root);
-    let inputs = build_event_public_inputs(
-        &s.env,
-        &s.merkle,
-        &order_root,
-        &order_hash,
-        LEAF_DOMAIN_CANCEL,
-    );
+    let inputs = build_event_public_inputs(&s.env, &order_root, &order_hash, LEAF_DOMAIN_CANCEL);
     assert!(s
         .verifier
         .try_verify_proof(&inputs, &Bytes::from_slice(&s.env, PROOF_BRIDGER))
@@ -2052,4 +2016,580 @@ fn test_t13_create_then_unlock_clears_bridger() {
     );
     assert!(!s.order_portal.has_open_positions(&params.bridger));
     assert!(!s.order_portal.has_open_positions(&params.ad_creator));
+}
+
+// ===========================================================================
+// 2.1b (#324): proof-carried registration — the home-chain registrar and the registry's
+// flagged register_by_proof, against the real root-anchor. T-67. Plan:
+// 2.1-build/05-proof-registration.md.
+// ===========================================================================
+
+mod registrar_contract {
+    soroban_sdk::contractimport!(file = "target/wasm32v1-none/release/registrar.wasm");
+}
+
+mod root_anchor_contract {
+    soroban_sdk::contractimport!(file = "target/wasm32v1-none/release/root_anchor.wasm");
+}
+
+const REGISTRATION_CLAIM: &[u8] = include_bytes!("fixtures/registration_claim.bin");
+/// The leaf's home chain: the vectors' Sepolia. Never this registry's own chain (1_000_002).
+const REGISTRATION_SOURCE_CHAIN: u128 = 11_155_111;
+const OTHER_SOURCE_CHAIN: u128 = 1_000_003;
+
+struct RegistrationFixture {
+    dst_chain_id: u128,
+    dst_registry_id: [u8; 32],
+    account: [u8; 32],
+    commitment: [u8; 32],
+    subject: [u8; 32],
+    root: [u8; 32],
+}
+
+/// The generator's registration leaf: the vector maker's account and key, epoch 0, minted for the
+/// vectors' Stellar registry.
+fn registration_fixture() -> RegistrationFixture {
+    let v: serde_json::Value = serde_json::from_str(TEST_PARAMS_JSON).unwrap();
+    let r = &v["registration"];
+    let h = |k: &str| hex_to_array(r[k].as_str().unwrap());
+    RegistrationFixture {
+        dst_chain_id: r["dstChainId"].as_str().unwrap().parse().unwrap(),
+        dst_registry_id: h("dstRegistryId"),
+        account: h("account"),
+        commitment: h("blsCommitment"),
+        subject: h("subject"),
+        root: h("root"),
+    }
+}
+
+/// The real registry pinned at the vector registry id, plus the vector maker's account, key and
+/// nonce-0 proof of possession — which doubles as the epoch-0 one.
+fn vector_registry(
+    s: &TestSetup,
+) -> (
+    bls_key_registry_contract::Client<'static>,
+    BytesN<32>,
+    BytesN<96>,
+    BytesN<192>,
+) {
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
+    let hexv =
+        |v: &serde_json::Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
+    let regid: [u8; 32] = hexv(&vectors["chains"]["stellarTestnet"]["registryId"])
+        .try_into()
+        .unwrap();
+    let at = Address::from_string(&SorobanString::from_str(
+        &s.env,
+        &stellar_strkey::Contract(regid).to_string(),
+    ));
+    let registry = s.env.register_at(&at, bls_key_registry_contract::WASM, ());
+    let client = bls_key_registry_contract::Client::new(&s.env, &registry);
+    let chain_id: u128 = vectors["chains"]["stellarTestnet"]["chainId"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    client.initialize(&s.admin_addr, &chain_id);
+
+    let r = &vectors["registration"]["makerOnStellarTestnet"];
+    let account = BytesN::from_array(&s.env, &hexv(&r["account"]).try_into().unwrap());
+    let pk = BytesN::from_array(&s.env, &hexv(&r["pkNative"]).try_into().unwrap());
+    let pop = BytesN::from_array(&s.env, &hexv(&r["pop"]).try_into().unwrap());
+    (client, account, pk, pop)
+}
+
+struct ProofWiring {
+    anchor: Address,
+    signer: Address,
+    verifier: Address,
+}
+
+/// The real root-anchor (threshold 1, delay 0) and a verifier, wired into the registry with
+/// `REGISTRATION_SOURCE_CHAIN` as the one allowed home chain and the flag as given.
+fn wire_proof_registration(
+    s: &TestSetup,
+    client: &bls_key_registry_contract::Client,
+    enabled: bool,
+) -> ProofWiring {
+    let signer = Address::generate(&s.env);
+    let anchor = s.env.register(root_anchor_contract::WASM, ());
+    root_anchor_contract::Client::new(&s.env, &anchor).initialize(
+        &s.admin_addr,
+        &soroban_sdk::vec![&s.env, signer.clone()],
+        &1,
+    );
+    let verifier = s
+        .env
+        .register(VERIFIER_WASM, (Bytes::from_slice(&s.env, VK),));
+    client.set_proof_registration(
+        &anchor,
+        &verifier,
+        &soroban_sdk::vec![&s.env, REGISTRATION_SOURCE_CHAIN],
+        &enabled,
+    );
+    ProofWiring {
+        anchor,
+        signer,
+        verifier,
+    }
+}
+
+/// The bridger's vector POP: a valid possession proof for the *other* key.
+fn other_pop(s: &TestSetup) -> BytesN<192> {
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
+    let pop = hex::decode(
+        vectors["registration"]["bridgerOnStellarTestnet"]["pop"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x"),
+    )
+    .unwrap();
+    BytesN::from_array(&s.env, &pop.try_into().unwrap())
+}
+
+// --- T-67a: the registrar appends only after the account's own auth -----------
+
+#[test]
+fn test_t67_registrar_appends_domain4_leaf_after_own_auth() {
+    let s = setup();
+    let fx = registration_fixture();
+    let merkle = s.env.register(MERKLE_WASM, ());
+    let mc = merkle_contract::Client::new(&s.env, &merkle);
+    mc.initialize(&s.admin_addr);
+    let registrar = s.env.register(registrar_contract::WASM, ());
+    let rc = registrar_contract::Client::new(&s.env, &registrar);
+    rc.initialize(&merkle);
+    mc.set_manager(&registrar, &true);
+
+    // The vector maker's account is a G-address: address_to_bytes32 of it is the raw pubkey,
+    // which is what the generator hashed.
+    let account = Address::from_string(&SorobanString::from_str(
+        &s.env,
+        &stellar_strkey::ed25519::PublicKey(fx.account).to_string(),
+    ));
+    let subject = rc.register_leaf(
+        &account,
+        &BytesN::from_array(&s.env, &fx.commitment),
+        &0,
+        &fx.dst_chain_id,
+        &BytesN::from_array(&s.env, &fx.dst_registry_id),
+    );
+    assert_eq!(
+        subject,
+        BytesN::from_array(&s.env, &fx.subject),
+        "the on-chain subject is the generator's"
+    );
+    assert_eq!(mc.get_width(), 1, "one leaf appended");
+    assert_eq!(
+        rc.next_epoch(&BytesN::from_array(&s.env, &fx.account)),
+        1,
+        "the epoch is consumed"
+    );
+}
+
+// --- T-67b/c: the registry's flagged path ------------------------------------
+
+#[test]
+fn test_t67_register_by_proof_flag_off_errors() {
+    let s = setup();
+    let fx = registration_fixture();
+    let (client, account, pk, pop) = vector_registry(&s);
+    wire_proof_registration(&s, &client, false);
+    let res = client.try_register_by_proof(
+        &account,
+        &pk,
+        &pop,
+        &0,
+        &REGISTRATION_SOURCE_CHAIN,
+        &BytesN::from_array(&s.env, &fx.root),
+        &Bytes::from_slice(&s.env, REGISTRATION_CLAIM),
+    );
+    assert_eq!(
+        res,
+        Err(Ok(
+            bls_key_registry_contract::RegistryError::ProofRegistrationDisabled
+        ))
+    );
+}
+
+#[test]
+fn test_t67_register_by_proof_against_anchored_root_registers() {
+    let s = setup();
+    let fx = registration_fixture();
+    let (client, account, pk, pop) = vector_registry(&s);
+    assert_eq!(
+        account,
+        BytesN::from_array(&s.env, &fx.account),
+        "fixture and vectors name the same account"
+    );
+    let w = wire_proof_registration(&s, &client, true);
+    let root = BytesN::from_array(&s.env, &fx.root);
+    root_anchor_contract::Client::new(&s.env, &w.anchor).anchor(
+        &w.signer,
+        &REGISTRATION_SOURCE_CHAIN,
+        &root,
+        &1,
+    );
+
+    let slot = client.register_by_proof(
+        &account,
+        &pk,
+        &pop,
+        &0,
+        &REGISTRATION_SOURCE_CHAIN,
+        &root,
+        &Bytes::from_slice(&s.env, REGISTRATION_CLAIM),
+    );
+    assert_eq!(slot, 0);
+    assert_eq!(
+        client.commitment_at(&account, &0),
+        BytesN::from_array(&s.env, &fx.commitment)
+    );
+    assert!(client.has_usable_slot(&account));
+    // The signature path's nonce is untouched: a proof registration is invisible to nonce-based
+    // landing detection (plan §7).
+    assert_eq!(client.nonce_of(&account), 0);
+}
+
+#[test]
+fn test_t67_register_by_proof_unanchored_root_errors() {
+    let s = setup();
+    let fx = registration_fixture();
+    let (client, account, pk, pop) = vector_registry(&s);
+    wire_proof_registration(&s, &client, true);
+    let res = client.try_register_by_proof(
+        &account,
+        &pk,
+        &pop,
+        &0,
+        &REGISTRATION_SOURCE_CHAIN,
+        &BytesN::from_array(&s.env, &fx.root),
+        &Bytes::from_slice(&s.env, REGISTRATION_CLAIM),
+    );
+    assert_eq!(
+        res,
+        Err(Ok(
+            bls_key_registry_contract::RegistryError::RootNotAnchored
+        ))
+    );
+}
+
+#[test]
+fn test_t67_register_by_proof_inside_anchor_delay_errors() {
+    let s = setup();
+    let fx = registration_fixture();
+    let (client, account, pk, pop) = vector_registry(&s);
+    let w = wire_proof_registration(&s, &client, true);
+    let ac = root_anchor_contract::Client::new(&s.env, &w.anchor);
+    ac.set_anchor_delay(&REGISTRATION_SOURCE_CHAIN, &3600);
+    let root = BytesN::from_array(&s.env, &fx.root);
+    ac.anchor(&w.signer, &REGISTRATION_SOURCE_CHAIN, &root, &1);
+    let res = client.try_register_by_proof(
+        &account,
+        &pk,
+        &pop,
+        &0,
+        &REGISTRATION_SOURCE_CHAIN,
+        &root,
+        &Bytes::from_slice(&s.env, REGISTRATION_CLAIM),
+    );
+    assert_eq!(
+        res,
+        Err(Ok(
+            bls_key_registry_contract::RegistryError::RootNotAnchored
+        ))
+    );
+}
+
+#[test]
+fn test_t67_register_by_proof_replay_errors() {
+    let s = setup();
+    let fx = registration_fixture();
+    let (client, account, pk, pop) = vector_registry(&s);
+    let w = wire_proof_registration(&s, &client, true);
+    let root = BytesN::from_array(&s.env, &fx.root);
+    root_anchor_contract::Client::new(&s.env, &w.anchor).anchor(
+        &w.signer,
+        &REGISTRATION_SOURCE_CHAIN,
+        &root,
+        &1,
+    );
+    let claim = Bytes::from_slice(&s.env, REGISTRATION_CLAIM);
+    client.register_by_proof(
+        &account,
+        &pk,
+        &pop,
+        &0,
+        &REGISTRATION_SOURCE_CHAIN,
+        &root,
+        &claim,
+    );
+    assert_eq!(
+        client.try_register_by_proof(
+            &account,
+            &pk,
+            &pop,
+            &0,
+            &REGISTRATION_SOURCE_CHAIN,
+            &root,
+            &claim
+        ),
+        Err(Ok(
+            bls_key_registry_contract::RegistryError::KeyPreviouslyUsed
+        ))
+    );
+}
+
+#[test]
+fn test_t67_enable_is_a_config_call_not_a_redeploy() {
+    let s = setup();
+    let fx = registration_fixture();
+    let (client, account, pk, pop) = vector_registry(&s);
+    let w = wire_proof_registration(&s, &client, false);
+    let root = BytesN::from_array(&s.env, &fx.root);
+    root_anchor_contract::Client::new(&s.env, &w.anchor).anchor(
+        &w.signer,
+        &REGISTRATION_SOURCE_CHAIN,
+        &root,
+        &1,
+    );
+    let claim = Bytes::from_slice(&s.env, REGISTRATION_CLAIM);
+    assert_eq!(
+        client.try_register_by_proof(
+            &account,
+            &pk,
+            &pop,
+            &0,
+            &REGISTRATION_SOURCE_CHAIN,
+            &root,
+            &claim
+        ),
+        Err(Ok(
+            bls_key_registry_contract::RegistryError::ProofRegistrationDisabled
+        ))
+    );
+
+    client.set_proof_registration(
+        &w.anchor,
+        &w.verifier,
+        &soroban_sdk::vec![&s.env, REGISTRATION_SOURCE_CHAIN],
+        &true,
+    );
+    client.register_by_proof(
+        &account,
+        &pk,
+        &pop,
+        &0,
+        &REGISTRATION_SOURCE_CHAIN,
+        &root,
+        &claim,
+    );
+    assert!(client.has_usable_slot(&account));
+}
+
+// --- B1/B3/B5: the source allow-list, the check order, the POP's epoch, mis-wiring --------
+
+#[test]
+fn test_t67_enable_requires_a_source_and_never_this_chain() {
+    let s = setup();
+    let (client, _, _, _) = vector_registry(&s);
+    let w = wire_proof_registration(&s, &client, false);
+    assert_eq!(
+        client.try_set_proof_registration(
+            &w.anchor,
+            &w.verifier,
+            &soroban_sdk::vec![&s.env],
+            &true
+        ),
+        Err(Ok(
+            bls_key_registry_contract::RegistryError::ProofRegistrationRefsUnset
+        ))
+    );
+    // This registry's own chain: its leaves belong to another registry.
+    assert_eq!(
+        client.try_set_proof_registration(
+            &w.anchor,
+            &w.verifier,
+            &soroban_sdk::vec![&s.env, client.chain_id()],
+            &false
+        ),
+        Err(Ok(
+            bls_key_registry_contract::RegistryError::SourceNotAllowed
+        ))
+    );
+}
+
+#[test]
+fn test_t67_register_by_proof_source_not_allowed_errors() {
+    let s = setup();
+    let fx = registration_fixture();
+    let (client, account, pk, pop) = vector_registry(&s);
+    let w = wire_proof_registration(&s, &client, true);
+    // Anchored under a chain the registry was not told to accept leaves from.
+    let root = BytesN::from_array(&s.env, &fx.root);
+    root_anchor_contract::Client::new(&s.env, &w.anchor).anchor(
+        &w.signer,
+        &OTHER_SOURCE_CHAIN,
+        &root,
+        &1,
+    );
+    assert_eq!(
+        client.try_register_by_proof(
+            &account,
+            &pk,
+            &pop,
+            &0,
+            &OTHER_SOURCE_CHAIN,
+            &root,
+            &Bytes::from_slice(&s.env, REGISTRATION_CLAIM)
+        ),
+        Err(Ok(
+            bls_key_registry_contract::RegistryError::SourceNotAllowed
+        ))
+    );
+}
+
+#[test]
+fn test_t67_register_by_proof_bad_pop_errors() {
+    let s = setup();
+    let fx = registration_fixture();
+    let (client, account, pk, _) = vector_registry(&s);
+    let w = wire_proof_registration(&s, &client, true);
+    let root = BytesN::from_array(&s.env, &fx.root);
+    root_anchor_contract::Client::new(&s.env, &w.anchor).anchor(
+        &w.signer,
+        &REGISTRATION_SOURCE_CHAIN,
+        &root,
+        &1,
+    );
+    assert_eq!(
+        client.try_register_by_proof(
+            &account,
+            &pk,
+            &other_pop(&s),
+            &0,
+            &REGISTRATION_SOURCE_CHAIN,
+            &root,
+            &Bytes::from_slice(&s.env, REGISTRATION_CLAIM)
+        ),
+        Err(Ok(bls_key_registry_contract::RegistryError::InvalidPop))
+    );
+}
+
+#[test]
+fn test_t67_pop_binds_the_epoch() {
+    let s = setup();
+    let fx = registration_fixture();
+    let (client, account, pk, pop) = vector_registry(&s);
+    let w = wire_proof_registration(&s, &client, true);
+    let root = BytesN::from_array(&s.env, &fx.root);
+    root_anchor_contract::Client::new(&s.env, &w.anchor).anchor(
+        &w.signer,
+        &REGISTRATION_SOURCE_CHAIN,
+        &root,
+        &1,
+    );
+    // Epoch 1 with the key's epoch-0 possession proof: rejected at the POP, before any verify (D7).
+    assert_eq!(
+        client.try_register_by_proof(
+            &account,
+            &pk,
+            &pop,
+            &1,
+            &REGISTRATION_SOURCE_CHAIN,
+            &root,
+            &Bytes::from_slice(&s.env, REGISTRATION_CLAIM)
+        ),
+        Err(Ok(bls_key_registry_contract::RegistryError::InvalidPop))
+    );
+}
+
+#[test]
+fn test_t67_cheap_checks_run_before_the_pairing() {
+    let s = setup();
+    let fx = registration_fixture();
+    let (client, account, pk, pop) = vector_registry(&s);
+    let w = wire_proof_registration(&s, &client, true);
+    let root = BytesN::from_array(&s.env, &fx.root);
+    let claim = Bytes::from_slice(&s.env, REGISTRATION_CLAIM);
+
+    // Unanchored root *and* a bad POP: the anchor lookup rejects, not the pairing.
+    assert_eq!(
+        client.try_register_by_proof(
+            &account,
+            &pk,
+            &other_pop(&s),
+            &0,
+            &REGISTRATION_SOURCE_CHAIN,
+            &root,
+            &claim
+        ),
+        Err(Ok(
+            bls_key_registry_contract::RegistryError::RootNotAnchored
+        ))
+    );
+
+    // Once registered, a replay with a stale root is "used" before the anchor is consulted.
+    root_anchor_contract::Client::new(&s.env, &w.anchor).anchor(
+        &w.signer,
+        &REGISTRATION_SOURCE_CHAIN,
+        &root,
+        &1,
+    );
+    client.register_by_proof(
+        &account,
+        &pk,
+        &pop,
+        &0,
+        &REGISTRATION_SOURCE_CHAIN,
+        &root,
+        &claim,
+    );
+    assert_eq!(
+        client.try_register_by_proof(
+            &account,
+            &pk,
+            &pop,
+            &0,
+            &REGISTRATION_SOURCE_CHAIN,
+            &BytesN::from_array(&s.env, &[1u8; 32]),
+            &claim
+        ),
+        Err(Ok(
+            bls_key_registry_contract::RegistryError::KeyPreviouslyUsed
+        ))
+    );
+}
+
+#[test]
+fn test_t67_mis_wired_anchor_is_a_typed_error() {
+    let s = setup();
+    let fx = registration_fixture();
+    let (client, account, pk, pop) = vector_registry(&s);
+    let w = wire_proof_registration(&s, &client, true);
+    // A contract that is not an anchor in the anchor slot: the consumer read is a typed `false`,
+    // never a trap, so the caller sees `RootNotAnchored` and no slot is added.
+    client.set_proof_registration(
+        &w.verifier,
+        &w.verifier,
+        &soroban_sdk::vec![&s.env, REGISTRATION_SOURCE_CHAIN],
+        &true,
+    );
+    assert_eq!(
+        client.try_register_by_proof(
+            &account,
+            &pk,
+            &pop,
+            &0,
+            &REGISTRATION_SOURCE_CHAIN,
+            &BytesN::from_array(&s.env, &fx.root),
+            &Bytes::from_slice(&s.env, REGISTRATION_CLAIM)
+        ),
+        Err(Ok(
+            bls_key_registry_contract::RegistryError::RootNotAnchored
+        ))
+    );
+    assert!(!client.has_usable_slot(&account));
 }

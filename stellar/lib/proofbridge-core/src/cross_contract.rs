@@ -3,7 +3,7 @@
 //! Defines typed `#[contractclient]` traits so contracts can call
 //! MerkleManager and Verifier without raw `env.invoke_contract`.
 
-use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env};
+use soroban_sdk::{contractclient, crypto::bn254::Bn254Fr, Address, Bytes, BytesN, Env};
 
 use crate::errors::ProofBridgeError;
 
@@ -34,6 +34,16 @@ pub trait VerifierInterface {
 #[contractclient(name = "RootVerifierClient")]
 pub trait RootVerifierInterface {
     fn is_root_valid(env: Env, source_chain_id: u128, root: BytesN<32>, metadata: Bytes) -> bool;
+}
+
+/// The authenticator for unilateral-event proofs (2.3f): is this root of the source chain
+/// notarized and past its delay? Consumers never learn who signs. `anchored_at` (0 when not
+/// anchored) lets a consumer that needs a longer age than the route's delay apply its own.
+#[allow(dead_code)]
+#[contractclient(name = "RootAnchorClient")]
+pub trait RootAnchorInterface {
+    fn is_anchored(env: Env, source_chain_id: u128, root: BytesN<32>) -> bool;
+    fn anchored_at(env: Env, source_chain_id: u128, root: BytesN<32>) -> u64;
 }
 
 /// The one registry read the escrows make (2.3c D2): a live, unexpired key slot.
@@ -146,16 +156,21 @@ pub const LEAF_DOMAIN_CANCEL: u32 = 2;
 pub const LEAF_DOMAIN_SETTLED: u32 = 3;
 pub const LEAF_DOMAIN_REGISTERED: u32 = 4;
 
+/// `x mod r` for BN254's scalar field: what the MMR hashes as a leaf's data (the MerkleManager's
+/// own `field_mod`). Local, so a consumer with no MerkleManager needs no reference to build inputs.
+pub fn field_mod(data: &BytesN<32>) -> BytesN<32> {
+    Bn254Fr::from_bytes(data.clone()).to_bytes()
+}
+
 /// Public inputs for an event claim: `[0, subject % p, target_root, domain]` (128 bytes). No secret,
 /// so the nullifier is zero; `domain` is a `LEAF_DOMAIN_*` event constant fixed by the caller.
 pub fn build_event_public_inputs(
     env: &Env,
-    merkle_manager: &Address,
     target_root: &BytesN<32>,
     subject: &BytesN<32>,
     domain: u32,
 ) -> Bytes {
-    let subject_mod = get_field_mod(env, merkle_manager, subject);
+    let subject_mod = field_mod(subject);
 
     let mut domain_word = [0u8; 32];
     domain_word[28..].copy_from_slice(&domain.to_be_bytes());
@@ -166,6 +181,40 @@ pub fn build_event_public_inputs(
     inputs.append(&Bytes::from_slice(env, &target_root.to_array()));
     inputs.append(&Bytes::from_slice(env, &domain_word));
     inputs
+}
+
+/// keccak256("ProofBridge.BLSKeyRegistry.RegistrationLeaf.v1")
+pub const REG_LEAF_TAG: [u8; 32] = [
+    0x11, 0x4c, 0xb0, 0xbc, 0xa6, 0xcb, 0x0f, 0x15, 0xf0, 0x56, 0x60, 0xd6, 0x36, 0x69, 0xbc, 0x00,
+    0xcb, 0xd1, 0xd4, 0x2f, 0xc7, 0xac, 0xe7, 0xdf, 0x9d, 0x09, 0x16, 0xb6, 0xff, 0x9a, 0x66, 0x86,
+];
+
+/// The subject of a `REGISTERED` leaf (2.1b): the registration an account consents to on its home
+/// chain, shaped like the registry's `reg_digest` — it binds the destination chain and registry, so
+/// one leaf is good for exactly one registry — with `epoch` in the nonce slot. Byte-identical to
+/// `RegistrationSubject.subject` on EVM:
+/// `keccak256(TAG ‖ dst_chain_id ‖ dst_registry_id ‖ account32 ‖ bls_commitment ‖ epoch)`, every
+/// field 32 bytes big-endian.
+pub fn registration_subject(
+    env: &Env,
+    dst_chain_id: u128,
+    dst_registry_id: &BytesN<32>,
+    account32: &BytesN<32>,
+    bls_commitment: &BytesN<32>,
+    epoch: u64,
+) -> BytesN<32> {
+    let mut chain = [0u8; 32];
+    chain[16..].copy_from_slice(&dst_chain_id.to_be_bytes());
+    let mut epoch_word = [0u8; 32];
+    epoch_word[24..].copy_from_slice(&epoch.to_be_bytes());
+
+    let mut data = Bytes::from_slice(env, &REG_LEAF_TAG);
+    data.extend_from_slice(&chain);
+    data.extend_from_slice(&dst_registry_id.to_array());
+    data.extend_from_slice(&account32.to_array());
+    data.extend_from_slice(&bls_commitment.to_array());
+    data.extend_from_slice(&epoch_word);
+    env.crypto().keccak256(&data).to_bytes()
 }
 
 // =============================================================================
@@ -187,6 +236,20 @@ pub fn is_root_valid(
     metadata.extend_from_slice(&bridger.to_array());
     metadata.append(cosig_data);
     RootVerifierClient::new(env, module).is_root_valid(&source_chain_id, root, &metadata)
+}
+
+// =============================================================================
+// RootAnchor Helpers
+// =============================================================================
+
+/// True iff the anchor module has notarized `root` for `source_chain_id` and its delay has passed.
+/// A failed call (a mis-wired address, a trap) is a typed `false`, never a host error on the
+/// consumer's refund path.
+pub fn is_anchored(env: &Env, anchor: &Address, source_chain_id: u128, root: &BytesN<32>) -> bool {
+    matches!(
+        RootAnchorClient::new(env, anchor).try_is_anchored(&source_chain_id, root),
+        Ok(Ok(true))
+    )
 }
 
 // =============================================================================
