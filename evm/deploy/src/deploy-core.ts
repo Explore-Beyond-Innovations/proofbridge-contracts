@@ -47,6 +47,8 @@ export interface DeployCoreResult {
     sclEip6565: string;
     blsKeyRegistry: string;
     counterpartyVerifier: string;
+    rootAnchor: string;
+    registrar: string;
   };
 }
 
@@ -224,6 +226,41 @@ export async function deployCore(
     },
   );
 
+  // ── RootAnchor (2.3f) + Registrar (2.1b) ───────────────────────────
+  // T2 notary: the publisher key(s) in ANCHOR_PUBLISHER (comma-separated, default
+  // admin) at ANCHOR_THRESHOLD (default 1); the ladder later swaps the set with
+  // setSigners. Per-route delays are set at link time (ANCHOR_DELAY_S).
+  const anchorSigners = envOrDefault("ANCHOR_PUBLISHER", admin)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const anchorThreshold = Number(envOrDefault("ANCHOR_THRESHOLD", "1"));
+  const rootAnchorAddr = await deployIfMissing(
+    "RootAnchor",
+    existing?.contracts.rootAnchor?.address,
+    async () => {
+      const f = contractFactory("RootAnchor", "RootAnchor", signer);
+      const c = await f.deploy(admin, anchorSigners, anchorThreshold, {
+        nonce: nonces.next(),
+      });
+      await c.deploymentTransaction()?.wait();
+      return c as ethers.Contract;
+    },
+  );
+
+  // The home-chain REGISTERED-leaf appender; needs MANAGER_ROLE on the MerkleManager (granted
+  // below). The registry's proof path stays switched off (2.1b §7); nothing wires it here.
+  const registrarAddr = await deployIfMissing(
+    "Registrar",
+    existing?.contracts.registrar?.address,
+    async () => {
+      const f = contractFactory("Registrar", "Registrar", signer);
+      const c = await f.deploy(merkleManagerAddr, { nonce: nonces.next() });
+      await c.deploymentTransaction()?.wait();
+      return c as ethers.Contract;
+    },
+  );
+
   // ── wire the escrows as the registry's revoke guards ──────────────
   // Re-set every run (idempotent); guards only gate key revocation/rotation.
   {
@@ -291,6 +328,7 @@ export async function deployCore(
   for (const { name, addr } of [
     { name: "AdManager", addr: adManagerAddr },
     { name: "OrderPortal", addr: orderPortalAddr },
+    { name: "Registrar", addr: registrarAddr },
   ]) {
     try {
       const tx = await merkleManager.getFunction("grantRole")(
@@ -324,9 +362,15 @@ export async function deployCore(
       sclEip6565: sclAddr,
       blsKeyRegistry: blsKeyRegistryAddr,
       counterpartyVerifier: counterpartyVerifierAddr,
+      rootAnchor: rootAnchorAddr,
+      registrar: registrarAddr,
     },
     // Preserve tokens already in the manifest (added by deploy-test-tokens / hand-curation).
     tokens: (existing?.tokens ?? []) as BuildManifestInput["tokens"],
+    // What the anchor was configured with; per-route delays are added by link.
+    rootAnchorConfig: existing?.contracts.rootAnchor
+      ? existing.rootAnchorConfig
+      : { signers: anchorSigners, threshold: anchorThreshold, anchorDelays: {} },
   });
 
   await writeManifest(outPath, manifest);
@@ -345,6 +389,8 @@ export async function deployCore(
       sclEip6565: sclAddr,
       blsKeyRegistry: blsKeyRegistryAddr,
       counterpartyVerifier: counterpartyVerifierAddr,
+      rootAnchor: rootAnchorAddr,
+      registrar: registrarAddr,
     },
   };
 }
