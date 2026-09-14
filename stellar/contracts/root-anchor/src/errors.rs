@@ -16,8 +16,10 @@ pub enum RootAnchorError {
     BadThreshold = 6,
     /// The same signer listed twice
     DuplicateSigner = 7,
-    /// A new root's ledger sequence must exceed the chain's latest anchored one
+    /// A root's ledger sequence must exceed the chain's latest anchored one
     SeqNotMonotonic = 8,
-    /// A later approval named a different sequence than the first
-    SeqMismatch = 9,
+    /// A route's delay is bounded by MAX_ANCHOR_DELAY
+    DelayTooLong = 9,
+    /// Nothing to revoke for this (chain, root)
+    NoSuchAnchor = 10,
 }

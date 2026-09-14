@@ -10,7 +10,8 @@ import {TwoStepAdmin} from "src/libraries/TwoStepAdmin.sol";
 import {MockAnchorConsumer} from "./mocks/MockAnchorConsumer.sol";
 
 /// 2.3f (#343): the RootAnchor module. T-42 (forged extension / rollback never anchors), T-63 (the
-/// delay, and the writer swap as a config change), plus the consumer seam 2.3e will call through.
+/// delay, and the writer swap as a config change), the pending-state rules that make the quorum rung
+/// safe (A1, A2, A6), the incident levers (A3), and the consumer seam 2.3e will call through.
 contract RootAnchorTest is Test {
     RootAnchor internal ra;
     MockAnchorConsumer internal consumer;
@@ -34,13 +35,22 @@ contract RootAnchorTest is Test {
         consumer = new MockAnchorConsumer(IRootAnchor(address(ra)));
     }
 
+    function _set(address[] memory set, uint32 threshold) internal {
+        vm.prank(admin);
+        ra.setSigners(set, threshold);
+    }
+
     function _three(uint32 threshold) internal {
         address[] memory three = new address[](3);
         three[0] = s1;
         three[1] = s2;
         three[2] = s3;
-        vm.prank(admin);
-        ra.setSigners(three, threshold);
+        _set(three, threshold);
+    }
+
+    function _one(address who) internal pure returns (address[] memory set) {
+        set = new address[](1);
+        set[0] = who;
     }
 
     function _unauthorized(address who) internal pure returns (bytes memory) {
@@ -53,6 +63,7 @@ contract RootAnchorTest is Test {
 
     function test_unanchoredRoot_isFalse() public view {
         assertFalse(ra.isAnchored(CHAIN, ROOT_A));
+        assertEq(ra.anchoredAt(CHAIN, ROOT_A), 0);
     }
 
     function test_anchor_isTrueWithZeroDelay() public {
@@ -61,6 +72,7 @@ contract RootAnchorTest is Test {
         emit RootAnchor.Anchored(CHAIN, ROOT_A, 10, uint64(block.timestamp));
         ra.anchor(CHAIN, ROOT_A, 10);
         assertTrue(ra.isAnchored(CHAIN, ROOT_A));
+        assertEq(ra.anchoredAt(CHAIN, ROOT_A), uint64(block.timestamp));
     }
 
     function test_onlyTheExactRootIsAnchored() public {
@@ -103,7 +115,7 @@ contract RootAnchorTest is Test {
         vm.prank(s1);
         ra.anchor(CHAIN, ROOT_B, 9);
         assertTrue(ra.isAnchored(CHAIN, ROOT_B));
-        assertEq(ra.latestSeq(CHAIN), 10, "latestSeq never decreases");
+        assertEq(ra.latestSeq(CHAIN), 10, "latestSeq never decreases on its own");
     }
 
     function test_nonSigner_reverts() public {
@@ -155,11 +167,24 @@ contract RootAnchorTest is Test {
         assertTrue(ra.isAnchored(OTHER_CHAIN, ROOT_B));
     }
 
+    function test_delayIsBounded_andIsAnchoredNeverReverts() public {
+        // Resolve the constant first: a call inside the argument list would be expectRevert's target.
+        uint64 max = ra.MAX_ANCHOR_DELAY();
+        vm.startPrank(admin);
+        vm.expectRevert(abi.encodeWithSelector(RootAnchor.RootAnchor__DelayTooLong.selector, max, max + 1));
+        ra.setAnchorDelay(CHAIN, max + 1);
+        ra.setAnchorDelay(CHAIN, max);
+        vm.stopPrank();
+
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_A, 10);
+        assertFalse(ra.isAnchored(CHAIN, ROOT_A), "max delay: not yet, and no revert");
+        vm.warp(block.timestamp + max);
+        assertTrue(ra.isAnchored(CHAIN, ROOT_A));
+    }
+
     function test_setSigners_rotatesTheWriter_withoutRedeploy() public {
-        address[] memory next = new address[](1);
-        next[0] = s2;
-        vm.prank(admin);
-        ra.setSigners(next, 1);
+        _set(_one(s2), 1);
 
         vm.prank(s1);
         vm.expectRevert(RootAnchor.RootAnchor__NotSigner.selector);
@@ -192,14 +217,151 @@ contract RootAnchorTest is Test {
         assertEq(ra.anchorOf(CHAIN, ROOT_A).approvals, 2);
     }
 
-    function test_seqMismatch_onPendingRoot_reverts() public {
+    /*//////////////////////////////////////////////////////////////
+              the pending state under a quorum (A1, A2, A6)
+    //////////////////////////////////////////////////////////////*/
+
+    /// A6: two honest publishers read the same root of a quiet chain at different ledgers.
+    function test_pendingRoot_acceptsAnySeq_recordsTheMax() public {
+        _three(2);
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_A, 100);
+        vm.prank(s2);
+        ra.anchor(CHAIN, ROOT_A, 150);
+        assertTrue(ra.isAnchored(CHAIN, ROOT_A));
+        assertEq(ra.anchorOf(CHAIN, ROOT_A).ledgerSeq, 150);
+        assertEq(ra.latestSeq(CHAIN), 150);
+
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_B, 200);
+        vm.prank(s3);
+        ra.anchor(CHAIN, ROOT_B, 180); // lower than pending: accepted, max kept
+        assertTrue(ra.isAnchored(CHAIN, ROOT_B));
+        assertEq(ra.anchorOf(CHAIN, ROOT_B).ledgerSeq, 200);
+    }
+
+    /// A1: a rotated-out notary's approvals stop counting.
+    function test_removedSigner_approvalsStopCounting() public {
+        _three(2);
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_A, 10); // s1 pre-approves, then is rotated out
+
+        address[] memory two = new address[](2);
+        two[0] = s2;
+        two[1] = s3;
+        _set(two, 2);
+
+        vm.prank(s2);
+        ra.anchor(CHAIN, ROOT_A, 10);
+        assertFalse(ra.isAnchored(CHAIN, ROOT_A), "s1's approval must not count under the new set");
+        assertEq(ra.anchorOf(CHAIN, ROOT_A).approvals, 1);
+
+        vm.prank(s3);
+        ra.anchor(CHAIN, ROOT_A, 10);
+        assertTrue(ra.isAnchored(CHAIN, ROOT_A));
+    }
+
+    /// A1 (second case): a lowered threshold can complete a pending root.
+    function test_loweredThreshold_completesPendingRoot() public {
         _three(2);
         vm.prank(s1);
         ra.anchor(CHAIN, ROOT_A, 10);
-        vm.prank(s2);
-        vm.expectRevert(abi.encodeWithSelector(RootAnchor.RootAnchor__SeqMismatch.selector, 10, 11));
-        ra.anchor(CHAIN, ROOT_A, 11);
+        assertFalse(ra.isAnchored(CHAIN, ROOT_A));
+
+        _set(_one(s1), 1);
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_A, 10);
+        assertTrue(ra.isAnchored(CHAIN, ROOT_A));
     }
+
+    /// A2: a pending root cannot complete below a root that anchored meanwhile.
+    function test_pendingRoot_cannotCompleteBelowLatest() public {
+        _three(2);
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_A, 10); // pending at 10
+
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_B, 20);
+        vm.prank(s2);
+        ra.anchor(CHAIN, ROOT_B, 20); // B anchors at 20
+
+        vm.prank(s2);
+        vm.expectRevert(abi.encodeWithSelector(RootAnchor.RootAnchor__SeqNotMonotonic.selector, 20, 10));
+        ra.anchor(CHAIN, ROOT_A, 10);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                       the incident levers (A3)
+    //////////////////////////////////////////////////////////////*/
+
+    function test_revokeAnchor_duringDelay_andAfter() public {
+        vm.prank(admin);
+        ra.setAnchorDelay(CHAIN, 600);
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_A, 10);
+
+        // Caught inside the delay: revoked before it ever becomes usable.
+        vm.prank(admin);
+        vm.expectEmit(true, true, false, true);
+        emit RootAnchor.AnchorRevoked(CHAIN, ROOT_A, 1);
+        ra.revokeAnchor(CHAIN, ROOT_A);
+        vm.warp(block.timestamp + 600);
+        assertFalse(ra.isAnchored(CHAIN, ROOT_A));
+        assertEq(ra.anchoredAt(CHAIN, ROOT_A), 0);
+
+        // Caught after: an anchored root can be pulled too.
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_B, 11);
+        vm.warp(block.timestamp + 600);
+        assertTrue(ra.isAnchored(CHAIN, ROOT_B));
+        vm.prank(admin);
+        ra.revokeAnchor(CHAIN, ROOT_B);
+        assertFalse(ra.isAnchored(CHAIN, ROOT_B));
+    }
+
+    function test_revokeAnchor_discardsPendingApprovals() public {
+        _three(2);
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_A, 10);
+        vm.prank(admin);
+        ra.revokeAnchor(CHAIN, ROOT_A);
+
+        // s1's earlier approval is gone; it takes two fresh ones.
+        vm.prank(s2);
+        ra.anchor(CHAIN, ROOT_A, 10);
+        assertFalse(ra.isAnchored(CHAIN, ROOT_A));
+        assertEq(ra.anchorOf(CHAIN, ROOT_A).approvals, 1);
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_A, 10);
+        assertTrue(ra.isAnchored(CHAIN, ROOT_A));
+    }
+
+    function test_revokeAnchor_unknownRoot_reverts() public {
+        vm.prank(admin);
+        vm.expectRevert(RootAnchor.RootAnchor__NoSuchAnchor.selector);
+        ra.revokeAnchor(CHAIN, ROOT_A);
+    }
+
+    function test_resetLatestSeq_recoversABrickedRoute() public {
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_A, type(uint64).max); // a buggy publisher pins the route
+        vm.prank(s1);
+        vm.expectRevert(abi.encodeWithSelector(RootAnchor.RootAnchor__SeqNotMonotonic.selector, type(uint64).max, 11));
+        ra.anchor(CHAIN, ROOT_B, 11);
+
+        vm.startPrank(admin);
+        ra.revokeAnchor(CHAIN, ROOT_A);
+        ra.resetLatestSeq(CHAIN, 0);
+        vm.stopPrank();
+
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_B, 11);
+        assertTrue(ra.isAnchored(CHAIN, ROOT_B));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         signer-set validation
+    //////////////////////////////////////////////////////////////*/
 
     function test_setSigners_badThreshold_reverts() public {
         address[] memory two = new address[](2);
@@ -223,11 +385,9 @@ contract RootAnchorTest is Test {
     }
 
     function test_setSigners_zeroAddress_reverts() public {
-        address[] memory z = new address[](1);
-        z[0] = address(0);
         vm.prank(admin);
         vm.expectRevert(RootAnchor.RootAnchor__ZeroAddress.selector);
-        ra.setSigners(z, 1);
+        ra.setSigners(_one(address(0)), 1);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -256,17 +416,19 @@ contract RootAnchorTest is Test {
     }
 
     function test_adminOnly_setters() public {
-        address[] memory one = new address[](1);
-        one[0] = s2;
         vm.startPrank(stranger);
         vm.expectRevert(_unauthorized(stranger));
-        ra.setSigners(one, 1);
+        ra.setSigners(_one(s2), 1);
         vm.expectRevert(_unauthorized(stranger));
         ra.setAnchorDelay(CHAIN, 1);
         vm.expectRevert(_unauthorized(stranger));
         ra.setMonotonic(false);
         vm.expectRevert(_unauthorized(stranger));
         ra.pause();
+        vm.expectRevert(_unauthorized(stranger));
+        ra.revokeAnchor(CHAIN, ROOT_A);
+        vm.expectRevert(_unauthorized(stranger));
+        ra.resetLatestSeq(CHAIN, 0);
         vm.stopPrank();
     }
 

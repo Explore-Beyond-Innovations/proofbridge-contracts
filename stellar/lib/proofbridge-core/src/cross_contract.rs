@@ -37,11 +37,13 @@ pub trait RootVerifierInterface {
 }
 
 /// The authenticator for unilateral-event proofs (2.3f): is this root of the source chain
-/// notarized and past its delay? Consumers never learn who signs.
+/// notarized and past its delay? Consumers never learn who signs. `anchored_at` (0 when not
+/// anchored) lets a consumer that needs a longer age than the route's delay apply its own.
 #[allow(dead_code)]
 #[contractclient(name = "RootAnchorClient")]
 pub trait RootAnchorInterface {
     fn is_anchored(env: Env, source_chain_id: u128, root: BytesN<32>) -> bool;
+    fn anchored_at(env: Env, source_chain_id: u128, root: BytesN<32>) -> u64;
 }
 
 // =============================================================================
@@ -195,6 +197,11 @@ pub fn is_root_valid(
 // =============================================================================
 
 /// True iff the anchor module has notarized `root` for `source_chain_id` and its delay has passed.
+/// A failed call (a mis-wired address, a trap) is a typed `false`, never a host error on the
+/// consumer's refund path.
 pub fn is_anchored(env: &Env, anchor: &Address, source_chain_id: u128, root: &BytesN<32>) -> bool {
-    RootAnchorClient::new(env, anchor).is_anchored(&source_chain_id, root)
+    matches!(
+        RootAnchorClient::new(env, anchor).try_is_anchored(&source_chain_id, root),
+        Ok(Ok(true))
+    )
 }

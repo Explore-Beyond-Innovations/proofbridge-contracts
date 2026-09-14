@@ -32,11 +32,22 @@ pub struct Anchored {
     pub anchored_at: u64,
 }
 
-/// The notary set changed — a ladder rung, never a redeploy.
+/// The admin discarded a root's record — the response to an anchor proven absent from real history.
+#[contractevent(topics = ["anch_rvk"], data_format = "single-value")]
+pub struct AnchorRevoked {
+    #[topic]
+    pub chain_id: u128,
+    #[topic]
+    pub root: BytesN<32>,
+    pub gen: u32,
+}
+
+/// The notary set changed — a ladder rung, never a redeploy. Pending approvals stop counting.
 #[contractevent(topics = ["signers"], data_format = "vec")]
 pub struct SignersSet {
     pub signers: Vec<Address>,
     pub threshold: u32,
+    pub epoch: u32,
 }
 
 #[contractevent(topics = ["delay_set"], data_format = "single-value")]
@@ -49,6 +60,13 @@ pub struct AnchorDelaySet {
 #[contractevent(topics = ["mono_set"], data_format = "single-value")]
 pub struct MonotonicSet {
     pub monotonic: bool,
+}
+
+#[contractevent(topics = ["seq_reset"], data_format = "single-value")]
+pub struct LatestSeqReset {
+    #[topic]
+    pub chain_id: u128,
+    pub seq: u64,
 }
 
 #[contractevent(topics = ["paused"], data_format = "single-value")]
