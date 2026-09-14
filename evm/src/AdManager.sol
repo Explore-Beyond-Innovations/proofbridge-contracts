@@ -388,7 +388,6 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         if (adToken == address(0)) revert AdManager__TokenZeroAddress();
         if (adRecipient == bytes32(0)) revert AdManager__RecipientZero();
         if (initialAmount == 0) revert AdManager__ZeroAmount();
-        _requireRegistered(settlementSigner);
 
         bytes32 routedOrderToken = tokenRoute[adToken][orderChainId];
 
@@ -397,6 +396,7 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         }
 
         if (adIds[adId]) revert AdManager__UsedAdId();
+        _requireRegistered(settlementSigner);
 
         if (adToken.isNative()) {
             if (msg.value < initialAmount) revert AdManager__InsufficientLiquidity();
@@ -423,10 +423,12 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
 
     /**
      * @notice Re-point an ad's settlement signer. Custody-authorized, callable at any time —
-     *         including with locks in flight: an open order settles against the signer frozen in
-     *         its own hash, never against this field (design 01 §1.5).
+     *         including with locks in flight (an open order settles against the signer frozen in
+     *         its own hash, never against this field, design 01 §1.5) and while paused: like the
+     *         registry's retirement lever, an incident lever must not be freezable, and unpause
+     *         re-enables locks in the same instant it would re-enable this.
      */
-    function setSettlementSigner(string memory adId, bytes32 identity) external nonReentrant whenNotPaused {
+    function setSettlementSigner(string memory adId, bytes32 identity) external nonReentrant {
         Ad storage ad = __getAdOwned(adId, msg.sender);
         _requireRegistered(identity);
         emit SettlementSignerSet(adId, ad.settlementSigner, identity);
@@ -517,10 +519,12 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
 
         ad.locked += adAmount;
         orders[orderHash] = Status.Open;
-        // 2.3c D1: count only the party this escrow authenticated (the maker). The bridger is
-        // counted by the OrderPortal that authenticated them; a lock naming a stranger must not
-        // move the stranger's counter.
-        inFlightOf[params.adCreator]++;
+        // 2.3c D1: count the settlement identity this escrow's unlock will verify — the ad's
+        // signer, asserted equal to `params.adSettlementSigner` above (and owned by the maker we
+        // authenticated). The custody address needs no counter: no unlock resolves its key. The
+        // bridger is counted by the OrderPortal that authenticated them; a lock naming a stranger
+        // must not move the stranger's counter.
+        inFlightOf[params.adSettlementSigner]++;
 
         // locks are unlocked on the order side (ad_contract = 0), so bind the leaf with side 0
         if (!i_merkleManager.appendOrderHash(orderHash, 0)) revert AdManager__MerkleManagerAppendFailed();
@@ -563,7 +567,7 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
 
         nullifierUsed[nullifierHash] = true;
         orders[orderHash] = Status.Filled;
-        inFlightOf[params.adCreator]--; // mirrors lockForOrder (2.3c D1)
+        inFlightOf[params.adSettlementSigner]--; // mirrors lockForOrder (2.3c D1)
 
         // Pay recipient on this chain from the ad's escrowed token.
         // Scale to ad-chain units to match what was reserved in lockForOrder.
@@ -702,11 +706,9 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
     }
 
     /**
-     * @notice Load an ad and assert `maker` is the owner.
-     */
-    /**
-     * @dev The registry gate on every settlement-signer set (2.3c D2): fails closed with no
-     *      registry, refuses the zero identity, and refuses an account with no live, unexpired key.
+     * @dev The registry gate on every settlement-signer set and on every lock (2.3c D2): fails
+     *      closed with no registry, refuses the zero identity, and refuses an account with no live,
+     *      unexpired key on this chain.
      */
     function _requireRegistered(bytes32 signer) private view {
         if (address(keyRegistry) == address(0)) revert AdManager__NoKeyRegistry();
@@ -714,6 +716,9 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         if (!keyRegistry.hasUsableSlot(signer)) revert AdManager__SignerNotRegistered(signer);
     }
 
+    /**
+     * @notice Load an ad and assert `maker` is the owner.
+     */
     function __getAdOwned(string memory adId, address maker) internal view returns (Ad storage ad) {
         ad = ads[adId];
         if (ad.maker == address(0)) revert AdManager__AdNotFound();
@@ -764,6 +769,9 @@ contract AdManager is TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVeri
         if (params.adSettlementSigner != ad.settlementSigner) {
             revert AdManager__SettlementSignerMismatch(ad.settlementSigner, params.adSettlementSigner);
         }
+        // A key retired after the ad was pointed at it (setValidUntil, a watchtower retirement)
+        // must not take new locks: the bridger's deposit could never be unlocked (2.3c D2).
+        _requireRegistered(ad.settlementSigner);
         if (params.adChainToken != ad.token.toBytes32()) {
             revert AdManager__AdTokenMismatch(ad.token.toBytes32(), params.adChainToken);
         }

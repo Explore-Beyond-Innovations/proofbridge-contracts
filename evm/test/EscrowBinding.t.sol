@@ -11,7 +11,7 @@ import {IwNativeToken} from "src/wNativeToken.sol";
 import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
 
 /// 2.3c (#340): the escrow binding (design 01 §1.4), the re-pointing lever (§1.5), and
-/// `inFlightOf` counted only for the party each escrow authenticated (D1). T-12, T-13, T-14.
+/// `inFlightOf` counted for the settlement identity each escrow's unlock verifies (D1). T-12, T-13, T-14.
 contract EscrowBindingAdManagerTest is AdManagerTest {
     bytes32 internal other32;
 
@@ -36,17 +36,47 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         assertEq(adManager.inFlightOf(who), 0);
     }
 
+    /// Re-point the fixture ad to `other32` and lock against it: custody stays with `maker`.
+    function _splitCaseLock(uint256 salt) internal returns (AdManager.OrderParams memory p) {
+        keyRegistry.set(other32, true);
+        vm.prank(maker);
+        adManager.setSettlementSigner(lastAdId, other32);
+
+        p = _defaultParams(lastAdId);
+        p.salt = salt;
+        p.adSettlementSigner = other32;
+        vm.prank(maker);
+        adManager.lockForOrder(p);
+    }
+
     /*//////////////////////////////////////////////////////////////
-                T-12 — only the authenticated party is counted
+          T-12 — only the settlement identity the unlock verifies is counted
     //////////////////////////////////////////////////////////////*/
 
-    function test_lock_countsMakerOnly() public {
+    function test_lock_countsTheSettlementSigner_whichIsTheMakerHere() public {
         test_fundAd_makerOnly();
         (AdManager.OrderParams memory p,) = _openOrder(lastAdId, address(adToken), 60 ether, 1, bridger, recipient);
 
-        assertEq(adManager.inFlightOf(p.adCreator), 1);
-        assertTrue(adManager.hasOpenPositions(p.adCreator));
+        assertEq(p.adSettlementSigner, p.adCreator, "non-split fixture");
+        assertEq(adManager.inFlightOf(p.adSettlementSigner), 1);
+        assertTrue(adManager.hasOpenPositions(p.adSettlementSigner));
         _assertNoPositions(p.bridger);
+    }
+
+    function test_lock_splitCase_countsTheSigner_notCustody() public {
+        test_fundAd_makerOnly();
+        AdManager.OrderParams memory p = _splitCaseLock(11);
+
+        // The revoke guard protects the key the unlock will verify; custody's key is never resolved.
+        assertEq(adManager.inFlightOf(other32), 1);
+        assertTrue(adManager.hasOpenPositions(other32));
+        _assertNoPositions(p.adCreator);
+        _assertNoPositions(p.bridger);
+
+        vm.prank(bridger);
+        adManager.unlock(p, bytes32("EB11"), bytes32(uint256(3)), hex"", hex"");
+        _assertNoPositions(other32);
+        _assertNoPositions(p.adCreator);
     }
 
     function test_lock_namingThirdPartyBridger_leavesTheirCounterAtZero() public {
@@ -59,14 +89,14 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
           T-13 — the counter clears on the terminal (unlock, today)
     //////////////////////////////////////////////////////////////*/
 
-    function test_lockThenUnlock_clearsMaker() public {
+    function test_lockThenUnlock_clearsTheSigner() public {
         test_fundAd_makerOnly();
         (AdManager.OrderParams memory p,) = _openOrder(lastAdId, address(adToken), 60 ether, 3, bridger, recipient);
 
         vm.prank(bridger);
         adManager.unlock(p, bytes32("EB1"), bytes32(uint256(3)), hex"", hex"");
 
-        _assertNoPositions(p.adCreator);
+        _assertNoPositions(p.adSettlementSigner);
         _assertNoPositions(p.bridger);
     }
 
@@ -129,6 +159,18 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         assertEq(_signerOf(lastAdId), other32);
     }
 
+    function test_setSettlementSigner_whilePaused_succeeds() public {
+        // An incident lever: never freezable (C2), like the registry's retirement lever.
+        test_fundAd_makerOnly();
+        keyRegistry.set(other32, true);
+        vm.prank(admin);
+        adManager.pause();
+
+        vm.prank(maker);
+        adManager.setSettlementSigner(lastAdId, other32);
+        assertEq(_signerOf(lastAdId), other32);
+    }
+
     function test_setSettlementSigner_notMaker_reverts() public {
         test_fundAd_makerOnly();
         keyRegistry.set(other32, true);
@@ -172,6 +214,27 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         vm.expectRevert(
             abi.encodeWithSelector(AdManager.AdManager__SettlementSignerMismatch.selector, _b32(maker), other32)
         );
+        adManager.lockForOrder(p);
+    }
+
+    function test_lock_afterKeyRetired_reverts() public {
+        // The ad still points at the maker, but the key was retired since (setValidUntil, a
+        // watchtower retirement): no new lock may trap a bridger against it (C1).
+        test_fundAd_makerOnly();
+        keyRegistry.set(_b32(maker), false);
+
+        AdManager.OrderParams memory p = _defaultParams(lastAdId);
+        p.salt = 8;
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(AdManager.AdManager__SignerNotRegistered.selector, _b32(maker)));
+        adManager.lockForOrder(p);
+
+        // Re-pointing at a usable key re-opens the ad.
+        keyRegistry.set(other32, true);
+        vm.prank(maker);
+        adManager.setSettlementSigner(lastAdId, other32);
+        p.adSettlementSigner = other32;
+        vm.prank(maker);
         adManager.lockForOrder(p);
     }
 

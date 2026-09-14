@@ -33,15 +33,19 @@ contract OrderHashParityTest is Test {
     }
 
     /// T-20 (2.3c D5, risk 01 F15): the settlement signer's wire form inside the hash is the form the
-    /// escrow compares against `Ad.settlementSigner`. The split-case vector carries a padded-EVM
-    /// signer; it must round-trip through the pinned helpers with the top 12 bytes zero. A left/right
-    /// pad drift fails here, and the Soroban suite asserts the same vector through `address_to_bytes32`.
+    /// escrow compares against `Ad.settlementSigner`. The generator pins the 20-byte address and its
+    /// 32-byte form independently (`_meta.settlementSignerEncoding`); the pinned helper must produce
+    /// the latter from the former, and the split-case vector must carry exactly those bytes. A
+    /// same-direction drift of generator and helper fails on the pinned pair.
     function test_settlementSignerEncodingRoundTrips() public view {
+        address evmAddress = v.readAddress("._meta.settlementSignerEncoding.evmAddress");
+        bytes32 account32 = v.readBytes32("._meta.settlementSignerEncoding.account32");
+        assertEq(AddressCast.toBytes32(evmAddress), account32, "toBytes32 must left-pad the address");
+        assertEq(AddressCast.toAddressChecked(account32), evmAddress);
+
         assertEq(v.readString(".vectors[1].name"), "split-case-evm-signer");
-        bytes32 signer = v.readBytes32(".vectors[1].order.adSettlementSigner");
-        assertEq(uint256(signer) >> 160, 0, "padded-EVM signer must be left-padded");
-        address identity = AddressCast.toAddressChecked(signer);
-        assertEq(AddressCast.toBytes32(identity), signer);
+        assertEq(v.readBytes32(".vectors[1].order.adSettlementSigner"), account32, "the split-case signer");
+        assertNotEq(v.readBytes32(".vectors[1].order.adCreator"), account32, "custody != identity");
     }
 
     function _uint(string memory key) internal view returns (uint256) {

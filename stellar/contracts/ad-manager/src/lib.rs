@@ -293,7 +293,6 @@ impl AdManagerContract {
         if initial_amount == 0 {
             return Err(AdManagerError::ZeroAmount);
         }
-        validation::require_registered(&env, &settlement_signer)?;
         let routed_order_token = storage::get_token_route(&env, &ad_token, order_chain_id);
         if routed_order_token.is_none() {
             return Err(AdManagerError::ChainNotSupported);
@@ -304,6 +303,7 @@ impl AdManagerContract {
 
         // Creator authorizes the call (and the downstream SAC transfer).
         creator.require_auth();
+        validation::require_registered(&env, &settlement_signer)?;
 
         token::transfer_from_user_bytes32(
             &env,
@@ -349,9 +349,8 @@ impl AdManagerContract {
         ad_id: String,
         identity: BytesN<32>,
     ) -> Result<(), AdManagerError> {
-        if storage::is_paused(&env) {
-            return Err(AdManagerError::ContractPaused);
-        }
+        // Not pause-gated: like the registry's retirement lever, an incident lever must not be
+        // freezable, and unpause re-enables locks in the same instant it would re-enable this.
         let mut ad = storage::get_ad(&env, &ad_id).ok_or(AdManagerError::AdNotFound)?;
         ad.maker.require_auth();
         validation::require_registered(&env, &identity)?;
@@ -511,6 +510,9 @@ impl AdManagerContract {
         let mut ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
 
         validation::validate_order(&env, &ad, &params)?;
+        // A key retired after the ad was pointed at it (set_valid_until, a watchtower retirement)
+        // must not take new locks: the bridger's deposit could never be unlocked (2.3c D2).
+        validation::require_registered(&env, &ad.settlement_signer)?;
         Self::assert_ad_decimals(&env, &params, &config.w_native_token)?;
 
         // Scale the signed order-chain amount into ad-chain precision for
@@ -542,13 +544,15 @@ impl AdManagerContract {
         ad.locked += ad_amount;
         storage::set_ad(&env, &params.ad_id, &ad);
         storage::set_order_status(&env, &order_hash, Status::Open);
-        // 2.3c D1: count only the party this escrow authenticated (the maker). The bridger is
-        // counted by the order-portal that authenticated them; a lock naming a stranger must not
-        // move the stranger's counter.
+        // 2.3c D1: count the settlement identity this escrow's unlock will verify — the ad's
+        // signer, asserted equal to `params.ad_settlement_signer` in validate_order (and owned by
+        // the maker we authenticated). The custody address needs no counter: no unlock resolves
+        // its key. The bridger is counted by the order-portal that authenticated them; a lock
+        // naming a stranger must not move the stranger's counter.
         storage::set_in_flight(
             &env,
-            &params.ad_creator,
-            storage::get_in_flight(&env, &params.ad_creator) + 1,
+            &params.ad_settlement_signer,
+            storage::get_in_flight(&env, &params.ad_settlement_signer) + 1,
         );
 
         cross_contract::append_to_merkle(&env, &config.merkle_manager, &order_hash, 0)?;
@@ -632,8 +636,8 @@ impl AdManagerContract {
         // Mirrors lock_for_order (2.3c D1).
         storage::set_in_flight(
             &env,
-            &params.ad_creator,
-            storage::get_in_flight(&env, &params.ad_creator) - 1,
+            &params.ad_settlement_signer,
+            storage::get_in_flight(&env, &params.ad_settlement_signer) - 1,
         );
 
         // Update ad and transfer tokens (scale signed amount to ad-chain precision)

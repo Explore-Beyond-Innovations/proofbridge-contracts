@@ -847,15 +847,19 @@ fn test_gate2_mock_true_unlocks_and_clears_in_flight() {
     MockRootVerifierClient::new(&s.env, &mock).set_ok(&true);
     s.ad_manager.set_root_verifier(&s.tp.order_chain_id, &mock);
 
-    assert!(s.ad_manager.has_open_positions(&params.ad_creator));
-    // 2.3c D1: the ad-manager counts only the maker it authenticated; the bridger is counted
-    // by the order-portal that authenticated them.
+    assert!(s
+        .ad_manager
+        .has_open_positions(&params.ad_settlement_signer));
+    // 2.3c D1: the ad-manager counts the settlement signer its unlock verifies; the bridger is
+    // counted by the order-portal that authenticated them.
     assert!(!s.ad_manager.has_open_positions(&params.bridger));
 
     let empty = Bytes::new(&s.env);
     assert!(ad_unlock(&s, &params, &empty));
 
-    assert!(!s.ad_manager.has_open_positions(&params.ad_creator));
+    assert!(!s
+        .ad_manager
+        .has_open_positions(&params.ad_settlement_signer));
     assert!(!s.ad_manager.has_open_positions(&params.bridger));
 }
 
@@ -1144,17 +1148,20 @@ fn test_portal_payout_pushes_directly() {
 
 // Revoke must round-trip through BOTH real escrows cross-contract: a live
 // locked trade keeps them busy while an uninvolved account revokes cleanly.
-#[test]
-fn test_registry_guards_are_the_real_escrows() {
-    let s = setup();
-    let params = locked_ad_order(&s);
-
+/// The real registry pinned at the contract id the vector PoPs bind, with the vector maker's key
+/// registered (Stellar-home: `require_auth`, mocked). Returns the client, the account and its owner.
+fn real_registry_with_vector_maker(
+    s: &TestSetup,
+) -> (
+    bls_key_registry_contract::Client<'static>,
+    BytesN<32>,
+    Address,
+) {
     let vectors: serde_json::Value =
         serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
     let hexv =
         |v: &serde_json::Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
 
-    // pin the registry at the contract id the vector PoPs bind
     let regid: [u8; 32] = hexv(&vectors["chains"]["stellarTestnet"]["registryId"])
         .try_into()
         .unwrap();
@@ -1171,13 +1178,6 @@ fn test_registry_guards_are_the_real_escrows() {
         .unwrap();
     client.initialize(&s.admin_addr, &chain_id);
 
-    client.set_position_guards(&soroban_sdk::vec![
-        &s.env,
-        s.ad_manager.address.clone(),
-        s.order_portal.address.clone()
-    ]);
-
-    // register the vector maker key (Stellar-home: require_auth, mocked)
     let r = &vectors["registration"]["makerOnStellarTestnet"];
     let account = BytesN::from_array(&s.env, &hexv(&r["account"]).try_into().unwrap());
     let wallet_pk: [u8; 32] = hexv(&vectors["keys"]["makerWallet"]["pk"])
@@ -1196,9 +1196,25 @@ fn test_registry_guards_are_the_real_escrows() {
         &pop,
         &0,
     );
+    (client, account, owner)
+}
+
+#[test]
+fn test_registry_guards_are_the_real_escrows() {
+    let s = setup();
+    let params = locked_ad_order(&s);
+
+    let (client, account, owner) = real_registry_with_vector_maker(&s);
+    client.set_position_guards(&soroban_sdk::vec![
+        &s.env,
+        s.ad_manager.address.clone(),
+        s.order_portal.address.clone()
+    ]);
 
     // the fixture trade genuinely occupies both guard sources...
-    assert!(s.ad_manager.has_open_positions(&params.ad_creator));
+    assert!(s
+        .ad_manager
+        .has_open_positions(&params.ad_settlement_signer));
     assert!(!s.order_portal.has_open_positions(&account));
 
     // ...and the revoke round-trips through BOTH real escrows and passes
@@ -1656,10 +1672,16 @@ fn unlock_fixture_order(s: &TestSetup, params: &ad_manager_contract::OrderParams
 // --- T-12: only the authenticated party is counted --------------------------
 
 #[test]
-fn test_t12_lock_counts_maker_only() {
+fn test_t12_lock_counts_the_settlement_signer_only() {
     let s = setup();
     let params = locked_ad_order(&s);
-    assert!(s.ad_manager.has_open_positions(&params.ad_creator));
+    // The fixture is the split case: the revoke guard protects the key the unlock will verify,
+    // and custody's key is never resolved, so custody is not counted.
+    assert_ne!(params.ad_settlement_signer, params.ad_creator);
+    assert!(s
+        .ad_manager
+        .has_open_positions(&params.ad_settlement_signer));
+    assert!(!s.ad_manager.has_open_positions(&params.ad_creator));
     // The bridger is counted by the order-portal that authenticated them, never here.
     assert!(!s.ad_manager.has_open_positions(&params.bridger));
 }
@@ -1672,16 +1694,50 @@ fn test_t12_lock_naming_third_party_bridger_leaves_their_counter_at_zero() {
     params.bridger = stranger.clone();
     s.ad_manager.lock_for_order(&params);
     assert!(!s.ad_manager.has_open_positions(&stranger));
-    assert!(s.ad_manager.has_open_positions(&params.ad_creator));
+    assert!(s
+        .ad_manager
+        .has_open_positions(&params.ad_settlement_signer));
+}
+
+#[test]
+fn test_c0_split_case_lock_guards_the_settlement_signers_revoke() {
+    // The owner of the settlement key cannot revoke it out from under an open lock, even though
+    // custody is another account (C0). The guard runs before the owner check.
+    let s = setup();
+    let (client, account, owner) = real_registry_with_vector_maker(&s);
+    client.set_position_guards(&soroban_sdk::vec![&s.env, s.ad_manager.address.clone()]);
+    s.ad_manager.set_key_registry(&client.address);
+
+    let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
+    s.ad_manager.set_settlement_signer(&ad_id, &account);
+    let mut params = ad_manager_order_params(&s.env, &s.tp);
+    params.ad_settlement_signer = account.clone();
+    s.ad_manager.lock_for_order(&params);
+
+    assert!(s.ad_manager.has_open_positions(&account));
+    assert!(!s.ad_manager.has_open_positions(&params.ad_creator));
+    assert_eq!(
+        client.try_revoke(
+            &account,
+            &bls_key_registry_contract::OwnerAuth::Stellar(owner),
+            &1
+        ),
+        Err(Ok(
+            bls_key_registry_contract::RegistryError::AccountInFlight
+        ))
+    );
 }
 
 // --- T-13: the counter clears on the terminal (unlock, today) ----------------
 
 #[test]
-fn test_t13_lock_then_unlock_clears_maker() {
+fn test_t13_lock_then_unlock_clears_the_signer() {
     let s = setup();
     let params = locked_ad_order(&s);
     unlock_fixture_order(&s, &params);
+    assert!(!s
+        .ad_manager
+        .has_open_positions(&params.ad_settlement_signer));
     assert!(!s.ad_manager.has_open_positions(&params.ad_creator));
     assert!(!s.ad_manager.has_open_positions(&params.bridger));
 }
@@ -1811,7 +1867,45 @@ fn test_t14_locked_order_still_settles_under_old_signer_after_repoint() {
 
     // The order settles against the signer frozen in its hash, never the ad's current field.
     unlock_fixture_order(&s, &params);
-    assert!(!s.ad_manager.has_open_positions(&params.ad_creator));
+    assert!(!s
+        .ad_manager
+        .has_open_positions(&params.ad_settlement_signer));
+}
+
+#[test]
+fn test_t14_set_settlement_signer_while_paused_succeeds() {
+    // An incident lever: never freezable (C2), like the registry's retirement lever.
+    let s = setup();
+    let next = other_account(&s.env, 0x88);
+    mark_usable(&s, &next);
+    s.ad_manager.pause();
+
+    let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
+    s.ad_manager.set_settlement_signer(&ad_id, &next);
+    assert_eq!(s.ad_manager.get_ad(&ad_id).unwrap().settlement_signer, next);
+}
+
+#[test]
+fn test_t14_lock_after_key_retired_errors() {
+    // The ad still points at its signer, but the key was retired since (set_valid_until, a
+    // watchtower retirement): no new lock may trap a bridger against it (C1).
+    let s = setup();
+    let params = ad_manager_order_params(&s.env, &s.tp);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry).set(&params.ad_settlement_signer, &false);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&params),
+        Err(Ok(ad_manager_contract::AdManagerError::SignerNotRegistered))
+    );
+
+    // Re-pointing at a usable key re-opens the ad.
+    let next = other_account(&s.env, 0x99);
+    mark_usable(&s, &next);
+    s.ad_manager
+        .set_settlement_signer(&SorobanString::from_str(&s.env, &s.tp.ad_id), &next);
+    let mut params = params;
+    params.ad_settlement_signer = next.clone();
+    s.ad_manager.lock_for_order(&params);
+    assert!(s.ad_manager.has_open_positions(&next));
 }
 
 // --- T-14: the lock-time equalities (design 01 §1.4; closes risk 01 F14) ------
@@ -1865,48 +1959,10 @@ fn test_t14_lock_after_repoint_requires_the_new_signer() {
 #[test]
 fn test_t14_real_registry_gates_the_signer() {
     let s = setup();
-    let vectors: serde_json::Value =
-        serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
-    let hexv =
-        |v: &serde_json::Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
-
-    let regid: [u8; 32] = hexv(&vectors["chains"]["stellarTestnet"]["registryId"])
-        .try_into()
-        .unwrap();
-    let at = Address::from_string(&SorobanString::from_str(
-        &s.env,
-        &stellar_strkey::Contract(regid).to_string(),
-    ));
-    let registry = s.env.register_at(&at, bls_key_registry_contract::WASM, ());
-    let client = bls_key_registry_contract::Client::new(&s.env, &registry);
-    let chain_id: u128 = vectors["chains"]["stellarTestnet"]["chainId"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-    client.initialize(&s.admin_addr, &chain_id);
-
-    let r = &vectors["registration"]["makerOnStellarTestnet"];
-    let account = BytesN::from_array(&s.env, &hexv(&r["account"]).try_into().unwrap());
-    let wallet_pk: [u8; 32] = hexv(&vectors["keys"]["makerWallet"]["pk"])
-        .try_into()
-        .unwrap();
-    let owner = Address::from_string(&SorobanString::from_str(
-        &s.env,
-        &stellar_strkey::ed25519::PublicKey(wallet_pk).to_string(),
-    ));
-    let pk = BytesN::from_array(&s.env, &hexv(&r["pkNative"]).try_into().unwrap());
-    let pop = BytesN::from_array(&s.env, &hexv(&r["pop"]).try_into().unwrap());
-    client.register(
-        &account,
-        &bls_key_registry_contract::OwnerAuth::Stellar(owner),
-        &pk,
-        &pop,
-        &0,
-    );
+    let (client, account, _) = real_registry_with_vector_maker(&s);
 
     // Point the escrow at the real registry: a registered identity passes, a stranger does not.
-    s.ad_manager.set_key_registry(&registry);
+    s.ad_manager.set_key_registry(&client.address);
     let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
     s.ad_manager.set_settlement_signer(&ad_id, &account);
     assert_eq!(
@@ -1926,27 +1982,36 @@ fn test_t20_settlement_signer_encoding_round_trips() {
     let env = Env::default();
     let v: serde_json::Value =
         serde_json::from_str(include_str!("../../test-vectors/order-hash-v2.json")).unwrap();
+    // The generator pins the 20-byte address and its 32-byte form separately: the helper must
+    // produce the latter from the former, so a same-direction drift of both cannot pass.
+    let enc = &v["_meta"]["settlementSignerEncoding"];
+    let addr: [u8; 20] = hex::decode(enc["evmAddress"].as_str().unwrap().trim_start_matches("0x"))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let account32 = hex_to_array(enc["account32"].as_str().unwrap());
+    assert_eq!(
+        proofbridge_core::secp::evm_address_to_bytes32(&env, &addr),
+        BytesN::from_array(&env, &account32)
+    );
+
     assert_eq!(
         v["vectors"][1]["name"].as_str().unwrap(),
         "split-case-evm-signer"
     );
-    let signer: [u8; 32] = hex::decode(
-        v["vectors"][1]["order"]["adSettlementSigner"]
-            .as_str()
-            .unwrap()
-            .trim_start_matches("0x"),
-    )
-    .unwrap()
-    .try_into()
-    .unwrap();
-    assert!(
-        signer[..12].iter().all(|b| *b == 0),
-        "padded-EVM signer must be left-padded"
-    );
-    let addr: [u8; 20] = signer[12..].try_into().unwrap();
     assert_eq!(
-        proofbridge_core::secp::evm_address_to_bytes32(&env, &addr),
-        BytesN::from_array(&env, &signer)
+        hex_to_array(
+            v["vectors"][1]["order"]["adSettlementSigner"]
+                .as_str()
+                .unwrap()
+        ),
+        account32,
+        "the split-case signer"
+    );
+    assert_ne!(
+        hex_to_array(v["vectors"][1]["order"]["adCreator"].as_str().unwrap()),
+        account32,
+        "custody != identity"
     );
 }
 
