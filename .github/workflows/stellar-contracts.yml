@@ -99,6 +99,7 @@ jobs:
           stellar contract build --optimize --package agent-account
           stellar contract build --optimize --package bls-key-registry
           stellar contract build --optimize --package root-anchor
+          stellar contract build --optimize --package registrar
         working-directory: stellar
 
       - name: Build event circuit

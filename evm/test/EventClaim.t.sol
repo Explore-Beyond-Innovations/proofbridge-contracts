@@ -23,8 +23,8 @@ contract InputsHarness {
         return RequestAuth.buildPublicInputs(mm, nullifier, root, orderHash, side);
     }
 
-    function eventClaim(bytes32 root, bytes32 subject, uint256 domain) external view returns (bytes32[] memory) {
-        return RequestAuth.buildEventInputs(mm, root, subject, domain);
+    function eventClaim(bytes32 root, bytes32 subject, uint256 domain) external pure returns (bytes32[] memory) {
+        return RequestAuth.buildEventInputs(root, subject, domain);
     }
 }
 

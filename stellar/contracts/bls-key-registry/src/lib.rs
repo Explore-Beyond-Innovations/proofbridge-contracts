@@ -17,6 +17,7 @@ use soroban_sdk::{
 };
 
 use errors::RegistryError;
+use proofbridge_core::cross_contract::{self, VerifierClient, LEAF_DOMAIN_REGISTERED};
 use proofbridge_core::eip712::{address_to_bytes32, contract_address_to_bytes32};
 pub use storage::KeySlot;
 
@@ -131,7 +132,46 @@ impl BlsKeyRegistry {
         Ok(())
     }
 
-    /// Adds a slot; never guarded (additive, design 03 §3.3). Returns the slot id.
+    /// 2.1b: wire (or unwire) proof-carried registration — the anchor, the verifier and the home
+    /// chains a leaf may come from. Enabling requires at least one source; the flip is a
+    /// configuration change, never a redeploy (D3). This chain is never a source: its own leaves
+    /// belong to another registry.
+    pub fn set_proof_registration(
+        env: Env,
+        anchor: Address,
+        verifier: Address,
+        sources: Vec<u128>,
+        enabled: bool,
+    ) -> Result<(), RegistryError> {
+        if !storage::is_initialized(&env) {
+            return Err(RegistryError::NotInitialized);
+        }
+        storage::get_admin(&env).require_auth();
+        if enabled && sources.is_empty() {
+            return Err(RegistryError::ProofRegistrationRefsUnset);
+        }
+        if sources.contains(storage::get_chain_id(&env)) {
+            return Err(RegistryError::SourceNotAllowed);
+        }
+        storage::set_proof_registration(
+            &env,
+            &storage::ProofRegistration {
+                anchor: anchor.clone(),
+                verifier: verifier.clone(),
+                sources: sources.clone(),
+                enabled,
+            },
+        );
+        events::ProofRegistrationSet {
+            anchor,
+            verifier,
+            sources,
+            enabled,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     pub fn register(
         env: Env,
         account: BytesN<32>,
@@ -170,6 +210,84 @@ impl BlsKeyRegistry {
             slot_id,
             bls_pub_key,
             nonce,
+        }
+        .publish(&env);
+        Ok(slot_id)
+    }
+
+    /// Adds a slot on an inclusion proof of the account's home-chain `REGISTERED` leaf against an
+    /// anchored root, instead of an owner signature (2.1b, design 03 §3.6). Flagged off in T2.
+    ///
+    /// Cheap rejections first: flag, identity, the replay guard, the source allow-list and the
+    /// anchor lookup all run before the pairing and the proof verify. No nonce: `is_used` is the
+    /// replay guard, so a leaf registers its key at most once, and the account nonce is untouched.
+    /// The POP binds `epoch` where `register` binds the nonce (D2, D7). The subject is rebuilt from
+    /// this chain and registry (`registration_subject`), so a leaf is good for exactly one registry.
+    pub fn register_by_proof(
+        env: Env,
+        account: BytesN<32>,
+        bls_pub_key: BytesN<96>,
+        pop: BytesN<192>,
+        epoch: u64,
+        source_chain_id: u128,
+        target_root: BytesN<32>,
+        proof: Bytes,
+    ) -> Result<u32, RegistryError> {
+        if !storage::is_initialized(&env) {
+            return Err(RegistryError::NotInitialized);
+        }
+        if storage::is_paused(&env) {
+            return Err(RegistryError::ContractPaused);
+        }
+        let cfg = storage::get_proof_registration(&env)
+            .filter(|c| c.enabled)
+            .ok_or(RegistryError::ProofRegistrationDisabled)?;
+        if bls_pub_key == g1_identity(&env) {
+            return Err(RegistryError::IdentityKey);
+        }
+        let commitment: BytesN<32> = env
+            .crypto()
+            .keccak256(&Bytes::from_slice(&env, &bls_pub_key.to_array()))
+            .to_bytes();
+        if storage::is_used(&env, &account, &commitment) {
+            return Err(RegistryError::KeyPreviouslyUsed);
+        }
+        if !cfg.sources.contains(source_chain_id) {
+            return Err(RegistryError::SourceNotAllowed);
+        }
+        if !cross_contract::is_anchored(&env, &cfg.anchor, source_chain_id, &target_root) {
+            return Err(RegistryError::RootNotAnchored);
+        }
+        if !verify_pop(&env, &account, &bls_pub_key, &pop, epoch) {
+            return Err(RegistryError::InvalidPop);
+        }
+
+        let subject = cross_contract::registration_subject(
+            &env,
+            storage::get_chain_id(&env),
+            &contract_address_to_bytes32(&env),
+            &account,
+            &commitment,
+            epoch,
+        );
+        let inputs = cross_contract::build_event_public_inputs(
+            &env,
+            &target_root,
+            &subject,
+            LEAF_DOMAIN_REGISTERED,
+        );
+        match VerifierClient::new(&env, &cfg.verifier).try_verify_proof(&inputs, &proof) {
+            Ok(Ok(())) => {}
+            _ => return Err(RegistryError::InvalidLeafProof),
+        }
+
+        let slot_id = add_slot(&env, &account, &commitment)?;
+        events::KeyRegisteredByProof {
+            account,
+            slot_id,
+            bls_pub_key,
+            epoch,
+            source_chain_id,
         }
         .publish(&env);
         Ok(slot_id)
