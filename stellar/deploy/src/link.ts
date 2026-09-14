@@ -151,6 +151,13 @@ export async function link(
   // ANCHOR_DELAY_S (default 0 — local / dev; the spec wants minutes-to-an-hour live).
   if (local.contracts.rootAnchor) {
     const delay = process.env.ANCHOR_DELAY_S ?? "0";
+    // The delay is the watchtower's window — the whole safety story of 2.3f. Outside a local
+    // deploy a forgotten variable must not ship a zero and record it as intended.
+    if (BigInt(delay) === 0n && local.meta.env !== "local") {
+      throw new Error(
+        `link: ANCHOR_DELAY_S is 0 for env=${local.meta.env}; set the route's anchor delay (seconds) or deploy with DEPLOY_ENV=local`,
+      );
+    }
     const cur = invokeContract(
       local.contracts.rootAnchor.address,
       "anchor_delay",

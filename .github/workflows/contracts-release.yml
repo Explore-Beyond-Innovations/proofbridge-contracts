@@ -124,7 +124,7 @@ jobs:
           cp stellar/target/wasm32v1-none/release/counterparty_verifier.wasm "$WASM_DIR/"
 
           # Copy only the artifacts the deployer actually loads.
-          for c in OrderPortal AdManager MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20 BLSKeyRegistry CounterpartyVerifier RootAnchor Registrar; do
+          for c in OrderPortal AdManager MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20 BLSKeyRegistry CounterpartyVerifier libSCL_EIP6565 RootAnchor Registrar; do
             mkdir -p "$EVM_OUT/${c}.sol"
             cp evm/out/${c}.sol/*.json "$EVM_OUT/${c}.sol/"
           done
