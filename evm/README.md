@@ -78,15 +78,15 @@ Run these **admin** calls to connect chains and tokens.
 **On OrderPortal (source chain):**
 
 ```solidity
-setChain(dstChainId, dstAdManager, true);
-setTokenRoute(token1, dstChainId, token2);
+setPeerEscrow(adChainId, adManager);          // bytes32 peer; zero removes the chain
+setTokenRoute(orderToken, adChainId, adToken); // (localToken, peerChainId, peerToken)
 ```
 
 **On AdManager (destination chain):**
 
 ```solidity
-setChain(orderChainId, orderPortal, true);
-setTokenRoute(adToken, orderToken, orderChainId);
+setPeerEscrow(orderChainId, orderPortal);
+setTokenRoute(adToken, orderChainId, orderToken); // the same argument order on both escrows
 ```
 
 **On MerkleManager (both chains):**
