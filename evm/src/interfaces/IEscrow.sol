@@ -145,9 +145,9 @@ interface IEscrow {
     /// @notice Whether the order's SETTLED leaf is in the MMR.
     function settledRecorded(bytes32 orderHash) external view returns (bool);
     /// @notice The pause clock: a window's real end moves by the pause time that fell inside it.
-    function lastPausedAt() external view returns (uint64);
-    function lastUnpausedAt() external view returns (uint64);
     function pausedSeconds() external view returns (uint64);
+    /// @notice Every pause, in order; `end == 0` while the escrow is paused.
+    function pauses(uint256 index) external view returns (uint64 start, uint64 end);
     /// @notice BLSKeyRegistry revoke guard: true while the account has a leg open on this escrow.
     function hasOpenPositions(bytes32 account) external view returns (bool);
     function getLatestMerkleRoot() external view returns (bytes32);

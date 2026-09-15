@@ -605,6 +605,40 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         adManager.unlock(r, bytes32("P5"), bytes32(0), hex"", hex"");
     }
 
+    /// Two pauses inside one still-unclaimed window both count, and a pause that straddles the
+    /// deadline counts from the deadline only: the history makes the pre-claim overlap exact.
+    function test_pause_history_everyPauseInsideTheWindowCounts() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lock(26);
+        // Straddles the deadline: 5 minutes before, 5 minutes after — 5 count.
+        vm.warp(p.deadline - 5 minutes);
+        vm.prank(admin);
+        adManager.pause();
+        vm.warp(p.deadline + 5 minutes);
+        vm.prank(admin);
+        adManager.unpause();
+        // A second pause inside the window — 10 more.
+        vm.warp(p.deadline + 10 minutes);
+        vm.prank(admin);
+        adManager.pause();
+        vm.warp(p.deadline + 20 minutes);
+        vm.prank(admin);
+        adManager.unpause();
+        uint256 end = p.deadline + 30 minutes + 15 minutes;
+
+        vm.warp(end + 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, end));
+        adManager.unlock(p, bytes32("H1"), bytes32(0), hex"", hex"");
+        adManager.claimCancel(p);
+        (, uint64 finalizeAt,,) = adManager.claims(h);
+        assertEq(finalizeAt, end, "the claim materializes every pause");
+        adManager.finalizeCancel(p);
+
+        (uint64 start0, uint64 end0) = adManager.pauses(0);
+        assertEq(start0, p.deadline - 5 minutes);
+        assertEq(end0, p.deadline + 5 minutes);
+        assertEq(adManager.pausedSeconds(), 20 minutes);
+    }
+
     /// G3: once claimed, the cutoff is the claim's frozen end; an admin retiming cannot move it.
     function test_G3_retimingDuringAClaimDoesNotMoveTheCutoff() public {
         (IAdManager.OrderParams memory p,) = _lock(21);

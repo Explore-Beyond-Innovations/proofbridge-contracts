@@ -104,10 +104,10 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
 
     /// @notice The pause clock: a pause freezes evidence, so it must not run the windows. Every
     ///         presentation window is measured in unpaused seconds — `pausedSeconds` accumulates at
-    ///         each unpause, and a window's real end moves by the pause time that fell inside it.
-    uint64 public lastPausedAt;
-    uint64 public lastUnpausedAt;
+    ///         each unpause, `pauses` keeps every span, and a window's real end moves by exactly the
+    ///         pause time that fell inside it.
     uint64 public pausedSeconds;
+    Termination.PauseSpan[] public pauses;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -130,13 +130,14 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
 
     function pause() external onlyRole(ADMIN_ROLE) {
         _pause();
-        lastPausedAt = uint64(block.timestamp);
+        pauses.push(Termination.PauseSpan(uint64(block.timestamp), 0));
     }
 
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
-        lastUnpausedAt = uint64(block.timestamp);
-        pausedSeconds += uint64(block.timestamp) - lastPausedAt;
+        Termination.PauseSpan storage span = pauses[pauses.length - 1];
+        span.end = uint64(block.timestamp);
+        pausedSeconds += span.end - span.start;
     }
 
     /// @inheritdoc IEscrow
@@ -379,8 +380,8 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
      * @dev When the leg's presentation window ends, in real time. Once claimed: the claim's
      *      `finalizeAt` plus every second the escrow has been paused since the claim opened (the
      *      record's counter snapshot makes this exact across any number of pauses). Before a claim,
-     *      the primary's deadline-anchored `deadline + buffer` plus the most recent pause's overlap
-     *      with the window. A pause stops the clocks and never reopens a closed window: a window
+     *      the primary's deadline-anchored `deadline + buffer` plus every pause's overlap with the
+     *      window. A pause stops the clocks and never reopens a closed window: a window
      *      closed before the pause gets no more time than the pause that fell inside it — none. One
      *      number serves both sides of the race: the unlock/presentation cutoff is this minus the
      *      margin, the finalize needs this reached.
@@ -393,11 +394,15 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
         return deadline + buffer + _pausedSince(deadline);
     }
 
-    /// @dev Seconds of the most recent pause that fell after `from` (0 when it ended before `from`).
-    function _pausedSince(uint256 from) internal view returns (uint256) {
-        if (lastUnpausedAt <= from) return 0;
-        uint256 start = lastPausedAt > from ? lastPausedAt : from;
-        return lastUnpausedAt - start;
+    /// @dev Seconds paused after `from`: every span's overlap with `[from, now]`, newest first,
+    ///      stopping at the first span that ended before `from`. One read per pause since `from`.
+    function _pausedSince(uint256 from) internal view returns (uint256 total) {
+        for (uint256 i = pauses.length; i > 0; i--) {
+            Termination.PauseSpan storage span = pauses[i - 1];
+            if (span.end <= from) break;
+            uint256 start = span.start > from ? span.start : from;
+            total += span.end - start;
+        }
     }
 
     /// @dev The leg must be `Claimed` and its window over; returns nothing, the caller then `_cancel`s.

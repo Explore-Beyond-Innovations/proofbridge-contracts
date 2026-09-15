@@ -3597,6 +3597,41 @@ fn test_pause_after_the_window_closed_does_not_reopen_it() {
     assert!(ad_unlock(&u, &r, &Bytes::new(&u.env)));
 }
 
+/// Two pauses inside one still-unclaimed window both count, and a pause that straddles the
+/// deadline counts from the deadline only: the history makes the pre-claim overlap exact.
+#[test]
+fn test_pause_history_every_pause_inside_the_window_counts() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline - 300);
+    s.ad_manager.pause();
+    warp(&s, p.deadline + 300);
+    s.ad_manager.unpause();
+    warp(&s, p.deadline + 600);
+    s.ad_manager.pause();
+    warp(&s, p.deadline + 1_200);
+    s.ad_manager.unpause();
+    let end = p.deadline + SUITE_BUFFER + 300 + 600;
+
+    warp(&s, end + 1);
+    assert!(!ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    s.ad_manager.claim_cancel(&p);
+    let claim = s
+        .ad_manager
+        .get_claim(&bytes32_to_bytesn(&s.env, &s.tp.order_hash))
+        .unwrap();
+    assert_eq!(claim.finalize_at, end, "the claim materializes every pause");
+    s.ad_manager.finalize_cancel(&p);
+
+    assert_eq!(s.ad_manager.pause_count(), 2);
+    let first = s.ad_manager.get_pause(&0).unwrap();
+    assert_eq!(
+        (first.start, first.end),
+        (p.deadline - 300, p.deadline + 300)
+    );
+    assert_eq!(s.ad_manager.paused_seconds(), 1_200);
+}
+
 #[test]
 fn test_pause_across_backstop_window_moves_its_end_by_the_pause() {
     let s = setup();

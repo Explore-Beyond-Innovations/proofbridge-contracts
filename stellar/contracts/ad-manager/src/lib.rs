@@ -47,8 +47,8 @@ use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String};
 
 pub use errors::AdManagerError;
 pub use types::{
-    Ad, ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, OrderParams, RouteTiming, Status,
-    NATIVE_TOKEN_ADDRESS,
+    Ad, ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, OrderParams, PauseSpan, RouteTiming,
+    Status, NATIVE_TOKEN_ADDRESS,
 };
 
 // =============================================================================
@@ -113,7 +113,14 @@ impl AdManagerContract {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
         if !storage::is_paused(&env) {
-            storage::set_last_paused_at(&env, env.ledger().timestamp());
+            storage::set_pause(
+                &env,
+                storage::pause_count(&env),
+                &PauseSpan {
+                    start: env.ledger().timestamp(),
+                    end: 0,
+                },
+            );
         }
         storage::set_paused(&env, true);
         events::Paused {
@@ -130,12 +137,15 @@ impl AdManagerContract {
         // window that was open by exactly that much (see `window_end`).
         if storage::is_paused(&env) {
             let now = env.ledger().timestamp();
-            let paused_for = now.saturating_sub(storage::get_last_paused_at(&env));
+            let last = storage::pause_count(&env) - 1;
+            let mut span =
+                storage::get_pause(&env, last).unwrap_or(PauseSpan { start: now, end: 0 });
+            span.end = now;
+            storage::set_pause(&env, last, &span);
             storage::set_paused_seconds(
                 &env,
-                storage::get_paused_seconds(&env).saturating_add(paused_for),
+                storage::get_paused_seconds(&env).saturating_add(now.saturating_sub(span.start)),
             );
-            storage::set_last_unpaused_at(&env, now);
         }
         storage::set_paused(&env, false);
         events::Unpaused {
@@ -988,6 +998,20 @@ impl AdManagerContract {
         storage::get_claim(&env, &order_hash)
     }
 
+    /// The pause history: the count, and each span (`end == 0` while paused).
+    pub fn pause_count(env: Env) -> u32 {
+        storage::pause_count(&env)
+    }
+
+    pub fn get_pause(env: Env, index: u32) -> Option<PauseSpan> {
+        storage::get_pause(&env, index)
+    }
+
+    /// Seconds the escrow has spent paused in total.
+    pub fn paused_seconds(env: Env) -> u64 {
+        storage::get_paused_seconds(&env)
+    }
+
     /// Whether the order's SETTLED leaf is in the MMR.
     pub fn is_settled_recorded(env: Env, order_hash: BytesN<32>) -> bool {
         storage::is_settled_recorded(&env, &order_hash)
@@ -1105,8 +1129,8 @@ impl AdManagerContract {
 
     /// When the leg's presentation window ends, in real time. Once claimed: the claim's
     /// `finalize_at` plus every second the escrow has been paused since the claim opened (exact
-    /// across any number of pauses). Before a claim: `deadline + buffer` plus the most recent
-    /// pause's overlap with the window. A pause stops the clocks and never reopens a closed window.
+    /// across any number of pauses). Before a claim: `deadline + buffer` plus every pause's
+    /// overlap with the window. A pause stops the clocks and never reopens a closed window.
     /// One number serves both sides of the race: the unlock cutoff is this minus the margin, the
     /// finalize needs it reached. Saturating: a far deadline never panics (EVM uses uint256).
     fn window_end(env: &Env, order_hash: &BytesN<32>, deadline: u64, buffer: u64) -> u64 {
@@ -1121,14 +1145,23 @@ impl AdManagerContract {
             .saturating_add(Self::paused_since(env, deadline))
     }
 
-    /// Seconds of the most recent pause that fell after `from` (0 when it ended before `from`).
+    /// Seconds paused after `from`: every span's overlap with `[from, now]`, newest first, stopping
+    /// at the first span that ended before `from`. One read per pause since `from`.
     fn paused_since(env: &Env, from: u64) -> u64 {
-        let unpaused = storage::get_last_unpaused_at(env);
-        if unpaused <= from {
-            return 0;
+        let mut total: u64 = 0;
+        let mut i = storage::pause_count(env);
+        while i > 0 {
+            i -= 1;
+            let span = match storage::get_pause(env, i) {
+                Some(span) => span,
+                None => break,
+            };
+            if span.end <= from {
+                break;
+            }
+            total = total.saturating_add(span.end.saturating_sub(span.start.max(from)));
         }
-        let start = storage::get_last_paused_at(env).max(from);
-        unpaused.saturating_sub(start)
+        total
     }
 
     /// `Claimed` and the window is over.

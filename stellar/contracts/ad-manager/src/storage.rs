@@ -3,7 +3,7 @@
 use soroban_sdk::{symbol_short, Address, BytesN, Env, String, Symbol};
 
 use crate::errors::AdManagerError;
-use crate::types::{Ad, ChainInfo, ClaimRecord, ContractConfig, RouteTiming, Status};
+use crate::types::{Ad, ChainInfo, ClaimRecord, ContractConfig, PauseSpan, RouteTiming, Status};
 
 // =============================================================================
 // Storage Keys - Instance Storage (Contract-level)
@@ -56,11 +56,12 @@ const KEY_ANCHOR: Symbol = symbol_short!("anchor");
 const KEY_CLAIMS: Symbol = symbol_short!("claims");
 /// Prefix for recorded settled leaves: (KEY_SETTLED, order_hash) -> bool
 const KEY_SETTLED: Symbol = symbol_short!("settled");
-/// The pause clock (instance): when the escrow was last paused / unpaused, and the seconds it has
-/// spent paused in total. A window's real end moves by the pause time that fell inside it.
-const KEY_PAUSED_AT: Symbol = symbol_short!("pausedat");
-const KEY_UNPAUSED: Symbol = symbol_short!("unpaused");
+/// The pause clock: the seconds spent paused in total (instance) and every pause span
+/// ((KEY_PSPAN, i) -> PauseSpan, persistent; KEY_PAUSECNT the count). A window's real end moves
+/// by exactly the pause time that fell inside it.
 const KEY_PAUSEDSEC: Symbol = symbol_short!("pausedsec");
+const KEY_PAUSECNT: Symbol = symbol_short!("pausecnt");
+const KEY_PSPAN: Symbol = symbol_short!("pspan");
 
 // =============================================================================
 // Initialization
@@ -313,20 +314,21 @@ pub fn set_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&KEY_PAUSED, &paused);
 }
 
-pub fn get_last_unpaused_at(env: &Env) -> u64 {
-    env.storage().instance().get(&KEY_UNPAUSED).unwrap_or(0)
+pub fn pause_count(env: &Env) -> u32 {
+    env.storage().instance().get(&KEY_PAUSECNT).unwrap_or(0)
 }
 
-pub fn set_last_unpaused_at(env: &Env, at: u64) {
-    env.storage().instance().set(&KEY_UNPAUSED, &at);
+pub fn get_pause(env: &Env, index: u32) -> Option<PauseSpan> {
+    env.storage().persistent().get(&(KEY_PSPAN, index))
 }
 
-pub fn get_last_paused_at(env: &Env) -> u64 {
-    env.storage().instance().get(&KEY_PAUSED_AT).unwrap_or(0)
-}
-
-pub fn set_last_paused_at(env: &Env, at: u64) {
-    env.storage().instance().set(&KEY_PAUSED_AT, &at);
+pub fn set_pause(env: &Env, index: u32, span: &PauseSpan) {
+    let key = (KEY_PSPAN, index);
+    env.storage().persistent().set(&key, span);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+    if index >= pause_count(env) {
+        env.storage().instance().set(&KEY_PAUSECNT, &(index + 1));
+    }
 }
 
 pub fn get_paused_seconds(env: &Env) -> u64 {

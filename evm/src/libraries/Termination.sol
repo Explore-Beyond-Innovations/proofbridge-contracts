@@ -16,6 +16,13 @@ library Termination {
         Dispute
     }
 
+    /// @dev One pause of the escrow: `end == 0` while it is still paused. The history is what makes
+    ///      a pre-claim window's pause overlap exact, however many pauses fell inside it.
+    struct PauseSpan {
+        uint64 start;
+        uint64 end;
+    }
+
     /// @dev One slot: 8 + 8 + 8 + 1 bytes. `pausedAtOpen` is the escrow's paused-seconds counter
     ///      when the window opened: the window's real end is `finalizeAt` plus whatever the escrow
     ///      has been paused since (a pause stops the clocks, it never reopens a closed window).
