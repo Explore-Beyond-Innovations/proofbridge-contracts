@@ -3402,24 +3402,22 @@ fn test_t43_unchallenged_backstop_refunds_after_the_window() {
     );
 }
 
-/// The co-signed unlock stays valid inside a backstop window, up to `finalize_at - margin`.
+/// The co-signed unlock is refused inside a backstop window: the package proves the lock, not the
+/// ad leg's outcome. Only outcome evidence settles or refunds there.
 #[test]
-fn test_unlock_inside_backstop_window_until_finalize_minus_margin() {
+fn test_unlock_refused_inside_backstop_window() {
     let s = setup();
-    s.order_portal.set_route_timing(
-        &s.tp.ad_chain_id,
-        &portal_timing(120, SUITE_BUFFER, 120, SUITE_LONG_BACKSTOP, 0),
-    );
+    let anchor = wire_anchor(&s);
     let p = created_portal_order(&s);
-    let now = p.deadline + SUITE_LONG_BACKSTOP;
-    warp(&s, now);
+    warp(&s, p.deadline + SUITE_LONG_BACKSTOP);
     s.order_portal.claim_backstop(&p);
-    let cutoff = now + SUITE_BUFFER - 120;
 
-    warp(&s, cutoff + 1);
-    assert_eq!(portal_unlock(&s, &p), Err(OpErr::OrderExpired));
-    warp(&s, cutoff);
-    assert_eq!(portal_unlock(&s, &p), Ok(()));
+    assert_eq!(portal_unlock(&s, &p), Err(OpErr::OrderNotOpen));
+    assert_eq!(portal_status(&s), order_portal_contract::Status::Claimed);
+    // A settled-leaf proof does settle it.
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &root);
+    s.order_portal.present_settled(&p, &root, &proof);
     assert_eq!(portal_status(&s), order_portal_contract::Status::Filled);
 }
 
@@ -3642,6 +3640,7 @@ fn test_pause_every_pause_since_the_lock_counts() {
 #[test]
 fn test_pause_across_backstop_window_moves_its_end_by_the_pause() {
     let s = setup();
+    let anchor = wire_anchor(&s);
     let p = created_portal_order(&s);
     let now = p.deadline + SUITE_LONG_BACKSTOP;
     warp(&s, now);
@@ -3660,11 +3659,11 @@ fn test_pause_across_backstop_window_moves_its_end_by_the_pause() {
         s.order_portal.try_finalize_backstop(&p),
         Err(Ok(OpErr::TooEarly))
     );
-    assert_eq!(
-        portal_unlock(&s, &p),
-        Ok(()),
-        "the maker's unlock is valid again"
-    );
+    // Inside the reopened window only outcome evidence counts: the settled-leaf proof pays the maker.
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &root);
+    s.order_portal.present_settled(&p, &root, &proof);
+    assert_eq!(portal_status(&s), order_portal_contract::Status::Filled);
 }
 
 /// Once claimed, the cutoff is the claim's frozen end; an admin retiming cannot move it.

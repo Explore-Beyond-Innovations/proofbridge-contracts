@@ -49,6 +49,8 @@ interface IOrderPortal is IEscrow {
     error OrderPortal__BridgerMustBeSender();
 
     function createOrder(OrderParams calldata params) external payable returns (bytes32 orderHash);
+    /// @notice The maker's co-signed settlement: `Open` only, until `deadline − claimStagger`. Never
+    ///         inside a backstop window — the package proves the lock, not the ad leg's outcome.
     function unlock(
         OrderParams calldata params,
         bytes32 nullifierHash,

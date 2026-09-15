@@ -22,8 +22,11 @@ import {Termination} from "./libraries/Termination.sol";
  *         unlocks the deposit on this chain with a proof of their lock on the ad chain. This leg is
  *         the termination follower (2.3e): it refunds only against a proof of the ad leg's CANCEL
  *         leaf under an anchored root, never on a clock; the maker's co-signed `unlock` stops
- *         `claimStagger` before the deadline so a cancel claim always leaves time to land it; and
- *         a far backstop (`deadline + longBackstop`) opens a window, never a bare refund;
+ *         `claimStagger` before the deadline, in every state, so a cancel claim always leaves time
+ *         to land it — the package proves the lock, not the outcome; and a far backstop
+ *         (`deadline + longBackstop`) opens a window in which only outcome evidence counts (a
+ *         settled-leaf proof pays the maker, a cancel-leaf proof refunds the bridger, silence
+ *         refunds the bridger), never a bare refund;
  *         `recordSettled` appends the SETTLED leaf after a fill. Everything not specific to
  *         deposits lives in {EscrowBase}.
  */
@@ -87,8 +90,13 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         bytes calldata cosigData
     ) external nonReentrant whenNotPaused {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
-        _requireSettleable(orderHash, nullifierHash);
-        _requireNotPast(_unlockCutoff(orderHash, params));
+        // `Open` only: after the deadline the co-signed package says nothing about the ad leg's
+        // outcome, so a backstop window (`Claimed`) never reopens it.
+        if (nullifierUsed[nullifierHash]) revert Escrow__NullifierUsed(nullifierHash);
+        if (_orders[orderHash].status != Status.Open) revert Escrow__OrderNotOpen(orderHash);
+        // D2: stop `claimStagger` before the deadline so the maker's cancel claim on the ad chain
+        // always leaves the watchtower time to land this leg.
+        _requireNotPast(params.deadline - _timing(params.adChainId).claimStagger);
         // Gate 2 — root authenticity (the co-signed root); mandatory, reverts NoRootVerifier when unwired.
         _requireRootValid(
             params.adChainId, targetRoot, RequestAuth.rootEnvelope(params.adSettlementSigner, params.bridger, cosigData)
@@ -199,17 +207,6 @@ contract OrderPortal is EscrowBase, IOrderPortal {
     function _refundBridger(bytes32 orderHash, OrderParams calldata p) private {
         _payOrCredit(p.bridger.toAddressChecked(), p.orderChainToken.toAddressChecked(), p.amount);
         emit OrderRefunded(orderHash, p.bridger, p.amount);
-    }
-
-    /**
-     * @dev The last second the co-signed unlock is accepted (D2). `Open`: `deadline − claimStagger`,
-     *      so the maker's cancel claim on the ad chain always leaves the watchtower time to land this
-     *      leg. `Claimed` (a backstop window): up to `finalizeAt − margin`.
-     */
-    function _unlockCutoff(bytes32 orderHash, OrderParams calldata p) private view returns (uint256) {
-        RouteTiming.Timing storage t = _timing(p.adChainId);
-        if (_orders[orderHash].status == Status.Claimed) return _windowEnd(orderHash, 0, t.buffer) - t.margin;
-        return p.deadline - t.claimStagger;
     }
 
     /// @dev Every create-time rule, cheapest first.

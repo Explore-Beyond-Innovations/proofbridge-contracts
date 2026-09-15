@@ -12,8 +12,10 @@
 //!
 //! This leg is the follower: it refunds only against a proof of the ad leg's CANCEL leaf under an
 //! anchored root, never on a clock; the maker's co-signed `unlock` stops `claim_stagger` before
-//! the deadline so a cancel claim always leaves time to land it; and a far backstop
-//! (`deadline + long_backstop`) opens a window, never a bare refund. Every `Filled` gets a
+//! the deadline, in every state, so a cancel claim always leaves time to land it — the package
+//! proves the lock, not the outcome; and a far backstop (`deadline + long_backstop`) opens a
+//! window in which only outcome evidence counts (a settled-leaf proof pays the maker, a cancel-leaf
+//! proof refunds the bridger, silence refunds the bridger), never a bare refund. Every `Filled` gets a
 //! SETTLED leaf, appended by `record_settled` in its own transaction (Soroban's per-tx budget;
 //! EVM appends it inside the fill). The same state machine as EVM:
 //!
@@ -414,11 +416,18 @@ impl OrderPortalContract {
 
         let order_hash = Self::order_hash(&env, &config, &params);
 
-        Self::require_settleable(&env, &order_hash)?;
+        // `Open` only: after the deadline the co-signed package says nothing about the ad leg's
+        // outcome, so a backstop window (`Claimed`) never reopens it.
+        if storage::get_order_status(&env, &order_hash) != Status::Open {
+            return Err(OrderPortalError::OrderNotOpen);
+        }
         if storage::is_nullifier_used(&env, &nullifier_hash) {
             return Err(OrderPortalError::NullifierUsed);
         }
-        if env.ledger().timestamp() > Self::unlock_cutoff(&env, &order_hash, &params)? {
+        // D2: stop `claim_stagger` before the deadline so the maker's cancel claim on the ad chain
+        // always leaves the watchtower time to land this leg.
+        let t = Self::timing(&env, params.ad_chain_id)?;
+        if env.ledger().timestamp() > params.deadline.saturating_sub(t.claim_stagger) {
             return Err(OrderPortalError::OrderExpired);
         }
 
@@ -789,21 +798,6 @@ impl OrderPortalContract {
         .publish(env);
     }
 
-    /// The last second the co-signed unlock is accepted (D2). `Open`: `deadline - claim_stagger`,
-    /// so the maker's cancel claim on the ad chain always leaves the watchtower time to land this
-    /// leg. `Claimed` (a backstop window): up to `finalize_at - margin`.
-    fn unlock_cutoff(
-        env: &Env,
-        order_hash: &BytesN<32>,
-        params: &OrderParams,
-    ) -> Result<u64, OrderPortalError> {
-        let t = Self::timing(env, params.ad_chain_id)?;
-        if storage::get_order_status(env, order_hash) == Status::Claimed {
-            return Ok(Self::window_end(env, order_hash, 0, t.buffer).saturating_sub(t.margin));
-        }
-        Ok(params.deadline.saturating_sub(t.claim_stagger))
-    }
-
     // ---- termination core (2.3e), mirrored by the ad-manager ----
 
     /// The route's clocks, or `NoRouteTiming` (the `RootVerifierNotSet` posture).
@@ -847,14 +841,6 @@ impl OrderPortalContract {
         match storage::get_order_status(env, order_hash) {
             Status::Open | Status::Claimed => Ok(()),
             _ => Err(OrderPortalError::NotClaimable),
-        }
-    }
-
-    /// The co-signed unlock's status gate: `Open`, or `Claimed` (inside a backstop window).
-    fn require_settleable(env: &Env, order_hash: &BytesN<32>) -> Result<(), OrderPortalError> {
-        match storage::get_order_status(env, order_hash) {
-            Status::Open | Status::Claimed => Ok(()),
-            _ => Err(OrderPortalError::OrderNotOpen),
         }
     }
 

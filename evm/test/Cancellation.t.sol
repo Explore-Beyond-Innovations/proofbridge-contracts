@@ -949,19 +949,20 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         portal.finalizeBackstop(p);
     }
 
-    /// The co-signed unlock stays valid inside a backstop window, up to `finalizeAt − margin`.
-    function test_unlock_insideBackstopWindow() public {
-        _setTiming(RouteTiming.Timing(120, 30 minutes, 120, 1 days, 0));
+    /// The co-signed unlock is refused inside a backstop window: the package proves the lock, not
+    /// the ad leg's outcome. Only outcome evidence settles or refunds there.
+    function test_unlock_refusedInsideBackstopWindow() public {
+        _wireAnchor();
         (IOrderPortal.OrderParams memory p, bytes32 h) = _create(10);
         vm.warp(p.deadline + 1 days);
         portal.claimBackstop(p);
-        uint256 cutoff = block.timestamp + 30 minutes - 120;
 
-        vm.warp(cutoff + 1);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, cutoff));
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderNotOpen.selector, h));
         portal.unlock(p, bytes32("B1"), bytes32(0), hex"", hex"");
-        vm.warp(cutoff);
-        portal.unlock(p, bytes32("B1"), bytes32(0), hex"", hex"");
+        assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Claimed));
+        // A settled-leaf proof does settle it.
+        _anchorRoot(bytes32(uint256(10)));
+        portal.presentSettled(p, bytes32(uint256(10)), hex"");
         assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Filled));
     }
 
@@ -1049,11 +1050,12 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         vm.warp(reopened2 - 1);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, reopened2));
         portal.finalizeBackstop(q);
-        portal.unlock(q, bytes32("PB"), bytes32(0), hex"", hex"");
+        _anchorRoot(bytes32(uint256(19)));
+        portal.presentSettled(q, bytes32(uint256(19)), hex"");
         assertEq(uint256(portal.orders(hq)), uint256(IEscrow.Status.Filled));
 
         // Closed ten days ago: a later pause reopens nothing (P1).
-        (IOrderPortal.OrderParams memory r,) = _create(20);
+        (IOrderPortal.OrderParams memory r, bytes32 hr) = _create(20);
         vm.warp(r.deadline + 1 days);
         portal.claimBackstop(r);
         vm.warp(block.timestamp + 30 minutes + 10 days);
@@ -1062,9 +1064,8 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         vm.warp(block.timestamp + 1 hours);
         vm.prank(admin);
         portal.unpause();
-        vm.expectRevert(
-            abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, r.deadline + 1 days + 30 minutes + 1 hours)
-        );
+        _anchorRoot(bytes32(uint256(20)));
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderNotOpen.selector, hr));
         portal.unlock(r, bytes32("PC"), bytes32(0), hex"", hex"");
         portal.finalizeBackstop(r);
     }

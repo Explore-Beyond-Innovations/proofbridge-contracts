@@ -9,7 +9,8 @@ pragma solidity ^0.8.34;
  * @dev `minWindow` — the shortest `deadline − now` a lock/create accepts (the monotonicity
  *      precondition for `cancelNeverLocked`). `buffer` — the primary's presentation window after the
  *      deadline, and the follower's backstop window after its claim. `margin` — how much before the
- *      end of the window the primary stops accepting the co-signed unlock (EVM proposer skew).
+ *      end of the window the primary stops accepting the co-signed unlock (EVM proposer skew);
+ *      primary-only, the follower's unlock never runs inside a window.
  *      `longBackstop` — how long after the deadline the follower may open a backstop claim.
  *      `claimStagger` — how much before the deadline the follower's co-signed unlock stops, so the
  *      maker's claim always leaves the watchtower time to land the bridger's leg.
