@@ -222,8 +222,13 @@ contract AdManager is EscrowBase, IAdManager {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
         _requireStatus(orderHash, Status.Open);
         _requireReached(params.deadline);
-        // Deadline-anchored (D1): a late claim cannot shorten the window the fast unlock relies on.
-        _openClaim(orderHash, Termination.ClaimEntry.Deadline, params.deadline + _timing(params.orderChainId).buffer);
+        // Deadline-anchored (D1): a late claim cannot shorten the window the fast unlock relies on;
+        // a pause that fell inside the window already extended it (`_windowEnd`).
+        _openClaim(
+            orderHash,
+            Termination.ClaimEntry.Deadline,
+            _windowEnd(orderHash, params.deadline, _timing(params.orderChainId).buffer)
+        );
     }
 
     /// @inheritdoc IAdManager

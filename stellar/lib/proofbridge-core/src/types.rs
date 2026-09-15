@@ -60,12 +60,16 @@ pub enum ClaimEntry {
     Dispute = 3,
 }
 
-/// The open presentation window on an order (`Claimed` ⇔ a record exists).
+/// The open presentation window on an order (`Claimed` ⇔ a record exists). `paused_at_open` is
+/// the escrow's paused-seconds counter when the window opened: the window's real end is
+/// `finalize_at` plus whatever the escrow has been paused since (a pause stops the clocks, it
+/// never reopens a closed window).
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClaimRecord {
     pub opened_at: u64,
     pub finalize_at: u64,
+    pub paused_at_open: u64,
     pub entry: ClaimEntry,
 }
 

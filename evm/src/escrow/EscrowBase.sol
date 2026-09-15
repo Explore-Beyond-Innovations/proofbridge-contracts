@@ -39,8 +39,8 @@ import {TwoStepAdmin} from "../libraries/TwoStepAdmin.sol";
  *
  *      `Filled` and `Cancelled` are terminal. Nothing terminal happens on a clock alone: a clock only
  *      opens a window, and evidence inside the window always wins over the refund after it — a pause
- *      included: every window ends no earlier than `lastUnpausedAt + buffer`, so a pause that outlives
- *      a window hands the evidence a full window again instead of a same-block race. The
+ *      included: a pause stops the clocks (`pausedSeconds`), so a window that was open when the pause
+ *      began ends later by exactly the pause, and a window that had already closed stays closed. The
  *      SETTLED leaf is its own transaction on both chains (Soroban's per-tx budget forces it there;
  *      EVM matches so the relayer batches one shape), permissionless and single-shot.
  */
@@ -102,9 +102,12 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     /// @notice Whether the order's SETTLED leaf is in the MMR (`recordSettled`, once per fill).
     mapping(bytes32 orderHash => bool) public settledRecorded;
 
-    /// @notice When the escrow was last unpaused; every presentation window ends no earlier than
-    ///         this plus the route's buffer (a pause freezes evidence, so it must not run the clocks).
+    /// @notice The pause clock: a pause freezes evidence, so it must not run the windows. Every
+    ///         presentation window is measured in unpaused seconds — `pausedSeconds` accumulates at
+    ///         each unpause, and a window's real end moves by the pause time that fell inside it.
+    uint64 public lastPausedAt;
     uint64 public lastUnpausedAt;
+    uint64 public pausedSeconds;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -127,11 +130,13 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
 
     function pause() external onlyRole(ADMIN_ROLE) {
         _pause();
+        lastPausedAt = uint64(block.timestamp);
     }
 
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
         lastUnpausedAt = uint64(block.timestamp);
+        pausedSeconds += uint64(block.timestamp) - lastPausedAt;
     }
 
     /// @inheritdoc IEscrow
@@ -365,21 +370,34 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
 
     /// @dev Open a presentation window on an `Open` leg; only a `finalize*` or evidence closes it.
     function _openClaim(bytes32 orderHash, Termination.ClaimEntry entry, uint256 finalizeAt) internal {
-        claims[orderHash] = Termination.Claim(uint64(block.timestamp), uint64(finalizeAt), entry);
+        claims[orderHash] = Termination.Claim(uint64(block.timestamp), uint64(finalizeAt), pausedSeconds, entry);
         orders[orderHash] = Status.Claimed;
         emit ClaimOpened(orderHash, entry, uint64(finalizeAt));
     }
 
     /**
-     * @dev When the leg's presentation window ends: the claim's `finalizeAt` once claimed, else
-     *      `deadline + buffer` (the primary's deadline-anchored window before any claim) — and never
-     *      earlier than `lastUnpausedAt + buffer`. One number serves both sides of the race: the
-     *      unlock/presentation cutoff is this minus the margin, the finalize needs this reached.
+     * @dev When the leg's presentation window ends, in real time. Once claimed: the claim's
+     *      `finalizeAt` plus every second the escrow has been paused since the claim opened (the
+     *      record's counter snapshot makes this exact across any number of pauses). Before a claim,
+     *      the primary's deadline-anchored `deadline + buffer` plus the most recent pause's overlap
+     *      with the window. A pause stops the clocks and never reopens a closed window: a window
+     *      closed before the pause gets no more time than the pause that fell inside it — none. One
+     *      number serves both sides of the race: the unlock/presentation cutoff is this minus the
+     *      margin, the finalize needs this reached.
      */
     function _windowEnd(bytes32 orderHash, uint256 deadline, uint64 buffer) internal view returns (uint256) {
-        uint256 base = orders[orderHash] == Status.Claimed ? claims[orderHash].finalizeAt : deadline + buffer;
-        uint256 grace = uint256(lastUnpausedAt) + buffer;
-        return base > grace ? base : grace;
+        if (orders[orderHash] == Status.Claimed) {
+            Termination.Claim storage c = claims[orderHash];
+            return uint256(c.finalizeAt) + (pausedSeconds - c.pausedAtOpen);
+        }
+        return deadline + buffer + _pausedSince(deadline);
+    }
+
+    /// @dev Seconds of the most recent pause that fell after `from` (0 when it ended before `from`).
+    function _pausedSince(uint256 from) internal view returns (uint256) {
+        if (lastUnpausedAt <= from) return 0;
+        uint256 start = lastPausedAt > from ? lastPausedAt : from;
+        return lastUnpausedAt - start;
     }
 
     /// @dev The leg must be `Claimed` and its window over; returns nothing, the caller then `_cancel`s.

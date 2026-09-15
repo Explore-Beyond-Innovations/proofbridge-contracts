@@ -3496,18 +3496,20 @@ fn test_t59_record_settled_single_shot_only_when_filled() {
 
 // --- G2/G3/G4: pause across a window, retiming during a claim, a far deadline ----------------------
 
-/// A pause freezes evidence, so it must not run the clocks: after unpause every open window ends no
-/// earlier than `last_unpaused_at + buffer`, and the unlock is valid again for that long.
+/// A pause freezes evidence, so it stops the clocks: a window open when the pause began ends later
+/// by exactly the pause, and the unlock is valid again for what was left of it.
 #[test]
-fn test_pause_across_the_window_reopens_it_for_a_full_buffer() {
+fn test_pause_across_the_window_moves_its_end_by_the_pause() {
     let s = setup();
     let p = locked_ad_order(&s);
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + 600);
     s.ad_manager.pause();
     warp(&s, p.deadline + SUITE_BUFFER + 3_600);
     s.ad_manager.unpause();
-    let reopened = p.deadline + SUITE_BUFFER + 3_600 + SUITE_BUFFER;
+    // 1200 s were left when the pause began; 1200 s remain after it.
+    let reopened = p.deadline + SUITE_BUFFER + 3_600 + (SUITE_BUFFER - 600);
 
     assert_eq!(
         s.ad_manager.try_finalize_cancel(&p),
@@ -3530,8 +3532,14 @@ fn test_pause_across_the_window_reopens_it_for_a_full_buffer() {
     t.ad_manager.pause();
     warp(&t, q.deadline + SUITE_BUFFER + 3_600);
     t.ad_manager.unpause();
+    // Paused across the whole window: the whole buffer remains after the pause.
     let reopened = q.deadline + SUITE_BUFFER + 3_600 + SUITE_BUFFER;
     t.ad_manager.claim_cancel(&q);
+    let claim = t
+        .ad_manager
+        .get_claim(&bytes32_to_bytesn(&t.env, &t.tp.order_hash))
+        .unwrap();
+    assert_eq!(claim.finalize_at, reopened, "the record carries the pause");
     assert_eq!(
         t.ad_manager.try_finalize_cancel(&q),
         Err(Ok(AdErr::TooEarly))
@@ -3542,8 +3550,55 @@ fn test_pause_across_the_window_reopens_it_for_a_full_buffer() {
     assert_eq!(ad_status(&t), ad_manager_contract::Status::Cancelled);
 }
 
+/// P1: a pause never reopens a window that had already closed — claimed or not — and a pause that
+/// ended before the deadline touches nothing.
 #[test]
-fn test_pause_across_backstop_window_reopens_it_for_a_full_buffer() {
+fn test_pause_after_the_window_closed_does_not_reopen_it() {
+    // Claimed, closed ten days ago, never finalized.
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER + 10 * 86_400);
+    s.ad_manager.pause();
+    warp(&s, p.deadline + SUITE_BUFFER + 10 * 86_400 + 3_600);
+    s.ad_manager.unpause();
+    assert!(
+        !ad_unlock(&s, &p, &Bytes::new(&s.env)),
+        "closed stays closed"
+    );
+    s.ad_manager.finalize_cancel(&p);
+
+    // Never claimed, closed ten days ago: the claim lands and finalizes at once.
+    let t = setup();
+    let q = locked_ad_order(&t);
+    warp(&t, q.deadline + SUITE_BUFFER + 10 * 86_400);
+    t.ad_manager.pause();
+    warp(&t, q.deadline + SUITE_BUFFER + 10 * 86_400 + 3_600);
+    t.ad_manager.unpause();
+    assert!(!ad_unlock(&t, &q, &Bytes::new(&t.env)));
+    t.ad_manager.claim_cancel(&q);
+    let claim = t
+        .ad_manager
+        .get_claim(&bytes32_to_bytesn(&t.env, &t.tp.order_hash))
+        .unwrap();
+    assert_eq!(claim.finalize_at, q.deadline + SUITE_BUFFER + 3_600);
+    t.ad_manager.finalize_cancel(&q);
+
+    // A pause that ended before the deadline changes nothing.
+    let u = setup();
+    let r = locked_ad_order(&u);
+    u.ad_manager.pause();
+    warp(&u, 3_600);
+    u.ad_manager.unpause();
+    warp(&u, r.deadline + SUITE_BUFFER + 1);
+    assert!(!ad_unlock(&u, &r, &Bytes::new(&u.env)));
+    warp(&u, r.deadline + SUITE_BUFFER);
+    assert!(ad_unlock(&u, &r, &Bytes::new(&u.env)));
+}
+
+#[test]
+fn test_pause_across_backstop_window_moves_its_end_by_the_pause() {
     let s = setup();
     let p = created_portal_order(&s);
     let now = p.deadline + SUITE_LONG_BACKSTOP;

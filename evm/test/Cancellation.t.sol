@@ -262,7 +262,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         emit IEscrow.ClaimOpened(h, Termination.ClaimEntry.Deadline, uint64(p.deadline + 30 minutes));
         adManager.claimCancel(p);
 
-        (uint64 openedAt, uint64 finalizeAt, Termination.ClaimEntry entry) = adManager.claims(h);
+        (uint64 openedAt, uint64 finalizeAt,, Termination.ClaimEntry entry) = adManager.claims(h);
         assertEq(openedAt, p.deadline);
         assertEq(finalizeAt, p.deadline + 30 minutes, "deadline-anchored");
         assertEq(uint256(entry), uint256(Termination.ClaimEntry.Deadline));
@@ -279,7 +279,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         (IAdManager.OrderParams memory p, bytes32 h) = _lock(4);
         vm.warp(p.deadline + 25 minutes);
         adManager.claimCancel(p);
-        (, uint64 finalizeAt,) = adManager.claims(h);
+        (, uint64 finalizeAt,,) = adManager.claims(h);
         assertEq(finalizeAt, p.deadline + 30 minutes);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 30 minutes));
         adManager.finalizeCancel(p);
@@ -320,7 +320,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         assertEq(_balance(), balanceBefore, "the ad keeps its funds");
         assertEq(adManager.getMerkleLeafCount(), leaves + 1, "the CANCEL leaf");
         assertEq(adManager.inFlightOf(p.adSettlementSigner), 0, "T-44");
-        (, uint64 finalizeAt,) = adManager.claims(h);
+        (, uint64 finalizeAt,,) = adManager.claims(h);
         assertEq(finalizeAt, 0, "claim record cleared");
 
         // Terminal: nothing else appends or moves.
@@ -353,7 +353,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         assertEq(adManager.getMerkleLeafCount(), leaves, "the fill itself appends nothing");
         adManager.recordSettled(p);
         assertEq(adManager.getMerkleLeafCount(), leaves + 1, "T-59: the SETTLED leaf, no cancel leaf");
-        (, uint64 finalizeAt,) = adManager.claims(h);
+        (, uint64 finalizeAt,,) = adManager.claims(h);
         assertEq(finalizeAt, 0, "window closed");
         assertEq(adManager.inFlightOf(p.adSettlementSigner), 0);
 
@@ -510,18 +510,20 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         assertEq(adManager.getMerkleLeafCount(), 3, "the CANCEL leaf only");
     }
 
-    /// G2: a pause freezes evidence, so it must not run the clocks. After unpause every open window
-    /// ends no earlier than `lastUnpausedAt + buffer`; the unlock is valid again for that long.
-    function test_pause_acrossTheWindow_evidenceGetsAFullWindowAfterUnpause() public {
+    /// G2: a pause freezes evidence, so it stops the clocks. A window open when the pause began ends
+    /// later by exactly the pause; the unlock is valid again for what was left of it.
+    function test_pause_acrossTheWindow_evidenceGetsTheRestOfItsWindowAfterUnpause() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lock(19);
         _claim(p);
+        vm.warp(p.deadline + 10 minutes);
         vm.prank(admin);
         adManager.pause();
         vm.warp(p.deadline + 30 minutes + 1 hours);
         vm.prank(admin);
         adManager.unpause();
-        uint256 reopened = block.timestamp + 30 minutes;
-        assertEq(adManager.lastUnpausedAt(), block.timestamp);
+        // 20 minutes were left when the pause began; 20 minutes remain after it.
+        uint256 reopened = block.timestamp + 20 minutes;
+        assertEq(adManager.pausedSeconds(), 1 hours + 20 minutes);
 
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, reopened));
         adManager.finalizeCancel(p);
@@ -544,8 +546,8 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         uint256 reopened = block.timestamp + 30 minutes;
 
         adManager.claimCancel(p);
-        (, uint64 finalizeAt,) = adManager.claims(h);
-        assertEq(finalizeAt, p.deadline + 30 minutes, "the record keeps the deadline-anchored end");
+        (, uint64 finalizeAt,,) = adManager.claims(h);
+        assertEq(finalizeAt, reopened, "the record carries the pause that fell inside the window");
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, reopened));
         adManager.finalizeCancel(p);
         vm.warp(reopened + 1);
@@ -553,6 +555,54 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         adManager.unlock(p, bytes32("P2"), bytes32(0), hex"", hex"");
         adManager.finalizeCancel(p);
         assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Cancelled));
+    }
+
+    /// P1: a pause never reopens a window that had already closed — claimed or not — and a pause
+    /// that ended before the deadline touches nothing.
+    function test_pause_afterTheWindowClosed_doesNotReopenIt() public {
+        // Claimed, closed ten days ago, never finalized.
+        (IAdManager.OrderParams memory p,) = _lock(23);
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes + 10 days);
+        vm.prank(admin);
+        adManager.pause();
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(admin);
+        adManager.unpause();
+        vm.expectRevert(
+            abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, p.deadline + 30 minutes + 1 hours)
+        );
+        adManager.unlock(p, bytes32("P3"), bytes32(0), hex"", hex"");
+        adManager.finalizeCancel(p);
+
+        // Never claimed, closed ten days ago: the claim lands and finalizes at once.
+        (IAdManager.OrderParams memory q, bytes32 hq) =
+            _openOrder(lastAdId, address(adToken), 60 ether, 24, bridger, recipient);
+        vm.warp(q.deadline + 30 minutes + 10 days);
+        vm.prank(admin);
+        adManager.pause();
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(admin);
+        adManager.unpause();
+        vm.expectRevert(
+            abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, q.deadline + 30 minutes + 1 hours)
+        );
+        adManager.unlock(q, bytes32("P4"), bytes32(0), hex"", hex"");
+        adManager.claimCancel(q);
+        (, uint64 finalizeAt,,) = adManager.claims(hq);
+        assertEq(finalizeAt, q.deadline + 30 minutes + 1 hours);
+        adManager.finalizeCancel(q);
+
+        // A pause that ended before the deadline changes nothing.
+        (IAdManager.OrderParams memory r,) = _openOrder(lastAdId, address(adToken), 60 ether, 25, bridger, recipient);
+        vm.prank(admin);
+        adManager.pause();
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(admin);
+        adManager.unpause();
+        vm.warp(r.deadline + 30 minutes + 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, r.deadline + 30 minutes));
+        adManager.unlock(r, bytes32("P5"), bytes32(0), hex"", hex"");
     }
 
     /// G3: once claimed, the cutoff is the claim's frozen end; an admin retiming cannot move it.
@@ -752,7 +802,7 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         _anchorRoot(bytes32(uint256(6)));
         portal.refundByCancel(p, bytes32(uint256(6)), hex"");
         assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Cancelled));
-        (, uint64 finalizeAt,) = portal.claims(h);
+        (, uint64 finalizeAt,,) = portal.claims(h);
         assertEq(finalizeAt, 0);
     }
 
@@ -792,7 +842,7 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         emit IEscrow.ClaimOpened(h, Termination.ClaimEntry.Backstop, finalizeAt);
         portal.claimBackstop(p);
 
-        (uint64 openedAt, uint64 fAt, Termination.ClaimEntry entry) = portal.claims(h);
+        (uint64 openedAt, uint64 fAt,, Termination.ClaimEntry entry) = portal.claims(h);
         assertEq(openedAt, block.timestamp);
         assertEq(fAt, finalizeAt, "claim-anchored");
         assertEq(uint256(entry), uint256(Termination.ClaimEntry.Backstop));
@@ -921,8 +971,9 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         portal.recordSettled(p);
     }
 
-    /// G2 on the follower: a pause across a backstop window reopens it for a full buffer.
-    function test_pause_acrossBackstopWindow_evidenceGetsAFullWindowAfterUnpause() public {
+    /// G2 on the follower: a pause inside a backstop window moves its end by the pause; a pause
+    /// after it closed does not reopen it.
+    function test_pause_acrossBackstopWindow_evidenceGetsTheRestOfItsWindowAfterUnpause() public {
         _wireAnchor();
         (IOrderPortal.OrderParams memory p, bytes32 h) = _create(18);
         vm.warp(p.deadline + 1 days);
@@ -954,6 +1005,22 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         portal.finalizeBackstop(q);
         portal.unlock(q, bytes32("PB"), bytes32(0), hex"", hex"");
         assertEq(uint256(portal.orders(hq)), uint256(IEscrow.Status.Filled));
+
+        // Closed ten days ago: a later pause reopens nothing (P1).
+        (IOrderPortal.OrderParams memory r,) = _create(20);
+        vm.warp(r.deadline + 1 days);
+        portal.claimBackstop(r);
+        vm.warp(block.timestamp + 30 minutes + 10 days);
+        vm.prank(admin);
+        portal.pause();
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(admin);
+        portal.unpause();
+        vm.expectRevert(
+            abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, r.deadline + 1 days + 30 minutes + 1 hours)
+        );
+        portal.unlock(r, bytes32("PC"), bytes32(0), hex"", hex"");
+        portal.finalizeBackstop(r);
     }
 
     /*//////////////////////////// T-40 with the real verifier ////////////////////////////*/

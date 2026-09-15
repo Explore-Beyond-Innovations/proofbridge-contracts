@@ -16,10 +16,13 @@ library Termination {
         Dispute
     }
 
-    /// @dev One slot: 8 + 8 + 1 bytes.
+    /// @dev One slot: 8 + 8 + 8 + 1 bytes. `pausedAtOpen` is the escrow's paused-seconds counter
+    ///      when the window opened: the window's real end is `finalizeAt` plus whatever the escrow
+    ///      has been paused since (a pause stops the clocks, it never reopens a closed window).
     struct Claim {
         uint64 openedAt;
         uint64 finalizeAt;
+        uint64 pausedAtOpen;
         ClaimEntry entry;
     }
 }

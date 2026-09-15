@@ -112,6 +112,9 @@ impl AdManagerContract {
     pub fn pause(env: Env) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
+        if !storage::is_paused(&env) {
+            storage::set_last_paused_at(&env, env.ledger().timestamp());
+        }
         storage::set_paused(&env, true);
         events::Paused {
             admin: config.admin,
@@ -123,10 +126,18 @@ impl AdManagerContract {
     pub fn unpause(env: Env) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
+        // A pause freezes evidence, so it stops the clocks: the seconds spent paused move every
+        // window that was open by exactly that much (see `window_end`).
+        if storage::is_paused(&env) {
+            let now = env.ledger().timestamp();
+            let paused_for = now.saturating_sub(storage::get_last_paused_at(&env));
+            storage::set_paused_seconds(
+                &env,
+                storage::get_paused_seconds(&env).saturating_add(paused_for),
+            );
+            storage::set_last_unpaused_at(&env, now);
+        }
         storage::set_paused(&env, false);
-        // A pause freezes evidence, so it must not run the clocks: every window ends no earlier
-        // than this + buffer (see `window_end`).
-        storage::set_last_unpaused_at(&env, env.ledger().timestamp());
         events::Unpaused {
             admin: config.admin,
         }
@@ -719,13 +730,10 @@ impl AdManagerContract {
         let order_hash = Self::order_hash(&env, &config, &params);
         Self::require_status(&env, &order_hash, Status::Open)?;
         Self::require_reached(&env, params.deadline)?;
+        // Deadline-anchored (D1); a pause that fell inside the window already extended it.
         let t = Self::timing(&env, params.order_chain_id)?;
-        Self::open_claim(
-            &env,
-            &order_hash,
-            ClaimEntry::Deadline,
-            params.deadline.saturating_add(t.buffer),
-        );
+        let finalize_at = Self::window_end(&env, &order_hash, params.deadline, t.buffer);
+        Self::open_claim(&env, &order_hash, ClaimEntry::Deadline, finalize_at);
         storage::extend_instance_ttl(&env);
         Ok(())
     }
@@ -1095,19 +1103,32 @@ impl AdManagerContract {
         }
     }
 
-    /// When the leg's presentation window ends: the claim's `finalize_at` once claimed, else
-    /// `deadline + buffer` — and never earlier than `last_unpaused_at + buffer`. One number serves
-    /// both sides of the race: the unlock cutoff is this minus the margin, the finalize needs it
-    /// reached. Saturating: a far deadline never panics (EVM computes in uint256).
+    /// When the leg's presentation window ends, in real time. Once claimed: the claim's
+    /// `finalize_at` plus every second the escrow has been paused since the claim opened (exact
+    /// across any number of pauses). Before a claim: `deadline + buffer` plus the most recent
+    /// pause's overlap with the window. A pause stops the clocks and never reopens a closed window.
+    /// One number serves both sides of the race: the unlock cutoff is this minus the margin, the
+    /// finalize needs it reached. Saturating: a far deadline never panics (EVM uses uint256).
     fn window_end(env: &Env, order_hash: &BytesN<32>, deadline: u64, buffer: u64) -> u64 {
-        let base = match storage::get_claim(env, order_hash) {
-            Some(claim) if storage::get_order_status(env, order_hash) == Status::Claimed => {
-                claim.finalize_at
+        if storage::get_order_status(env, order_hash) == Status::Claimed {
+            if let Some(claim) = storage::get_claim(env, order_hash) {
+                let since = storage::get_paused_seconds(env).saturating_sub(claim.paused_at_open);
+                return claim.finalize_at.saturating_add(since);
             }
-            _ => deadline.saturating_add(buffer),
-        };
-        let grace = storage::get_last_unpaused_at(env).saturating_add(buffer);
-        base.max(grace)
+        }
+        deadline
+            .saturating_add(buffer)
+            .saturating_add(Self::paused_since(env, deadline))
+    }
+
+    /// Seconds of the most recent pause that fell after `from` (0 when it ended before `from`).
+    fn paused_since(env: &Env, from: u64) -> u64 {
+        let unpaused = storage::get_last_unpaused_at(env);
+        if unpaused <= from {
+            return 0;
+        }
+        let start = storage::get_last_paused_at(env).max(from);
+        unpaused.saturating_sub(start)
     }
 
     /// `Claimed` and the window is over.
@@ -1142,6 +1163,7 @@ impl AdManagerContract {
             &ClaimRecord {
                 opened_at: env.ledger().timestamp(),
                 finalize_at,
+                paused_at_open: storage::get_paused_seconds(env),
                 entry,
             },
         );

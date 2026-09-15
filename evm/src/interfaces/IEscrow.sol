@@ -141,11 +141,13 @@ interface IEscrow {
     function claims(bytes32 orderHash)
         external
         view
-        returns (uint64 openedAt, uint64 finalizeAt, Termination.ClaimEntry entry);
+        returns (uint64 openedAt, uint64 finalizeAt, uint64 pausedAtOpen, Termination.ClaimEntry entry);
     /// @notice Whether the order's SETTLED leaf is in the MMR.
     function settledRecorded(bytes32 orderHash) external view returns (bool);
-    /// @notice When the escrow was last unpaused; no window ends before this plus the route's buffer.
+    /// @notice The pause clock: a window's real end moves by the pause time that fell inside it.
+    function lastPausedAt() external view returns (uint64);
     function lastUnpausedAt() external view returns (uint64);
+    function pausedSeconds() external view returns (uint64);
     /// @notice BLSKeyRegistry revoke guard: true while the account has a leg open on this escrow.
     function hasOpenPositions(bytes32 account) external view returns (bool);
     function getLatestMerkleRoot() external view returns (bytes32);
