@@ -2,14 +2,16 @@
 pragma solidity ^0.8.34;
 
 import {AdManagerTest} from "./Admanager.t.sol";
+import {IEscrow} from "src/interfaces/IEscrow.sol";
+import {IAdManager} from "src/interfaces/IAdManager.sol";
 import {AdManager} from "src/AdManager.sol";
 
 /// An ad settles only on the route it committed to at creation.
 contract RouteCommitmentTest is AdManagerTest {
-    AdManager.OrderParams rp;
+    IAdManager.OrderParams rp;
 
     function _prepareLock(string memory adId, bytes32 orderChainToken, uint256 salt) internal {
-        AdManager.OrderParams memory p = _defaultParams(adId);
+        IAdManager.OrderParams memory p = _defaultParams(adId);
         p.orderChainToken = orderChainToken;
         p.salt = salt;
         rp = p;
@@ -25,7 +27,7 @@ contract RouteCommitmentTest is AdManagerTest {
 
     function test_adStoresCommittedRouteAtCreation() public {
         test_fundAd_makerOnly();
-        (,,,,,,, bytes32 committed,) = adManager.ads(lastAdId);
+        (,,,,, bytes32 committed,,,) = adManager.ads(lastAdId);
         assertEq(committed, _b32(orderToken), "route not committed");
     }
 
@@ -35,26 +37,24 @@ contract RouteCommitmentTest is AdManagerTest {
         address newOrderToken = makeAddr("newOrderToken");
 
         vm.prank(admin);
-        adManager.setTokenRoute(address(adToken), _b32(newOrderToken), orderChainId);
+        adManager.setTokenRoute(address(adToken), orderChainId, _b32(newOrderToken));
 
         // matches the new table, not the commitment
         _prepareLock(adId, _b32(newOrderToken), 41);
         vm.expectRevert(
-            abi.encodeWithSelector(AdManager.AdManager__RouteMismatch.selector, _b32(orderToken), _b32(newOrderToken))
+            abi.encodeWithSelector(IAdManager.AdManager__RouteMismatch.selector, _b32(orderToken), _b32(newOrderToken))
         );
         adManager.lockForOrder(rp);
 
         // matches the commitment, not the table: frozen, not redirected
         _prepareLock(adId, _b32(orderToken), 42);
         vm.expectRevert(
-            abi.encodeWithSelector(
-                AdManager.AdManager__OrderTokenMismatch.selector, _b32(newOrderToken), _b32(orderToken)
-            )
+            abi.encodeWithSelector(IEscrow.Escrow__PeerTokenMismatch.selector, _b32(newOrderToken), _b32(orderToken))
         );
         adManager.lockForOrder(rp);
 
         vm.prank(admin);
-        adManager.setTokenRoute(address(adToken), _b32(orderToken), orderChainId);
+        adManager.setTokenRoute(address(adToken), orderChainId, _b32(orderToken));
         _lockWithOrderToken(adId, _b32(orderToken), 43);
     }
 
@@ -67,7 +67,7 @@ contract RouteCommitmentTest is AdManagerTest {
 
         if (reroute) {
             vm.prank(admin);
-            adManager.setTokenRoute(address(adToken), bytes32(uint256(uint160(makeAddr("other")))), orderChainId);
+            adManager.setTokenRoute(address(adToken), orderChainId, bytes32(uint256(uint160(makeAddr("other")))));
         }
 
         bool shouldSucceed = offeredToken == committed && !reroute;
@@ -78,7 +78,7 @@ contract RouteCommitmentTest is AdManagerTest {
         adManager.lockForOrder(rp);
 
         if (shouldSucceed) {
-            (,,,,, uint256 locked,,,) = adManager.ads(adId);
+            (,,,,,,,, uint256 locked) = adManager.ads(adId);
             assertGt(locked, 0, "lock did not take");
         }
     }

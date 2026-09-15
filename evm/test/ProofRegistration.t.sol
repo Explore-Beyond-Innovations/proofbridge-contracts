@@ -2,6 +2,7 @@
 pragma solidity ^0.8.34;
 
 import {stdJson} from "forge-std/StdJson.sol";
+import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
 import {BLSKeyRegistryTest} from "./BLSKeyRegistry.t.sol";
 import {BLSKeyRegistry} from "src/BLSKeyRegistry.sol";
 import {RootAnchor} from "src/RootAnchor.sol";
@@ -83,7 +84,7 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
 
     function test_flagOff_reverts() public {
         _wire(false);
-        vm.expectRevert(BLSKeyRegistry.ProofRegistrationDisabled.selector);
+        vm.expectRevert(IBLSKeyRegistry.ProofRegistrationDisabled.selector);
         registry.registerByProof(account, pk, pop, EPOCH, SOURCE_CHAIN, bytes32(0), "");
     }
 
@@ -93,25 +94,25 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
         signers[0] = address(this);
         RootAnchor a = new RootAnchor(address(this), signers, 1);
 
-        vm.expectRevert(BLSKeyRegistry.ProofRegistrationRefsUnset.selector);
+        vm.expectRevert(IBLSKeyRegistry.ProofRegistrationRefsUnset.selector);
         registry.setProofRegistration(IRootAnchor(address(0)), IVerifier(address(v)), _sources(SOURCE_CHAIN), true);
         // A reference without code is as unset as the zero address.
-        vm.expectRevert(BLSKeyRegistry.ProofRegistrationRefsUnset.selector);
+        vm.expectRevert(IBLSKeyRegistry.ProofRegistrationRefsUnset.selector);
         registry.setProofRegistration(IRootAnchor(address(a)), IVerifier(address(1)), _sources(SOURCE_CHAIN), true);
-        vm.expectRevert(BLSKeyRegistry.ProofRegistrationRefsUnset.selector);
+        vm.expectRevert(IBLSKeyRegistry.ProofRegistrationRefsUnset.selector);
         registry.setProofRegistration(IRootAnchor(address(a)), IVerifier(address(v)), new uint256[](0), true);
         // Disabled needs nothing.
         registry.setProofRegistration(IRootAnchor(address(0)), IVerifier(address(0)), new uint256[](0), false);
     }
 
     function test_thisChainIsNeverASource() public {
-        vm.expectRevert(abi.encodeWithSelector(BLSKeyRegistry.SourceNotAllowed.selector, block.chainid));
+        vm.expectRevert(abi.encodeWithSelector(IBLSKeyRegistry.SourceNotAllowed.selector, block.chainid));
         registry.setProofRegistration(IRootAnchor(address(0)), IVerifier(address(0)), _sources(block.chainid), false);
     }
 
     function test_setProofRegistration_adminOnly() public {
         vm.prank(makeAddr("stranger"));
-        vm.expectRevert(BLSKeyRegistry.NotAdmin.selector);
+        vm.expectRevert(IBLSKeyRegistry.NotAdmin.selector);
         registry.setProofRegistration(IRootAnchor(address(1)), IVerifier(address(1)), _sources(SOURCE_CHAIN), true);
     }
 
@@ -119,7 +120,7 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
         _wire(false);
         anchor.anchor(SOURCE_CHAIN, fxRoot, 1);
 
-        vm.expectRevert(BLSKeyRegistry.ProofRegistrationDisabled.selector);
+        vm.expectRevert(IBLSKeyRegistry.ProofRegistrationDisabled.selector);
         _register();
 
         registry.setProofRegistration(
@@ -137,7 +138,7 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
         anchor.anchor(SOURCE_CHAIN, fxRoot, 1);
 
         vm.expectEmit(true, true, false, true);
-        emit BLSKeyRegistry.KeyRegisteredByProof(account, 0, pk, EPOCH, SOURCE_CHAIN);
+        emit IBLSKeyRegistry.KeyRegisteredByProof(account, 0, pk, EPOCH, SOURCE_CHAIN);
         uint32 slotId = _register();
 
         assertEq(slotId, 0);
@@ -152,7 +153,7 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
 
     function test_unanchoredRoot_reverts() public {
         _wire(true);
-        vm.expectRevert(abi.encodeWithSelector(BLSKeyRegistry.RootNotAnchored.selector, SOURCE_CHAIN, fxRoot));
+        vm.expectRevert(abi.encodeWithSelector(IBLSKeyRegistry.RootNotAnchored.selector, SOURCE_CHAIN, fxRoot));
         _register();
     }
 
@@ -160,7 +161,7 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
         _wire(true);
         anchor.setAnchorDelay(SOURCE_CHAIN, 3600);
         anchor.anchor(SOURCE_CHAIN, fxRoot, 1);
-        vm.expectRevert(abi.encodeWithSelector(BLSKeyRegistry.RootNotAnchored.selector, SOURCE_CHAIN, fxRoot));
+        vm.expectRevert(abi.encodeWithSelector(IBLSKeyRegistry.RootNotAnchored.selector, SOURCE_CHAIN, fxRoot));
         _register();
     }
 
@@ -168,7 +169,7 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
         _wire(true);
         // Anchored under a chain the registry was not told to accept leaves from.
         anchor.anchor(OTHER_CHAIN, fxRoot, 1);
-        vm.expectRevert(abi.encodeWithSelector(BLSKeyRegistry.SourceNotAllowed.selector, OTHER_CHAIN));
+        vm.expectRevert(abi.encodeWithSelector(IBLSKeyRegistry.SourceNotAllowed.selector, OTHER_CHAIN));
         registry.registerByProof(account, pk, pop, EPOCH, OTHER_CHAIN, fxRoot, fxProof);
     }
 
@@ -220,7 +221,7 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
         bytes memory otherPop = reg("bridgerOnSepolia", "pop");
         anchor.anchor(SOURCE_CHAIN, fxRoot, 1);
 
-        vm.expectRevert(BLSKeyRegistry.InvalidPop.selector);
+        vm.expectRevert(IBLSKeyRegistry.InvalidPop.selector);
         registry.registerByProof(account, pk, otherPop, EPOCH, SOURCE_CHAIN, fxRoot, fxProof);
     }
 
@@ -230,7 +231,7 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
         (bytes memory proof, bytes32 root) = _leafProof(_subject(account, pk, 1));
         anchor.anchor(SOURCE_CHAIN, root, 1);
 
-        vm.expectRevert(BLSKeyRegistry.InvalidPop.selector);
+        vm.expectRevert(IBLSKeyRegistry.InvalidPop.selector);
         registry.registerByProof(account, pk, pop, 1, SOURCE_CHAIN, root, proof);
     }
 
@@ -241,10 +242,10 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
         anchor.anchor(SOURCE_CHAIN, fxRoot, 1);
         _register();
 
-        vm.expectRevert(BLSKeyRegistry.KeyPreviouslyUsed.selector);
+        vm.expectRevert(IBLSKeyRegistry.KeyPreviouslyUsed.selector);
         _register();
         // The replay guard runs before the anchor lookup: a replay with a stale root still says "used".
-        vm.expectRevert(BLSKeyRegistry.KeyPreviouslyUsed.selector);
+        vm.expectRevert(IBLSKeyRegistry.KeyPreviouslyUsed.selector);
         registry.registerByProof(account, pk, pop, EPOCH, SOURCE_CHAIN, bytes32(uint256(1)), fxProof);
     }
 
@@ -252,7 +253,7 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
         _wire(true);
         bytes memory otherPop = reg("bridgerOnSepolia", "pop");
         // Unanchored root *and* a bad POP: the storage read rejects, not the pairing.
-        vm.expectRevert(abi.encodeWithSelector(BLSKeyRegistry.RootNotAnchored.selector, SOURCE_CHAIN, fxRoot));
+        vm.expectRevert(abi.encodeWithSelector(IBLSKeyRegistry.RootNotAnchored.selector, SOURCE_CHAIN, fxRoot));
         registry.registerByProof(account, pk, otherPop, EPOCH, SOURCE_CHAIN, fxRoot, fxProof);
     }
 }

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.34;
 
 import {Test} from "forge-std/Test.sol";
+import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 import {BLSKeyRegistry} from "../src/BLSKeyRegistry.sol";
 import {CounterpartyVerifier} from "../src/CounterpartyVerifier.sol";
@@ -54,7 +55,7 @@ contract CounterpartyVerifierTest is Test {
         );
         registry.register(
             maker,
-            BLSKeyRegistry.OwnerAuth(BLSKeyRegistry.Scheme.Sep53, sep53Data),
+            IBLSKeyRegistry.OwnerAuth(IBLSKeyRegistry.Scheme.Sep53, sep53Data),
             v.readBytes(".registration.makerOnSepolia.pkNative"),
             v.readBytes(".registration.makerOnSepolia.pop"),
             0
@@ -67,7 +68,7 @@ contract CounterpartyVerifierTest is Test {
         );
         registry.register(
             bridger,
-            BLSKeyRegistry.OwnerAuth(BLSKeyRegistry.Scheme.Eip712, eip712),
+            IBLSKeyRegistry.OwnerAuth(IBLSKeyRegistry.Scheme.Eip712, eip712),
             v.readBytes(".registration.bridgerOnSepolia.pkNative"),
             v.readBytes(".registration.bridgerOnSepolia.pop"),
             0
@@ -107,9 +108,9 @@ contract CounterpartyVerifierTest is Test {
         return string.concat(".slots.makerOnSepolia.registrations[", vm.toString(i), "]");
     }
 
-    function sep53(string memory path) internal view returns (BLSKeyRegistry.OwnerAuth memory) {
-        return BLSKeyRegistry.OwnerAuth(
-            BLSKeyRegistry.Scheme.Sep53,
+    function sep53(string memory path) internal view returns (IBLSKeyRegistry.OwnerAuth memory) {
+        return IBLSKeyRegistry.OwnerAuth(
+            IBLSKeyRegistry.Scheme.Sep53,
             abi.encode(
                 uint256(v.readBytes32(string.concat(path, ".scl.r"))),
                 uint256(v.readBytes32(string.concat(path, ".scl.s"))),
@@ -234,7 +235,7 @@ contract CounterpartyVerifierTest is Test {
             registerMakerSlot(i);
         }
         registerMakerSlot(5); // at cap: prunes slot 0 (validUntil 1 + 30 days < now)
-        vm.expectRevert(BLSKeyRegistry.NoSuchSlot.selector);
+        vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.lookup(maker, 0);
         assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, metadata()));
         assertEq(registry.liveSlots(maker).length, 5);
@@ -252,8 +253,8 @@ contract CounterpartyVerifierTest is Test {
     function test_unregisteredAccountFails() public {
         registry.revoke(
             maker,
-            BLSKeyRegistry.OwnerAuth(
-                BLSKeyRegistry.Scheme.Sep53,
+            IBLSKeyRegistry.OwnerAuth(
+                IBLSKeyRegistry.Scheme.Sep53,
                 abi.encode(
                     uint256(v.readBytes32(".registration.makerOnSepolia.revokeAtNonce1.ownerSig.scl.r")),
                     uint256(v.readBytes32(".registration.makerOnSepolia.revokeAtNonce1.ownerSig.scl.s")),

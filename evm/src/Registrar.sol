@@ -3,7 +3,8 @@ pragma solidity ^0.8.34;
 
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
-import {IMerkleManager} from "./MerkleManager.sol";
+import {IMerkleManager} from "./interfaces/IMerkleManager.sol";
+import {IRegistrar} from "./interfaces/IRegistrar.sol";
 import {AddressCast} from "./libraries/AddressCast.sol";
 import {LeafDomain} from "./libraries/LeafDomain.sol";
 import {RegistrationSubject} from "./libraries/RegistrationSubject.sol";
@@ -26,7 +27,7 @@ import {RegistrationSubject} from "./libraries/RegistrationSubject.sol";
  *      lands once, the direct path cannot append duplicates, and an account's leaves are totally ordered
  *      for the registration-leaf monitor.
  */
-contract Registrar is EIP712 {
+contract Registrar is IRegistrar, EIP712 {
     using AddressCast for address;
     using AddressCast for bytes32;
 
@@ -52,24 +53,9 @@ contract Registrar is EIP712 {
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event RegistrationLeaf(
-        bytes32 indexed account32,
-        bytes32 indexed blsCommitment,
-        uint64 epoch,
-        uint256 dstChainId,
-        bytes32 dstRegistryId,
-        bytes32 subject
-    );
-
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
-
-    error Registrar__ZeroAddress();
-    error Registrar__NotAccount();
-    error Registrar__BadAuth();
-    error Registrar__StaleEpoch(uint64 nextEpoch, uint64 given);
-    error Registrar__AppendFailed();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR

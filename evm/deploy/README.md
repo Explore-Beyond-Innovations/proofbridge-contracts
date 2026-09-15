@@ -41,7 +41,7 @@ is hand-curated in the manifest.
 
 ### `link --peer <peer-manifest>`
 
-Wires `setChain` + `setTokenRoute` on this chain's AdManager +
+Wires `setPeerEscrow` + `setTokenRoute` on this chain's AdManager +
 OrderPortal so they accept proofs from the peer chain. Run this after
 both chains have been deployed *and* have their test tokens registered.
 

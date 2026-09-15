@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import {IMerkleManager} from "../MerkleManager.sol";
+import {IMerkleManager} from "../interfaces/IMerkleManager.sol";
 import {MMRPoseidon2} from "@solidity-mmr/MMRPoseidon2.sol";
 
 /**

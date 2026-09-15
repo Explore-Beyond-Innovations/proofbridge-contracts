@@ -2,6 +2,8 @@
 pragma solidity ^0.8.34;
 
 import {Test, console} from "forge-std/Test.sol";
+import {IAdManager} from "src/interfaces/IAdManager.sol";
+import {IOrderPortal} from "src/interfaces/IOrderPortal.sol";
 import {AdManager} from "src/AdManager.sol";
 import {OrderPortal} from "src/OrderPortal.sol";
 import {HonkVerifier} from "src/Verifier.sol";
@@ -142,11 +144,11 @@ contract ProofBridge is Test {
         // Set up AdManager configs
         vm.startPrank(admin);
         // Register the order chain
-        adManager.setChain(orderChainId, _b32(address(orderPortal)), true);
+        adManager.setPeerEscrow(orderChainId, _b32(address(orderPortal)));
         // Set token route
-        adManager.setTokenRoute(address(adToken), _b32(address(orderToken)), orderChainId);
+        adManager.setTokenRoute(address(adToken), orderChainId, _b32(address(orderToken)));
         // Set native token route
-        adManager.setTokenRoute(NATIVE_TOKEN_ADDRESS, _b32(address(orderToken)), orderChainId);
+        adManager.setTokenRoute(NATIVE_TOKEN_ADDRESS, orderChainId, _b32(address(orderToken)));
         // Root authenticity is mandatory at unlock: wire a permissive mock.
         adManager.setRootVerifier(orderChainId, address(new MockRootVerifier(true)));
         // 2.3c: the maker is the settlement signer and must hold a usable key.
@@ -187,7 +189,7 @@ contract ProofBridge is Test {
         orderToken.mint(bridger, minted);
         // Set up OrderPortal configs
         vm.startPrank(admin);
-        orderPortal.setChain(adChainId, _b32(address(adManager)), true);
+        orderPortal.setPeerEscrow(adChainId, _b32(address(adManager)));
         orderPortal.setTokenRoute(address(orderToken), adChainId, _b32(address(adToken)));
         orderPortal.setRootVerifier(adChainId, address(new MockRootVerifier(true)));
         vm.stopPrank();
@@ -201,7 +203,7 @@ contract ProofBridge is Test {
     function _defaultAdChainParams(string memory adId, address adTokenAddr, uint256 amount, uint256 salt)
         internal
         view
-        returns (AdManager.OrderParams memory p)
+        returns (IAdManager.OrderParams memory p)
     {
         p.orderChainToken = _b32(address(orderToken));
         p.adChainToken = _b32(adTokenAddr);
@@ -223,7 +225,7 @@ contract ProofBridge is Test {
     function _defaultOrderChainParams(string memory adId, address adTokenAddr, uint256 amount, uint256 salt)
         internal
         view
-        returns (OrderPortal.OrderParams memory p)
+        returns (IOrderPortal.OrderParams memory p)
     {
         p.orderChainToken = _b32(address(orderToken));
         p.adChainToken = _b32(adTokenAddr);
@@ -258,11 +260,11 @@ contract ProofBridge is Test {
         string memory adId = _adId();
 
         // get order chain params
-        OrderPortal.OrderParams memory orderChainParams =
+        IOrderPortal.OrderParams memory orderChainParams =
             _defaultOrderChainParams(adId, address(adToken), 100 ether, 777);
 
         // get ad chain params
-        AdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), 100 ether, 777);
+        IAdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), 100 ether, 777);
 
         bytes32 orderChainOrderHash;
         bytes32 adChainOrderHash;
@@ -287,11 +289,11 @@ contract ProofBridge is Test {
         string memory adId = _adId();
 
         // get order chain params
-        OrderPortal.OrderParams memory orderChainParams =
+        IOrderPortal.OrderParams memory orderChainParams =
             _defaultOrderChainParams(adId, address(adToken), 90 ether, 777);
 
         // get ad chain params
-        AdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), 100 ether, 777);
+        IAdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), 100 ether, 777);
 
         vm.chainId(orderChainId);
         bytes32 orderChainOrderHash = orderPortal.hashOrderPublic(orderChainParams);
@@ -380,11 +382,11 @@ contract ProofBridge is Test {
         string memory adId = _adId();
 
         // get order chain params
-        OrderPortal.OrderParams memory orderChainParams =
+        IOrderPortal.OrderParams memory orderChainParams =
             _defaultOrderChainParams(adId, address(adToken), 100 ether, 777);
 
         // get ad chain params
-        AdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), 100 ether, 777);
+        IAdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), 100 ether, 777);
 
         // order chain params for typed data hash
         Order memory order = Order({
@@ -430,7 +432,7 @@ contract ProofBridge is Test {
         string memory adId = _adId();
 
         // get order chain params
-        OrderPortal.OrderParams memory orderChainParams =
+        IOrderPortal.OrderParams memory orderChainParams =
             _defaultOrderChainParams(adId, address(adToken), 100 ether, 777);
 
         vm.chainId(orderChainId);
@@ -462,9 +464,9 @@ contract ProofBridge is Test {
         string memory adId = _adId();
 
         // Setup Params
-        OrderPortal.OrderParams memory orderChainParams =
+        IOrderPortal.OrderParams memory orderChainParams =
             _defaultOrderChainParams(adId, address(adToken), orderAmt, 777);
-        AdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), orderAmt, 777);
+        IAdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), orderAmt, 777);
 
         // Create order on order chain
         vm.chainId(orderChainId);
@@ -518,9 +520,9 @@ contract ProofBridge is Test {
         string memory adId = _adId();
 
         // Setup Params
-        OrderPortal.OrderParams memory orderChainParams =
+        IOrderPortal.OrderParams memory orderChainParams =
             _defaultOrderChainParams(adId, address(adToken), orderAmt, 777);
-        AdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), orderAmt, 777);
+        IAdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), orderAmt, 777);
 
         // Create order on order chain
         vm.chainId(orderChainId);
@@ -568,7 +570,7 @@ contract ProofBridge is Test {
         string memory adId = _adId();
 
         // get order chain params
-        OrderPortal.OrderParams memory orderChainParams =
+        IOrderPortal.OrderParams memory orderChainParams =
             _defaultOrderChainParams(adId, address(adToken), 100 ether, 777);
 
         vm.chainId(orderChainId);
@@ -601,9 +603,9 @@ contract ProofBridge is Test {
         string memory adId = _adId();
 
         // Setup Params
-        OrderPortal.OrderParams memory orderChainParams =
+        IOrderPortal.OrderParams memory orderChainParams =
             _defaultOrderChainParams(adId, address(adToken), orderAmt, 777);
-        AdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), orderAmt, 777);
+        IAdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), orderAmt, 777);
 
         // Create order on order chain
         vm.chainId(orderChainId);
@@ -654,9 +656,9 @@ contract ProofBridge is Test {
         string memory adId = _adId();
 
         // Setup Params
-        OrderPortal.OrderParams memory orderChainParams =
+        IOrderPortal.OrderParams memory orderChainParams =
             _defaultOrderChainParams(adId, address(adToken), orderAmt, 777);
-        AdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), orderAmt, 777);
+        IAdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), orderAmt, 777);
 
         // Create order on order chain
         vm.chainId(orderChainId);
@@ -702,9 +704,9 @@ contract ProofBridge is Test {
         string memory adId = _adId();
 
         // Setup Params
-        OrderPortal.OrderParams memory orderChainParams =
+        IOrderPortal.OrderParams memory orderChainParams =
             _defaultOrderChainParams(adId, address(adToken), orderAmt, 777);
-        AdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), orderAmt, 777);
+        IAdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), orderAmt, 777);
 
         // Create order on order chain
         vm.chainId(orderChainId);
@@ -753,9 +755,9 @@ contract ProofBridge is Test {
         string memory adId = _adId();
 
         // Setup Params
-        OrderPortal.OrderParams memory orderChainParams =
+        IOrderPortal.OrderParams memory orderChainParams =
             _defaultOrderChainParams(adId, address(adToken), orderAmt, 777);
-        AdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), orderAmt, 777);
+        IAdManager.OrderParams memory adChainParams = _defaultAdChainParams(adId, address(adToken), orderAmt, 777);
 
         // Create order on order chain
         vm.chainId(orderChainId);

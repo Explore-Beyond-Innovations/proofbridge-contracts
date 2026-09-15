@@ -70,7 +70,7 @@ The destination chain contract where liquidity providers (makers) manage their a
 * **closeAd**: Permanently closes an ad and withdraws all remaining funds
 * **lockForOrder**: Reserves liquidity for a specific EIP-712 order hash, appends to MMR
 * **unlock**: Verifies ZK proof, consumes nullifier, transfers ad token to the **orderRecipient**
-* **setChain** / **setTokenRoute**: Admin configuration for cross-chain routing
+* **setPeerEscrow** / **setTokenRoute**: Admin configuration for cross-chain routing (`setPeerEscrow(chainId, peer)`, zero removes; `setTokenRoute(localToken, peerChainId, peerToken)`)
 
 **Key Storage:**
 
@@ -88,7 +88,7 @@ The source chain contract where users initiate cross-chain transfers by creating
 
 * **createOrder**: Initiates a cross-chain order by depositing source chain tokens, appends to MMR
 * **unlock**: Verifies ZK proof and releases funds to the designated recipient
-* **setChain** / **setTokenRoute**: Admin configuration
+* **setPeerEscrow** / **setTokenRoute**: Admin configuration (the same signatures as AdManager)
 
 **Key Storage:**
 

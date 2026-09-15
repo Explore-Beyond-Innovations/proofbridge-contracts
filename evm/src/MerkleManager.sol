@@ -1,39 +1,18 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.34;
 
 import {MMRPoseidon2} from "@solidity-mmr/MMRPoseidon2.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-
-interface IMerkleManager {
-    function getRoot() external view returns (bytes32);
-    function getRootAtIndex(uint256 leafIndex) external view returns (bytes32);
-    function getWidth() external view returns (uint256);
-    function appendOrderHash(bytes32 orderHash, uint256 side) external returns (bool);
-    function getSize() external view returns (uint256);
-    function getNode(uint256 index) external view returns (bytes32);
-    function getMerkleProof(uint256 index)
-        external
-        view
-        returns (bytes32 root_, uint256 width_, bytes32[] memory peakBag, bytes32[] memory siblings);
-    function verifyInclusionProof(
-        bytes32 root_,
-        uint256 width_,
-        uint256 index,
-        bytes32 valueHash,
-        bytes32[] calldata peakBag,
-        bytes32[] calldata siblings
-    ) external view returns (bool);
-    function fieldMod(bytes32 orderHash) external pure returns (bytes32 orderHashMod);
-}
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {IMerkleManager} from "./interfaces/IMerkleManager.sol";
 
 /**
  * @title MerkleManager
  * @dev Manages all order hashes for ProofBridge protocol per chain
  */
-contract MerkleManager is IMerkleManager, TwoStepAdmin, Pausable, ReentrancyGuard {
+contract MerkleManager is IMerkleManager, TwoStepAdmin, Pausable, ReentrancyGuardTransient {
     using MMRPoseidon2 for MMRPoseidon2.Tree;
 
     MMRPoseidon2.Tree _tree;
