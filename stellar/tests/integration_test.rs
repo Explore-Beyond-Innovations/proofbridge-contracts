@@ -1271,9 +1271,22 @@ fn test_registry_upgrade_is_admin_gated() {
     client.upgrade(&hash);
     assert_eq!(client.nonce_of(&account), 0);
 
-    // Nobody else: with no auths mocked, the admin's require_auth fails.
-    s.env.set_auths(&[]);
-    assert!(client.try_upgrade(&hash).is_err());
+    // A stranger who does sign is still refused: the gate is the stored admin, not any signer.
+    {
+        use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+        use soroban_sdk::IntoVal;
+        let stranger = Address::generate(&s.env);
+        s.env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "upgrade",
+                args: (hash.clone(),).into_val(&s.env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(client.try_upgrade(&hash).is_err());
+    }
 }
 
 // 1.6c cost-measurement gate: CPU instructions + memory bytes consumed by a full

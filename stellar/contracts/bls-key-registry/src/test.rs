@@ -898,13 +898,34 @@ fn sep53_wrong_key_traps_and_changes_nothing() {
     let e = &v["slots"][MAKER]["setValidUntil"][0];
     let stranger = [7u8; 32];
     let sig = sep53_sign(&env, &digest32(&e["digest"]), &stranger);
-    let res = client.try_set_valid_until(&account, &OwnerAuth::Sep53(sig), &0, &1);
+    let msg = panic_message(|| {
+        client.set_valid_until(&account, &OwnerAuth::Sep53(sig), &0, &1);
+    });
     assert!(
-        matches!(res, Err(Err(_))),
-        "a bad ed25519 signature is a host error"
+        msg.starts_with(CRYPTO_TRAP),
+        "a bad ed25519 signature is a host Crypto trap, got: {msg}"
     );
     assert_eq!(client.lookup(&account, &0).unwrap().valid_until, 0);
 }
+
+/// The panic a failing call raises, as text. A bad ed25519 signature traps in the host; the
+/// generated `try_` client folds that into `InvokeError::Abort`, so the type is only visible here.
+fn panic_message(f: impl FnOnce()) -> std::string::String {
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .expect_err("the call should trap");
+    payload
+        .downcast_ref::<std::string::String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|m| std::string::String::from(*m))
+        })
+        .unwrap_or_default()
+}
+
+/// The exact host error the relayer's `isPermanentRevert` keys on (`Error(Crypto`).
+const CRYPTO_TRAP: &str = "HostError: Error(Crypto, InvalidInput)";
 
 /// A signature bound to slot 0 / value 1 does not retire slot 1 or set another value.
 #[test]
@@ -915,14 +936,20 @@ fn sep53_signature_bound_to_slot_and_value() {
     register_slot(&env, &client, &v, MAKER, 1);
     let e = &v["slots"][MAKER]["setValidUntil"][0];
     let sig = bn::<64>(&env, &e["ownerSig"]["sig"]);
-    assert!(matches!(
-        client.try_set_valid_until(&account, &OwnerAuth::Sep53(sig.clone()), &1, &1),
-        Err(Err(_))
-    ));
-    assert!(matches!(
-        client.try_set_valid_until(&account, &OwnerAuth::Sep53(sig), &0, &grace_ts(&v)),
-        Err(Err(_))
-    ));
+    let other_slot = panic_message(|| {
+        client.set_valid_until(&account, &OwnerAuth::Sep53(sig.clone()), &1, &1);
+    });
+    assert!(
+        other_slot.starts_with(CRYPTO_TRAP),
+        "slot 1 under slot 0's signature: {other_slot}"
+    );
+    let other_value = panic_message(|| {
+        client.set_valid_until(&account, &OwnerAuth::Sep53(sig), &0, &grace_ts(&v));
+    });
+    assert!(
+        other_value.starts_with(CRYPTO_TRAP),
+        "another value under value 1's signature: {other_value}"
+    );
     assert_eq!(client.lookup(&account, &0).unwrap().valid_until, 0);
     assert_eq!(client.lookup(&account, &1).unwrap().valid_until, 0);
 }
