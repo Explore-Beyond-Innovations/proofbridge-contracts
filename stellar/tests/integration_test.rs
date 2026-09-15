@@ -3494,6 +3494,140 @@ fn test_t59_record_settled_single_shot_only_when_filled() {
     assert_eq!(ad_leaves(&t), 1, "the CANCEL leaf only");
 }
 
+// --- G2/G3/G4: pause across a window, retiming during a claim, a far deadline ----------------------
+
+/// A pause freezes evidence, so it must not run the clocks: after unpause every open window ends no
+/// earlier than `last_unpaused_at + buffer`, and the unlock is valid again for that long.
+#[test]
+fn test_pause_across_the_window_reopens_it_for_a_full_buffer() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    s.ad_manager.pause();
+    warp(&s, p.deadline + SUITE_BUFFER + 3_600);
+    s.ad_manager.unpause();
+    let reopened = p.deadline + SUITE_BUFFER + 3_600 + SUITE_BUFFER;
+
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, reopened - 1);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    assert!(
+        ad_unlock(&s, &p, &Bytes::new(&s.env)),
+        "the unlock is valid again"
+    );
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+
+    // Silence through the reopened window: the finalize lands at its end, the unlock no longer does.
+    let t = setup();
+    let q = locked_ad_order(&t);
+    t.ad_manager.pause();
+    warp(&t, q.deadline + SUITE_BUFFER + 3_600);
+    t.ad_manager.unpause();
+    let reopened = q.deadline + SUITE_BUFFER + 3_600 + SUITE_BUFFER;
+    t.ad_manager.claim_cancel(&q);
+    assert_eq!(
+        t.ad_manager.try_finalize_cancel(&q),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&t, reopened + 1);
+    assert!(!ad_unlock(&t, &q, &Bytes::new(&t.env)));
+    t.ad_manager.finalize_cancel(&q);
+    assert_eq!(ad_status(&t), ad_manager_contract::Status::Cancelled);
+}
+
+#[test]
+fn test_pause_across_backstop_window_reopens_it_for_a_full_buffer() {
+    let s = setup();
+    let p = created_portal_order(&s);
+    let now = p.deadline + SUITE_LONG_BACKSTOP;
+    warp(&s, now);
+    s.order_portal.claim_backstop(&p);
+    s.order_portal.pause();
+    warp(&s, now + SUITE_BUFFER + 3_600);
+    s.order_portal.unpause();
+    let reopened = now + SUITE_BUFFER + 3_600 + SUITE_BUFFER;
+
+    assert_eq!(
+        s.order_portal.try_finalize_backstop(&p),
+        Err(Ok(OpErr::TooEarly))
+    );
+    warp(&s, reopened - 1);
+    assert_eq!(
+        s.order_portal.try_finalize_backstop(&p),
+        Err(Ok(OpErr::TooEarly))
+    );
+    assert_eq!(
+        portal_unlock(&s, &p),
+        Ok(()),
+        "the maker's unlock is valid again"
+    );
+}
+
+/// Once claimed, the cutoff is the claim's frozen end; an admin retiming cannot move it.
+#[test]
+fn test_retiming_during_a_claim_does_not_move_the_cutoff() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    s.ad_manager.set_route_timing(
+        &s.tp.order_chain_id,
+        &ad_timing(0, 7_200, 0, SUITE_LONG_BACKSTOP, 0),
+    );
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    assert!(
+        !ad_unlock(&s, &p, &Bytes::new(&s.env)),
+        "raised buffer: the old end holds"
+    );
+    s.ad_manager.finalize_cancel(&p);
+
+    let t = setup();
+    t.ad_manager.set_route_timing(
+        &t.tp.order_chain_id,
+        &ad_timing(0, 7_200, 0, SUITE_LONG_BACKSTOP, 0),
+    );
+    let q = locked_ad_order(&t);
+    warp(&t, q.deadline);
+    t.ad_manager.claim_cancel(&q);
+    t.ad_manager.set_route_timing(
+        &t.tp.order_chain_id,
+        &ad_timing(0, SUITE_BUFFER, 0, SUITE_LONG_BACKSTOP, 0),
+    );
+    warp(&t, q.deadline + 3_600);
+    assert_eq!(
+        t.ad_manager.try_finalize_cancel(&q),
+        Err(Ok(AdErr::TooEarly)),
+        "lowered buffer: still open"
+    );
+    assert!(ad_unlock(&t, &q, &Bytes::new(&t.env)));
+}
+
+/// A far deadline never panics: the cutoffs saturate (EVM computes them in uint256).
+#[test]
+fn test_far_deadline_never_panics() {
+    let s = setup();
+    let mut p = ad_manager_order_params(&s.env, &s.tp);
+    p.deadline = u64::MAX;
+    s.ad_manager.lock_for_order(&p);
+    // The proof is for the fixture's order (another hash), so the unlock reaches the verifier and fails there.
+    let late = s.ad_manager.try_unlock(
+        &p,
+        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+        &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
+    );
+    assert_eq!(late, Err(Ok(AdErr::InvalidProof)));
+    assert_eq!(s.ad_manager.try_claim_cancel(&p), Err(Ok(AdErr::TooEarly)));
+}
+
 // --- timing validation, fail-closed posture, pause ------------------------------------------------
 
 #[test]

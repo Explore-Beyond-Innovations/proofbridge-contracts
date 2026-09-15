@@ -197,7 +197,7 @@ contract AdManager is EscrowBase, IAdManager {
     ) external nonReentrant whenNotPaused {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
         // D2: the co-signed unlock is the presentation — valid through the window, minus the margin.
-        _requireNotPast(_presentationCutoff(params));
+        _requireNotPast(_presentationCutoff(orderHash, params));
         _requireSettleable(orderHash, nullifierHash);
         // Gate 2 — root authenticity (the co-signed root); mandatory, reverts NoRootVerifier when unwired.
         _requireRootValid(
@@ -229,7 +229,7 @@ contract AdManager is EscrowBase, IAdManager {
     /// @inheritdoc IAdManager
     function finalizeCancel(OrderParams calldata params) external nonReentrant whenNotPaused {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
-        _requireFinalizable(orderHash);
+        _requireFinalizable(orderHash, _timing(params.orderChainId).buffer);
 
         Ad storage ad = ads[params.adId];
         uint256 adAmount = _adAmount(params);
@@ -331,10 +331,12 @@ contract AdManager is EscrowBase, IAdManager {
         _payOrCredit(p.orderRecipient.toAddressChecked(), ad.token, adAmount);
     }
 
-    /// @dev The last second the co-signed unlock is accepted: `deadline + buffer − margin` (D2).
-    function _presentationCutoff(OrderParams calldata p) private view returns (uint256) {
+    /// @dev The last second the co-signed unlock is accepted (D2): the window's end minus the margin.
+    ///      Once claimed the end is the claim's frozen `finalizeAt`, so an admin retiming cannot move
+    ///      the cutoff across it.
+    function _presentationCutoff(bytes32 orderHash, OrderParams calldata p) private view returns (uint256) {
         RouteTiming.Timing storage t = _timing(p.orderChainId);
-        return p.deadline + t.buffer - t.margin;
+        return _windowEnd(orderHash, p.deadline, t.buffer) - t.margin;
     }
 
     /// @dev The registry gate on every settlement-signer set and on every lock (2.3c D2): fails

@@ -153,7 +153,7 @@ contract OrderPortal is EscrowBase, IOrderPortal {
     /// @inheritdoc IOrderPortal
     function finalizeBackstop(OrderParams calldata params) external nonReentrant whenNotPaused {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
-        _requireFinalizable(orderHash);
+        _requireFinalizable(orderHash, _timing(params.adChainId).buffer);
         _cancel(orderHash, params.bridger, false);
         _refundBridger(orderHash, params);
     }
@@ -208,7 +208,7 @@ contract OrderPortal is EscrowBase, IOrderPortal {
      */
     function _unlockCutoff(bytes32 orderHash, OrderParams calldata p) private view returns (uint256) {
         RouteTiming.Timing storage t = _timing(p.adChainId);
-        if (orders[orderHash] == Status.Claimed) return claims[orderHash].finalizeAt - t.margin;
+        if (orders[orderHash] == Status.Claimed) return _windowEnd(orderHash, 0, t.buffer) - t.margin;
         return p.deadline - t.claimStagger;
     }
 

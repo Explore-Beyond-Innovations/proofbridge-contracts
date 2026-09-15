@@ -56,6 +56,8 @@ const KEY_ANCHOR: Symbol = symbol_short!("anchor");
 const KEY_CLAIMS: Symbol = symbol_short!("claims");
 /// Prefix for recorded settled leaves: (KEY_SETTLED, order_hash) -> bool
 const KEY_SETTLED: Symbol = symbol_short!("settled");
+/// When the escrow was last unpaused (instance): no window ends before this + buffer.
+const KEY_UNPAUSED: Symbol = symbol_short!("unpaused");
 
 // =============================================================================
 // Initialization
@@ -306,6 +308,14 @@ pub fn is_paused(env: &Env) -> bool {
 
 pub fn set_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&KEY_PAUSED, &paused);
+}
+
+pub fn get_last_unpaused_at(env: &Env) -> u64 {
+    env.storage().instance().get(&KEY_UNPAUSED).unwrap_or(0)
+}
+
+pub fn set_last_unpaused_at(env: &Env, at: u64) {
+    env.storage().instance().set(&KEY_UNPAUSED, &at);
 }
 
 pub fn get_pending_admin(env: &Env) -> Option<Address> {

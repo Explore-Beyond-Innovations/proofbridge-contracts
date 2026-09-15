@@ -510,6 +510,72 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         assertEq(adManager.getMerkleLeafCount(), 3, "the CANCEL leaf only");
     }
 
+    /// G2: a pause freezes evidence, so it must not run the clocks. After unpause every open window
+    /// ends no earlier than `lastUnpausedAt + buffer`; the unlock is valid again for that long.
+    function test_pause_acrossTheWindow_evidenceGetsAFullWindowAfterUnpause() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lock(19);
+        _claim(p);
+        vm.prank(admin);
+        adManager.pause();
+        vm.warp(p.deadline + 30 minutes + 1 hours);
+        vm.prank(admin);
+        adManager.unpause();
+        uint256 reopened = block.timestamp + 30 minutes;
+        assertEq(adManager.lastUnpausedAt(), block.timestamp);
+
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, reopened));
+        adManager.finalizeCancel(p);
+        vm.warp(reopened - 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, reopened));
+        adManager.finalizeCancel(p);
+        // The bridger's co-signed unlock is valid through the reopened window.
+        adManager.unlock(p, bytes32("P1"), bytes32(0), hex"", hex"");
+        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Filled));
+    }
+
+    function test_pause_acrossTheWindow_thenSilence_finalizesAtTheReopenedEnd() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lock(20);
+        // Paused while still Open, across the deadline and the whole buffer.
+        vm.prank(admin);
+        adManager.pause();
+        vm.warp(p.deadline + 30 minutes + 1 hours);
+        vm.prank(admin);
+        adManager.unpause();
+        uint256 reopened = block.timestamp + 30 minutes;
+
+        adManager.claimCancel(p);
+        (, uint64 finalizeAt,) = adManager.claims(h);
+        assertEq(finalizeAt, p.deadline + 30 minutes, "the record keeps the deadline-anchored end");
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, reopened));
+        adManager.finalizeCancel(p);
+        vm.warp(reopened + 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, reopened));
+        adManager.unlock(p, bytes32("P2"), bytes32(0), hex"", hex"");
+        adManager.finalizeCancel(p);
+        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Cancelled));
+    }
+
+    /// G3: once claimed, the cutoff is the claim's frozen end; an admin retiming cannot move it.
+    function test_G3_retimingDuringAClaimDoesNotMoveTheCutoff() public {
+        (IAdManager.OrderParams memory p,) = _lock(21);
+        _claim(p);
+        _setTiming(RouteTiming.Timing(0, 2 hours, 0, 1 days, 0));
+        vm.warp(p.deadline + 30 minutes + 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, p.deadline + 30 minutes));
+        adManager.unlock(p, bytes32("G3"), bytes32(0), hex"", hex"");
+        adManager.finalizeCancel(p);
+
+        // And lowered: the window stays open as long as the claim said.
+        _setTiming(RouteTiming.Timing(0, 2 hours, 0, 1 days, 0));
+        (IAdManager.OrderParams memory q,) = _openOrder(lastAdId, address(adToken), 60 ether, 22, bridger, recipient);
+        _claim(q);
+        _setTiming(RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        vm.warp(q.deadline + 1 hours);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, q.deadline + 2 hours));
+        adManager.finalizeCancel(q);
+        adManager.unlock(q, bytes32("G3b"), bytes32(0), hex"", hex"");
+    }
+
     /*//////////////////////////// T-59 with the real verifier ////////////////////////////*/
 
     /// A domain-3 proof of the order leg's settled leaf flips a Claimed primary to Filled.
@@ -853,6 +919,41 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         portal.finalizeBackstop(p);
         vm.expectRevert(Pausable.EnforcedPause.selector);
         portal.recordSettled(p);
+    }
+
+    /// G2 on the follower: a pause across a backstop window reopens it for a full buffer.
+    function test_pause_acrossBackstopWindow_evidenceGetsAFullWindowAfterUnpause() public {
+        _wireAnchor();
+        (IOrderPortal.OrderParams memory p, bytes32 h) = _create(18);
+        vm.warp(p.deadline + 1 days);
+        portal.claimBackstop(p);
+        vm.prank(admin);
+        portal.pause();
+        vm.warp(block.timestamp + 30 minutes + 1 hours);
+        vm.prank(admin);
+        portal.unpause();
+        uint256 reopened = block.timestamp + 30 minutes;
+
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, reopened));
+        portal.finalizeBackstop(p);
+        _anchorRoot(bytes32(uint256(18)));
+        portal.presentSettled(p, bytes32(uint256(18)), hex"");
+        assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Filled));
+
+        (IOrderPortal.OrderParams memory q, bytes32 hq) = _create(19);
+        vm.warp(q.deadline + 1 days);
+        portal.claimBackstop(q);
+        vm.prank(admin);
+        portal.pause();
+        vm.warp(block.timestamp + 2 hours);
+        vm.prank(admin);
+        portal.unpause();
+        uint256 reopened2 = block.timestamp + 30 minutes;
+        vm.warp(reopened2 - 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, reopened2));
+        portal.finalizeBackstop(q);
+        portal.unlock(q, bytes32("PB"), bytes32(0), hex"", hex"");
+        assertEq(uint256(portal.orders(hq)), uint256(IEscrow.Status.Filled));
     }
 
     /*//////////////////////////// T-40 with the real verifier ////////////////////////////*/

@@ -38,7 +38,9 @@ import {TwoStepAdmin} from "../libraries/TwoStepAdmin.sol";
  *          └──cancelNeverLocked (primary only)──▶ Cancelled (+ CANCEL leaf)
  *
  *      `Filled` and `Cancelled` are terminal. Nothing terminal happens on a clock alone: a clock only
- *      opens a window, and evidence inside the window always wins over the refund after it. The
+ *      opens a window, and evidence inside the window always wins over the refund after it — a pause
+ *      included: every window ends no earlier than `lastUnpausedAt + buffer`, so a pause that outlives
+ *      a window hands the evidence a full window again instead of a same-block race. The
  *      SETTLED leaf is its own transaction on both chains (Soroban's per-tx budget forces it there;
  *      EVM matches so the relayer batches one shape), permissionless and single-shot.
  */
@@ -100,6 +102,10 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     /// @notice Whether the order's SETTLED leaf is in the MMR (`recordSettled`, once per fill).
     mapping(bytes32 orderHash => bool) public settledRecorded;
 
+    /// @notice When the escrow was last unpaused; every presentation window ends no earlier than
+    ///         this plus the route's buffer (a pause freezes evidence, so it must not run the clocks).
+    uint64 public lastUnpausedAt;
+
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -125,6 +131,7 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
 
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
+        lastUnpausedAt = uint64(block.timestamp);
     }
 
     /// @inheritdoc IEscrow
@@ -363,10 +370,22 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
         emit ClaimOpened(orderHash, entry, uint64(finalizeAt));
     }
 
+    /**
+     * @dev When the leg's presentation window ends: the claim's `finalizeAt` once claimed, else
+     *      `deadline + buffer` (the primary's deadline-anchored window before any claim) — and never
+     *      earlier than `lastUnpausedAt + buffer`. One number serves both sides of the race: the
+     *      unlock/presentation cutoff is this minus the margin, the finalize needs this reached.
+     */
+    function _windowEnd(bytes32 orderHash, uint256 deadline, uint64 buffer) internal view returns (uint256) {
+        uint256 base = orders[orderHash] == Status.Claimed ? claims[orderHash].finalizeAt : deadline + buffer;
+        uint256 grace = uint256(lastUnpausedAt) + buffer;
+        return base > grace ? base : grace;
+    }
+
     /// @dev The leg must be `Claimed` and its window over; returns nothing, the caller then `_cancel`s.
-    function _requireFinalizable(bytes32 orderHash) internal view {
+    function _requireFinalizable(bytes32 orderHash, uint64 buffer) internal view {
         if (orders[orderHash] != Status.Claimed) revert Escrow__NotClaimed(orderHash);
-        _requireReached(claims[orderHash].finalizeAt);
+        _requireReached(_windowEnd(orderHash, 0, buffer));
     }
 
     /// @dev `→ Cancelled`: close the window, count out. The leaf and the funds are the caller's.

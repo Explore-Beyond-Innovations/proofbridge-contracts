@@ -190,12 +190,21 @@ export async function link(
   // anchor delay — a forgotten clock must not ship a default and record it as intended.
   {
     const timing = routeTimingFromEnv(local.meta.env);
+    // The CLI reads a JSON string in a u64 slot as an enum variant name and rejects the call
+    // (monorepo 69486f0): every field goes out as a JSON number, exact to 2^53.
+    const u64 = (name: string, v: string): number => {
+      const n = BigInt(v);
+      if (n > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new Error(`link: ${name}=${v} exceeds 2^53; the CLI JSON path cannot carry it exactly`);
+      }
+      return Number(n);
+    };
     const timingArg = JSON.stringify({
-      min_window: timing.minWindow,
-      buffer: timing.buffer,
-      margin: timing.margin,
-      long_backstop: timing.longBackstop,
-      claim_stagger: timing.claimStagger,
+      min_window: u64("ROUTE_MIN_WINDOW_S", timing.minWindow),
+      buffer: u64("ROUTE_BUFFER_S", timing.buffer),
+      margin: u64("ROUTE_MARGIN_S", timing.margin),
+      long_backstop: u64("ROUTE_LONG_BACKSTOP_S", timing.longBackstop),
+      claim_stagger: u64("ROUTE_CLAIM_STAGGER_S", timing.claimStagger),
     });
     const timingAlreadySet = (escrow: string): boolean => {
       try {

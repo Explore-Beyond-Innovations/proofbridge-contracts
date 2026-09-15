@@ -113,6 +113,9 @@ impl OrderPortalContract {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
         storage::set_paused(&env, false);
+        // A pause freezes evidence, so it must not run the clocks: every window ends no earlier
+        // than this + buffer (see `window_end`).
+        storage::set_last_unpaused_at(&env, env.ledger().timestamp());
         events::Unpaused {
             admin: config.admin,
         }
@@ -518,9 +521,14 @@ impl OrderPortalContract {
         let order_hash = Self::order_hash(&env, &config, &params);
         Self::require_status(&env, &order_hash, Status::Open)?;
         let t = Self::timing(&env, params.ad_chain_id)?;
-        Self::require_reached(&env, params.deadline + t.long_backstop)?;
+        Self::require_reached(&env, params.deadline.saturating_add(t.long_backstop))?;
         let now = env.ledger().timestamp();
-        Self::open_claim(&env, &order_hash, ClaimEntry::Backstop, now + t.buffer);
+        Self::open_claim(
+            &env,
+            &order_hash,
+            ClaimEntry::Backstop,
+            now.saturating_add(t.buffer),
+        );
         storage::extend_instance_ttl(&env);
         Ok(())
     }
@@ -530,7 +538,8 @@ impl OrderPortalContract {
         Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
-        Self::require_finalizable(&env, &order_hash)?;
+        let buffer = Self::timing(&env, params.ad_chain_id)?.buffer;
+        Self::require_finalizable(&env, &order_hash, buffer)?;
         Self::cancel(&env, &order_hash, &params.bridger, false);
         Self::refund_bridger(&env, &config, &order_hash, &params);
         storage::extend_instance_ttl(&env);
@@ -770,10 +779,9 @@ impl OrderPortalContract {
     ) -> Result<u64, OrderPortalError> {
         let t = Self::timing(env, params.ad_chain_id)?;
         if storage::get_order_status(env, order_hash) == Status::Claimed {
-            let claim = storage::get_claim(env, order_hash).ok_or(OrderPortalError::NotClaimed)?;
-            return Ok(claim.finalize_at - t.margin);
+            return Ok(Self::window_end(env, order_hash, 0, t.buffer).saturating_sub(t.margin));
         }
-        Ok(params.deadline - t.claim_stagger)
+        Ok(params.deadline.saturating_sub(t.claim_stagger))
     }
 
     // ---- termination core (2.3e), mirrored by the ad-manager ----
@@ -830,13 +838,31 @@ impl OrderPortalContract {
         }
     }
 
+    /// When the leg's presentation window ends: the claim's `finalize_at` once claimed, else
+    /// `deadline + buffer` — and never earlier than `last_unpaused_at + buffer`. One number serves
+    /// both sides of the race: the unlock cutoff is this minus the margin, the finalize needs it
+    /// reached. Saturating: a far deadline never panics (EVM computes in uint256).
+    fn window_end(env: &Env, order_hash: &BytesN<32>, deadline: u64, buffer: u64) -> u64 {
+        let base = match storage::get_claim(env, order_hash) {
+            Some(claim) if storage::get_order_status(env, order_hash) == Status::Claimed => {
+                claim.finalize_at
+            }
+            _ => deadline.saturating_add(buffer),
+        };
+        let grace = storage::get_last_unpaused_at(env).saturating_add(buffer);
+        base.max(grace)
+    }
+
     /// `Claimed` and the window is over.
-    fn require_finalizable(env: &Env, order_hash: &BytesN<32>) -> Result<(), OrderPortalError> {
+    fn require_finalizable(
+        env: &Env,
+        order_hash: &BytesN<32>,
+        buffer: u64,
+    ) -> Result<(), OrderPortalError> {
         if storage::get_order_status(env, order_hash) != Status::Claimed {
             return Err(OrderPortalError::NotClaimed);
         }
-        let claim = storage::get_claim(env, order_hash).ok_or(OrderPortalError::NotClaimed)?;
-        Self::require_reached(env, claim.finalize_at)
+        Self::require_reached(env, Self::window_end(env, order_hash, 0, buffer))
     }
 
     /// Gate for the evidence paths: the root must be notarized by the wired anchor (D7).

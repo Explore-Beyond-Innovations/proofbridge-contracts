@@ -124,6 +124,9 @@ impl AdManagerContract {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
         storage::set_paused(&env, false);
+        // A pause freezes evidence, so it must not run the clocks: every window ends no earlier
+        // than this + buffer (see `window_end`).
+        storage::set_last_unpaused_at(&env, env.ledger().timestamp());
         events::Unpaused {
             admin: config.admin,
         }
@@ -653,10 +656,13 @@ impl AdManagerContract {
             return Err(AdManagerError::NullifierUsed);
         }
         // 2.3e D2: the co-signed unlock is the presentation — valid through the window, minus
-        // the margin. With margin 0 the window's last second is shared with finalize_cancel;
-        // the first transaction wins.
+        // the margin. Once claimed the end is the claim's frozen `finalize_at`, so a retiming
+        // cannot move the cutoff across it. With margin 0 the window's last second is shared
+        // with finalize_cancel; the first transaction wins.
         let t = Self::timing(&env, params.order_chain_id)?;
-        if env.ledger().timestamp() > params.deadline + t.buffer - t.margin {
+        let cutoff =
+            Self::window_end(&env, &order_hash, params.deadline, t.buffer).saturating_sub(t.margin);
+        if env.ledger().timestamp() > cutoff {
             return Err(AdManagerError::OrderExpired);
         }
 
@@ -718,7 +724,7 @@ impl AdManagerContract {
             &env,
             &order_hash,
             ClaimEntry::Deadline,
-            params.deadline + t.buffer,
+            params.deadline.saturating_add(t.buffer),
         );
         storage::extend_instance_ttl(&env);
         Ok(())
@@ -730,7 +736,8 @@ impl AdManagerContract {
         Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
-        Self::require_finalizable(&env, &order_hash)?;
+        let buffer = Self::timing(&env, params.order_chain_id)?.buffer;
+        Self::require_finalizable(&env, &order_hash, buffer)?;
 
         let ad_amount = Self::ad_amount(&params)?;
         let mut ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
@@ -1088,13 +1095,31 @@ impl AdManagerContract {
         }
     }
 
+    /// When the leg's presentation window ends: the claim's `finalize_at` once claimed, else
+    /// `deadline + buffer` — and never earlier than `last_unpaused_at + buffer`. One number serves
+    /// both sides of the race: the unlock cutoff is this minus the margin, the finalize needs it
+    /// reached. Saturating: a far deadline never panics (EVM computes in uint256).
+    fn window_end(env: &Env, order_hash: &BytesN<32>, deadline: u64, buffer: u64) -> u64 {
+        let base = match storage::get_claim(env, order_hash) {
+            Some(claim) if storage::get_order_status(env, order_hash) == Status::Claimed => {
+                claim.finalize_at
+            }
+            _ => deadline.saturating_add(buffer),
+        };
+        let grace = storage::get_last_unpaused_at(env).saturating_add(buffer);
+        base.max(grace)
+    }
+
     /// `Claimed` and the window is over.
-    fn require_finalizable(env: &Env, order_hash: &BytesN<32>) -> Result<(), AdManagerError> {
+    fn require_finalizable(
+        env: &Env,
+        order_hash: &BytesN<32>,
+        buffer: u64,
+    ) -> Result<(), AdManagerError> {
         if storage::get_order_status(env, order_hash) != Status::Claimed {
             return Err(AdManagerError::NotClaimed);
         }
-        let claim = storage::get_claim(env, order_hash).ok_or(AdManagerError::NotClaimed)?;
-        Self::require_reached(env, claim.finalize_at)
+        Self::require_reached(env, Self::window_end(env, order_hash, 0, buffer))
     }
 
     /// Gate for the evidence paths: the root must be notarized by the wired anchor (D7).
