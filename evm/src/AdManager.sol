@@ -12,6 +12,8 @@ import {DecimalScaling} from "./libraries/DecimalScaling.sol";
 import {LeafDomain} from "./libraries/LeafDomain.sol";
 import {OrderHash} from "./libraries/OrderHash.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
+import {RouteTiming} from "./libraries/RouteTiming.sol";
+import {Termination} from "./libraries/Termination.sol";
 
 /**
  * @title AdManager (Proofbridge)
@@ -19,6 +21,11 @@ import {RequestAuth} from "./libraries/RequestAuth.sol";
  * @custom:security-contact security@proofbridge.xyz
  * @notice The maker's leg. Makers post liquidity ads, lock ad funds against EIP-712 orders, and
  *         bridgers unlock the lock on this chain with a proof of their deposit on the order chain.
+ *         This leg is the termination primary (2.3e): the only place a clock runs. After the
+ *         deadline anyone may claim a cancel, which opens the window `[deadline, deadline + buffer)`;
+ *         the co-signed `unlock` (accepted until `deadline + buffer − margin`) or a `presentSettled`
+ *         proof settles it; an unchallenged window releases the lock and records the CANCEL leaf the
+ *         order leg refunds against; `recordSettled` appends the SETTLED leaf after a fill.
  *         Everything not specific to ads lives in {EscrowBase}.
  */
 contract AdManager is EscrowBase, IAdManager {
@@ -157,9 +164,10 @@ contract AdManager is EscrowBase, IAdManager {
     function lockForOrder(OrderParams calldata params) external nonReentrant whenNotPaused returns (bytes32 orderHash) {
         Ad storage ad = _getAdOwned(params.adId, msg.sender);
         orderHash = _validateOrder(ad, params);
+        _requireMinWindow(params.orderChainId, params.deadline);
 
         // The signed amount is in order-chain units; the pool accounts in ad-chain units.
-        uint256 adAmount = DecimalScaling.scale(params.amount, params.orderDecimals, params.adDecimals);
+        uint256 adAmount = _adAmount(params);
         if (adAmount > ad.balance - ad.locked) revert Escrow__InsufficientLiquidity();
 
         _openOrder(orderHash);
@@ -188,7 +196,8 @@ contract AdManager is EscrowBase, IAdManager {
         bytes calldata cosigData
     ) external nonReentrant whenNotPaused {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
-        _requireBeforeDeadline(params.deadline);
+        // D2: the co-signed unlock is the presentation — valid through the window, minus the margin.
+        _requireNotPast(_presentationCutoff(orderHash, params));
         _requireSettleable(orderHash, nullifierHash);
         // Gate 2 — root authenticity (the co-signed root); mandatory, reverts NoRootVerifier when unwired.
         _requireRootValid(
@@ -199,15 +208,75 @@ contract AdManager is EscrowBase, IAdManager {
         _requireDepositProof(orderHash, nullifierHash, targetRoot, proof, _PUBLIC_INPUT_SIDE_AD);
 
         _settle(orderHash, nullifierHash, params.adSettlementSigner);
-
-        // Pay the bridger's recipient from the ad, in the units the lock reserved.
-        Ad storage ad = ads[params.adId];
-        uint256 adAmount = DecimalScaling.scale(params.amount, params.orderDecimals, params.adDecimals);
-        ad.balance -= adAmount;
-        ad.locked -= adAmount;
-        _payOrCredit(params.orderRecipient.toAddressChecked(), ad.token, adAmount);
+        _payFromAd(params);
 
         emit OrderUnlocked(orderHash, params.orderRecipient, nullifierHash);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        TERMINATION — THE PRIMARY (2.3e)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @inheritdoc IAdManager
+    function claimCancel(OrderParams calldata params) external nonReentrant whenNotPaused {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        _requireStatus(orderHash, Status.Open);
+        _requireReached(params.deadline);
+        // Deadline-anchored (D1): a late claim cannot shorten the window the fast unlock relies on;
+        // a pause that fell inside the window already extended it (`_windowEnd`).
+        _openClaim(
+            orderHash,
+            Termination.ClaimEntry.Deadline,
+            _windowEnd(orderHash, params.deadline, _timing(params.orderChainId).buffer)
+        );
+    }
+
+    /// @inheritdoc IAdManager
+    function finalizeCancel(OrderParams calldata params) external nonReentrant whenNotPaused {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        _requireFinalizable(orderHash, _timing(params.orderChainId).buffer);
+
+        Ad storage ad = ads[params.adId];
+        uint256 adAmount = _adAmount(params);
+        ad.locked -= adAmount;
+        _cancel(orderHash, params.adSettlementSigner, false);
+        _appendLeaf(orderHash, LeafDomain.CANCEL);
+
+        emit LockCancelled(params.adId, orderHash, adAmount);
+    }
+
+    /// @inheritdoc IAdManager
+    function cancelNeverLocked(OrderParams calldata params) external nonReentrant whenNotPaused {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        _requireStatus(orderHash, Status.None);
+        _requireReached(params.deadline);
+        // D5: a lock needs `deadline ≥ now + minWindow`, so past the deadline none can follow this.
+        if (peerEscrow[params.orderChainId] == bytes32(0)) revert Escrow__ChainNotSupported(params.orderChainId);
+        _timing(params.orderChainId);
+
+        _orders[orderHash].status = Status.Cancelled;
+        _appendLeaf(orderHash, LeafDomain.CANCEL);
+        emit OrderCancelled(orderHash, false);
+    }
+
+    /// @inheritdoc IAdManager
+    function recordSettled(OrderParams calldata params) external nonReentrant whenNotPaused {
+        _recordSettled(_hashOrder(params, block.chainid, address(this)));
+    }
+
+    /// @inheritdoc IAdManager
+    function presentSettled(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof)
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        _requirePresentable(orderHash);
+        _requireAnchored(params.orderChainId, targetRoot);
+        _requireEventProof(targetRoot, orderHash, proof, LeafDomain.SETTLED);
+
+        _fill(orderHash, params.adSettlementSigner, true);
+        _payFromAd(params);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -251,6 +320,28 @@ contract AdManager is EscrowBase, IAdManager {
             adSettlementSigner: p.adSettlementSigner
         });
         return OrderHash.digest(o);
+    }
+
+    /// @dev The signed amount in ad-chain units — what the lock reserved and the payout releases.
+    function _adAmount(OrderParams calldata p) private pure returns (uint256) {
+        return DecimalScaling.scale(p.amount, p.orderDecimals, p.adDecimals);
+    }
+
+    /// @dev Pay the bridger's recipient from the ad, in the units the lock reserved.
+    function _payFromAd(OrderParams calldata p) private {
+        Ad storage ad = ads[p.adId];
+        uint256 adAmount = _adAmount(p);
+        ad.balance -= adAmount;
+        ad.locked -= adAmount;
+        _payOrCredit(p.orderRecipient.toAddressChecked(), ad.token, adAmount);
+    }
+
+    /// @dev The last second the co-signed unlock is accepted (D2): the window's end minus the margin.
+    ///      Once claimed the end is the claim's frozen `finalizeAt`, so an admin retiming cannot move
+    ///      the cutoff across it.
+    function _presentationCutoff(bytes32 orderHash, OrderParams calldata p) private view returns (uint256) {
+        RouteTiming.Timing storage t = _timing(p.orderChainId);
+        return _windowEnd(orderHash, p.deadline, t.buffer) - t.margin;
     }
 
     /// @dev The registry gate on every settlement-signer set and on every lock (2.3c D2): fails

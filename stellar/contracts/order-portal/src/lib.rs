@@ -7,6 +7,24 @@
 //!
 //! Order hashes are computed using EIP-712 encoding to ensure cross-chain
 //! compatibility.
+//!
+//! ## Termination (2.3e)
+//!
+//! This leg is the follower: it refunds only against a proof of the ad leg's CANCEL leaf under an
+//! anchored root, never on a clock; the maker's co-signed `unlock` stops `claim_stagger` before
+//! the deadline, in every state, so a cancel claim always leaves time to land it — the package
+//! proves the lock, not the outcome; and a far backstop (`deadline + long_backstop`) opens a
+//! window in which only outcome evidence counts (a settled-leaf proof pays the maker, a cancel-leaf
+//! proof refunds the bridger, silence refunds the bridger), never a bare refund. Every `Filled` gets a
+//! SETTLED leaf, appended by `record_settled` in its own transaction (Soroban's per-tx budget;
+//! EVM appends it inside the fill). The same state machine as EVM:
+//!
+//! ```text
+//!   None ──create──▶ Open ──claim_backstop──▶ Claimed ──finalize_backstop──▶ Cancelled (refund)
+//!                     │                         │
+//!                     ├──refund_by_cancel (proof, no clock)──┘──▶ Cancelled (refund)
+//!                     └──unlock / present_settled──┘──▶ Filled ──record_settled──▶ (+ SETTLED leaf)
+//! ```
 
 #![no_std]
 
@@ -22,10 +40,14 @@ mod token;
 mod types;
 mod validation;
 
+use proofbridge_core::cross_contract::{LEAF_DOMAIN_AD, LEAF_DOMAIN_CANCEL, LEAF_DOMAIN_SETTLED};
 use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env};
 
 pub use errors::OrderPortalError;
-pub use types::{ChainInfo, ContractConfig, OrderParams, Status, NATIVE_TOKEN_ADDRESS};
+pub use types::{
+    ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, OrderParams, OrderRecord, RouteTiming,
+    Status, NATIVE_TOKEN_ADDRESS,
+};
 
 // =============================================================================
 // Contract Definition
@@ -81,6 +103,9 @@ impl OrderPortalContract {
     pub fn pause(env: Env) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
+        if !storage::is_paused(&env) {
+            storage::set_last_paused_at(&env, env.ledger().timestamp());
+        }
         storage::set_paused(&env, true);
         events::Paused {
             admin: config.admin,
@@ -92,6 +117,16 @@ impl OrderPortalContract {
     pub fn unpause(env: Env) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
+        // A pause freezes evidence, so it stops the clocks: the seconds spent paused move every
+        // window that was open by exactly that much (see `window_end`).
+        if storage::is_paused(&env) {
+            let now = env.ledger().timestamp();
+            let paused_for = now.saturating_sub(storage::get_last_paused_at(&env));
+            storage::set_paused_seconds(
+                &env,
+                storage::get_paused_seconds(&env).saturating_add(paused_for),
+            );
+        }
         storage::set_paused(&env, false);
         events::Unpaused {
             admin: config.admin,
@@ -173,6 +208,31 @@ impl OrderPortalContract {
         config.admin.require_auth();
         storage::set_root_verifier(&env, chain_id, &module);
         events::RootVerifierSet { chain_id, module }.publish(&env);
+        Ok(())
+    }
+
+    /// Set the termination clocks for a peer chain (2.3e D6). Validated; unset fails closed.
+    pub fn set_route_timing(
+        env: Env,
+        chain_id: u128,
+        timing: RouteTiming,
+    ) -> Result<(), OrderPortalError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        proofbridge_core::timing::validate(&timing).map_err(|_| OrderPortalError::InvalidTiming)?;
+        storage::set_route_timing(&env, chain_id, &timing);
+        events::RouteTimingSet { chain_id, timing }.publish(&env);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Set the notary the evidence paths read (2.3e D7). Settlement never touches it.
+    pub fn set_root_anchor(env: Env, anchor: Address) -> Result<(), OrderPortalError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        storage::set_root_anchor(&env, &anchor);
+        events::RootAnchorSet { anchor }.publish(&env);
+        storage::extend_instance_ttl(&env);
         Ok(())
     }
 
@@ -269,9 +329,10 @@ impl OrderPortalContract {
         validation::validate_order(&env, &params)?;
         // Verify signed orderDecimals matches on-chain token decimals.
         Self::assert_order_decimals(&env, &params, &config.w_native_token)?;
+        // 2.3e D5: the window bound.
+        Self::require_min_window(&env, params.ad_chain_id, params.deadline)?;
 
-        let contract_bytes = eip712::contract_address_to_bytes32(&env);
-        let order_hash = eip712::hash_order(&env, &params, config.chain_id, &contract_bytes);
+        let order_hash = Self::order_hash(&env, &config, &params);
 
         if storage::get_order_status(&env, &order_hash) != Status::None {
             return Err(OrderPortalError::OrderExists);
@@ -294,9 +355,15 @@ impl OrderPortalContract {
             params.amount,
         )?;
 
-        cross_contract::append_to_merkle(&env, &config.merkle_manager, &order_hash, 1)?;
+        // The deposit is consumed on the ad side: its leaf carries the AD domain.
+        cross_contract::append_to_merkle(
+            &env,
+            &config.merkle_manager,
+            &order_hash,
+            LEAF_DOMAIN_AD,
+        )?;
 
-        storage::set_order_status(&env, &order_hash, Status::Open);
+        storage::open_order(&env, &order_hash);
         // 2.3c D1: count only the party this escrow authenticated (the bridger). The maker is
         // counted by the ad-manager that authenticated them.
         storage::set_in_flight(
@@ -347,16 +414,20 @@ impl OrderPortalContract {
         // Permissionless (EVM parity): the recipient is hash-bound, so anyone may submit.
         Self::assert_order_decimals(&env, &params, &config.w_native_token)?;
 
-        let contract_bytes = eip712::contract_address_to_bytes32(&env);
-        let order_hash = eip712::hash_order(&env, &params, config.chain_id, &contract_bytes);
+        let order_hash = Self::order_hash(&env, &config, &params);
 
+        // `Open` only: after the deadline the co-signed package says nothing about the ad leg's
+        // outcome, so a backstop window (`Claimed`) never reopens it.
         if storage::get_order_status(&env, &order_hash) != Status::Open {
             return Err(OrderPortalError::OrderNotOpen);
         }
         if storage::is_nullifier_used(&env, &nullifier_hash) {
             return Err(OrderPortalError::NullifierUsed);
         }
-        if env.ledger().timestamp() > params.deadline {
+        // D2: stop `claim_stagger` before the deadline so the maker's cancel claim on the ad chain
+        // always leaves the watchtower time to land this leg.
+        let t = Self::timing(&env, params.ad_chain_id)?;
+        if env.ledger().timestamp() > params.deadline.saturating_sub(t.claim_stagger) {
             return Err(OrderPortalError::OrderExpired);
         }
 
@@ -386,21 +457,8 @@ impl OrderPortalContract {
         cross_contract::verify_proof(&env, &config.verifier, &public_inputs, &proof)?;
 
         storage::set_nullifier_used(&env, &nullifier_hash);
-        storage::set_order_status(&env, &order_hash, Status::Filled);
-        // Mirrors create_order (2.3c D1).
-        storage::set_in_flight(
-            &env,
-            &params.bridger,
-            storage::get_in_flight(&env, &params.bridger) - 1,
-        );
-
-        Self::pay_or_credit(
-            &env,
-            &config.w_native_token,
-            &params.ad_recipient,
-            &params.order_chain_token,
-            params.amount,
-        );
+        Self::fill(&env, &order_hash, &params.bridger, false);
+        Self::pay_maker(&env, &config, &params);
 
         events::OrderUnlocked {
             order_hash: order_hash.clone(),
@@ -409,6 +467,126 @@ impl OrderPortalContract {
         }
         .publish(&env);
 
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    // =========================================================================
+    // Termination — the follower (2.3e)
+    // =========================================================================
+
+    /// Refund the bridger against a proof of the primary's CANCEL leaf under an anchored root.
+    /// Reads no clock (D4). `Open` or `Claimed`: a cancel proof beats a backstop window.
+    pub fn refund_by_cancel(
+        env: Env,
+        params: OrderParams,
+        target_root: BytesN<32>,
+        proof: Bytes,
+    ) -> Result<(), OrderPortalError> {
+        Self::require_not_paused(&env)?;
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        Self::require_presentable(&env, &order_hash)?;
+        Self::require_anchored(&env, params.ad_chain_id, &target_root)?;
+
+        let inputs = proofbridge_core::cross_contract::build_event_public_inputs(
+            &env,
+            &target_root,
+            &order_hash,
+            LEAF_DOMAIN_CANCEL,
+        );
+        cross_contract::verify_proof(&env, &config.verifier, &inputs, &proof)?;
+
+        Self::cancel(&env, &order_hash, &params.bridger, true);
+        Self::refund_bridger(&env, &config, &order_hash, &params);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Settle the deposit to the maker on a proof of the ad leg's SETTLED leaf under an anchored
+    /// root. `Open` or `Claimed`; not window-gated (D3); no nullifier.
+    pub fn present_settled(
+        env: Env,
+        params: OrderParams,
+        target_root: BytesN<32>,
+        proof: Bytes,
+    ) -> Result<(), OrderPortalError> {
+        Self::require_not_paused(&env)?;
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        Self::require_presentable(&env, &order_hash)?;
+        Self::require_anchored(&env, params.ad_chain_id, &target_root)?;
+
+        let inputs = proofbridge_core::cross_contract::build_event_public_inputs(
+            &env,
+            &target_root,
+            &order_hash,
+            LEAF_DOMAIN_SETTLED,
+        );
+        cross_contract::verify_proof(&env, &config.verifier, &inputs, &proof)?;
+
+        Self::fill(&env, &order_hash, &params.bridger, true);
+        Self::pay_maker(&env, &config, &params);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Open the backstop window at `now >= deadline + long_backstop` (an anchor outage). The
+    /// window is claim-anchored (D1: this clock starts days late; no evidence race straddles it)
+    /// and may be finalized at `now + buffer`. Permissionless.
+    pub fn claim_backstop(env: Env, params: OrderParams) -> Result<(), OrderPortalError> {
+        Self::require_not_paused(&env)?;
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        Self::require_status(&env, &order_hash, Status::Open)?;
+        let t = Self::timing(&env, params.ad_chain_id)?;
+        Self::require_reached(&env, params.deadline.saturating_add(t.long_backstop))?;
+        let now = env.ledger().timestamp();
+        Self::open_claim(
+            &env,
+            &order_hash,
+            ClaimEntry::Backstop,
+            now.saturating_add(t.buffer),
+        );
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// After an unchallenged backstop window: refund the bridger.
+    pub fn finalize_backstop(env: Env, params: OrderParams) -> Result<(), OrderPortalError> {
+        Self::require_not_paused(&env)?;
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        let buffer = Self::timing(&env, params.ad_chain_id)?.buffer;
+        Self::require_finalizable(&env, &order_hash, buffer)?;
+        Self::cancel(&env, &order_hash, &params.bridger, false);
+        Self::refund_bridger(&env, &config, &order_hash, &params);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Append this leg's SETTLED leaf for a `Filled` order (D8), so the other escrow's presenter
+    /// can prove this one paid. Permissionless, single-shot, its own transaction: on Soroban a
+    /// verify plus a Poseidon2 MMR append does not fit the 100M-instruction budget, so the leaf
+    /// follows the fill instead of riding in it (EVM appends it inside the fill).
+    pub fn record_settled(env: Env, params: OrderParams) -> Result<(), OrderPortalError> {
+        Self::require_not_paused(&env)?;
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        if storage::get_order_status(&env, &order_hash) != Status::Filled {
+            return Err(OrderPortalError::NotFilled);
+        }
+        if storage::is_settled_recorded(&env, &order_hash) {
+            return Err(OrderPortalError::SettledRecorded);
+        }
+        storage::set_settled_recorded(&env, &order_hash);
+        cross_contract::append_to_merkle(
+            &env,
+            &config.merkle_manager,
+            &order_hash,
+            LEAF_DOMAIN_SETTLED,
+        )?;
+        events::SettledRecorded { order_hash }.publish(&env);
         storage::extend_instance_ttl(&env);
         Ok(())
     }
@@ -519,6 +697,36 @@ impl OrderPortalContract {
         storage::get_order_status(&env, &order_hash)
     }
 
+    /// The termination clocks for a peer chain, if set.
+    pub fn get_route_timing(env: Env, chain_id: u128) -> Option<RouteTiming> {
+        storage::get_route_timing(&env, chain_id)
+    }
+
+    /// The notary the evidence paths read, if set.
+    pub fn get_root_anchor(env: Env) -> Option<Address> {
+        storage::get_root_anchor(&env)
+    }
+
+    /// The open presentation window on an order, if any.
+    pub fn get_claim(env: Env, order_hash: BytesN<32>) -> Option<ClaimRecord> {
+        storage::get_claim(&env, &order_hash)
+    }
+
+    /// The order's leg: status plus the pause-counter snapshot its window is measured from.
+    pub fn get_order(env: Env, order_hash: BytesN<32>) -> OrderRecord {
+        storage::get_order(&env, &order_hash)
+    }
+
+    /// Seconds the escrow has spent paused in total.
+    pub fn paused_seconds(env: Env) -> u64 {
+        storage::get_paused_seconds(&env)
+    }
+
+    /// Whether the order's SETTLED leaf is in the MMR.
+    pub fn is_settled_recorded(env: Env, order_hash: BytesN<32>) -> bool {
+        storage::is_settled_recorded(&env, &order_hash)
+    }
+
     /// Get chain info.
     pub fn get_chain(env: Env, chain_id: u128) -> Option<ChainInfo> {
         storage::get_chain(&env, chain_id)
@@ -543,6 +751,195 @@ impl OrderPortalContract {
     // =========================================================================
     // Internal Helpers
     // =========================================================================
+
+    fn require_not_paused(env: &Env) -> Result<(), OrderPortalError> {
+        if storage::is_paused(env) {
+            return Err(OrderPortalError::ContractPaused);
+        }
+        Ok(())
+    }
+
+    /// The canonical 17-field order hash from this leg's params plus the order-chain context.
+    fn order_hash(env: &Env, config: &ContractConfig, params: &OrderParams) -> BytesN<32> {
+        let contract_bytes = eip712::contract_address_to_bytes32(env);
+        eip712::hash_order(env, params, config.chain_id, &contract_bytes)
+    }
+
+    /// The maker's payout: the deposit, to the ad's recipient.
+    fn pay_maker(env: &Env, config: &ContractConfig, params: &OrderParams) {
+        Self::pay_or_credit(
+            env,
+            &config.w_native_token,
+            &params.ad_recipient,
+            &params.order_chain_token,
+            params.amount,
+        );
+    }
+
+    /// The bridger's refund: the deposit, back to them.
+    fn refund_bridger(
+        env: &Env,
+        config: &ContractConfig,
+        order_hash: &BytesN<32>,
+        params: &OrderParams,
+    ) {
+        Self::pay_or_credit(
+            env,
+            &config.w_native_token,
+            &params.bridger,
+            &params.order_chain_token,
+            params.amount,
+        );
+        events::OrderRefunded {
+            order_hash: order_hash.clone(),
+            bridger: params.bridger.clone(),
+            amount: params.amount,
+        }
+        .publish(env);
+    }
+
+    // ---- termination core (2.3e), mirrored by the ad-manager ----
+
+    /// The route's clocks, or `NoRouteTiming` (the `RootVerifierNotSet` posture).
+    fn timing(env: &Env, chain_id: u128) -> Result<RouteTiming, OrderPortalError> {
+        storage::get_route_timing(env, chain_id).ok_or(OrderPortalError::NoRouteTiming)
+    }
+
+    fn require_min_window(
+        env: &Env,
+        chain_id: u128,
+        deadline: u64,
+    ) -> Result<(), OrderPortalError> {
+        let t = Self::timing(env, chain_id)?;
+        if deadline < env.ledger().timestamp() + t.min_window {
+            return Err(OrderPortalError::DeadlineTooSoon);
+        }
+        Ok(())
+    }
+
+    fn require_reached(env: &Env, at: u64) -> Result<(), OrderPortalError> {
+        if env.ledger().timestamp() < at {
+            return Err(OrderPortalError::TooEarly);
+        }
+        Ok(())
+    }
+
+    /// The leg must be exactly `expected` (`Open` before a claim).
+    fn require_status(
+        env: &Env,
+        order_hash: &BytesN<32>,
+        expected: Status,
+    ) -> Result<(), OrderPortalError> {
+        if storage::get_order_status(env, order_hash) != expected {
+            return Err(OrderPortalError::NotClaimable);
+        }
+        Ok(())
+    }
+
+    /// `Open` or in a presentation window: evidence may still settle or refund it.
+    fn require_presentable(env: &Env, order_hash: &BytesN<32>) -> Result<(), OrderPortalError> {
+        match storage::get_order_status(env, order_hash) {
+            Status::Open | Status::Claimed => Ok(()),
+            _ => Err(OrderPortalError::NotClaimable),
+        }
+    }
+
+    /// When the leg's presentation window ends, in real time. Once claimed: the claim's
+    /// `finalize_at` plus every second the escrow has been paused since the claim opened (exact
+    /// across any number of pauses). Before a claim: `deadline + buffer` plus every second paused
+    /// since the leg was locked (its own snapshot; a pause before the deadline counts too — it
+    /// froze both unlocks, and more time for evidence is the safe direction). A pause stops the
+    /// clocks and never reopens a closed window: a pause after the end adds its length, but the
+    /// clock moved on by the same length.
+    /// One number serves both sides of the race: the unlock cutoff is this minus the margin, the
+    /// finalize needs it reached. Saturating: a far deadline never panics (EVM uses uint256).
+    fn window_end(env: &Env, order_hash: &BytesN<32>, deadline: u64, buffer: u64) -> u64 {
+        let order = storage::get_order(env, order_hash);
+        let paused = storage::get_paused_seconds(env);
+        if order.status == Status::Claimed {
+            if let Some(claim) = storage::get_claim(env, order_hash) {
+                return claim
+                    .finalize_at
+                    .saturating_add(paused.saturating_sub(claim.paused_at_open));
+            }
+        }
+        deadline
+            .saturating_add(buffer)
+            .saturating_add(paused.saturating_sub(order.paused_at_open))
+    }
+
+    /// `Claimed` and the window is over.
+    fn require_finalizable(
+        env: &Env,
+        order_hash: &BytesN<32>,
+        buffer: u64,
+    ) -> Result<(), OrderPortalError> {
+        if storage::get_order_status(env, order_hash) != Status::Claimed {
+            return Err(OrderPortalError::NotClaimed);
+        }
+        Self::require_reached(env, Self::window_end(env, order_hash, 0, buffer))
+    }
+
+    /// Gate for the evidence paths: the root must be notarized by the wired anchor (D7).
+    fn require_anchored(
+        env: &Env,
+        chain_id: u128,
+        root: &BytesN<32>,
+    ) -> Result<(), OrderPortalError> {
+        let anchor = storage::get_root_anchor(env).ok_or(OrderPortalError::NoRootAnchor)?;
+        if !proofbridge_core::cross_contract::is_anchored(env, &anchor, chain_id, root) {
+            return Err(OrderPortalError::RootNotAnchored);
+        }
+        Ok(())
+    }
+
+    fn open_claim(env: &Env, order_hash: &BytesN<32>, entry: ClaimEntry, finalize_at: u64) {
+        storage::set_claim(
+            env,
+            order_hash,
+            &ClaimRecord {
+                opened_at: env.ledger().timestamp(),
+                finalize_at,
+                paused_at_open: storage::get_paused_seconds(env),
+                entry,
+            },
+        );
+        storage::set_order_status(env, order_hash, Status::Claimed);
+        events::ClaimOpened {
+            order_hash: order_hash.clone(),
+            entry,
+            finalize_at,
+        }
+        .publish(env);
+    }
+
+    /// `Open | Claimed → Filled`: close the window, count out. The SETTLED leaf (D8) is appended
+    /// by `record_settled`, a separate call: a verify plus a Poseidon2 MMR append does not fit
+    /// Soroban's 100M-instruction transaction budget (measured 105.8M against a 96.1M unlock).
+    fn fill(env: &Env, order_hash: &BytesN<32>, account: &BytesN<32>, by_evidence: bool) {
+        storage::set_order_status(env, order_hash, Status::Filled);
+        storage::remove_claim(env, order_hash);
+        // Mirrors create_order (2.3c D1).
+        storage::set_in_flight(env, account, storage::get_in_flight(env, account) - 1);
+        events::OrderSettled {
+            order_hash: order_hash.clone(),
+            by_evidence,
+        }
+        .publish(env);
+    }
+
+    /// `→ Cancelled`: close the window, count out. The follower appends no leaf of its own —
+    /// nothing follows it; the refund is the caller's.
+    fn cancel(env: &Env, order_hash: &BytesN<32>, account: &BytesN<32>, by_evidence: bool) {
+        storage::set_order_status(env, order_hash, Status::Cancelled);
+        storage::remove_claim(env, order_hash);
+        storage::set_in_flight(env, account, storage::get_in_flight(env, account) - 1);
+        events::OrderCancelled {
+            order_hash: order_hash.clone(),
+            by_evidence,
+        }
+        .publish(env);
+    }
 
     /// Verify the signed `order_decimals` matches the order-chain token's
     /// on-chain decimals. Guards against decimal spoofing that would otherwise

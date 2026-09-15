@@ -1,6 +1,7 @@
 import {
   readManifest,
   type ChainDeploymentManifest,
+  type RouteTiming,
 } from "@proofbridge/deployment-manifest";
 import { DEFAULT_STELLAR_CHAIN_ID } from "./common.js";
 import { invokeContract } from "./stellar-cli.js";
@@ -183,6 +184,95 @@ export async function link(
     console.log("  [link] no RootAnchor in the local manifest; redeploy core to add the notary");
   }
 
+  // ── Termination clocks + notary reference for the peer route (2.3e) ──
+  // ROUTE_{MIN_WINDOW,BUFFER,MARGIN,LONG_BACKSTOP,CLAIM_STAGGER}_S. Local deploys default to
+  // the smallest legal clocks; anywhere else every variable must be set explicitly, like the
+  // anchor delay — a forgotten clock must not ship a default and record it as intended.
+  {
+    const timing = routeTimingFromEnv(local.meta.env);
+    // The CLI reads a JSON string in a u64 slot as an enum variant name and rejects the call
+    // (monorepo 69486f0): every field goes out as a JSON number, exact to 2^53.
+    const u64 = (name: string, v: string): number => {
+      const n = BigInt(v);
+      if (n > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new Error(`link: ${name}=${v} exceeds 2^53; the CLI JSON path cannot carry it exactly`);
+      }
+      return Number(n);
+    };
+    const timingArg = JSON.stringify({
+      min_window: u64("ROUTE_MIN_WINDOW_S", timing.minWindow),
+      buffer: u64("ROUTE_BUFFER_S", timing.buffer),
+      margin: u64("ROUTE_MARGIN_S", timing.margin),
+      long_backstop: u64("ROUTE_LONG_BACKSTOP_S", timing.longBackstop),
+      claim_stagger: u64("ROUTE_CLAIM_STAGGER_S", timing.claimStagger),
+    });
+    const timingAlreadySet = (escrow: string): boolean => {
+      try {
+        const out = invokeContract(escrow, "get_route_timing", ["--chain_id", peerChainId], {
+          send: false,
+        });
+        const parsed = JSON.parse(out.split("\n").filter(Boolean).pop() ?? "null");
+        return (
+          !!parsed &&
+          BigInt(parsed.min_window) === BigInt(timing.minWindow) &&
+          BigInt(parsed.buffer) === BigInt(timing.buffer) &&
+          BigInt(parsed.margin) === BigInt(timing.margin) &&
+          BigInt(parsed.long_backstop) === BigInt(timing.longBackstop) &&
+          BigInt(parsed.claim_stagger) === BigInt(timing.claimStagger)
+        );
+      } catch {
+        return false;
+      }
+    };
+    for (const [name, escrow] of [
+      ["AdManager", local.contracts.adManager.address],
+      ["OrderPortal", local.contracts.orderPortal.address],
+    ] as const) {
+      if (timingAlreadySet(escrow)) {
+        console.log(`  [skip] ${name}.set_route_timing(${peerChainId}) already set`);
+        continue;
+      }
+      invokeContract(escrow, "set_route_timing", [
+        "--chain_id",
+        peerChainId,
+        "--timing",
+        timingArg,
+      ]);
+      chainTxs++;
+      console.log(
+        `  [link] ${name}.set_route_timing(${peerChainId}, minWindow=${timing.minWindow}s buffer=${timing.buffer}s margin=${timing.margin}s longBackstop=${timing.longBackstop}s claimStagger=${timing.claimStagger}s)`,
+      );
+    }
+    local.routeTiming[peerChainId] = timing;
+    await writeManifest(localPath, local);
+  }
+  if (local.contracts.rootAnchor) {
+    const anchorAddr = local.contracts.rootAnchor.address;
+    const anchorAlreadySet = (escrow: string): boolean => {
+      try {
+        const out = invokeContract(escrow, "get_root_anchor", [], { send: false });
+        const parsed = JSON.parse(out.split("\n").filter(Boolean).pop() ?? "null");
+        return typeof parsed === "string" && parsed === anchorAddr;
+      } catch {
+        return false;
+      }
+    };
+    for (const [name, escrow] of [
+      ["AdManager", local.contracts.adManager.address],
+      ["OrderPortal", local.contracts.orderPortal.address],
+    ] as const) {
+      if (anchorAlreadySet(escrow)) {
+        console.log(`  [skip] ${name}.set_root_anchor already ${anchorAddr}`);
+        continue;
+      }
+      invokeContract(escrow, "set_root_anchor", ["--anchor", anchorAddr]);
+      chainTxs++;
+      console.log(`  [link] ${name}.set_root_anchor(${anchorAddr}) - evidence paths live`);
+    }
+  } else {
+    console.log("  [link] no RootAnchor in the local manifest; the escrows' evidence paths stay fail-closed");
+  }
+
   // ── Per-pair token routes (two directions per pairKey) ────────────
   let routeTxs = 0;
   for (const localTok of local.tokens) {
@@ -231,3 +321,26 @@ export async function link(
 }
 
 export type { ChainDeploymentManifest };
+
+/** The route clocks from env: local deploys get the smallest legal set; elsewhere every var is required. */
+function routeTimingFromEnv(env: string): RouteTiming {
+  const local = env === "local";
+  const read = (name: string, localDefault: string): string => {
+    const v = process.env[name];
+    if (v !== undefined) {
+      if (!/^\d+$/.test(v)) throw new Error(`link: ${name}="${v}" is not a whole number of seconds`);
+      return v;
+    }
+    if (local) return localDefault;
+    throw new Error(
+      `link: ${name} is unset for env=${env}; set every ROUTE_*_S clock (seconds) or deploy with DEPLOY_ENV=local`,
+    );
+  };
+  return {
+    minWindow: read("ROUTE_MIN_WINDOW_S", "0"),
+    buffer: read("ROUTE_BUFFER_S", "1800"),
+    margin: read("ROUTE_MARGIN_S", "0"),
+    longBackstop: read("ROUTE_LONG_BACKSTOP_S", "86400"),
+    claimStagger: read("ROUTE_CLAIM_STAGGER_S", "0"),
+  };
+}

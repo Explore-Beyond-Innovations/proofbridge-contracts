@@ -260,6 +260,8 @@ export async function deployCore(
       registrar,
     },
     // What the anchor was configured with; per-route delays are added by link.
+    // The route clocks link set last time; a redeploy keeps them until link runs again.
+    routeTiming: existing?.routeTiming,
     rootAnchorConfig: existing?.contracts.rootAnchor
       ? existing.rootAnchorConfig
       : { signers: anchorSigners, threshold: anchorThreshold, anchorDelays: {} },

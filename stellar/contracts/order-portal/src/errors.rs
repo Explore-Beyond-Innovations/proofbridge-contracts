@@ -97,6 +97,30 @@ pub enum OrderPortalError {
     InvalidAccountAddress = 70,
     /// The order's deadline has passed; it can no longer be unlocked.
     OrderExpired = 74,
+
+    // ==========================================================================
+    // Termination (2.3e) — 75-82
+    // ==========================================================================
+    /// No route timing set for the peer chain; every timed path fails closed
+    NoRouteTiming = 75,
+    /// set_route_timing: the clocks violate the D6 rules
+    InvalidTiming = 76,
+    /// The order's deadline is closer than the route's min_window
+    DeadlineTooSoon = 77,
+    /// The order is not in a state this path accepts (Open / Claimed, as documented)
+    NotClaimable = 78,
+    /// The clock the caller relies on has not been reached
+    TooEarly = 79,
+    /// No presentation window is open on the order
+    NotClaimed = 80,
+    /// No root anchor is set; the evidence paths fail closed
+    NoRootAnchor = 81,
+    /// The anchor has not notarized the root (or its delay has not passed)
+    RootNotAnchored = 82,
+    /// record_settled: the order's SETTLED leaf is already in the MMR
+    SettledRecorded = 83,
+    /// record_settled: the order is not `Filled`
+    NotFilled = 84,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {

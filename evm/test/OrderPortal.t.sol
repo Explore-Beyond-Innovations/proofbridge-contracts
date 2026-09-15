@@ -11,6 +11,7 @@ import {IVerifier} from "src/Verifier.sol";
 import {IMerkleManager} from "src/MerkleManager.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
+import {RouteTiming} from "src/libraries/RouteTiming.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
 import {AddressCast} from "src/libraries/AddressCast.sol";
 import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
@@ -76,6 +77,8 @@ contract OrderPortalTest is Test {
         vm.startPrank(admin);
         merkleManager.grantRole(merkleManager.MANAGER_ROLE(), address(portal));
         portal.setRootVerifier(adChainId, address(new MockRootVerifier(true)));
+        // 2.3e: timing is fail-closed; the suite's clocks (buffer 30 min, no window bound, no stagger).
+        portal.setRouteTiming(adChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
         vm.stopPrank();
 
         orderToken = new ERC20Mock();

@@ -11,6 +11,7 @@ import {IVerifier} from "src/Verifier.sol";
 import {MerkleManager, IMerkleManager} from "src/MerkleManager.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
+import {RouteTiming} from "src/libraries/RouteTiming.sol";
 import {MockKeyRegistry} from "./mocks/MockKeyRegistry.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
 import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
@@ -151,6 +152,8 @@ contract ProofBridge is Test {
         adManager.setTokenRoute(NATIVE_TOKEN_ADDRESS, orderChainId, _b32(address(orderToken)));
         // Root authenticity is mandatory at unlock: wire a permissive mock.
         adManager.setRootVerifier(orderChainId, address(new MockRootVerifier(true)));
+        // 2.3e: timing is fail-closed; the suite's clocks (buffer 30 min, no window bound, no stagger).
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
         // 2.3c: the maker is the settlement signer and must hold a usable key.
         MockKeyRegistry keyRegistry = new MockKeyRegistry();
         keyRegistry.set(_b32(maker), true);
@@ -192,6 +195,7 @@ contract ProofBridge is Test {
         orderPortal.setPeerEscrow(adChainId, _b32(address(adManager)));
         orderPortal.setTokenRoute(address(orderToken), adChainId, _b32(address(adToken)));
         orderPortal.setRootVerifier(adChainId, address(new MockRootVerifier(true)));
+        orderPortal.setRouteTiming(adChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
         vm.stopPrank();
 
         vm.chainId(neutral);
