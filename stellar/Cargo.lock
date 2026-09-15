@@ -249,9 +249,11 @@ dependencies = [
 name = "bls-key-registry"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "hex",
  "proofbridge-core",
  "serde_json",
+ "sha2",
  "soroban-sdk",
  "stellar-strkey 0.0.16",
 ]

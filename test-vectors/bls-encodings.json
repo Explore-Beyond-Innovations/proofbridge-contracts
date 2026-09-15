@@ -1020,7 +1020,16 @@
           "validUntil": "1",
           "digest": "0x9cb0f2ee52d7c83a2f8a773fa740f70847576d32f7b9ccde0ab2d182982944d3",
           "ownerSig": {
-            "scheme": "require_auth"
+            "scheme": "sep53-ed25519",
+            "signedPayloadSha256": "0xcfb2a378a07f4826156c03088498b0beb6e69cdfec9c07f955e1583f95599f57",
+            "sig": "0x35e4c03bf49596aebb06ea155f129a8356294318f03e6afd67df9ec206c9bc61821be662dbea5e8a4cbfb54848a73f94acc4496b3a0c2be87295df95e7443200",
+            "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+            "scl": {
+              "r": "0x35e4c03bf49596aebb06ea155f129a8356294318f03e6afd67df9ec206c9bc61",
+              "s": "0x821be662dbea5e8a4cbfb54848a73f94acc4496b3a0c2be87295df95e7443200",
+              "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+              "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+            }
           }
         },
         {
@@ -1028,7 +1037,16 @@
           "validUntil": "2000000000",
           "digest": "0xd566b41f97189de693210a976d8b6ba4a89fd717b41219fea10e0a78fbc68a29",
           "ownerSig": {
-            "scheme": "require_auth"
+            "scheme": "sep53-ed25519",
+            "signedPayloadSha256": "0xed9a4cf84e5445388d78e01eebf6e7d8f6a8dac6247c0a5f0c263174cdd816ed",
+            "sig": "0x78fc4dcac2e6f19cf8c1d805e6965fb6be1bfaf34fe9444bb0b7874a4afac06f83f879a920ea65cb42834e4ac02cb516d106b5636415c49f263224d54e052206",
+            "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+            "scl": {
+              "r": "0x78fc4dcac2e6f19cf8c1d805e6965fb6be1bfaf34fe9444bb0b7874a4afac06f",
+              "s": "0x83f879a920ea65cb42834e4ac02cb516d106b5636415c49f263224d54e052206",
+              "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+              "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+            }
           }
         },
         {
@@ -1036,7 +1054,16 @@
           "validUntil": "1",
           "digest": "0x2bcbaf943504a0ddcb76171ffa1be8b24f288977c9ec2d777fe8cdb3c43091c0",
           "ownerSig": {
-            "scheme": "require_auth"
+            "scheme": "sep53-ed25519",
+            "signedPayloadSha256": "0x578f5137cf6cb44eff112649a7aac5f47dbc44ed0b19e6eb9f4bbb20a6633b93",
+            "sig": "0x4d126db2e9ce7c92db4a0cf0eaf50919b295f4fb825703451ed918d4456f8270712095e701eb87b7a79652708e52d93bf547553b7484cd576252a9e2deb6c402",
+            "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+            "scl": {
+              "r": "0x4d126db2e9ce7c92db4a0cf0eaf50919b295f4fb825703451ed918d4456f8270",
+              "s": "0x712095e701eb87b7a79652708e52d93bf547553b7484cd576252a9e2deb6c402",
+              "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+              "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+            }
           }
         },
         {
@@ -1044,7 +1071,16 @@
           "validUntil": "2000000000",
           "digest": "0x52a2e9ee53c5c48463f30664da54b5a1353b5ac7dbc46f9fa900331d687c67d3",
           "ownerSig": {
-            "scheme": "require_auth"
+            "scheme": "sep53-ed25519",
+            "signedPayloadSha256": "0xcfa0321a0a2443909428f83a05bb71c0f0444d95a95d47e65cf8cc96242a7a7c",
+            "sig": "0x0ea578455afbcb90e18b9a6154fa1813ae719533359d329c1683475b399d4793a3d46074ba5ee3ea5bd8390578b252ffc3b0cf5be147421aa936aa3c9e1b7c0d",
+            "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+            "scl": {
+              "r": "0x0ea578455afbcb90e18b9a6154fa1813ae719533359d329c1683475b399d4793",
+              "s": "0xa3d46074ba5ee3ea5bd8390578b252ffc3b0cf5be147421aa936aa3c9e1b7c0d",
+              "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+              "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+            }
           }
         },
         {
@@ -1052,7 +1088,16 @@
           "validUntil": "1",
           "digest": "0x75b5cb0b9d88b274e0ecb956371858e58f41b729a8318e37c2eff4c36c1de40f",
           "ownerSig": {
-            "scheme": "require_auth"
+            "scheme": "sep53-ed25519",
+            "signedPayloadSha256": "0x9e7f260edb72b3aecd23e07586af13089f9bccd7128855890394ecab36c0908b",
+            "sig": "0x6e520a57d0a97a3968e3cb0948a4427d0cab734d7374327047b17aeef23a1f1538bb01b8f0732a1d1a2987d8955ec21513ba15699b9977da9b98bce818b6780d",
+            "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+            "scl": {
+              "r": "0x6e520a57d0a97a3968e3cb0948a4427d0cab734d7374327047b17aeef23a1f15",
+              "s": "0x38bb01b8f0732a1d1a2987d8955ec21513ba15699b9977da9b98bce818b6780d",
+              "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+              "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+            }
           }
         },
         {
@@ -1060,7 +1105,16 @@
           "validUntil": "2000000000",
           "digest": "0x052b91be997227c51c3195a0b2493e8b2326d04cddf9b202b42bdf92b7608363",
           "ownerSig": {
-            "scheme": "require_auth"
+            "scheme": "sep53-ed25519",
+            "signedPayloadSha256": "0xe76eca78a21d201a15e884c4dcd738895dc591ffc2de74b3b6f6f96351ca241c",
+            "sig": "0xc04c2ce6a9eb1d97997746594a9e0433b47a9bde9c2d5c025ac345effbb026fb25ce01262791e7787376b10c0191e226a50c05df307b61a3db7f795ced8fb70d",
+            "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+            "scl": {
+              "r": "0xc04c2ce6a9eb1d97997746594a9e0433b47a9bde9c2d5c025ac345effbb026fb",
+              "s": "0x25ce01262791e7787376b10c0191e226a50c05df307b61a3db7f795ced8fb70d",
+              "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+              "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+            }
           }
         },
         {
@@ -1068,7 +1122,16 @@
           "validUntil": "1",
           "digest": "0xc6d34acda7d55f4c1c6d61b6cb82dc125c4b10bd492bede40fe5ab1b4a58eb40",
           "ownerSig": {
-            "scheme": "require_auth"
+            "scheme": "sep53-ed25519",
+            "signedPayloadSha256": "0xab1fbda18820afc986ac8bda304c5eba63c4a2961215fedb1ade9c0baaf81834",
+            "sig": "0xa66f3aad001e023f73d0db31bcc42a7f158228e578acdeec5445755a098d6d8ba96399b7b6c0aeb90667787bfda92659321cc4b143324fe00c664c8548dd2800",
+            "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+            "scl": {
+              "r": "0xa66f3aad001e023f73d0db31bcc42a7f158228e578acdeec5445755a098d6d8b",
+              "s": "0xa96399b7b6c0aeb90667787bfda92659321cc4b143324fe00c664c8548dd2800",
+              "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+              "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+            }
           }
         },
         {
@@ -1076,7 +1139,16 @@
           "validUntil": "2000000000",
           "digest": "0x3b0e68f121faf28eeb844cecaf6ac19a17d7aa4dfd60fe11170f290625c8a65e",
           "ownerSig": {
-            "scheme": "require_auth"
+            "scheme": "sep53-ed25519",
+            "signedPayloadSha256": "0x7ac565ae876e53f220b84eb8c452e843e193c0d37cd406d6afcd57604e746c64",
+            "sig": "0x896e0a664c9140bb2dbf76d0955a7da60fff88fd4314933cd611f341cedf5cfc2d8d2d0fcb67bd5cbb7b19db04d818c9f52fa649361dda7465eb53ee61f15308",
+            "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+            "scl": {
+              "r": "0x896e0a664c9140bb2dbf76d0955a7da60fff88fd4314933cd611f341cedf5cfc",
+              "s": "0x2d8d2d0fcb67bd5cbb7b19db04d818c9f52fa649361dda7465eb53ee61f15308",
+              "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+              "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+            }
           }
         },
         {
@@ -1084,7 +1156,16 @@
           "validUntil": "1",
           "digest": "0x367e4729e29e12decd533c0dcd7eddf32a0c52d5593cbc8126d2c8ac3fcd9913",
           "ownerSig": {
-            "scheme": "require_auth"
+            "scheme": "sep53-ed25519",
+            "signedPayloadSha256": "0xdc042dd79ddbb45548faa64bef0a7f7fbad05500d3bcdee94088a4570cd3f03f",
+            "sig": "0xc59a35173625c44ed0d4afb8a35b5bbdc2a429d90607075ad93f79771e322b2a4f05ff89cb7169cb5b8ec8ff0cec16fb1d7779770b9db03d7bb751ac37125f00",
+            "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+            "scl": {
+              "r": "0xc59a35173625c44ed0d4afb8a35b5bbdc2a429d90607075ad93f79771e322b2a",
+              "s": "0x4f05ff89cb7169cb5b8ec8ff0cec16fb1d7779770b9db03d7bb751ac37125f00",
+              "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+              "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+            }
           }
         },
         {
@@ -1092,7 +1173,16 @@
           "validUntil": "2000000000",
           "digest": "0x431128494a83544660a0f9775a8785da99392ac9be4a42fab941a8ac403a9cbc",
           "ownerSig": {
-            "scheme": "require_auth"
+            "scheme": "sep53-ed25519",
+            "signedPayloadSha256": "0x260a27fa5efb059de1a8526830f9c653c55e7325bd9b44d6692952a556155526",
+            "sig": "0x2df5081a828aebff8a7d2f7ba6336580972e9888870d1f4cdcb0d1d775a5d720294f9b9628353b299b79a5ac903545428a078f779299ec3e1ec8e6c85aebb908",
+            "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+            "scl": {
+              "r": "0x2df5081a828aebff8a7d2f7ba6336580972e9888870d1f4cdcb0d1d775a5d720",
+              "s": "0x294f9b9628353b299b79a5ac903545428a078f779299ec3e1ec8e6c85aebb908",
+              "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+              "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+            }
           }
         },
         {
@@ -1100,7 +1190,16 @@
           "validUntil": "1",
           "digest": "0x8459674c584be3221e0c310f5194a9b19bf40c667af97e5126a796b6db28ff5f",
           "ownerSig": {
-            "scheme": "require_auth"
+            "scheme": "sep53-ed25519",
+            "signedPayloadSha256": "0x1228b3e1316f14d7a794de1abb1cf31dda9a6496df02621cc8735791a4a10897",
+            "sig": "0x4c7d0e15ed0ab94a40dbe74e5d4a5e5c426317188c9bacb477d90249fe549a704a0db2b332b3b1deea7cda19dc7e747db29316c7607511bd0f37057caac25707",
+            "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+            "scl": {
+              "r": "0x4c7d0e15ed0ab94a40dbe74e5d4a5e5c426317188c9bacb477d90249fe549a70",
+              "s": "0x4a0db2b332b3b1deea7cda19dc7e747db29316c7607511bd0f37057caac25707",
+              "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+              "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+            }
           }
         },
         {
@@ -1108,7 +1207,16 @@
           "validUntil": "2000000000",
           "digest": "0x53349b9ad482996a10203c300b5ef946bc97bc80240ee6d0b8ae4586003bd0b8",
           "ownerSig": {
-            "scheme": "require_auth"
+            "scheme": "sep53-ed25519",
+            "signedPayloadSha256": "0x318078ca81978188fec2f8f2b2775dae925da117c73ed7cfb5bfbb6308f5ab8b",
+            "sig": "0x21e8ed70d15b76c228369cb923722b16c6eafd3710b73359ce464b283ba7ef76f7ee33f202111237a8b5d66af9a7fb8817fcfb409c8bca35c814daa5d8f38308",
+            "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+            "scl": {
+              "r": "0x21e8ed70d15b76c228369cb923722b16c6eafd3710b73359ce464b283ba7ef76",
+              "s": "0xf7ee33f202111237a8b5d66af9a7fb8817fcfb409c8bca35c814daa5d8f38308",
+              "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+              "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+            }
           }
         }
       ]

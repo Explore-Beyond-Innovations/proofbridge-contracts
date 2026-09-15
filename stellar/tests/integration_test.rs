@@ -1256,6 +1256,26 @@ fn test_registry_guards_are_the_real_escrows() {
     assert!(client.try_commitment_at(&account, &0).is_err());
 }
 
+/// #404 D5: the registry's code can be swapped behind the two-step admin. Re-uploading its own
+/// wasm is a no-op upgrade that proves the path; a caller who is not the admin is refused.
+#[test]
+fn test_registry_upgrade_is_admin_gated() {
+    let s = setup();
+    let (client, account, _pk, _pop) = vector_registry(&s);
+    let hash = s
+        .env
+        .deployer()
+        .upload_contract_wasm(bls_key_registry_contract::WASM);
+
+    // Admin (every auth is mocked in the suite): the swap lands, state survives.
+    client.upgrade(&hash);
+    assert_eq!(client.nonce_of(&account), 0);
+
+    // Nobody else: with no auths mocked, the admin's require_auth fails.
+    s.env.set_auths(&[]);
+    assert!(client.try_upgrade(&hash).is_err());
+}
+
 // 1.6c cost-measurement gate: CPU instructions + memory bytes consumed by a full
 // WASM unlock on each escrow (real ZK verify via cross-contract call). Metered
 // with reset_unlimited() immediately before the call; asserts <= in-source ceiling.

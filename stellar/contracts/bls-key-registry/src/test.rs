@@ -80,6 +80,8 @@ fn slot_account(env: &Env, v: &serde_json::Value, who: &str) -> BytesN<32> {
     bn::<32>(env, &v["slots"][who]["account"])
 }
 
+/// The vector says how the owner signed: the maker registers by `require_auth` and retires by a
+/// detached SEP-53 signature (#404); the bridger always signs with its EVM key.
 fn owner_for(
     env: &Env,
     v: &serde_json::Value,
@@ -87,7 +89,11 @@ fn owner_for(
     owner_sig: &serde_json::Value,
 ) -> OwnerAuth {
     if who == MAKER {
-        OwnerAuth::Stellar(maker_owner(env, v))
+        if owner_sig["scheme"] == "sep53-ed25519" {
+            OwnerAuth::Sep53(bn::<64>(env, &owner_sig["sig"]))
+        } else {
+            OwnerAuth::Stellar(maker_owner(env, v))
+        }
     } else {
         OwnerAuth::Evm(sig65(env, owner_sig))
     }
@@ -819,4 +825,144 @@ fn t04_second_slot_needs_fresh_pop() {
         ),
         Err(Ok(RegistryError::InvalidPop))
     );
+}
+
+// =============================================================================
+// #404: the detached ed25519 owner-auth (`Sep53`) — the maker's pre-signed kill switch
+// =============================================================================
+
+/// Sign `digest` the way a Stellar wallet does (SEP-53: sha256(prefix ‖ lowercase 0x-hex)),
+/// with the vector maker's ed25519 key or a stranger's.
+fn sep53_sign(env: &Env, digest: &[u8; 32], sk: &[u8; 32]) -> BytesN<64> {
+    use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
+    let mut msg = b"Stellar Signed Message:\n".to_vec();
+    msg.extend_from_slice(std::format!("0x{}", hex::encode(digest)).as_bytes());
+    let payload = Sha256::digest(&msg);
+    let sig = SigningKey::from_bytes(sk).sign(&payload);
+    BytesN::from_array(env, &sig.to_bytes())
+}
+
+fn maker_wallet_sk(v: &serde_json::Value) -> [u8; 32] {
+    hexval(&v["keys"]["makerWallet"]["sk"]).try_into().unwrap()
+}
+
+fn digest32(v: &serde_json::Value) -> [u8; 32] {
+    hexval(v).try_into().unwrap()
+}
+
+/// The vectors' Soroban `setValidUntil` entries carry `sep53-ed25519` signatures for the maker,
+/// so every `set_valid_until` case above already runs under `Sep53`; this pins the bytes.
+#[test]
+fn sep53_vector_retires_the_makers_slot() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    let e = &v["slots"][MAKER]["setValidUntil"][0];
+    assert_eq!(e["ownerSig"]["scheme"], "sep53-ed25519");
+    client.set_valid_until(
+        &account,
+        &OwnerAuth::Sep53(bn::<64>(&env, &e["ownerSig"]["sig"])),
+        &0,
+        &1,
+    );
+    assert_eq!(
+        client.try_commitment_at(&account, &0),
+        Err(Ok(RegistryError::SlotExpired))
+    );
+}
+
+/// The message rule is the EVM registry's byte for byte: a fresh signature by the maker's key
+/// over the vector's digest verifies, so any SEP-53 wallet's output lands.
+#[test]
+fn sep53_fresh_signature_over_the_digest_verifies() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    let e = &v["slots"][MAKER]["setValidUntil"][1]; // (slot 0, graceTs)
+    let sig = sep53_sign(&env, &digest32(&e["digest"]), &maker_wallet_sk(&v));
+    client.set_valid_until(&account, &OwnerAuth::Sep53(sig), &0, &grace_ts(&v));
+    assert_eq!(
+        client.lookup(&account, &0).unwrap().valid_until,
+        grace_ts(&v)
+    );
+}
+
+/// A stranger's key over the same digest traps in the host's ed25519 verify (D3): nothing
+/// changes on-chain, and the relayer treats the trap as a permanent revert.
+#[test]
+fn sep53_wrong_key_traps_and_changes_nothing() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    let e = &v["slots"][MAKER]["setValidUntil"][0];
+    let stranger = [7u8; 32];
+    let sig = sep53_sign(&env, &digest32(&e["digest"]), &stranger);
+    let res = client.try_set_valid_until(&account, &OwnerAuth::Sep53(sig), &0, &1);
+    assert!(
+        matches!(res, Err(Err(_))),
+        "a bad ed25519 signature is a host error"
+    );
+    assert_eq!(client.lookup(&account, &0).unwrap().valid_until, 0);
+}
+
+/// A signature bound to slot 0 / value 1 does not retire slot 1 or set another value.
+#[test]
+fn sep53_signature_bound_to_slot_and_value() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    register_slot(&env, &client, &v, MAKER, 1);
+    let e = &v["slots"][MAKER]["setValidUntil"][0];
+    let sig = bn::<64>(&env, &e["ownerSig"]["sig"]);
+    assert!(matches!(
+        client.try_set_valid_until(&account, &OwnerAuth::Sep53(sig.clone()), &1, &1),
+        Err(Err(_))
+    ));
+    assert!(matches!(
+        client.try_set_valid_until(&account, &OwnerAuth::Sep53(sig), &0, &grace_ts(&v)),
+        Err(Err(_))
+    ));
+    assert_eq!(client.lookup(&account, &0).unwrap().valid_until, 0);
+    assert_eq!(client.lookup(&account, &1).unwrap().valid_until, 0);
+}
+
+/// The shape rule mirrors the EVM path: a padded-EVM account is never an ed25519 key.
+#[test]
+fn sep53_refuses_a_padded_evm_account() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, BRIDGER);
+    register_slot(&env, &client, &v, BRIDGER, 0);
+    let e = &v["slots"][BRIDGER]["setValidUntil"][0];
+    let sig = sep53_sign(&env, &digest32(&e["digest"]), &maker_wallet_sk(&v));
+    assert_eq!(
+        client.try_set_valid_until(&account, &OwnerAuth::Sep53(sig), &0, &1),
+        Err(Ok(RegistryError::OwnerMismatch))
+    );
+}
+
+/// `register` and `revoke` take the same dispatch, so a Stellar-home owner can be relayed there
+/// too: detached signatures over the vector's registration and revoke digests.
+#[test]
+fn sep53_registers_and_revokes_by_detached_signature() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    let sk = maker_wallet_sk(&v);
+    let r0 = slot_reg(&v, MAKER, 0);
+    client.register(
+        &account,
+        &OwnerAuth::Sep53(sep53_sign(&env, &digest32(&r0["regDigest"]), &sk)),
+        &bn::<96>(&env, &r0["pkNative"]),
+        &bn::<192>(&env, &r0["pop"]),
+        &0,
+    );
+    assert_eq!(client.nonce_of(&account), 1);
+    // revoke at nonce 1: the digest the vectors record on registration 1
+    let r1 = slot_reg(&v, MAKER, 1);
+    client.revoke(
+        &account,
+        &OwnerAuth::Sep53(sep53_sign(&env, &digest32(&r1["revokeDigest"]), &sk)),
+        &1,
+    );
+    assert!(client.try_commitment_at(&account, &0).is_err());
 }
