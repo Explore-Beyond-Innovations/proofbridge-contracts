@@ -5,6 +5,8 @@
 
 use soroban_sdk::{contractevent, Address, BytesN, String};
 
+use crate::types::{ClaimEntry, RouteTiming};
+
 // =============================================================================
 // Chain / Route Events
 // =============================================================================
@@ -104,4 +106,65 @@ pub struct PayoutClaimed {
     pub recipient: BytesN<32>,
     pub token: BytesN<32>,
     pub amount: u128,
+}
+
+// =============================================================================
+// Termination Events (2.3e)
+// =============================================================================
+
+/// The termination clocks for a peer chain were set (D6).
+#[contractevent(topics = ["timing"], data_format = "vec")]
+pub struct RouteTimingSet {
+    #[topic]
+    pub chain_id: u128,
+    pub timing: RouteTiming,
+}
+
+/// The notary the evidence paths read was set (D7).
+#[contractevent(topics = ["anchor"], data_format = "single-value")]
+pub struct RootAnchorSet {
+    pub anchor: Address,
+}
+
+/// A presentation window opened on this leg; it may be finalized at `finalize_at`.
+#[contractevent(topics = ["clm_open"], data_format = "vec")]
+pub struct ClaimOpened {
+    #[topic]
+    pub order_hash: BytesN<32>,
+    pub entry: ClaimEntry,
+    pub finalize_at: u64,
+}
+
+/// The leg reached `Filled` and its SETTLED leaf was appended; `by_evidence` is true for
+/// `present_settled`, false for the co-signed `unlock`.
+#[contractevent(topics = ["ord_setl"], data_format = "single-value")]
+pub struct OrderSettled {
+    #[topic]
+    pub order_hash: BytesN<32>,
+    pub by_evidence: bool,
+}
+
+/// The leg reached `Cancelled`; `by_evidence` is true for `refund_by_cancel` (a proof of the
+/// primary's cancel leaf), false for the clock-driven backstop finalize.
+#[contractevent(topics = ["ord_cncl"], data_format = "single-value")]
+pub struct OrderCancelled {
+    #[topic]
+    pub order_hash: BytesN<32>,
+    pub by_evidence: bool,
+}
+
+/// The bridger's deposit went back to them (`Cancelled`).
+#[contractevent(topics = ["ord_rfnd"], data_format = "vec")]
+pub struct OrderRefunded {
+    #[topic]
+    pub order_hash: BytesN<32>,
+    pub bridger: BytesN<32>,
+    pub amount: u128,
+}
+
+/// The leg's SETTLED leaf was appended (`record_settled`, the follow-up to a fill on Soroban).
+#[contractevent(topics = ["setl_leaf"], data_format = "single-value")]
+pub struct SettledRecorded {
+    #[topic]
+    pub order_hash: BytesN<32>,
 }

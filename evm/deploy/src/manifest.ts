@@ -8,6 +8,7 @@ import {
   readManifest,
   writeManifest,
   type RootAnchorConfig,
+  type RouteTiming,
 } from "@proofbridge/deployment-manifest";
 import { deploymentsDir, evmAddressToBytes32 } from "./common.js";
 
@@ -73,6 +74,8 @@ export interface BuildManifestInput {
   };
   tokens: EvmTokenInput[];
   rootAnchorConfig?: RootAnchorConfig;
+  /** Per peer chain id → the clocks link set; preserved across redeploys, written by link. */
+  routeTiming?: Record<string, RouteTiming>;
 }
 
 export function buildManifest(
@@ -119,6 +122,7 @@ export function buildManifest(
     },
     tokens: input.tokens.map(tokenEntry),
     ...(input.rootAnchorConfig ? { rootAnchorConfig: input.rootAnchorConfig } : {}),
+    routeTiming: input.routeTiming ?? {},
     meta: {
       deployedAt: new Date().toISOString(),
       deployer: input.deployer,

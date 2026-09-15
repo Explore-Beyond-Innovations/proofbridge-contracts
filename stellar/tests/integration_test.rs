@@ -325,6 +325,47 @@ fn setup() -> TestSetup<'static> {
 }
 
 fn setup_with_verifiers(wire_root_verifiers: bool) -> TestSetup<'static> {
+    setup_opts(wire_root_verifiers, true)
+}
+
+/// 2.3e: the suite's clocks — no window bound, a 30-minute buffer, no margin, a 1-day backstop, no
+/// stagger — the smallest legal set, so every existing lock/create/unlock keeps its shape.
+const SUITE_BUFFER: u64 = 1_800;
+const SUITE_LONG_BACKSTOP: u64 = 86_400;
+
+fn ad_timing(
+    min_window: u64,
+    buffer: u64,
+    margin: u64,
+    long_backstop: u64,
+    claim_stagger: u64,
+) -> ad_manager_contract::RouteTiming {
+    ad_manager_contract::RouteTiming {
+        min_window,
+        buffer,
+        margin,
+        long_backstop,
+        claim_stagger,
+    }
+}
+
+fn portal_timing(
+    min_window: u64,
+    buffer: u64,
+    margin: u64,
+    long_backstop: u64,
+    claim_stagger: u64,
+) -> order_portal_contract::RouteTiming {
+    order_portal_contract::RouteTiming {
+        min_window,
+        buffer,
+        margin,
+        long_backstop,
+        claim_stagger,
+    }
+}
+
+fn setup_opts(wire_root_verifiers: bool, wire_timing: bool) -> TestSetup<'static> {
     let tp = load_test_params();
 
     let env = Env::default();
@@ -438,6 +479,18 @@ fn setup_with_verifiers(wire_root_verifiers: bool) -> TestSetup<'static> {
         &tp.ad_chain_id,
         &bytes32_to_bytesn(&env, &tp.ad_chain_token),
     );
+
+    // 2.3e: timing is fail-closed on both legs.
+    if wire_timing {
+        ad_manager.set_route_timing(
+            &tp.order_chain_id,
+            &ad_timing(0, SUITE_BUFFER, 0, SUITE_LONG_BACKSTOP, 0),
+        );
+        order_portal.set_route_timing(
+            &tp.ad_chain_id,
+            &portal_timing(0, SUITE_BUFFER, 0, SUITE_LONG_BACKSTOP, 0),
+        );
+    }
 
     // The maker is the account the fixture's `ad_creator` encodes: 2.3c checks
     // `params.ad_creator == address_to_bytes32(ad.maker)` at lock, so the ad must be
@@ -722,9 +775,12 @@ fn test_full_cross_chain_flow() {
         "Order hash must be identical on both chains"
     );
 
-    // ----- AD CHAIN: bridger unlocks proving the order-chain (counterparty) root -----
+    // Each leg's proof targets the counterparty root *at deposit time* — what the relayer's mirror
+    // records and the co-signers sign. Latest roots move later (2.3e: the SETTLED leaf).
     let bridger_target_root = s.order_portal.get_latest_merkle_root();
+    let adcreator_target_root = s.ad_manager.get_latest_merkle_root();
 
+    // ----- AD CHAIN: bridger unlocks proving the order-chain (counterparty) root -----
     s.ad_manager.unlock(
         &ad_params,
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
@@ -739,8 +795,6 @@ fn test_full_cross_chain_flow() {
     );
 
     // ----- ORDER CHAIN: ad creator unlocks proving the ad-chain (counterparty) root -----
-    let adcreator_target_root = s.ad_manager.get_latest_merkle_root();
-
     s.order_portal.unlock(
         &order_params,
         &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
@@ -1258,6 +1312,44 @@ fn test_unlock_metering() {
     }
 }
 
+/// 2.3e: the new paths that verify a proof (`present_settled`, `refund_by_cancel`) sit at the
+/// unlock's cost — the verify dominates — and the SETTLED append is its own transaction
+/// (`record_settled`): a verify plus a Poseidon2 append measured 105.8M, over the budget.
+#[test]
+fn test_termination_metering() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = locked_ad_order(&s);
+    let q = created_portal_order(&s);
+    let (settled_root, settled) = settled_proof(&s);
+    let (cancel_root, cancel) = cancel_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &settled_root);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &cancel_root);
+
+    let meter = |label: &str| {
+        let b = s.env.cost_estimate().budget();
+        let (cpu, mem) = (b.cpu_instruction_cost(), b.memory_bytes_cost());
+        std::println!("{}: cpu {} insns, mem {} bytes", label, cpu, mem);
+        assert!(
+            cpu <= SOROBAN_DEFAULT_TX_CPU_BUDGET,
+            "{label} over the tx budget"
+        );
+        assert!(mem <= AD_UNLOCK_MEM_CEILING, "{label} over the mem ceiling");
+    };
+
+    s.env.cost_estimate().budget().reset_unlimited();
+    s.ad_manager.present_settled(&p, &settled_root, &settled);
+    meter("ad_manager.present_settled");
+
+    s.env.cost_estimate().budget().reset_unlimited();
+    s.ad_manager.record_settled(&p);
+    meter("ad_manager.record_settled");
+
+    s.env.cost_estimate().budget().reset_unlimited();
+    s.order_portal.refund_by_cancel(&q, &cancel_root, &cancel);
+    meter("order_portal.refund_by_cancel");
+}
+
 // ---------------------------------------------------------------------------
 // Event claims (2.3d): the same circuit and the same verify_proof as deposits; the contract-built
 // public inputs (proofbridge_core::cross_contract::build_event_public_inputs) keep them apart.
@@ -1556,7 +1648,10 @@ fn test_ad_manager_unlock_after_deadline_is_rejected() {
     s.ad_manager
         .set_root_verifier(&s.tp.order_chain_id, &module);
 
-    s.env.ledger().set_timestamp(params.deadline + 1);
+    // 2.3e D2: the primary's co-signed unlock is the presentation — valid through the window.
+    s.env
+        .ledger()
+        .set_timestamp(params.deadline + SUITE_BUFFER + 1);
     let late = s.ad_manager.try_unlock(
         &params,
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
@@ -1569,7 +1664,7 @@ fn test_ad_manager_unlock_after_deadline_is_rejected() {
         Err(Ok(ad_manager_contract::AdManagerError::OrderExpired))
     );
 
-    s.env.ledger().set_timestamp(params.deadline);
+    s.env.ledger().set_timestamp(params.deadline + SUITE_BUFFER);
     assert!(ad_unlock(&s, &params, &Bytes::new(&s.env)));
 }
 
@@ -2592,4 +2687,1151 @@ fn test_t67_mis_wired_anchor_is_a_typed_error() {
         ))
     );
     assert!(!client.has_usable_slot(&account));
+}
+
+// ---------------------------------------------------------------------------
+// 2.3e — the termination primitive (T-39 … T-59), the mirror of evm/test/Cancellation.t.sol.
+// The same fixture order on both legs; the fixture's domain-2 (cancel) and domain-3 (settled)
+// proofs stand in for the other leg's leaf, notarized by a real root-anchor (signer = admin,
+// threshold 1).
+// ---------------------------------------------------------------------------
+
+use ad_manager_contract::AdManagerError as AdErr;
+use order_portal_contract::OrderPortalError as OpErr;
+
+/// A real RootAnchor wired into both escrows; the admin is its one notary.
+fn wire_anchor(s: &TestSetup) -> root_anchor_contract::Client<'static> {
+    let id = s.env.register(root_anchor_contract::WASM, ());
+    let anchor = root_anchor_contract::Client::new(&s.env, &id);
+    anchor.initialize(
+        &s.admin_addr,
+        &soroban_sdk::vec![&s.env, s.admin_addr.clone()],
+        &1u32,
+    );
+    s.ad_manager.set_root_anchor(&id);
+    s.order_portal.set_root_anchor(&id);
+    anchor
+}
+
+fn notarize(
+    s: &TestSetup,
+    anchor: &root_anchor_contract::Client,
+    chain_id: u128,
+    root: &BytesN<32>,
+) {
+    let seq = anchor.latest_seq(&chain_id) + 1;
+    anchor.anchor(&s.admin_addr, &chain_id, root, &seq);
+}
+
+fn cancel_proof(s: &TestSetup) -> (BytesN<32>, Bytes) {
+    (
+        bytes32_to_bytesn(&s.env, &s.tp.event_roots[0]),
+        Bytes::from_slice(&s.env, EVENT_CLAIMS[0].1),
+    )
+}
+
+fn settled_proof(s: &TestSetup) -> (BytesN<32>, Bytes) {
+    (
+        bytes32_to_bytesn(&s.env, &s.tp.event_roots[1]),
+        Bytes::from_slice(&s.env, EVENT_CLAIMS[1].1),
+    )
+}
+
+fn warp(s: &TestSetup, t: u64) {
+    use soroban_sdk::testutils::Ledger;
+    s.env.ledger().set_timestamp(t);
+}
+
+fn account_addr(s: &TestSetup, key: &[u8; 32]) -> Address {
+    let strkey = stellar_strkey::ed25519::PublicKey(*key).to_string();
+    Address::from_string(&SorobanString::from_str(&s.env, &strkey))
+}
+
+fn ad_id(s: &TestSetup) -> SorobanString {
+    SorobanString::from_str(&s.env, &s.tp.ad_id)
+}
+
+fn ad_locked(s: &TestSetup) -> u128 {
+    s.ad_manager.get_ad(&ad_id(s)).unwrap().locked
+}
+
+fn ad_leaves(s: &TestSetup) -> u128 {
+    s.ad_manager.get_merkle_leaf_count()
+}
+
+fn portal_leaves(s: &TestSetup) -> u128 {
+    s.order_portal.get_merkle_leaf_count()
+}
+
+fn signer_in_flight(s: &TestSetup) -> u64 {
+    let signer = bytes32_to_bytesn(&s.env, &s.tp.ad_settlement_signer);
+    if s.ad_manager.has_open_positions(&signer) {
+        1
+    } else {
+        0
+    }
+}
+
+fn bridger_in_flight(s: &TestSetup) -> u64 {
+    let bridger = bytes32_to_bytesn(&s.env, &s.tp.bridger);
+    if s.order_portal.has_open_positions(&bridger) {
+        1
+    } else {
+        0
+    }
+}
+
+fn ad_status(s: &TestSetup) -> ad_manager_contract::Status {
+    s.ad_manager
+        .get_order_status(&bytes32_to_bytesn(&s.env, &s.tp.order_hash))
+}
+
+fn portal_status(s: &TestSetup) -> order_portal_contract::Status {
+    s.order_portal
+        .get_order_status(&bytes32_to_bytesn(&s.env, &s.tp.order_hash))
+}
+
+// --- the primary: claim → window → finalize -----------------------------------------------------
+
+#[test]
+fn test_claim_cancel_at_deadline_opens_window_moves_no_funds() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let locked = ad_locked(&s);
+
+    warp(&s, p.deadline - 1);
+    assert_eq!(s.ad_manager.try_claim_cancel(&p), Err(Ok(AdErr::TooEarly)));
+
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    let claim = s
+        .ad_manager
+        .get_claim(&bytes32_to_bytesn(&s.env, &s.tp.order_hash))
+        .unwrap();
+    assert_eq!(claim.opened_at, p.deadline);
+    assert_eq!(
+        claim.finalize_at,
+        p.deadline + SUITE_BUFFER,
+        "deadline-anchored"
+    );
+    assert_eq!(claim.entry, ad_manager_contract::ClaimEntry::Deadline);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Claimed);
+    assert_eq!(ad_locked(&s), locked, "a claim moves nothing");
+    assert_eq!(signer_in_flight(&s), 1);
+
+    assert_eq!(
+        s.ad_manager.try_claim_cancel(&p),
+        Err(Ok(AdErr::NotClaimable))
+    );
+}
+
+/// A late claim does not shorten the window (D1).
+#[test]
+fn test_claim_cancel_late_is_still_deadline_anchored() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline + SUITE_BUFFER - 60);
+    s.ad_manager.claim_cancel(&p);
+    let claim = s
+        .ad_manager
+        .get_claim(&bytes32_to_bytesn(&s.env, &s.tp.order_hash))
+        .unwrap();
+    assert_eq!(claim.finalize_at, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// T-50 (the Open entry): the window is the full buffer.
+#[test]
+fn test_t50_finalize_cancel_one_second_early_is_too_early() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER - 1);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// T-39 + T-44: the leaf appears exactly with `Cancelled`; the lock returns; the counter clears.
+#[test]
+fn test_t39_finalize_cancel_releases_lock_appends_leaf_clears_counter() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let balance = s.ad_manager.get_ad(&ad_id(&s)).unwrap().balance;
+    assert_eq!(ad_leaves(&s), 1, "the ORDER leaf");
+
+    // From Open: nothing to finalize, no leaf.
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::NotClaimed))
+    );
+    assert_eq!(ad_leaves(&s), 1);
+
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Cancelled);
+    assert_eq!(ad_locked(&s), 0, "lock released");
+    assert_eq!(
+        s.ad_manager.get_ad(&ad_id(&s)).unwrap().balance,
+        balance,
+        "the ad keeps its funds"
+    );
+    assert_eq!(ad_leaves(&s), 2, "the CANCEL leaf");
+    assert_eq!(signer_in_flight(&s), 0, "T-44");
+    assert!(s
+        .ad_manager
+        .get_claim(&bytes32_to_bytesn(&s.env, &s.tp.order_hash))
+        .is_none());
+
+    // Terminal: nothing else appends or moves.
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::NotClaimed))
+    );
+    assert_eq!(
+        s.ad_manager.try_claim_cancel(&p),
+        Err(Ok(AdErr::NotClaimable))
+    );
+    assert!(!ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    let anchor = wire_anchor(&s);
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+    assert_eq!(
+        s.ad_manager.try_present_settled(&p, &root, &proof),
+        Err(Ok(AdErr::NotClaimable))
+    );
+    assert_eq!(ad_leaves(&s), 2, "no second leaf");
+}
+
+// --- T-45: the window bound and the never-locked attestation --------------------------------------
+
+#[test]
+fn test_t45_lock_refuses_deadline_inside_min_window() {
+    let s = setup();
+    s.ad_manager.set_route_timing(
+        &s.tp.order_chain_id,
+        &ad_timing(3_600, SUITE_BUFFER, 0, SUITE_LONG_BACKSTOP, 0),
+    );
+    let p = ad_manager_order_params(&s.env, &s.tp);
+    warp(&s, p.deadline - 100);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p),
+        Err(Ok(AdErr::DeadlineTooSoon))
+    );
+    warp(&s, p.deadline - 3_600);
+    s.ad_manager.lock_for_order(&p);
+}
+
+#[test]
+fn test_t45_create_refuses_deadline_inside_min_window() {
+    let s = setup();
+    s.order_portal.set_route_timing(
+        &s.tp.ad_chain_id,
+        &portal_timing(3_600, SUITE_BUFFER, 0, SUITE_LONG_BACKSTOP, 0),
+    );
+    let bridger = account_addr(&s, &s.tp.bridger);
+    TokenContractClient::new(&s.env, &s.order_token_addr).mint(&bridger, &(s.tp.amount as i128));
+    let p = order_portal_order_params(&s.env, &s.tp);
+    warp(&s, p.deadline - 100);
+    assert_eq!(
+        s.order_portal.try_create_order(&p),
+        Err(Ok(OpErr::DeadlineTooSoon))
+    );
+    warp(&s, p.deadline - 3_600);
+    s.order_portal.create_order(&p);
+}
+
+#[test]
+fn test_t45_cancel_never_locked_only_none_at_deadline_appends_leaf() {
+    let s = setup();
+    let p = ad_manager_order_params(&s.env, &s.tp);
+    assert_eq!(ad_leaves(&s), 0);
+
+    warp(&s, p.deadline - 1);
+    assert_eq!(
+        s.ad_manager.try_cancel_never_locked(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    assert_eq!(ad_leaves(&s), 0, "no leaf before the deadline");
+
+    warp(&s, p.deadline);
+    s.ad_manager.cancel_never_locked(&p);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Cancelled);
+    assert_eq!(ad_leaves(&s), 1, "the cancel leaf");
+    assert_eq!(signer_in_flight(&s), 0, "nothing was counted");
+
+    // Single-shot, and a lock can never follow it.
+    assert_eq!(
+        s.ad_manager.try_cancel_never_locked(&p),
+        Err(Ok(AdErr::NotClaimable))
+    );
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p),
+        Err(Ok(AdErr::OrderExists))
+    );
+}
+
+#[test]
+fn test_t45_cancel_never_locked_refuses_open_and_unsupported_chain() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    assert_eq!(
+        s.ad_manager.try_cancel_never_locked(&p),
+        Err(Ok(AdErr::NotClaimable))
+    );
+
+    let mut q = ad_manager_order_params(&s.env, &s.tp);
+    q.order_chain_id = 999;
+    assert_eq!(
+        s.ad_manager.try_cancel_never_locked(&q),
+        Err(Ok(AdErr::ChainNotSupported))
+    );
+}
+
+// --- T-45a / T-45b: the co-signed unlock is the presentation --------------------------------------
+
+#[test]
+fn test_t45a_fast_unlock_race_bridger_unlocks_inside_the_window() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+
+    warp(&s, p.deadline + SUITE_BUFFER / 2);
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+    s.ad_manager.record_settled(&p);
+    assert_eq!(ad_leaves(&s), 2, "T-59: the SETTLED leaf, no cancel leaf");
+    assert!(s
+        .ad_manager
+        .get_claim(&bytes32_to_bytesn(&s.env, &s.tp.order_hash))
+        .is_none());
+    assert_eq!(signer_in_flight(&s), 0);
+
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::NotClaimed))
+    );
+}
+
+#[test]
+fn test_t45b_primary_unlock_valid_to_buffer_minus_margin() {
+    let s = setup();
+    s.ad_manager.set_route_timing(
+        &s.tp.order_chain_id,
+        &ad_timing(120, SUITE_BUFFER, 120, SUITE_LONG_BACKSTOP, 0),
+    );
+    let p = locked_ad_order(&s);
+    let cutoff = p.deadline + SUITE_BUFFER - 120;
+
+    warp(&s, cutoff + 1);
+    let late = s.ad_manager.try_unlock(
+        &p,
+        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+        &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
+    );
+    assert_eq!(late, Err(Ok(AdErr::OrderExpired)));
+
+    warp(&s, cutoff);
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+}
+
+#[test]
+fn test_t45b_follower_unlock_stops_at_deadline_minus_stagger() {
+    let s = setup();
+    s.order_portal.set_route_timing(
+        &s.tp.ad_chain_id,
+        &portal_timing(3_600, SUITE_BUFFER, 0, SUITE_LONG_BACKSTOP, 1_800),
+    );
+    let p = created_portal_order(&s);
+    let cutoff = p.deadline - 1_800;
+
+    warp(&s, cutoff + 1);
+    assert_eq!(portal_unlock(&s, &p), Err(OpErr::OrderExpired));
+    warp(&s, cutoff);
+    assert_eq!(portal_unlock(&s, &p), Ok(()));
+}
+
+// --- T-54 / D3: present_settled on the primary ---------------------------------------------------
+
+#[test]
+fn test_t54_present_settled_settles_a_claimed_primary_no_nullifier() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+
+    let recipient = account_addr(&s, &s.tp.order_recipient);
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let before = token.balance(&recipient);
+
+    warp(&s, p.deadline + SUITE_BUFFER - 60);
+    s.ad_manager.present_settled(&p, &root, &proof);
+
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+    assert_eq!(
+        token.balance(&recipient),
+        before + s.tp.amount as i128,
+        "the bridger's recipient is paid"
+    );
+    assert_eq!(ad_locked(&s), 0);
+    s.ad_manager.record_settled(&p);
+    assert_eq!(ad_leaves(&s), 2, "T-59: SETTLED appended");
+    assert_eq!(signer_in_flight(&s), 0, "T-44");
+
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::NotClaimed))
+    );
+    assert_eq!(
+        s.ad_manager.try_present_settled(&p, &root, &proof),
+        Err(Ok(AdErr::NotClaimable))
+    );
+}
+
+/// D3: not window-gated — accepted on an Open order before the deadline.
+#[test]
+fn test_present_settled_on_open_before_deadline() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = locked_ad_order(&s);
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+    s.ad_manager.present_settled(&p, &root, &proof);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+}
+
+#[test]
+fn test_present_settled_gates_anchor_delay_and_domain() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let (root, proof) = settled_proof(&s);
+
+    // No anchor wired: fail closed. The co-signed unlock does not care (checked last).
+    assert_eq!(
+        s.ad_manager.try_present_settled(&p, &root, &proof),
+        Err(Ok(AdErr::NoRootAnchor))
+    );
+
+    let anchor = wire_anchor(&s);
+    assert_eq!(
+        s.ad_manager.try_present_settled(&p, &root, &proof),
+        Err(Ok(AdErr::RootNotAnchored))
+    );
+
+    // Inside the delay.
+    anchor.set_anchor_delay(&s.tp.order_chain_id, &3_600);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+    assert_eq!(
+        s.ad_manager.try_present_settled(&p, &root, &proof),
+        Err(Ok(AdErr::RootNotAnchored))
+    );
+
+    // A cancel leaf is not a settled leaf: the domain is a contract constant.
+    warp(&s, 3_600);
+    anchor.set_anchor_delay(&s.tp.order_chain_id, &0);
+    let (cancel_root, cancel_proof) = cancel_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &cancel_root);
+    assert_eq!(
+        s.ad_manager
+            .try_present_settled(&p, &cancel_root, &cancel_proof),
+        Err(Ok(AdErr::InvalidProof))
+    );
+    assert_eq!(
+        ad_status(&s),
+        ad_manager_contract::Status::Open,
+        "the unwind stands"
+    );
+
+    s.ad_manager.present_settled(&p, &root, &proof);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+}
+
+// --- T-41: a filled primary can never grow a cancel leaf ------------------------------------------
+
+#[test]
+fn test_t41_filled_primary_no_cancel_leaf_is_reachable() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    s.ad_manager.record_settled(&p);
+    assert_eq!(ad_leaves(&s), 2, "ORDER + SETTLED");
+
+    warp(&s, p.deadline + 10 * SUITE_LONG_BACKSTOP);
+    assert_eq!(
+        s.ad_manager.try_claim_cancel(&p),
+        Err(Ok(AdErr::NotClaimable))
+    );
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::NotClaimed))
+    );
+    assert_eq!(
+        s.ad_manager.try_cancel_never_locked(&p),
+        Err(Ok(AdErr::NotClaimable))
+    );
+    assert_eq!(ad_leaves(&s), 2, "no cancel leaf");
+}
+
+// --- T-40 / T-41 / T-44: the follower's refund by cancel proof ------------------------------------
+
+fn refund_reads_no_clock_at(t: u64) {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = created_portal_order(&s);
+    let (root, proof) = cancel_proof(&s);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &root);
+    let bridger = account_addr(&s, &s.tp.bridger);
+    let token = TokenContractClient::new(&s.env, &s.order_token_addr);
+    let before = token.balance(&bridger);
+
+    warp(&s, t);
+    s.order_portal.refund_by_cancel(&p, &root, &proof);
+    assert_eq!(portal_status(&s), order_portal_contract::Status::Cancelled);
+    assert_eq!(
+        token.balance(&bridger),
+        before + s.tp.amount as i128,
+        "deposit back"
+    );
+    assert_eq!(bridger_in_flight(&s), 0, "T-44");
+    assert_eq!(
+        portal_leaves(&s),
+        1,
+        "the follower appends no leaf of its own on cancel"
+    );
+
+    // Terminal.
+    assert_eq!(
+        s.order_portal.try_refund_by_cancel(&p, &root, &proof),
+        Err(Ok(OpErr::NotClaimable))
+    );
+    assert_eq!(portal_unlock(&s, &p), Err(OpErr::OrderNotOpen));
+    assert_eq!(
+        s.order_portal.try_present_settled(&p, &root, &proof),
+        Err(Ok(OpErr::NotClaimable))
+    );
+}
+
+#[test]
+fn test_t41_refund_by_cancel_long_before_the_deadline() {
+    let tp = load_test_params();
+    refund_reads_no_clock_at(tp.deadline - 20 * 3_600);
+}
+
+#[test]
+fn test_t41_refund_by_cancel_long_after_the_deadline() {
+    let tp = load_test_params();
+    refund_reads_no_clock_at(tp.deadline + 30 * 86_400);
+}
+
+/// A cancel proof beats an open backstop window (recorded decision: Open and Claimed accepted).
+#[test]
+fn test_refund_by_cancel_from_a_backstop_window() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = created_portal_order(&s);
+    warp(&s, p.deadline + SUITE_LONG_BACKSTOP);
+    s.order_portal.claim_backstop(&p);
+    let (root, proof) = cancel_proof(&s);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &root);
+    s.order_portal.refund_by_cancel(&p, &root, &proof);
+    assert_eq!(portal_status(&s), order_portal_contract::Status::Cancelled);
+    assert!(s
+        .order_portal
+        .get_claim(&bytes32_to_bytesn(&s.env, &s.tp.order_hash))
+        .is_none());
+}
+
+#[test]
+fn test_t40_refund_by_cancel_gates_anchor_delay_and_domain() {
+    let s = setup();
+    let p = created_portal_order(&s);
+    let (root, proof) = cancel_proof(&s);
+
+    assert_eq!(
+        s.order_portal.try_refund_by_cancel(&p, &root, &proof),
+        Err(Ok(OpErr::NoRootAnchor))
+    );
+    let anchor = wire_anchor(&s);
+    assert_eq!(
+        s.order_portal.try_refund_by_cancel(&p, &root, &proof),
+        Err(Ok(OpErr::RootNotAnchored))
+    );
+    anchor.set_anchor_delay(&s.tp.ad_chain_id, &600);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &root);
+    assert_eq!(
+        s.order_portal.try_refund_by_cancel(&p, &root, &proof),
+        Err(Ok(OpErr::RootNotAnchored))
+    );
+
+    // A settled leaf cannot refund…
+    warp(&s, 600);
+    anchor.set_anchor_delay(&s.tp.ad_chain_id, &0);
+    let (settled_root, settled) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &settled_root);
+    assert_eq!(
+        s.order_portal
+            .try_refund_by_cancel(&p, &settled_root, &settled),
+        Err(Ok(OpErr::InvalidProof))
+    );
+    assert_eq!(portal_status(&s), order_portal_contract::Status::Open);
+
+    // …and the cancel leaf does, once the delay has passed.
+    s.order_portal.refund_by_cancel(&p, &root, &proof);
+    assert_eq!(portal_status(&s), order_portal_contract::Status::Cancelled);
+}
+
+// --- T-43: the backstop ------------------------------------------------------------------------------
+
+#[test]
+fn test_t43_claim_backstop_only_after_long_backstop_opens_claim_anchored_window() {
+    let s = setup();
+    let p = created_portal_order(&s);
+    let bridger = account_addr(&s, &s.tp.bridger);
+    let token = TokenContractClient::new(&s.env, &s.order_token_addr);
+    let before = token.balance(&bridger);
+
+    warp(&s, p.deadline + SUITE_LONG_BACKSTOP - 1);
+    assert_eq!(
+        s.order_portal.try_claim_backstop(&p),
+        Err(Ok(OpErr::TooEarly))
+    );
+
+    let now = p.deadline + SUITE_LONG_BACKSTOP + 5 * 3_600;
+    warp(&s, now);
+    s.order_portal.claim_backstop(&p);
+    let claim = s
+        .order_portal
+        .get_claim(&bytes32_to_bytesn(&s.env, &s.tp.order_hash))
+        .unwrap();
+    assert_eq!(claim.opened_at, now);
+    assert_eq!(claim.finalize_at, now + SUITE_BUFFER, "claim-anchored");
+    assert_eq!(claim.entry, order_portal_contract::ClaimEntry::Backstop);
+    assert_eq!(token.balance(&bridger), before, "no funds move on a claim");
+    assert_eq!(bridger_in_flight(&s), 1);
+
+    assert_eq!(
+        s.order_portal.try_claim_backstop(&p),
+        Err(Ok(OpErr::NotClaimable))
+    );
+    assert_eq!(
+        s.order_portal.try_finalize_backstop(&p),
+        Err(Ok(OpErr::TooEarly))
+    );
+}
+
+#[test]
+fn test_t43_present_settled_inside_the_backstop_window_pays_the_maker() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = created_portal_order(&s);
+    warp(&s, p.deadline + SUITE_LONG_BACKSTOP);
+    s.order_portal.claim_backstop(&p);
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &root);
+
+    let maker_recipient = account_addr(&s, &s.tp.ad_recipient);
+    let token = TokenContractClient::new(&s.env, &s.order_token_addr);
+    let before = token.balance(&maker_recipient);
+
+    warp(&s, p.deadline + SUITE_LONG_BACKSTOP + SUITE_BUFFER - 60);
+    s.order_portal.present_settled(&p, &root, &proof);
+
+    assert_eq!(portal_status(&s), order_portal_contract::Status::Filled);
+    assert_eq!(
+        token.balance(&maker_recipient),
+        before + s.tp.amount as i128,
+        "the maker's recipient is paid"
+    );
+    s.order_portal.record_settled(&p);
+    assert_eq!(portal_leaves(&s), 2, "T-59: SETTLED appended");
+    assert_eq!(bridger_in_flight(&s), 0, "T-44");
+
+    warp(&s, p.deadline + SUITE_LONG_BACKSTOP + SUITE_BUFFER);
+    assert_eq!(
+        s.order_portal.try_finalize_backstop(&p),
+        Err(Ok(OpErr::NotClaimed))
+    );
+}
+
+/// The documented residual: only silence through claim + window reaches the refund.
+#[test]
+fn test_t43_unchallenged_backstop_refunds_after_the_window() {
+    let s = setup();
+    let p = created_portal_order(&s);
+    let bridger = account_addr(&s, &s.tp.bridger);
+    let token = TokenContractClient::new(&s.env, &s.order_token_addr);
+    let before = token.balance(&bridger);
+
+    let now = p.deadline + SUITE_LONG_BACKSTOP;
+    warp(&s, now);
+    s.order_portal.claim_backstop(&p);
+    warp(&s, now + SUITE_BUFFER - 1);
+    assert_eq!(
+        s.order_portal.try_finalize_backstop(&p),
+        Err(Ok(OpErr::TooEarly))
+    );
+
+    warp(&s, now + SUITE_BUFFER);
+    s.order_portal.finalize_backstop(&p);
+    assert_eq!(portal_status(&s), order_portal_contract::Status::Cancelled);
+    assert_eq!(token.balance(&bridger), before + s.tp.amount as i128);
+    assert_eq!(bridger_in_flight(&s), 0, "T-44");
+    assert_eq!(portal_leaves(&s), 1, "no leaf on a follower cancel");
+    assert_eq!(
+        s.order_portal.try_finalize_backstop(&p),
+        Err(Ok(OpErr::NotClaimed))
+    );
+}
+
+/// The co-signed unlock is refused inside a backstop window: the package proves the lock, not the
+/// ad leg's outcome. Only outcome evidence settles or refunds there.
+#[test]
+fn test_unlock_refused_inside_backstop_window() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = created_portal_order(&s);
+    warp(&s, p.deadline + SUITE_LONG_BACKSTOP);
+    s.order_portal.claim_backstop(&p);
+
+    assert_eq!(portal_unlock(&s, &p), Err(OpErr::OrderNotOpen));
+    assert_eq!(portal_status(&s), order_portal_contract::Status::Claimed);
+    // A settled-leaf proof does settle it.
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &root);
+    s.order_portal.present_settled(&p, &root, &proof);
+    assert_eq!(portal_status(&s), order_portal_contract::Status::Filled);
+}
+
+// --- T-59: the settled leaf on every Filled ---------------------------------------------------------
+
+#[test]
+fn test_t59_cosigned_unlock_appends_settled_then_nothing_cancels() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = created_portal_order(&s);
+    assert_eq!(portal_leaves(&s), 1, "the AD leaf");
+    assert_eq!(portal_unlock(&s, &p), Ok(()));
+    assert_eq!(
+        portal_leaves(&s),
+        1,
+        "the fill itself appends nothing on Soroban"
+    );
+    s.order_portal.record_settled(&p);
+    assert_eq!(portal_leaves(&s), 2, "AD + SETTLED");
+    assert_eq!(
+        s.order_portal.try_record_settled(&p),
+        Err(Ok(OpErr::SettledRecorded)),
+        "single-shot"
+    );
+
+    let (root, proof) = cancel_proof(&s);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &root);
+    assert_eq!(
+        s.order_portal.try_refund_by_cancel(&p, &root, &proof),
+        Err(Ok(OpErr::NotClaimable))
+    );
+    warp(&s, p.deadline + 2 * SUITE_LONG_BACKSTOP);
+    assert_eq!(
+        s.order_portal.try_claim_backstop(&p),
+        Err(Ok(OpErr::NotClaimable))
+    );
+}
+
+/// T-59 on Soroban: the SETTLED leaf is recordable exactly once, only for `Filled`, never on a cancel.
+#[test]
+fn test_t59_record_settled_single_shot_only_when_filled() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    assert_eq!(
+        s.ad_manager.try_record_settled(&p),
+        Err(Ok(AdErr::NotFilled))
+    );
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    assert!(!s
+        .ad_manager
+        .is_settled_recorded(&bytes32_to_bytesn(&s.env, &s.tp.order_hash)));
+    s.ad_manager.record_settled(&p);
+    assert!(s
+        .ad_manager
+        .is_settled_recorded(&bytes32_to_bytesn(&s.env, &s.tp.order_hash)));
+    assert_eq!(ad_leaves(&s), 2);
+    assert_eq!(
+        s.ad_manager.try_record_settled(&p),
+        Err(Ok(AdErr::SettledRecorded))
+    );
+    assert_eq!(ad_leaves(&s), 2);
+
+    // A cancelled order never gets one.
+    let t = setup();
+    let q = ad_manager_order_params(&t.env, &t.tp);
+    warp(&t, q.deadline);
+    t.ad_manager.cancel_never_locked(&q);
+    assert_eq!(
+        t.ad_manager.try_record_settled(&q),
+        Err(Ok(AdErr::NotFilled))
+    );
+    assert_eq!(ad_leaves(&t), 1, "the CANCEL leaf only");
+}
+
+// --- G2/G3/G4: pause across a window, retiming during a claim, a far deadline ----------------------
+
+/// A pause freezes evidence, so it stops the clocks: a window open when the pause began ends later
+/// by exactly the pause, and the unlock is valid again for what was left of it.
+#[test]
+fn test_pause_across_the_window_moves_its_end_by_the_pause() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + 600);
+    s.ad_manager.pause();
+    warp(&s, p.deadline + SUITE_BUFFER + 3_600);
+    s.ad_manager.unpause();
+    // 1200 s were left when the pause began; 1200 s remain after it.
+    let reopened = p.deadline + SUITE_BUFFER + 3_600 + (SUITE_BUFFER - 600);
+
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, reopened - 1);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    assert!(
+        ad_unlock(&s, &p, &Bytes::new(&s.env)),
+        "the unlock is valid again"
+    );
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+
+    // Silence through the reopened window: the finalize lands at its end, the unlock no longer does.
+    let t = setup();
+    let q = locked_ad_order(&t);
+    // Paused from 5 minutes before the deadline across the whole buffer: the clock is measured
+    // from the lock, so all of it counts and the whole buffer remains after the pause.
+    warp(&t, q.deadline - 300);
+    t.ad_manager.pause();
+    warp(&t, q.deadline + SUITE_BUFFER + 3_600);
+    t.ad_manager.unpause();
+    let reopened = q.deadline + SUITE_BUFFER + 3_600 + SUITE_BUFFER + 300;
+    t.ad_manager.claim_cancel(&q);
+    let claim = t
+        .ad_manager
+        .get_claim(&bytes32_to_bytesn(&t.env, &t.tp.order_hash))
+        .unwrap();
+    assert_eq!(claim.finalize_at, reopened, "the record carries the pause");
+    assert_eq!(
+        t.ad_manager.try_finalize_cancel(&q),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&t, reopened + 1);
+    assert!(!ad_unlock(&t, &q, &Bytes::new(&t.env)));
+    t.ad_manager.finalize_cancel(&q);
+    assert_eq!(ad_status(&t), ad_manager_contract::Status::Cancelled);
+}
+
+/// P1: a pause never reopens a window that had already closed — claimed or not — and a pause that
+/// ended before the deadline touches nothing.
+#[test]
+fn test_pause_after_the_window_closed_does_not_reopen_it() {
+    // Claimed, closed ten days ago, never finalized.
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER + 10 * 86_400);
+    s.ad_manager.pause();
+    warp(&s, p.deadline + SUITE_BUFFER + 10 * 86_400 + 3_600);
+    s.ad_manager.unpause();
+    assert!(
+        !ad_unlock(&s, &p, &Bytes::new(&s.env)),
+        "closed stays closed"
+    );
+    s.ad_manager.finalize_cancel(&p);
+
+    // Never claimed, closed ten days ago: the claim lands and finalizes at once.
+    let t = setup();
+    let q = locked_ad_order(&t);
+    warp(&t, q.deadline + SUITE_BUFFER + 10 * 86_400);
+    t.ad_manager.pause();
+    warp(&t, q.deadline + SUITE_BUFFER + 10 * 86_400 + 3_600);
+    t.ad_manager.unpause();
+    assert!(!ad_unlock(&t, &q, &Bytes::new(&t.env)));
+    t.ad_manager.claim_cancel(&q);
+    let claim = t
+        .ad_manager
+        .get_claim(&bytes32_to_bytesn(&t.env, &t.tp.order_hash))
+        .unwrap();
+    assert_eq!(claim.finalize_at, q.deadline + SUITE_BUFFER + 3_600);
+    t.ad_manager.finalize_cancel(&q);
+
+    // A pause between the lock and the deadline extends the window too (the chosen behaviour: the
+    // clock runs from the lock, and that pause froze both unlocks).
+    let u = setup();
+    let r = locked_ad_order(&u);
+    u.ad_manager.pause();
+    warp(&u, 3_600);
+    u.ad_manager.unpause();
+    warp(&u, r.deadline + SUITE_BUFFER + 3_600 + 1);
+    assert!(!ad_unlock(&u, &r, &Bytes::new(&u.env)));
+    warp(&u, r.deadline + SUITE_BUFFER + 3_600);
+    assert!(ad_unlock(&u, &r, &Bytes::new(&u.env)));
+}
+
+/// Two pauses on one still-unclaimed lock, a long one then a short one, both count: the window is
+/// measured from the lock's pause-counter snapshot, exact over any number of pauses. A lock taken
+/// after a pause does not inherit it.
+#[test]
+fn test_pause_every_pause_since_the_lock_counts() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline + 60);
+    s.ad_manager.pause();
+    warp(&s, p.deadline + 660);
+    s.ad_manager.unpause();
+    warp(&s, p.deadline + 900);
+    s.ad_manager.pause();
+    warp(&s, p.deadline + 1_200);
+    s.ad_manager.unpause();
+    let end = p.deadline + SUITE_BUFFER + 600 + 300;
+
+    warp(&s, end + 1);
+    assert!(!ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    s.ad_manager.claim_cancel(&p);
+    let claim = s
+        .ad_manager
+        .get_claim(&bytes32_to_bytesn(&s.env, &s.tp.order_hash))
+        .unwrap();
+    assert_eq!(claim.finalize_at, end, "the claim materializes every pause");
+    s.ad_manager.finalize_cancel(&p);
+
+    assert_eq!(s.ad_manager.paused_seconds(), 900);
+    let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
+    assert_eq!(s.ad_manager.get_order(&order_hash).paused_at_open, 0);
+
+    // A lock taken now starts its clock at the current counter: those pauses are not its own.
+    let mut q = ad_manager_order_params(&s.env, &s.tp);
+    q.salt = soroban_sdk::U256::from_u32(&s.env, 777);
+    q.deadline = end + 86_400;
+    let hq = s.ad_manager.lock_for_order(&q);
+    assert_eq!(s.ad_manager.get_order(&hq).paused_at_open, 900);
+}
+
+#[test]
+fn test_pause_across_backstop_window_moves_its_end_by_the_pause() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = created_portal_order(&s);
+    let now = p.deadline + SUITE_LONG_BACKSTOP;
+    warp(&s, now);
+    s.order_portal.claim_backstop(&p);
+    s.order_portal.pause();
+    warp(&s, now + SUITE_BUFFER + 3_600);
+    s.order_portal.unpause();
+    let reopened = now + SUITE_BUFFER + 3_600 + SUITE_BUFFER;
+
+    assert_eq!(
+        s.order_portal.try_finalize_backstop(&p),
+        Err(Ok(OpErr::TooEarly))
+    );
+    warp(&s, reopened - 1);
+    assert_eq!(
+        s.order_portal.try_finalize_backstop(&p),
+        Err(Ok(OpErr::TooEarly))
+    );
+    // Inside the reopened window only outcome evidence counts: the settled-leaf proof pays the maker.
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &root);
+    s.order_portal.present_settled(&p, &root, &proof);
+    assert_eq!(portal_status(&s), order_portal_contract::Status::Filled);
+}
+
+/// Once claimed, the cutoff is the claim's frozen end; an admin retiming cannot move it.
+#[test]
+fn test_retiming_during_a_claim_does_not_move_the_cutoff() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    s.ad_manager.set_route_timing(
+        &s.tp.order_chain_id,
+        &ad_timing(0, 7_200, 0, SUITE_LONG_BACKSTOP, 0),
+    );
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    assert!(
+        !ad_unlock(&s, &p, &Bytes::new(&s.env)),
+        "raised buffer: the old end holds"
+    );
+    s.ad_manager.finalize_cancel(&p);
+
+    let t = setup();
+    t.ad_manager.set_route_timing(
+        &t.tp.order_chain_id,
+        &ad_timing(0, 7_200, 0, SUITE_LONG_BACKSTOP, 0),
+    );
+    let q = locked_ad_order(&t);
+    warp(&t, q.deadline);
+    t.ad_manager.claim_cancel(&q);
+    t.ad_manager.set_route_timing(
+        &t.tp.order_chain_id,
+        &ad_timing(0, SUITE_BUFFER, 0, SUITE_LONG_BACKSTOP, 0),
+    );
+    warp(&t, q.deadline + 3_600);
+    assert_eq!(
+        t.ad_manager.try_finalize_cancel(&q),
+        Err(Ok(AdErr::TooEarly)),
+        "lowered buffer: still open"
+    );
+    assert!(ad_unlock(&t, &q, &Bytes::new(&t.env)));
+}
+
+/// A far deadline never panics: the cutoffs saturate (EVM computes them in uint256).
+#[test]
+fn test_far_deadline_never_panics() {
+    let s = setup();
+    let mut p = ad_manager_order_params(&s.env, &s.tp);
+    p.deadline = u64::MAX;
+    s.ad_manager.lock_for_order(&p);
+    // The proof is for the fixture's order (another hash), so the unlock reaches the verifier and fails there.
+    let late = s.ad_manager.try_unlock(
+        &p,
+        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+        &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
+    );
+    assert_eq!(late, Err(Ok(AdErr::InvalidProof)));
+    assert_eq!(s.ad_manager.try_claim_cancel(&p), Err(Ok(AdErr::TooEarly)));
+}
+
+// --- timing validation, fail-closed posture, pause ------------------------------------------------
+
+#[test]
+fn test_set_route_timing_validation_matrix_both_legs() {
+    let s = setup();
+    let cases = [
+        (0, SUITE_BUFFER - 1, 0, SUITE_LONG_BACKSTOP, 0),
+        (3_600, 3_600, 3_600, SUITE_LONG_BACKSTOP, 0),
+        (0, 7_200, 0, 3_600, 0),
+        (1_800, 3_600, 0, SUITE_LONG_BACKSTOP, 1_800),
+        (60, 3_600, 120, SUITE_LONG_BACKSTOP, 0),
+    ];
+    for (mw, b, m, lb, cs) in cases {
+        assert_eq!(
+            s.ad_manager
+                .try_set_route_timing(&s.tp.order_chain_id, &ad_timing(mw, b, m, lb, cs)),
+            Err(Ok(AdErr::InvalidTiming))
+        );
+        assert_eq!(
+            s.order_portal
+                .try_set_route_timing(&s.tp.ad_chain_id, &portal_timing(mw, b, m, lb, cs)),
+            Err(Ok(OpErr::InvalidTiming))
+        );
+    }
+    // The D6 defaults round-trip.
+    s.ad_manager.set_route_timing(
+        &s.tp.order_chain_id,
+        &ad_timing(3_600, 7_200, 120, 259_200, 1_800),
+    );
+    assert_eq!(
+        s.ad_manager.get_route_timing(&s.tp.order_chain_id),
+        Some(ad_timing(3_600, 7_200, 120, 259_200, 1_800))
+    );
+}
+
+#[test]
+fn test_timing_unset_fails_closed_on_every_timed_path() {
+    let s = setup_opts(true, false);
+    let p = ad_manager_order_params(&s.env, &s.tp);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p),
+        Err(Ok(AdErr::NoRouteTiming))
+    );
+    warp(&s, p.deadline);
+    assert_eq!(
+        s.ad_manager.try_cancel_never_locked(&p),
+        Err(Ok(AdErr::NoRouteTiming))
+    );
+
+    let bridger = account_addr(&s, &s.tp.bridger);
+    TokenContractClient::new(&s.env, &s.order_token_addr).mint(&bridger, &(s.tp.amount as i128));
+    let q = order_portal_order_params(&s.env, &s.tp);
+    warp(&s, 0);
+    assert_eq!(
+        s.order_portal.try_create_order(&q),
+        Err(Ok(OpErr::NoRouteTiming))
+    );
+}
+
+#[test]
+fn test_pause_gates_every_termination_path() {
+    let s = setup();
+    wire_anchor(&s);
+    let p = locked_ad_order(&s);
+    let q = created_portal_order(&s);
+    let (root, proof) = cancel_proof(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.pause();
+    s.order_portal.pause();
+
+    assert_eq!(
+        s.ad_manager.try_claim_cancel(&p),
+        Err(Ok(AdErr::ContractPaused))
+    );
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::ContractPaused))
+    );
+    assert_eq!(
+        s.ad_manager.try_cancel_never_locked(&p),
+        Err(Ok(AdErr::ContractPaused))
+    );
+    assert_eq!(
+        s.ad_manager.try_present_settled(&p, &root, &proof),
+        Err(Ok(AdErr::ContractPaused))
+    );
+    assert_eq!(
+        s.order_portal.try_refund_by_cancel(&q, &root, &proof),
+        Err(Ok(OpErr::ContractPaused))
+    );
+    assert_eq!(
+        s.order_portal.try_present_settled(&q, &root, &proof),
+        Err(Ok(OpErr::ContractPaused))
+    );
+    assert_eq!(
+        s.order_portal.try_claim_backstop(&q),
+        Err(Ok(OpErr::ContractPaused))
+    );
+    assert_eq!(
+        s.order_portal.try_finalize_backstop(&q),
+        Err(Ok(OpErr::ContractPaused))
+    );
+    assert_eq!(
+        s.ad_manager.try_record_settled(&p),
+        Err(Ok(AdErr::ContractPaused))
+    );
+    assert_eq!(
+        s.order_portal.try_record_settled(&q),
+        Err(Ok(OpErr::ContractPaused))
+    );
 }

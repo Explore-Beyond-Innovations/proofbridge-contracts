@@ -42,10 +42,15 @@ interface IOrderPortal is IEscrow {
         bytes32 adRecipient
     );
 
+    /// @notice The bridger's deposit went back to them (`Cancelled`).
+    event OrderRefunded(bytes32 indexed orderHash, bytes32 indexed bridger, uint256 amount);
+
     error OrderPortal__AdManagerMismatch(bytes32 expected);
     error OrderPortal__BridgerMustBeSender();
 
     function createOrder(OrderParams calldata params) external payable returns (bytes32 orderHash);
+    /// @notice The maker's co-signed settlement: `Open` only, until `deadline − claimStagger`. Never
+    ///         inside a backstop window — the package proves the lock, not the ad leg's outcome.
     function unlock(
         OrderParams calldata params,
         bytes32 nullifierHash,
@@ -53,4 +58,23 @@ interface IOrderPortal is IEscrow {
         bytes calldata proof,
         bytes calldata cosigData
     ) external;
+
+    /*//////////////////////////////////////////////////////////////
+                        TERMINATION — THE FOLLOWER (2.3e)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Refund the bridger against a proof of the primary's CANCEL leaf under an anchored
+    ///         root. Reads no clock. `Open` or `Claimed` (a cancel proof beats a backstop window).
+    function refundByCancel(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof) external;
+    /// @notice Settle the deposit to the maker on a proof of the ad leg's SETTLED leaf under an
+    ///         anchored root. `Open` or `Claimed`; no nullifier.
+    function presentSettled(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof) external;
+    /// @notice Append the deposit's SETTLED leaf after a fill (D8). Permissionless, single-shot, its
+    ///         own transaction — the relayer batches it behind the fill.
+    function recordSettled(OrderParams calldata params) external;
+    /// @notice Open the backstop window at `now ≥ deadline + longBackstop` (an anchor outage): the
+    ///         window is claim-anchored and may be finalized at `now + buffer`. Permissionless.
+    function claimBackstop(OrderParams calldata params) external;
+    /// @notice After an unchallenged backstop window: refund the bridger.
+    function finalizeBackstop(OrderParams calldata params) external;
 }

@@ -105,6 +105,28 @@ pub enum AdManagerError {
     SignerNotRegistered = 49,
     /// The order's ad_settlement_signer is not the one this ad declared
     SettlementSignerMismatch = 50,
+
+    // Termination (2.3e) — 51-58
+    /// No route timing set for the peer chain; every timed path fails closed
+    NoRouteTiming = 51,
+    /// set_route_timing: the clocks violate the D6 rules
+    InvalidTiming = 52,
+    /// The lock's deadline is closer than the route's min_window
+    DeadlineTooSoon = 53,
+    /// The order is not in a state this path accepts (Open / Claimed / None, as documented)
+    NotClaimable = 54,
+    /// The clock the caller relies on has not been reached
+    TooEarly = 55,
+    /// No presentation window is open on the order
+    NotClaimed = 56,
+    /// No root anchor is set; the evidence paths fail closed
+    NoRootAnchor = 57,
+    /// The anchor has not notarized the root (or its delay has not passed)
+    RootNotAnchored = 58,
+    /// record_settled: the order's SETTLED leaf is already in the MMR
+    SettledRecorded = 59,
+    /// record_settled: the order is not `Filled`
+    NotFilled = 60,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for AdManagerError {

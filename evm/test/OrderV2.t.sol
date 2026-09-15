@@ -58,13 +58,15 @@ contract AdManagerOrderV2Test is AdManagerTest {
         adManager.unlock(p, bytes32("S2"), ROOT, hex"", hex"");
     }
 
-    function test_unlock_revertsAfterDeadline_andPassesAtIt() public {
+    /// 2.3e D2: the primary's co-signed unlock is the presentation — valid through the window.
+    function test_unlock_revertsAfterWindow_andPassesAtItsEnd() public {
         IAdManager.OrderParams memory p = _lock(SIGNER);
         _module(SIGNER);
-        vm.warp(p.deadline + 1);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, p.deadline));
+        uint256 cutoff = p.deadline + 30 minutes;
+        vm.warp(cutoff + 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, cutoff));
         adManager.unlock(p, bytes32("D1"), ROOT, hex"", hex"");
-        vm.warp(p.deadline);
+        vm.warp(cutoff);
         adManager.unlock(p, bytes32("D1"), ROOT, hex"", hex"");
     }
 

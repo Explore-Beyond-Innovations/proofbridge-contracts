@@ -1,6 +1,7 @@
 import {
   readManifest,
   type ChainDeploymentManifest,
+  type RouteTiming,
 } from "@proofbridge/deployment-manifest";
 import { connect, requireEnv } from "./common.js";
 import { attachContract } from "./artifacts.js";
@@ -185,6 +186,61 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     console.log("  [link] no RootAnchor in the local manifest; redeploy core to add the notary");
   }
 
+  // ── Termination clocks + notary reference for the peer route (2.3e) ──
+  // ROUTE_{MIN_WINDOW,BUFFER,MARGIN,LONG_BACKSTOP,CLAIM_STAGGER}_S. Local deploys default to
+  // the smallest legal clocks; anywhere else every variable must be set explicitly, like the
+  // anchor delay — a forgotten clock must not ship a default and record it as intended.
+  {
+    const timing = routeTimingFromEnv(local.meta.env);
+    for (const [name, escrow] of [
+      ["AdManager", adManager],
+      ["OrderPortal", orderPortal],
+    ] as const) {
+      const cur = await escrow.getFunction("routeTiming")(peerChainId);
+      const same =
+        BigInt(cur[0]) === BigInt(timing.minWindow) &&
+        BigInt(cur[1]) === BigInt(timing.buffer) &&
+        BigInt(cur[2]) === BigInt(timing.margin) &&
+        BigInt(cur[3]) === BigInt(timing.longBackstop) &&
+        BigInt(cur[4]) === BigInt(timing.claimStagger);
+      if (same) {
+        console.log(`  [skip] ${name}.setRouteTiming(${peerChainId}) already set`);
+        continue;
+      }
+      const tx = await escrow.getFunction("setRouteTiming")(
+        peerChainId,
+        [timing.minWindow, timing.buffer, timing.margin, timing.longBackstop, timing.claimStagger],
+        { nonce: nonces.next() },
+      );
+      await tx.wait();
+      chainTxs++;
+      console.log(
+        `  [link] ${name}.setRouteTiming(${peerChainId}, minWindow=${timing.minWindow}s buffer=${timing.buffer}s margin=${timing.margin}s longBackstop=${timing.longBackstop}s claimStagger=${timing.claimStagger}s)`,
+      );
+    }
+    local.routeTiming[peerChainId.toString()] = timing;
+    await writeManifest(localPath, local);
+  }
+  if (local.contracts.rootAnchor) {
+    const anchorAddr = local.contracts.rootAnchor.address;
+    for (const [name, escrow] of [
+      ["AdManager", adManager],
+      ["OrderPortal", orderPortal],
+    ] as const) {
+      const cur = await escrow.getFunction("rootAnchor")();
+      if (sameHex(cur, anchorAddr)) {
+        console.log(`  [skip] ${name}.setRootAnchor already ${anchorAddr}`);
+        continue;
+      }
+      const tx = await escrow.getFunction("setRootAnchor")(anchorAddr, { nonce: nonces.next() });
+      await tx.wait();
+      chainTxs++;
+      console.log(`  [link] ${name}.setRootAnchor(${anchorAddr}) - evidence paths live`);
+    }
+  } else {
+    console.log("  [link] no RootAnchor in the local manifest; the escrows' evidence paths stay fail-closed");
+  }
+
   // ── Per-pair token routes (two directions per pairKey) ────────────
   let routeTxs = 0;
   for (const localTok of local.tokens) {
@@ -243,6 +299,29 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     peerChainId: peer.chain.chainId,
     chainTxs,
     routeTxs,
+  };
+}
+
+/** The route clocks from env: local deploys get the smallest legal set; elsewhere every var is required. */
+function routeTimingFromEnv(env: string): RouteTiming {
+  const local = env === "local";
+  const read = (name: string, localDefault: string): string => {
+    const v = process.env[name];
+    if (v !== undefined) {
+      if (!/^\d+$/.test(v)) throw new Error(`link: ${name}="${v}" is not a whole number of seconds`);
+      return v;
+    }
+    if (local) return localDefault;
+    throw new Error(
+      `link: ${name} is unset for env=${env}; set every ROUTE_*_S clock (seconds) or deploy with DEPLOY_ENV=local`,
+    );
+  };
+  return {
+    minWindow: read("ROUTE_MIN_WINDOW_S", "0"),
+    buffer: read("ROUTE_BUFFER_S", "1800"),
+    margin: read("ROUTE_MARGIN_S", "0"),
+    longBackstop: read("ROUTE_LONG_BACKSTOP_S", "86400"),
+    claimStagger: read("ROUTE_CLAIM_STAGGER_S", "0"),
   };
 }
 

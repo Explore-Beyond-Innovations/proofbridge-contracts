@@ -2,7 +2,7 @@
 
 use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol};
 
-use crate::types::{ChainInfo, ContractConfig, Status};
+use crate::types::{ChainInfo, ClaimRecord, ContractConfig, OrderRecord, RouteTiming, Status};
 
 // =============================================================================
 // Storage Keys
@@ -31,6 +31,18 @@ const KEY_RVERIF: Symbol = symbol_short!("rverif");
 const KEY_INFLT: Symbol = symbol_short!("inflt");
 /// Prefix for unclaimed payouts: (KEY_CLAIM, recipient, token) -> u128
 const KEY_CLAIM: Symbol = symbol_short!("claim");
+/// Prefix for route timing (2.3e D6): (KEY_TIMING, chain_id) -> RouteTiming
+const KEY_TIMING: Symbol = symbol_short!("timing");
+/// The notary the evidence paths read (2.3e D7), instance storage.
+const KEY_ANCHOR: Symbol = symbol_short!("anchor");
+/// Prefix for open presentation windows: (KEY_CLAIMS, order_hash) -> ClaimRecord
+const KEY_CLAIMS: Symbol = symbol_short!("claims");
+/// Prefix for recorded settled leaves: (KEY_SETTLED, order_hash) -> bool
+const KEY_SETTLED: Symbol = symbol_short!("settled");
+/// The pause clock (instance): when the current pause began, and the seconds spent paused in
+/// total. Each leg snapshots the total when it opens; its window moves by the pause time since.
+const KEY_PAUSED_AT: Symbol = symbol_short!("pausedat");
+const KEY_PAUSEDSEC: Symbol = symbol_short!("pausedsec");
 
 // =============================================================================
 // Instance Storage (Contract-level state)
@@ -119,18 +131,97 @@ pub fn remove_token_route(env: &Env, order_token: &BytesN<32>, ad_chain_id: u128
 // =============================================================================
 
 /// Get order status
-pub fn get_order_status(env: &Env, order_hash: &BytesN<32>) -> Status {
+pub fn get_order(env: &Env, order_hash: &BytesN<32>) -> OrderRecord {
     env.storage()
         .persistent()
         .get(&(KEY_ORDERS, order_hash.clone()))
-        .unwrap_or(Status::None)
+        .unwrap_or(OrderRecord {
+            status: Status::None,
+            paused_at_open: 0,
+        })
 }
 
-/// Set order status
+pub fn get_order_status(env: &Env, order_hash: &BytesN<32>) -> Status {
+    get_order(env, order_hash).status
+}
+
+/// `None → Open`, stamping the pause counter the leg's window is measured from.
+pub fn open_order(env: &Env, order_hash: &BytesN<32>) {
+    set_order(
+        env,
+        order_hash,
+        &OrderRecord {
+            status: Status::Open,
+            paused_at_open: get_paused_seconds(env),
+        },
+    );
+}
+
+/// Flip the status, keeping the leg's pause snapshot; every flip re-extends the record (2.3h's TTL
+/// runbook lists this write).
 pub fn set_order_status(env: &Env, order_hash: &BytesN<32>, status: Status) {
+    let mut rec = get_order(env, order_hash);
+    rec.status = status;
+    set_order(env, order_hash, &rec);
+}
+
+fn set_order(env: &Env, order_hash: &BytesN<32>, rec: &OrderRecord) {
+    let key = (KEY_ORDERS, order_hash.clone());
+    env.storage().persistent().set(&key, rec);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+}
+
+// =============================================================================
+// Termination (2.3e)
+// =============================================================================
+
+pub fn get_route_timing(env: &Env, chain_id: u128) -> Option<RouteTiming> {
+    env.storage().persistent().get(&(KEY_TIMING, chain_id))
+}
+
+pub fn set_route_timing(env: &Env, chain_id: u128, timing: &RouteTiming) {
+    let key = (KEY_TIMING, chain_id);
+    env.storage().persistent().set(&key, timing);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+}
+
+pub fn get_root_anchor(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&KEY_ANCHOR)
+}
+
+pub fn set_root_anchor(env: &Env, anchor: &Address) {
+    env.storage().instance().set(&KEY_ANCHOR, anchor);
+}
+
+pub fn get_claim(env: &Env, order_hash: &BytesN<32>) -> Option<ClaimRecord> {
     env.storage()
         .persistent()
-        .set(&(KEY_ORDERS, order_hash.clone()), &status);
+        .get(&(KEY_CLAIMS, order_hash.clone()))
+}
+
+pub fn set_claim(env: &Env, order_hash: &BytesN<32>, claim: &ClaimRecord) {
+    let key = (KEY_CLAIMS, order_hash.clone());
+    env.storage().persistent().set(&key, claim);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+}
+
+pub fn is_settled_recorded(env: &Env, order_hash: &BytesN<32>) -> bool {
+    env.storage()
+        .persistent()
+        .get(&(KEY_SETTLED, order_hash.clone()))
+        .unwrap_or(false)
+}
+
+pub fn set_settled_recorded(env: &Env, order_hash: &BytesN<32>) {
+    let key = (KEY_SETTLED, order_hash.clone());
+    env.storage().persistent().set(&key, &true);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+}
+
+pub fn remove_claim(env: &Env, order_hash: &BytesN<32>) {
+    env.storage()
+        .persistent()
+        .remove(&(KEY_CLAIMS, order_hash.clone()));
 }
 
 // =============================================================================
@@ -195,6 +286,22 @@ pub fn is_paused(env: &Env) -> bool {
 
 pub fn set_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&KEY_PAUSED, &paused);
+}
+
+pub fn get_last_paused_at(env: &Env) -> u64 {
+    env.storage().instance().get(&KEY_PAUSED_AT).unwrap_or(0)
+}
+
+pub fn set_last_paused_at(env: &Env, at: u64) {
+    env.storage().instance().set(&KEY_PAUSED_AT, &at);
+}
+
+pub fn get_paused_seconds(env: &Env) -> u64 {
+    env.storage().instance().get(&KEY_PAUSEDSEC).unwrap_or(0)
+}
+
+pub fn set_paused_seconds(env: &Env, secs: u64) {
+    env.storage().instance().set(&KEY_PAUSEDSEC, &secs);
 }
 
 pub fn get_pending_admin(env: &Env) -> Option<Address> {

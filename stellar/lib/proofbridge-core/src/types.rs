@@ -6,7 +6,8 @@ use soroban_sdk::{contracttype, Address};
 // Order Lifecycle
 // =============================================================================
 
-/// Order lifecycle status
+/// Order lifecycle status. `Filled` and `Cancelled` are terminal; `Claimed` is a presentation
+/// window (2.3e); `Disputed` / `Resolved` are reserved for 2.3g so it never renumbers.
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -15,8 +16,70 @@ pub enum Status {
     None = 0,
     /// Liquidity reserved / Created and funded
     Open = 1,
-    /// Unlocked and paid
+    /// Unlocked and paid (the SETTLED leaf is appended)
     Filled = 2,
+    /// A presentation window is open; evidence settles it, silence cancels it
+    Claimed = 3,
+    /// Refunded / released (the primary appends the CANCEL leaf)
+    Cancelled = 4,
+    /// Reserved (2.3g)
+    Disputed = 5,
+    /// Reserved (2.3g)
+    Resolved = 6,
+}
+
+// =============================================================================
+// Termination (2.3e)
+// =============================================================================
+
+/// The per-peer-chain clocks the termination primitive reads (2.3e D6), in seconds. Admin-set per
+/// route, validated once at write time (`timing::validate`), fail-closed when unset.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteTiming {
+    /// Shortest `deadline - now` a lock/create accepts.
+    pub min_window: u64,
+    /// The primary's presentation window after the deadline; the follower's backstop window after its claim.
+    pub buffer: u64,
+    /// How much before the window's end the primary stops accepting the co-signed unlock.
+    pub margin: u64,
+    /// How long after the deadline the follower may open a backstop claim.
+    pub long_backstop: u64,
+    /// How much before the deadline the follower's co-signed unlock stops (0 = off).
+    pub claim_stagger: u64,
+}
+
+/// Which clock opened a presentation window; 2.3g's dispute entry hangs off the same record.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ClaimEntry {
+    None = 0,
+    Deadline = 1,
+    Backstop = 2,
+    Dispute = 3,
+}
+
+/// The order's leg on this chain: its status and the escrow's paused-seconds counter when the leg
+/// opened (a pause stops the window's clock; the window is measured from this snapshot).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrderRecord {
+    pub status: Status,
+    pub paused_at_open: u64,
+}
+
+/// The open presentation window on an order (`Claimed` ⇔ a record exists). `paused_at_open` is
+/// the escrow's paused-seconds counter when the window opened: the window's real end is
+/// `finalize_at` plus whatever the escrow has been paused since (a pause stops the clocks, it
+/// never reopens a closed window).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaimRecord {
+    pub opened_at: u64,
+    pub finalize_at: u64,
+    pub paused_at_open: u64,
+    pub entry: ClaimEntry,
 }
 
 impl Default for Status {
