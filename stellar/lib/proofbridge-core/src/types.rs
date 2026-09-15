@@ -60,13 +60,13 @@ pub enum ClaimEntry {
     Dispute = 3,
 }
 
-/// One pause of an escrow: `end == 0` while it is still paused. The history is what makes a
-/// pre-claim window's pause overlap exact, however many pauses fell inside it.
+/// The order's leg on this chain: its status and the escrow's paused-seconds counter when the leg
+/// opened (a pause stops the window's clock; the window is measured from this snapshot).
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PauseSpan {
-    pub start: u64,
-    pub end: u64,
+pub struct OrderRecord {
+    pub status: Status,
+    pub paused_at_open: u64,
 }
 
 /// The open presentation window on an order (`Claimed` ⇔ a record exists). `paused_at_open` is

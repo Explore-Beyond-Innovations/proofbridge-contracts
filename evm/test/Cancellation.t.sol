@@ -537,13 +537,15 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
 
     function test_pause_acrossTheWindow_thenSilence_finalizesAtTheReopenedEnd() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lock(20);
-        // Paused while still Open, across the deadline and the whole buffer.
+        // Paused while still Open, from 5 minutes before the deadline across the whole buffer:
+        // the clock is measured from the lock, so all 1h35 count.
+        vm.warp(p.deadline - 5 minutes);
         vm.prank(admin);
         adManager.pause();
         vm.warp(p.deadline + 30 minutes + 1 hours);
         vm.prank(admin);
         adManager.unpause();
-        uint256 reopened = block.timestamp + 30 minutes;
+        uint256 reopened = block.timestamp + 35 minutes;
 
         adManager.claimCancel(p);
         (, uint64 finalizeAt,,) = adManager.claims(h);
@@ -593,31 +595,35 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         assertEq(finalizeAt, q.deadline + 30 minutes + 1 hours);
         adManager.finalizeCancel(q);
 
-        // A pause that ended before the deadline changes nothing.
+        // A pause between the lock and the deadline extends the window too (the chosen behaviour:
+        // the clock runs from the lock, and that pause froze both unlocks).
         (IAdManager.OrderParams memory r,) = _openOrder(lastAdId, address(adToken), 60 ether, 25, bridger, recipient);
         vm.prank(admin);
         adManager.pause();
         vm.warp(block.timestamp + 1 hours);
         vm.prank(admin);
         adManager.unpause();
-        vm.warp(r.deadline + 30 minutes + 1);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, r.deadline + 30 minutes));
+        vm.warp(r.deadline + 30 minutes + 1 hours + 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, r.deadline + 30 minutes + 1 hours)
+        );
+        adManager.unlock(r, bytes32("P5"), bytes32(0), hex"", hex"");
+        vm.warp(r.deadline + 30 minutes + 1 hours);
         adManager.unlock(r, bytes32("P5"), bytes32(0), hex"", hex"");
     }
 
-    /// Two pauses inside one still-unclaimed window both count, and a pause that straddles the
-    /// deadline counts from the deadline only: the history makes the pre-claim overlap exact.
-    function test_pause_history_everyPauseInsideTheWindowCounts() public {
+    /// Two pauses on one still-unclaimed lock, a long one then a short one, both count: the window
+    /// is measured from the lock's pause-counter snapshot, exact over any number of pauses. A lock
+    /// taken after a pause does not inherit it.
+    function test_pause_everyPauseSinceTheLockCounts() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lock(26);
-        // Straddles the deadline: 5 minutes before, 5 minutes after — 5 count.
-        vm.warp(p.deadline - 5 minutes);
+        vm.warp(p.deadline + 1 minutes);
         vm.prank(admin);
         adManager.pause();
-        vm.warp(p.deadline + 5 minutes);
+        vm.warp(p.deadline + 11 minutes);
         vm.prank(admin);
         adManager.unpause();
-        // A second pause inside the window — 10 more.
-        vm.warp(p.deadline + 10 minutes);
+        vm.warp(p.deadline + 15 minutes);
         vm.prank(admin);
         adManager.pause();
         vm.warp(p.deadline + 20 minutes);
@@ -633,10 +639,16 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         assertEq(finalizeAt, end, "the claim materializes every pause");
         adManager.finalizeCancel(p);
 
-        (uint64 start0, uint64 end0) = adManager.pauses(0);
-        assertEq(start0, p.deadline - 5 minutes);
-        assertEq(end0, p.deadline + 5 minutes);
-        assertEq(adManager.pausedSeconds(), 20 minutes);
+        assertEq(adManager.pausedSeconds(), 15 minutes);
+        assertEq(adManager.orderPausedAtOpen(h), 0);
+
+        // A lock taken now starts its clock at the current counter: those pauses are not its own.
+        (IAdManager.OrderParams memory q, bytes32 hq) =
+            _openOrder(lastAdId, address(adToken), 60 ether, 27, bridger, recipient);
+        assertEq(adManager.orderPausedAtOpen(hq), 15 minutes);
+        vm.warp(q.deadline + 30 minutes + 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, q.deadline + 30 minutes));
+        adManager.unlock(q, bytes32("H2"), bytes32(0), hex"", hex"");
     }
 
     /// G3: once claimed, the cutoff is the claim's frozen end; an admin retiming cannot move it.

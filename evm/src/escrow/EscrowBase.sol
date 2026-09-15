@@ -39,8 +39,9 @@ import {TwoStepAdmin} from "../libraries/TwoStepAdmin.sol";
  *
  *      `Filled` and `Cancelled` are terminal. Nothing terminal happens on a clock alone: a clock only
  *      opens a window, and evidence inside the window always wins over the refund after it — a pause
- *      included: a pause stops the clocks (`pausedSeconds`), so a window that was open when the pause
- *      began ends later by exactly the pause, and a window that had already closed stays closed. The
+ *      included: a pause stops the clocks (`pausedSeconds`, measured from the leg's lock/create or
+ *      from a backstop claim), so a window ends later by exactly the pause, and a window that had
+ *      already closed stays closed. The
  *      SETTLED leaf is its own transaction on both chains (Soroban's per-tx budget forces it there;
  *      EVM matches so the relayer batches one shape), permissionless and single-shot.
  */
@@ -78,8 +79,8 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     /// @notice Token routes: local token → peer chain id → the peer chain's token id.
     mapping(address localToken => mapping(uint256 peerChainId => bytes32 peerToken)) public tokenRoute;
 
-    /// @notice Order status by EIP-712 hash.
-    mapping(bytes32 orderHash => Status) public orders;
+    /// @notice The order's leg by EIP-712 hash: status + the pause counter when it opened.
+    mapping(bytes32 orderHash => Order) internal _orders;
 
     /// @notice Consumed nullifiers; one settlement proof per nullifier, protocol-wide.
     mapping(bytes32 nullifierHash => bool) public nullifierUsed;
@@ -104,10 +105,10 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
 
     /// @notice The pause clock: a pause freezes evidence, so it must not run the windows. Every
     ///         presentation window is measured in unpaused seconds — `pausedSeconds` accumulates at
-    ///         each unpause, `pauses` keeps every span, and a window's real end moves by exactly the
-    ///         pause time that fell inside it.
+    ///         each unpause, each leg snapshots it when it opens, and a window's real end moves by
+    ///         exactly the pause time since that snapshot.
     uint64 public pausedSeconds;
-    Termination.PauseSpan[] public pauses;
+    uint64 private _pausedAt;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -130,14 +131,12 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
 
     function pause() external onlyRole(ADMIN_ROLE) {
         _pause();
-        pauses.push(Termination.PauseSpan(uint64(block.timestamp), 0));
+        _pausedAt = uint64(block.timestamp);
     }
 
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
-        Termination.PauseSpan storage span = pauses[pauses.length - 1];
-        span.end = uint64(block.timestamp);
-        pausedSeconds += span.end - span.start;
+        pausedSeconds += uint64(block.timestamp) - _pausedAt;
     }
 
     /// @inheritdoc IEscrow
@@ -232,10 +231,11 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
                               ORDER LEDGER
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev `None → Open`; a second lock/create of the same hash reverts.
+    /// @dev `None → Open`, stamping the pause counter the leg's window is measured from; a second
+    ///      lock/create of the same hash reverts.
     function _openOrder(bytes32 orderHash) internal {
-        if (orders[orderHash] != Status.None) revert Escrow__OrderExists(orderHash);
-        orders[orderHash] = Status.Open;
+        if (_orders[orderHash].status != Status.None) revert Escrow__OrderExists(orderHash);
+        _orders[orderHash] = Order(Status.Open, pausedSeconds);
     }
 
     /// @dev Append this leg's leaf to the chain's MMR under `domain` (a `LeafDomain` constant).
@@ -280,13 +280,13 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
 
     /// @dev The leg is `Open` or in a presentation window: evidence may still settle it.
     function _requirePresentable(bytes32 orderHash) internal view returns (Status s) {
-        s = orders[orderHash];
+        s = _orders[orderHash].status;
         if (s != Status.Open && s != Status.Claimed) revert Escrow__NotClaimable(orderHash, s);
     }
 
     /// @dev The leg must be exactly `expected` (`Open` before a claim, `None` before a never-locked cancel).
     function _requireStatus(bytes32 orderHash, Status expected) internal view {
-        Status s = orders[orderHash];
+        Status s = _orders[orderHash].status;
         if (s != expected) revert Escrow__NotClaimable(orderHash, s);
     }
 
@@ -298,7 +298,7 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     ///      `Claimed` — the co-signed unlock is the presentation, 2.3e D2).
     function _requireSettleable(bytes32 orderHash, bytes32 nullifierHash) internal view {
         if (nullifierUsed[nullifierHash]) revert Escrow__NullifierUsed(nullifierHash);
-        Status s = orders[orderHash];
+        Status s = _orders[orderHash].status;
         if (s != Status.Open && s != Status.Claimed) revert Escrow__OrderNotOpen(orderHash);
     }
 
@@ -353,7 +353,7 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
      *      D8) follows in `_recordSettled`, a separate transaction.
      */
     function _fill(bytes32 orderHash, bytes32 account, bool byEvidence) internal {
-        orders[orderHash] = Status.Filled;
+        _orders[orderHash].status = Status.Filled;
         delete claims[orderHash];
         _countOut(account);
         emit OrderSettled(orderHash, byEvidence);
@@ -362,7 +362,7 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     /// @dev Append this leg's SETTLED leaf for a `Filled` order, once (D8): what lets the other
     ///      escrow's presenter prove this one paid. Permissionless; the caller only names the order.
     function _recordSettled(bytes32 orderHash) internal {
-        if (orders[orderHash] != Status.Filled) revert Escrow__NotFilled(orderHash);
+        if (_orders[orderHash].status != Status.Filled) revert Escrow__NotFilled(orderHash);
         if (settledRecorded[orderHash]) revert Escrow__SettledRecorded(orderHash);
         settledRecorded[orderHash] = true;
         _appendLeaf(orderHash, LeafDomain.SETTLED);
@@ -372,7 +372,7 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     /// @dev Open a presentation window on an `Open` leg; only a `finalize*` or evidence closes it.
     function _openClaim(bytes32 orderHash, Termination.ClaimEntry entry, uint256 finalizeAt) internal {
         claims[orderHash] = Termination.Claim(uint64(block.timestamp), uint64(finalizeAt), pausedSeconds, entry);
-        orders[orderHash] = Status.Claimed;
+        _orders[orderHash].status = Status.Claimed;
         emit ClaimOpened(orderHash, entry, uint64(finalizeAt));
     }
 
@@ -380,40 +380,31 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
      * @dev When the leg's presentation window ends, in real time. Once claimed: the claim's
      *      `finalizeAt` plus every second the escrow has been paused since the claim opened (the
      *      record's counter snapshot makes this exact across any number of pauses). Before a claim,
-     *      the primary's deadline-anchored `deadline + buffer` plus every pause's overlap with the
-     *      window. A pause stops the clocks and never reopens a closed window: a window
-     *      closed before the pause gets no more time than the pause that fell inside it — none. One
-     *      number serves both sides of the race: the unlock/presentation cutoff is this minus the
-     *      margin, the finalize needs this reached.
+     *      the primary's deadline-anchored `deadline + buffer` plus every second paused since the leg
+     *      was locked (its own snapshot; a pause before the deadline counts too — it froze both
+     *      unlocks, and more time for evidence is the safe direction). A pause stops the clocks and
+     *      never reopens a closed window: a pause after the end adds its length, but the clock moved
+     *      on by the same length. One number serves both sides of the race: the unlock/presentation
+     *      cutoff is this minus the margin, the finalize needs this reached.
      */
     function _windowEnd(bytes32 orderHash, uint256 deadline, uint64 buffer) internal view returns (uint256) {
-        if (orders[orderHash] == Status.Claimed) {
+        Order storage o = _orders[orderHash];
+        if (o.status == Status.Claimed) {
             Termination.Claim storage c = claims[orderHash];
             return uint256(c.finalizeAt) + (pausedSeconds - c.pausedAtOpen);
         }
-        return deadline + buffer + _pausedSince(deadline);
-    }
-
-    /// @dev Seconds paused after `from`: every span's overlap with `[from, now]`, newest first,
-    ///      stopping at the first span that ended before `from`. One read per pause since `from`.
-    function _pausedSince(uint256 from) internal view returns (uint256 total) {
-        for (uint256 i = pauses.length; i > 0; i--) {
-            Termination.PauseSpan storage span = pauses[i - 1];
-            if (span.end <= from) break;
-            uint256 start = span.start > from ? span.start : from;
-            total += span.end - start;
-        }
+        return deadline + buffer + (pausedSeconds - o.pausedAtOpen);
     }
 
     /// @dev The leg must be `Claimed` and its window over; returns nothing, the caller then `_cancel`s.
     function _requireFinalizable(bytes32 orderHash, uint64 buffer) internal view {
-        if (orders[orderHash] != Status.Claimed) revert Escrow__NotClaimed(orderHash);
+        if (_orders[orderHash].status != Status.Claimed) revert Escrow__NotClaimed(orderHash);
         _requireReached(_windowEnd(orderHash, 0, buffer));
     }
 
     /// @dev `→ Cancelled`: close the window, count out. The leaf and the funds are the caller's.
     function _cancel(bytes32 orderHash, bytes32 account, bool byEvidence) internal {
-        orders[orderHash] = Status.Cancelled;
+        _orders[orderHash].status = Status.Cancelled;
         delete claims[orderHash];
         _countOut(account);
         emit OrderCancelled(orderHash, byEvidence);
@@ -422,6 +413,16 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     /*//////////////////////////////////////////////////////////////
                                  VIEWS
     //////////////////////////////////////////////////////////////*/
+
+    /// @inheritdoc IEscrow
+    function orders(bytes32 orderHash) external view returns (Status) {
+        return _orders[orderHash].status;
+    }
+
+    /// @inheritdoc IEscrow
+    function orderPausedAtOpen(bytes32 orderHash) external view returns (uint64) {
+        return _orders[orderHash].pausedAtOpen;
+    }
 
     /// @inheritdoc IEscrow
     function hasOpenPositions(bytes32 account) external view returns (bool) {

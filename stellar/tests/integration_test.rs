@@ -3529,11 +3529,13 @@ fn test_pause_across_the_window_moves_its_end_by_the_pause() {
     // Silence through the reopened window: the finalize lands at its end, the unlock no longer does.
     let t = setup();
     let q = locked_ad_order(&t);
+    // Paused from 5 minutes before the deadline across the whole buffer: the clock is measured
+    // from the lock, so all of it counts and the whole buffer remains after the pause.
+    warp(&t, q.deadline - 300);
     t.ad_manager.pause();
     warp(&t, q.deadline + SUITE_BUFFER + 3_600);
     t.ad_manager.unpause();
-    // Paused across the whole window: the whole buffer remains after the pause.
-    let reopened = q.deadline + SUITE_BUFFER + 3_600 + SUITE_BUFFER;
+    let reopened = q.deadline + SUITE_BUFFER + 3_600 + SUITE_BUFFER + 300;
     t.ad_manager.claim_cancel(&q);
     let claim = t
         .ad_manager
@@ -3585,33 +3587,35 @@ fn test_pause_after_the_window_closed_does_not_reopen_it() {
     assert_eq!(claim.finalize_at, q.deadline + SUITE_BUFFER + 3_600);
     t.ad_manager.finalize_cancel(&q);
 
-    // A pause that ended before the deadline changes nothing.
+    // A pause between the lock and the deadline extends the window too (the chosen behaviour: the
+    // clock runs from the lock, and that pause froze both unlocks).
     let u = setup();
     let r = locked_ad_order(&u);
     u.ad_manager.pause();
     warp(&u, 3_600);
     u.ad_manager.unpause();
-    warp(&u, r.deadline + SUITE_BUFFER + 1);
+    warp(&u, r.deadline + SUITE_BUFFER + 3_600 + 1);
     assert!(!ad_unlock(&u, &r, &Bytes::new(&u.env)));
-    warp(&u, r.deadline + SUITE_BUFFER);
+    warp(&u, r.deadline + SUITE_BUFFER + 3_600);
     assert!(ad_unlock(&u, &r, &Bytes::new(&u.env)));
 }
 
-/// Two pauses inside one still-unclaimed window both count, and a pause that straddles the
-/// deadline counts from the deadline only: the history makes the pre-claim overlap exact.
+/// Two pauses on one still-unclaimed lock, a long one then a short one, both count: the window is
+/// measured from the lock's pause-counter snapshot, exact over any number of pauses. A lock taken
+/// after a pause does not inherit it.
 #[test]
-fn test_pause_history_every_pause_inside_the_window_counts() {
+fn test_pause_every_pause_since_the_lock_counts() {
     let s = setup();
     let p = locked_ad_order(&s);
-    warp(&s, p.deadline - 300);
+    warp(&s, p.deadline + 60);
     s.ad_manager.pause();
-    warp(&s, p.deadline + 300);
+    warp(&s, p.deadline + 660);
     s.ad_manager.unpause();
-    warp(&s, p.deadline + 600);
+    warp(&s, p.deadline + 900);
     s.ad_manager.pause();
     warp(&s, p.deadline + 1_200);
     s.ad_manager.unpause();
-    let end = p.deadline + SUITE_BUFFER + 300 + 600;
+    let end = p.deadline + SUITE_BUFFER + 600 + 300;
 
     warp(&s, end + 1);
     assert!(!ad_unlock(&s, &p, &Bytes::new(&s.env)));
@@ -3623,13 +3627,16 @@ fn test_pause_history_every_pause_inside_the_window_counts() {
     assert_eq!(claim.finalize_at, end, "the claim materializes every pause");
     s.ad_manager.finalize_cancel(&p);
 
-    assert_eq!(s.ad_manager.pause_count(), 2);
-    let first = s.ad_manager.get_pause(&0).unwrap();
-    assert_eq!(
-        (first.start, first.end),
-        (p.deadline - 300, p.deadline + 300)
-    );
-    assert_eq!(s.ad_manager.paused_seconds(), 1_200);
+    assert_eq!(s.ad_manager.paused_seconds(), 900);
+    let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
+    assert_eq!(s.ad_manager.get_order(&order_hash).paused_at_open, 0);
+
+    // A lock taken now starts its clock at the current counter: those pauses are not its own.
+    let mut q = ad_manager_order_params(&s.env, &s.tp);
+    q.salt = soroban_sdk::U256::from_u32(&s.env, 777);
+    q.deadline = end + 86_400;
+    let hq = s.ad_manager.lock_for_order(&q);
+    assert_eq!(s.ad_manager.get_order(&hq).paused_at_open, 900);
 }
 
 #[test]

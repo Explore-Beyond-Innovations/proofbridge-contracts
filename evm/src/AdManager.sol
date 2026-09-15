@@ -254,7 +254,7 @@ contract AdManager is EscrowBase, IAdManager {
         if (peerEscrow[params.orderChainId] == bytes32(0)) revert Escrow__ChainNotSupported(params.orderChainId);
         _timing(params.orderChainId);
 
-        orders[orderHash] = Status.Cancelled;
+        _orders[orderHash].status = Status.Cancelled;
         _appendLeaf(orderHash, LeafDomain.CANCEL);
         emit OrderCancelled(orderHash, false);
     }

@@ -208,7 +208,7 @@ contract OrderPortal is EscrowBase, IOrderPortal {
      */
     function _unlockCutoff(bytes32 orderHash, OrderParams calldata p) private view returns (uint256) {
         RouteTiming.Timing storage t = _timing(p.adChainId);
-        if (orders[orderHash] == Status.Claimed) return _windowEnd(orderHash, 0, t.buffer) - t.margin;
+        if (_orders[orderHash].status == Status.Claimed) return _windowEnd(orderHash, 0, t.buffer) - t.margin;
         return p.deadline - t.claimStagger;
     }
 

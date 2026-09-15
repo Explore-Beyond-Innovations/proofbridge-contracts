@@ -47,7 +47,7 @@ use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String};
 
 pub use errors::AdManagerError;
 pub use types::{
-    Ad, ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, OrderParams, PauseSpan, RouteTiming,
+    Ad, ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, OrderParams, OrderRecord, RouteTiming,
     Status, NATIVE_TOKEN_ADDRESS,
 };
 
@@ -113,14 +113,7 @@ impl AdManagerContract {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
         if !storage::is_paused(&env) {
-            storage::set_pause(
-                &env,
-                storage::pause_count(&env),
-                &PauseSpan {
-                    start: env.ledger().timestamp(),
-                    end: 0,
-                },
-            );
+            storage::set_last_paused_at(&env, env.ledger().timestamp());
         }
         storage::set_paused(&env, true);
         events::Paused {
@@ -137,14 +130,10 @@ impl AdManagerContract {
         // window that was open by exactly that much (see `window_end`).
         if storage::is_paused(&env) {
             let now = env.ledger().timestamp();
-            let last = storage::pause_count(&env) - 1;
-            let mut span =
-                storage::get_pause(&env, last).unwrap_or(PauseSpan { start: now, end: 0 });
-            span.end = now;
-            storage::set_pause(&env, last, &span);
+            let paused_for = now.saturating_sub(storage::get_last_paused_at(&env));
             storage::set_paused_seconds(
                 &env,
-                storage::get_paused_seconds(&env).saturating_add(now.saturating_sub(span.start)),
+                storage::get_paused_seconds(&env).saturating_add(paused_for),
             );
         }
         storage::set_paused(&env, false);
@@ -613,7 +602,7 @@ impl AdManagerContract {
         let ad_token = ad.token.clone();
         ad.locked += ad_amount;
         storage::set_ad(&env, &params.ad_id, &ad);
-        storage::set_order_status(&env, &order_hash, Status::Open);
+        storage::open_order(&env, &order_hash);
         // 2.3c D1: count the settlement identity this escrow's unlock will verify — the ad's
         // signer, asserted equal to `params.ad_settlement_signer` in validate_order (and owned by
         // the maker we authenticated). The custody address needs no counter: no unlock resolves
@@ -998,13 +987,9 @@ impl AdManagerContract {
         storage::get_claim(&env, &order_hash)
     }
 
-    /// The pause history: the count, and each span (`end == 0` while paused).
-    pub fn pause_count(env: Env) -> u32 {
-        storage::pause_count(&env)
-    }
-
-    pub fn get_pause(env: Env, index: u32) -> Option<PauseSpan> {
-        storage::get_pause(&env, index)
+    /// The order's leg: status plus the pause-counter snapshot its window is measured from.
+    pub fn get_order(env: Env, order_hash: BytesN<32>) -> OrderRecord {
+        storage::get_order(&env, &order_hash)
     }
 
     /// Seconds the escrow has spent paused in total.
@@ -1129,39 +1114,26 @@ impl AdManagerContract {
 
     /// When the leg's presentation window ends, in real time. Once claimed: the claim's
     /// `finalize_at` plus every second the escrow has been paused since the claim opened (exact
-    /// across any number of pauses). Before a claim: `deadline + buffer` plus every pause's
-    /// overlap with the window. A pause stops the clocks and never reopens a closed window.
+    /// across any number of pauses). Before a claim: `deadline + buffer` plus every second paused
+    /// since the leg was locked (its own snapshot; a pause before the deadline counts too — it
+    /// froze both unlocks, and more time for evidence is the safe direction). A pause stops the
+    /// clocks and never reopens a closed window: a pause after the end adds its length, but the
+    /// clock moved on by the same length.
     /// One number serves both sides of the race: the unlock cutoff is this minus the margin, the
     /// finalize needs it reached. Saturating: a far deadline never panics (EVM uses uint256).
     fn window_end(env: &Env, order_hash: &BytesN<32>, deadline: u64, buffer: u64) -> u64 {
-        if storage::get_order_status(env, order_hash) == Status::Claimed {
+        let order = storage::get_order(env, order_hash);
+        let paused = storage::get_paused_seconds(env);
+        if order.status == Status::Claimed {
             if let Some(claim) = storage::get_claim(env, order_hash) {
-                let since = storage::get_paused_seconds(env).saturating_sub(claim.paused_at_open);
-                return claim.finalize_at.saturating_add(since);
+                return claim
+                    .finalize_at
+                    .saturating_add(paused.saturating_sub(claim.paused_at_open));
             }
         }
         deadline
             .saturating_add(buffer)
-            .saturating_add(Self::paused_since(env, deadline))
-    }
-
-    /// Seconds paused after `from`: every span's overlap with `[from, now]`, newest first, stopping
-    /// at the first span that ended before `from`. One read per pause since `from`.
-    fn paused_since(env: &Env, from: u64) -> u64 {
-        let mut total: u64 = 0;
-        let mut i = storage::pause_count(env);
-        while i > 0 {
-            i -= 1;
-            let span = match storage::get_pause(env, i) {
-                Some(span) => span,
-                None => break,
-            };
-            if span.end <= from {
-                break;
-            }
-            total = total.saturating_add(span.end.saturating_sub(span.start.max(from)));
-        }
-        total
+            .saturating_add(paused.saturating_sub(order.paused_at_open))
     }
 
     /// `Claimed` and the window is over.

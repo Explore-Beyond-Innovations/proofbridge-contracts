@@ -2,7 +2,7 @@
 
 use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol};
 
-use crate::types::{ChainInfo, ClaimRecord, ContractConfig, PauseSpan, RouteTiming, Status};
+use crate::types::{ChainInfo, ClaimRecord, ContractConfig, OrderRecord, RouteTiming, Status};
 
 // =============================================================================
 // Storage Keys
@@ -39,12 +39,10 @@ const KEY_ANCHOR: Symbol = symbol_short!("anchor");
 const KEY_CLAIMS: Symbol = symbol_short!("claims");
 /// Prefix for recorded settled leaves: (KEY_SETTLED, order_hash) -> bool
 const KEY_SETTLED: Symbol = symbol_short!("settled");
-/// The pause clock: the seconds spent paused in total (instance) and every pause span
-/// ((KEY_PSPAN, i) -> PauseSpan, persistent; KEY_PAUSECNT the count). A window's real end moves
-/// by exactly the pause time that fell inside it.
+/// The pause clock (instance): when the current pause began, and the seconds spent paused in
+/// total. Each leg snapshots the total when it opens; its window moves by the pause time since.
+const KEY_PAUSED_AT: Symbol = symbol_short!("pausedat");
 const KEY_PAUSEDSEC: Symbol = symbol_short!("pausedsec");
-const KEY_PAUSECNT: Symbol = symbol_short!("pausecnt");
-const KEY_PSPAN: Symbol = symbol_short!("pspan");
 
 // =============================================================================
 // Instance Storage (Contract-level state)
@@ -133,17 +131,43 @@ pub fn remove_token_route(env: &Env, order_token: &BytesN<32>, ad_chain_id: u128
 // =============================================================================
 
 /// Get order status
-pub fn get_order_status(env: &Env, order_hash: &BytesN<32>) -> Status {
+pub fn get_order(env: &Env, order_hash: &BytesN<32>) -> OrderRecord {
     env.storage()
         .persistent()
         .get(&(KEY_ORDERS, order_hash.clone()))
-        .unwrap_or(Status::None)
+        .unwrap_or(OrderRecord {
+            status: Status::None,
+            paused_at_open: 0,
+        })
 }
 
-/// Set order status; every flip re-extends the record (2.3h's TTL runbook lists this write).
+pub fn get_order_status(env: &Env, order_hash: &BytesN<32>) -> Status {
+    get_order(env, order_hash).status
+}
+
+/// `None → Open`, stamping the pause counter the leg's window is measured from.
+pub fn open_order(env: &Env, order_hash: &BytesN<32>) {
+    set_order(
+        env,
+        order_hash,
+        &OrderRecord {
+            status: Status::Open,
+            paused_at_open: get_paused_seconds(env),
+        },
+    );
+}
+
+/// Flip the status, keeping the leg's pause snapshot; every flip re-extends the record (2.3h's TTL
+/// runbook lists this write).
 pub fn set_order_status(env: &Env, order_hash: &BytesN<32>, status: Status) {
+    let mut rec = get_order(env, order_hash);
+    rec.status = status;
+    set_order(env, order_hash, &rec);
+}
+
+fn set_order(env: &Env, order_hash: &BytesN<32>, rec: &OrderRecord) {
     let key = (KEY_ORDERS, order_hash.clone());
-    env.storage().persistent().set(&key, &status);
+    env.storage().persistent().set(&key, rec);
     proofbridge_core::ttl::extend_persistent(env, &key);
 }
 
@@ -264,21 +288,12 @@ pub fn set_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&KEY_PAUSED, &paused);
 }
 
-pub fn pause_count(env: &Env) -> u32 {
-    env.storage().instance().get(&KEY_PAUSECNT).unwrap_or(0)
+pub fn get_last_paused_at(env: &Env) -> u64 {
+    env.storage().instance().get(&KEY_PAUSED_AT).unwrap_or(0)
 }
 
-pub fn get_pause(env: &Env, index: u32) -> Option<PauseSpan> {
-    env.storage().persistent().get(&(KEY_PSPAN, index))
-}
-
-pub fn set_pause(env: &Env, index: u32, span: &PauseSpan) {
-    let key = (KEY_PSPAN, index);
-    env.storage().persistent().set(&key, span);
-    proofbridge_core::ttl::extend_persistent(env, &key);
-    if index >= pause_count(env) {
-        env.storage().instance().set(&KEY_PAUSECNT, &(index + 1));
-    }
+pub fn set_last_paused_at(env: &Env, at: u64) {
+    env.storage().instance().set(&KEY_PAUSED_AT, &at);
 }
 
 pub fn get_paused_seconds(env: &Env) -> u64 {

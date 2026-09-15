@@ -35,6 +35,13 @@ interface IEscrow {
         Resolved
     }
 
+    /// @notice The order's leg on this chain, one slot: its status and the escrow's paused-seconds
+    ///         counter when the leg opened (a pause stops the window's clock, see `pausedSeconds`).
+    struct Order {
+        Status status;
+        uint64 pausedAtOpen;
+    }
+
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -130,6 +137,8 @@ interface IEscrow {
     function peerEscrow(uint256 chainId) external view returns (bytes32);
     function tokenRoute(address localToken, uint256 peerChainId) external view returns (bytes32);
     function orders(bytes32 orderHash) external view returns (Status);
+    /// @notice The paused-seconds counter when the leg opened; the window's clock starts there.
+    function orderPausedAtOpen(bytes32 orderHash) external view returns (uint64);
     function nullifierUsed(bytes32 nullifierHash) external view returns (bool);
     function inFlightOf(bytes32 account) external view returns (uint256);
     function claimable(address recipient, address token) external view returns (uint256);
@@ -144,10 +153,9 @@ interface IEscrow {
         returns (uint64 openedAt, uint64 finalizeAt, uint64 pausedAtOpen, Termination.ClaimEntry entry);
     /// @notice Whether the order's SETTLED leaf is in the MMR.
     function settledRecorded(bytes32 orderHash) external view returns (bool);
-    /// @notice The pause clock: a window's real end moves by the pause time that fell inside it.
+    /// @notice The pause clock: seconds the escrow has spent paused. A window's real end moves by
+    ///         the pause time since its leg opened (or since its claim, for a backstop).
     function pausedSeconds() external view returns (uint64);
-    /// @notice Every pause, in order; `end == 0` while the escrow is paused.
-    function pauses(uint256 index) external view returns (uint64 start, uint64 end);
     /// @notice BLSKeyRegistry revoke guard: true while the account has a leg open on this escrow.
     function hasOpenPositions(bytes32 account) external view returns (bool);
     function getLatestMerkleRoot() external view returns (bytes32);

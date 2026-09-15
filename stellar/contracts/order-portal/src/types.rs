@@ -4,7 +4,7 @@ use soroban_sdk::{contracttype, BytesN, String, U256};
 
 pub use proofbridge_core::token::NATIVE_TOKEN_ADDRESS;
 pub use proofbridge_core::types::{
-    ClaimEntry, ClaimRecord, ContractConfig, PauseSpan, RouteTiming, Status,
+    ClaimEntry, ClaimRecord, ContractConfig, OrderRecord, RouteTiming, Status,
 };
 
 // =============================================================================
