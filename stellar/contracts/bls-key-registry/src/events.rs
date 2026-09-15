@@ -92,3 +92,10 @@ pub struct ProofRegistrationSet {
     pub sources: Vec<u128>,
     pub enabled: bool,
 }
+
+/// #404: the registry's code was swapped behind the two-step admin.
+#[contractevent(topics = ["upgraded"], data_format = "vec")]
+pub struct Upgraded {
+    pub admin: Address,
+    pub wasm_hash: BytesN<32>,
+}

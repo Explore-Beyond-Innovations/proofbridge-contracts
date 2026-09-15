@@ -13,7 +13,7 @@ mod storage;
 use soroban_sdk::{
     bytesn, contract, contractclient, contractimpl, contracttype,
     crypto::bls12_381::{Bls12381G1Affine as G1Affine, Bls12381G2Affine as G2Affine},
-    vec, Address, Bytes, BytesN, Env, Vec,
+    vec, Address, Bytes, BytesN, ContractExecutable, Env, Vec,
 };
 
 use errors::RegistryError;
@@ -52,6 +52,8 @@ pub const GRACE_PERIOD: u64 = 30 * 24 * 60 * 60;
 
 const ETH_SIGN_PREFIX: &[u8; 28] = b"\x19Ethereum Signed Message:\n32";
 
+const SEP53_PREFIX: &[u8; 24] = b"Stellar Signed Message:\n";
+
 /// How the account owner authorized this state change.
 #[contracttype]
 #[derive(Clone)]
@@ -60,6 +62,11 @@ pub enum OwnerAuth {
     Stellar(Address),
     /// `r || s || v` secp256k1 personal_sign; recovered address must match `account`.
     Evm(BytesN<65>),
+    /// `r || s` detached ed25519 over the SEP-53 message of the digest
+    /// (`sha256("Stellar Signed Message:\n" ‖ lowercase 0x-hex)`), the same bytes the EVM
+    /// registry checks; `account` is the signing key. Durable, so a Stellar-home identity can
+    /// pre-sign its retirement (#404, #400 option c).
+    Sep53(BytesN<64>),
 }
 
 /// Escrow-side seam so revoke can refuse while the account has open positions.
@@ -105,6 +112,21 @@ impl BlsKeyRegistry {
         admin.require_auth();
         storage::set_pending_admin(&env, &to);
         events::AdminTransferStarted { from: admin, to }.publish(&env);
+        Ok(())
+    }
+
+    /// Swap the contract's code behind the two-step admin (#404 D5): the next gap of this
+    /// class is a code swap, not a migration. Storage and the pause flag are untouched.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), RegistryError> {
+        let admin = storage::get_admin(&env);
+        admin.require_auth();
+        env.deployer()
+            .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
+        events::Upgraded {
+            admin,
+            wasm_hash: new_wasm_hash,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -571,7 +593,44 @@ fn check_owner(
             Ok(())
         }
         OwnerAuth::Evm(sig) => check_evm_owner(env, account, &digest(), &sig),
+        OwnerAuth::Sep53(sig) => check_sep53_owner(env, account, &digest(), &sig),
     }
+}
+
+/// `account` is the raw 32-byte ed25519 key; a padded-EVM shape is never one (the mirror of
+/// `check_evm_owner`'s rule). The message is the EVM registry's byte for byte. The host's
+/// ed25519 verify traps on a bad signature — there is no boolean form — so a wrong key
+/// surfaces as a host error, not `OwnerMismatch`; the relayer files nothing it has not verified
+/// off-chain first, and treats the trap as a permanent revert (plan D3).
+fn check_sep53_owner(
+    env: &Env,
+    account: &BytesN<32>,
+    digest: &BytesN<32>,
+    sig: &BytesN<64>,
+) -> Result<(), RegistryError> {
+    let acct = account.to_array();
+    if acct[..12].iter().all(|b| *b == 0) {
+        return Err(RegistryError::OwnerMismatch);
+    }
+    let mut message = Bytes::from_slice(env, SEP53_PREFIX);
+    message.extend_from_slice(&hex_0x_lower(&digest.to_array()));
+    let payload = env.crypto().sha256(&message).to_bytes();
+    env.crypto()
+        .ed25519_verify(account, &Bytes::from(payload), sig);
+    Ok(())
+}
+
+/// Lowercase "0x" + 64 hex — the exact string a Stellar wallet signs.
+fn hex_0x_lower(b: &[u8; 32]) -> [u8; 66] {
+    const ALPHABET: &[u8; 16] = b"0123456789abcdef";
+    let mut out = [0u8; 66];
+    out[0] = b'0';
+    out[1] = b'x';
+    for (i, byte) in b.iter().enumerate() {
+        out[2 + i * 2] = ALPHABET[(byte >> 4) as usize];
+        out[3 + i * 2] = ALPHABET[(byte & 0x0f) as usize];
+    }
+    out
 }
 
 fn require_no_open_positions(env: &Env, account: &BytesN<32>) -> Result<(), RegistryError> {
