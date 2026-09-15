@@ -12,7 +12,8 @@ abstract contract TwoStepAdmin is AccessControl {
     event AdminTransferred(address indexed from, address indexed to);
 
     error NotPendingAdmin();
-    /// @notice A zero or self transfer: accepting either would leave the contract with no admin.
+    /// @notice A self transfer: accepting it grants and then revokes the role from the same
+    ///         address, leaving the contract with no admin.
     error InvalidAdmin(address to);
 
     function _initAdmin(address admin_) internal {
@@ -20,8 +21,10 @@ abstract contract TwoStepAdmin is AccessControl {
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
     }
 
+    /// @notice Nominate the next admin; `address(0)` withdraws a pending nomination (zero can
+    ///         never accept, so it is the cancel).
     function transferAdmin(address to) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (to == address(0) || to == admin) revert InvalidAdmin(to);
+        if (to == admin) revert InvalidAdmin(to);
         pendingAdmin = to;
         emit AdminTransferStarted(admin, to);
     }

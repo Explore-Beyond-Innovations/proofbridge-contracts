@@ -54,6 +54,27 @@ contract AdManagerPauseTest is AdManagerTest {
         adManager.pause();
     }
 
+    /// A self-nomination would strip the only admin at accept; a zero nomination is the cancel.
+    function test_twoStepAdmin_refusesSelf_zeroWithdrawsNomination() public {
+        address next = makeAddr("nextAdmin");
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(TwoStepAdmin.InvalidAdmin.selector, admin));
+        adManager.transferAdmin(admin);
+
+        vm.prank(admin);
+        adManager.transferAdmin(next);
+        vm.prank(admin);
+        vm.expectEmit(true, true, true, true);
+        emit TwoStepAdmin.AdminTransferStarted(admin, address(0));
+        adManager.transferAdmin(address(0));
+        assertEq(adManager.pendingAdmin(), address(0));
+
+        vm.prank(next);
+        vm.expectRevert(TwoStepAdmin.NotPendingAdmin.selector);
+        adManager.acceptAdmin();
+        assertEq(adManager.admin(), admin);
+    }
+
     function test_twoStepAdmin_transferAndAccept() public {
         address next = makeAddr("nextAdmin");
 
