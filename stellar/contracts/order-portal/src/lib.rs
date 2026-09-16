@@ -41,6 +41,7 @@ mod types;
 mod validation;
 
 use proofbridge_core::cross_contract::{LEAF_DOMAIN_AD, LEAF_DOMAIN_CANCEL, LEAF_DOMAIN_SETTLED};
+use proofbridge_core::escrow_ops as ops;
 use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env};
 
 pub use errors::OrderPortalError;
@@ -103,47 +104,21 @@ impl OrderPortalContract {
     pub fn pause(env: Env) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
-        if !storage::is_paused(&env) {
-            storage::set_last_paused_at(&env, env.ledger().timestamp());
-        }
-        storage::set_paused(&env, true);
-        events::Paused {
-            admin: config.admin,
-        }
-        .publish(&env);
+        ops::pause(&env, &config);
         Ok(())
     }
 
     pub fn unpause(env: Env) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
-        // A pause freezes evidence, so it stops the clocks: the seconds spent paused move every
-        // window that was open by exactly that much (see `window_end`).
-        if storage::is_paused(&env) {
-            let now = env.ledger().timestamp();
-            let paused_for = now.saturating_sub(storage::get_last_paused_at(&env));
-            storage::set_paused_seconds(
-                &env,
-                storage::get_paused_seconds(&env).saturating_add(paused_for),
-            );
-        }
-        storage::set_paused(&env, false);
-        events::Unpaused {
-            admin: config.admin,
-        }
-        .publish(&env);
+        ops::unpause(&env, &config);
         Ok(())
     }
 
     pub fn transfer_admin(env: Env, to: Address) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
-        storage::set_pending_admin(&env, &to);
-        events::AdminTransferStarted {
-            from: config.admin,
-            to,
-        }
-        .publish(&env);
+        ops::transfer_admin(&env, &config, to);
         Ok(())
     }
 
@@ -151,15 +126,7 @@ impl OrderPortalContract {
         let pending = storage::get_pending_admin(&env).ok_or(OrderPortalError::NotPendingAdmin)?;
         pending.require_auth();
         let mut config = storage::get_config(&env)?;
-        let old = config.admin.clone();
-        config.admin = pending.clone();
-        storage::set_config(&env, &config);
-        storage::clear_pending_admin(&env);
-        events::AdminTransferred {
-            from: old,
-            to: pending,
-        }
-        .publish(&env);
+        ops::accept_admin(&env, &mut config, pending);
         Ok(())
     }
 
@@ -198,7 +165,6 @@ impl OrderPortalContract {
         Ok(())
     }
 
-    /// Remove a destination chain configuration.
     pub fn set_root_verifier(
         env: Env,
         chain_id: u128,
@@ -206,8 +172,7 @@ impl OrderPortalContract {
     ) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
-        storage::set_root_verifier(&env, chain_id, &module);
-        events::RootVerifierSet { chain_id, module }.publish(&env);
+        ops::set_root_verifier(&env, chain_id, module);
         Ok(())
     }
 
@@ -219,20 +184,14 @@ impl OrderPortalContract {
     ) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
-        proofbridge_core::timing::validate(&timing).map_err(|_| OrderPortalError::InvalidTiming)?;
-        storage::set_route_timing(&env, chain_id, &timing);
-        events::RouteTimingSet { chain_id, timing }.publish(&env);
-        storage::extend_instance_ttl(&env);
-        Ok(())
+        Ok(ops::set_route_timing(&env, chain_id, timing)?)
     }
 
     /// Set the notary the evidence paths read (2.3e D7). Settlement never touches it.
     pub fn set_root_anchor(env: Env, anchor: Address) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
-        storage::set_root_anchor(&env, &anchor);
-        events::RootAnchorSet { anchor }.publish(&env);
-        storage::extend_instance_ttl(&env);
+        ops::set_root_anchor(&env, anchor);
         Ok(())
     }
 
@@ -565,30 +524,11 @@ impl OrderPortalContract {
         Ok(())
     }
 
-    /// Append this leg's SETTLED leaf for a `Filled` order (D8), so the other escrow's presenter
-    /// can prove this one paid. Permissionless, single-shot, its own transaction: on Soroban a
-    /// verify plus a Poseidon2 MMR append does not fit the 100M-instruction budget, so the leaf
-    /// follows the fill instead of riding in it (EVM appends it inside the fill).
     pub fn record_settled(env: Env, params: OrderParams) -> Result<(), OrderPortalError> {
         Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
-        if storage::get_order_status(&env, &order_hash) != Status::Filled {
-            return Err(OrderPortalError::NotFilled);
-        }
-        if storage::is_settled_recorded(&env, &order_hash) {
-            return Err(OrderPortalError::SettledRecorded);
-        }
-        storage::set_settled_recorded(&env, &order_hash);
-        cross_contract::append_to_merkle(
-            &env,
-            &config.merkle_manager,
-            &order_hash,
-            LEAF_DOMAIN_SETTLED,
-        )?;
-        events::SettledRecorded { order_hash }.publish(&env);
-        storage::extend_instance_ttl(&env);
-        Ok(())
+        ops::record_settled(&env, &config.merkle_manager, &order_hash)
     }
 
     // =========================================================================
@@ -599,8 +539,6 @@ impl OrderPortalContract {
     /// BLSKeyRegistry revoke guard: true while the account has an order
     /// created but not yet unlocked.
 
-    /// Best-effort direct transfer; on failure the payout becomes claimable so
-    /// a recipient can never block settlement.
     fn pay_or_credit(
         env: &Env,
         w_native: &Address,
@@ -608,19 +546,7 @@ impl OrderPortalContract {
         token: &BytesN<32>,
         amount: u128,
     ) {
-        if proofbridge_core::token::try_transfer_to_recipient_bytes32(
-            env, token, w_native, recipient, amount,
-        ) {
-            return;
-        }
-        let owed = storage::get_claimable(env, recipient, token);
-        storage::set_claimable(env, recipient, token, owed + amount);
-        events::PayoutCredited {
-            recipient: recipient.clone(),
-            token: token.clone(),
-            amount,
-        }
-        .publish(env);
+        ops::pay_or_credit(env, w_native, recipient, token, amount)
     }
 
     /// Pay out a credited unlock. Permissionless: funds can only go to the
@@ -630,29 +556,9 @@ impl OrderPortalContract {
         recipient: BytesN<32>,
         token: BytesN<32>,
     ) -> Result<(), OrderPortalError> {
-        if storage::is_paused(&env) {
-            return Err(OrderPortalError::ContractPaused);
-        }
+        Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
-        let amount = storage::get_claimable(&env, &recipient, &token);
-        if amount == 0 {
-            return Err(OrderPortalError::NothingToClaim);
-        }
-        storage::set_claimable(&env, &recipient, &token, 0);
-        token::transfer_to_recipient_bytes32(
-            &env,
-            &token,
-            &config.w_native_token,
-            &recipient,
-            amount,
-        )?;
-        events::PayoutClaimed {
-            recipient,
-            token,
-            amount,
-        }
-        .publish(&env);
-        Ok(())
+        ops::claim(&env, &config, recipient, token)
     }
 
     pub fn has_open_positions(env: Env, account: BytesN<32>) -> bool {
@@ -753,10 +659,7 @@ impl OrderPortalContract {
     // =========================================================================
 
     fn require_not_paused(env: &Env) -> Result<(), OrderPortalError> {
-        if storage::is_paused(env) {
-            return Err(OrderPortalError::ContractPaused);
-        }
-        Ok(())
+        Ok(ops::require_not_paused(env)?)
     }
 
     /// The canonical 17-field order hash from this leg's params plus the order-chain context.
@@ -802,7 +705,7 @@ impl OrderPortalContract {
 
     /// The route's clocks, or `NoRouteTiming` (the `RootVerifierNotSet` posture).
     fn timing(env: &Env, chain_id: u128) -> Result<RouteTiming, OrderPortalError> {
-        storage::get_route_timing(env, chain_id).ok_or(OrderPortalError::NoRouteTiming)
+        Ok(ops::timing(env, chain_id)?)
     }
 
     fn require_min_window(
@@ -810,135 +713,51 @@ impl OrderPortalContract {
         chain_id: u128,
         deadline: u64,
     ) -> Result<(), OrderPortalError> {
-        let t = Self::timing(env, chain_id)?;
-        if deadline < env.ledger().timestamp() + t.min_window {
-            return Err(OrderPortalError::DeadlineTooSoon);
-        }
-        Ok(())
+        Ok(ops::require_min_window(env, chain_id, deadline)?)
     }
 
     fn require_reached(env: &Env, at: u64) -> Result<(), OrderPortalError> {
-        if env.ledger().timestamp() < at {
-            return Err(OrderPortalError::TooEarly);
-        }
-        Ok(())
+        Ok(ops::require_reached(env, at)?)
     }
 
-    /// The leg must be exactly `expected` (`Open` before a claim).
     fn require_status(
         env: &Env,
         order_hash: &BytesN<32>,
         expected: Status,
     ) -> Result<(), OrderPortalError> {
-        if storage::get_order_status(env, order_hash) != expected {
-            return Err(OrderPortalError::NotClaimable);
-        }
-        Ok(())
+        Ok(ops::require_status(env, order_hash, expected)?)
     }
 
-    /// `Open` or in a presentation window: evidence may still settle or refund it.
     fn require_presentable(env: &Env, order_hash: &BytesN<32>) -> Result<(), OrderPortalError> {
-        match storage::get_order_status(env, order_hash) {
-            Status::Open | Status::Claimed => Ok(()),
-            _ => Err(OrderPortalError::NotClaimable),
-        }
+        Ok(ops::require_presentable(env, order_hash)?)
     }
 
-    /// When the leg's presentation window ends, in real time. Once claimed: the claim's
-    /// `finalize_at` plus every second the escrow has been paused since the claim opened (exact
-    /// across any number of pauses). Before a claim: `deadline + buffer` plus every second paused
-    /// since the leg was locked (its own snapshot; a pause before the deadline counts too — it
-    /// froze both unlocks, and more time for evidence is the safe direction). A pause stops the
-    /// clocks and never reopens a closed window: a pause after the end adds its length, but the
-    /// clock moved on by the same length.
-    /// One number serves both sides of the race: the unlock cutoff is this minus the margin, the
-    /// finalize needs it reached. Saturating: a far deadline never panics (EVM uses uint256).
-    fn window_end(env: &Env, order_hash: &BytesN<32>, deadline: u64, buffer: u64) -> u64 {
-        let order = storage::get_order(env, order_hash);
-        let paused = storage::get_paused_seconds(env);
-        if order.status == Status::Claimed {
-            if let Some(claim) = storage::get_claim(env, order_hash) {
-                return claim
-                    .finalize_at
-                    .saturating_add(paused.saturating_sub(claim.paused_at_open));
-            }
-        }
-        deadline
-            .saturating_add(buffer)
-            .saturating_add(paused.saturating_sub(order.paused_at_open))
-    }
-
-    /// `Claimed` and the window is over.
     fn require_finalizable(
         env: &Env,
         order_hash: &BytesN<32>,
         buffer: u64,
     ) -> Result<(), OrderPortalError> {
-        if storage::get_order_status(env, order_hash) != Status::Claimed {
-            return Err(OrderPortalError::NotClaimed);
-        }
-        Self::require_reached(env, Self::window_end(env, order_hash, 0, buffer))
+        Ok(ops::require_finalizable(env, order_hash, buffer)?)
     }
 
-    /// Gate for the evidence paths: the root must be notarized by the wired anchor (D7).
     fn require_anchored(
         env: &Env,
         chain_id: u128,
         root: &BytesN<32>,
     ) -> Result<(), OrderPortalError> {
-        let anchor = storage::get_root_anchor(env).ok_or(OrderPortalError::NoRootAnchor)?;
-        if !proofbridge_core::cross_contract::is_anchored(env, &anchor, chain_id, root) {
-            return Err(OrderPortalError::RootNotAnchored);
-        }
-        Ok(())
+        Ok(ops::require_anchored(env, chain_id, root)?)
     }
 
     fn open_claim(env: &Env, order_hash: &BytesN<32>, entry: ClaimEntry, finalize_at: u64) {
-        storage::set_claim(
-            env,
-            order_hash,
-            &ClaimRecord {
-                opened_at: env.ledger().timestamp(),
-                finalize_at,
-                paused_at_open: storage::get_paused_seconds(env),
-                entry,
-            },
-        );
-        storage::set_order_status(env, order_hash, Status::Claimed);
-        events::ClaimOpened {
-            order_hash: order_hash.clone(),
-            entry,
-            finalize_at,
-        }
-        .publish(env);
+        ops::open_claim(env, order_hash, entry, finalize_at)
     }
 
-    /// `Open | Claimed → Filled`: close the window, count out. The SETTLED leaf (D8) is appended
-    /// by `record_settled`, a separate call: a verify plus a Poseidon2 MMR append does not fit
-    /// Soroban's 100M-instruction transaction budget (measured 105.8M against a 96.1M unlock).
     fn fill(env: &Env, order_hash: &BytesN<32>, account: &BytesN<32>, by_evidence: bool) {
-        storage::set_order_status(env, order_hash, Status::Filled);
-        storage::remove_claim(env, order_hash);
-        // Mirrors create_order (2.3c D1).
-        storage::set_in_flight(env, account, storage::get_in_flight(env, account) - 1);
-        events::OrderSettled {
-            order_hash: order_hash.clone(),
-            by_evidence,
-        }
-        .publish(env);
+        ops::fill(env, order_hash, account, by_evidence)
     }
 
-    /// `→ Cancelled`: close the window, count out. The follower appends no leaf of its own —
-    /// nothing follows it; the refund is the caller's.
     fn cancel(env: &Env, order_hash: &BytesN<32>, account: &BytesN<32>, by_evidence: bool) {
-        storage::set_order_status(env, order_hash, Status::Cancelled);
-        storage::remove_claim(env, order_hash);
-        storage::set_in_flight(env, account, storage::get_in_flight(env, account) - 1);
-        events::OrderCancelled {
-            order_hash: order_hash.clone(),
-            by_evidence,
-        }
-        .publish(env);
+        ops::cancel(env, order_hash, account, by_evidence)
     }
 
     /// Verify the signed `order_decimals` matches the order-chain token's

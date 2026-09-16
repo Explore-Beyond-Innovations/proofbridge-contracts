@@ -13,6 +13,8 @@ pub mod cross_contract;
 pub mod decimal_scaling;
 pub mod eip712;
 pub mod errors;
+pub mod escrow_events;
+pub mod escrow_ops;
 pub mod escrow_storage;
 pub mod secp;
 pub mod timing;
