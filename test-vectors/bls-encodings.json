@@ -144,6 +144,62 @@
         }
       }
     },
+    "makerSep53OnStellarTestnet": {
+      "rule": "the Soroban registry under OwnerAuth::Sep53: `sig` is the bare 64-byte r‖s Soroban takes; `scl` is the same signature in the 128-byte abi.encode(r, s, edX, edY) shape the EVM registry takes — the shape only, since these digests bind chain 1000002 and the Stellar registry id, so these particular bytes authorise nothing on an EVM registry",
+      "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+      "nonce": "0",
+      "pkNative": "0x10b5d7ef1aec2eb92c6ef8a862b0093cb6ea4b49c9165ccb43c06cae3b4a4137ce36acb002ce09129e4f67f3c8d136070839598cb1f041fcfb9975919bb37bd38eefe1ee91ef6d5fdaabef82396e18d53c0f65a4a2ee611b8d7d9db9e5b57def",
+      "commitment": "0x83804fd845c0d2cb6fb4bb3ebd58d9d6ab31a1b2c2fd100eaa433215f16bdd22",
+      "popMsg": "0x28cc1b6c54f422c03457077ba8814710c3ddb07ee5b4a068e990bb90c562200700000000000000000000000000000000000000000000000000000000000f42422222222222222222222222222222222222222222222222222222222222222222690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c3110b5d7ef1aec2eb92c6ef8a862b0093cb6ea4b49c9165ccb43c06cae3b4a4137ce36acb002ce09129e4f67f3c8d136070839598cb1f041fcfb9975919bb37bd38eefe1ee91ef6d5fdaabef82396e18d53c0f65a4a2ee611b8d7d9db9e5b57def0000000000000000000000000000000000000000000000000000000000000000",
+      "pop": "0x137c59bd648237dc8a5b721e7a564aeb516e62a5ef7e7f2345dc38c607e062fc9caf9b02c3a8ad189ea9046dbe4614770366bbafe348ed6943637f1a9a8ce5bc0d772242c81ef58b288f28c0b332bc1bfea46dfa84df0f9b7767e8e5962a34080d677442e5f7b3c6d5fab69e37191bb9ff9481a322bff05891c747b100c545f1e3e9d16b13dc8f37b3ce2f9de875eebb006914d4b6b79154140bea8d7287c349d40d41f7636118e20cccd5c3b298edd92571897b1cd51ae8d04c120fdb0f0624",
+      "regDigest": "0x1cf8a929c550070605dabb769627ad88eb2fc44382de16fa953509ca5cb136c1",
+      "revokeDigest": "0x1374a582bdf1f1b6f9d66cf9c20dcd8a40025c7ce24cbbd211681cbc5068fbc1",
+      "ownerSig": {
+        "scheme": "sep53-ed25519",
+        "signedPayloadSha256": "0xee78ee6dfe188f55bc928c1e833fad120d1d6e06246d9e8db1e544a589258ae4",
+        "sig": "0xc7971b2406c5a668e2e8d9af6766f2918a9d5fd251cbebff190fbabdd7fb6aa2adb3d182f81cf2b35a372e67b7bd621ac43052754912410bd16f9e9cb19f2707",
+        "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+        "scl": {
+          "r": "0xc7971b2406c5a668e2e8d9af6766f2918a9d5fd251cbebff190fbabdd7fb6aa2",
+          "s": "0xadb3d182f81cf2b35a372e67b7bd621ac43052754912410bd16f9e9cb19f2707",
+          "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+          "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        }
+      },
+      "staleRevokeSigAtNonce0": {
+        "rule": "must be refused at nonce 1: same tag, wrong nonce — this is what isolates the nonce binding from the tag binding",
+        "nonce": "0",
+        "revokeDigest": "0x1374a582bdf1f1b6f9d66cf9c20dcd8a40025c7ce24cbbd211681cbc5068fbc1",
+        "ownerSig": {
+          "scheme": "sep53-ed25519",
+          "signedPayloadSha256": "0x2548bd24e9cc85356f7181d35b8de6cabe8dc0b33064c3fcf97acf12609cd42c",
+          "sig": "0x617e86112c471dc205caf42a22371ecf94883479317bd3bb965365139afb784f7b5a1df72299f4946c890143eedd8a5dceecd26b147a81787e8239f0364a910c",
+          "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+          "scl": {
+            "r": "0x617e86112c471dc205caf42a22371ecf94883479317bd3bb965365139afb784f",
+            "s": "0x7b5a1df72299f4946c890143eedd8a5dceecd26b147a81787e8239f0364a910c",
+            "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+            "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          }
+        }
+      },
+      "revokeAtNonce1": {
+        "nonce": "1",
+        "revokeDigest": "0x1c2166a4cc12803f8f0000c8e7d11c79a77d17ed60d02cbf9c6005a98c88b128",
+        "ownerSig": {
+          "scheme": "sep53-ed25519",
+          "signedPayloadSha256": "0x61529dc0fbc62e2fd33a97654ec676ab3f099d1ad1ba085b838bc45eaf3218dc",
+          "sig": "0x6769cbacb60c2f16233f5d41e90044e62aef22c69b060eea70f097e44bc8fc127af57ae30a70d9be3455b2bf9aab4941c6ead1ddff84f37690be1e84b96b9305",
+          "signerPk": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+          "scl": {
+            "r": "0x6769cbacb60c2f16233f5d41e90044e62aef22c69b060eea70f097e44bc8fc12",
+            "s": "0x7af57ae30a70d9be3455b2bf9aab4941c6ead1ddff84f37690be1e84b96b9305",
+            "edX": "0x615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c",
+            "edY": "0x315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          }
+        }
+      }
+    },
     "bridgerOnSepolia": {
       "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
       "nonce": "0",
