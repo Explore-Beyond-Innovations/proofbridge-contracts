@@ -219,83 +219,6 @@ fn revoke_stellar_home_then_key_is_gone() {
 }
 
 #[test]
-fn register_stellar_home_account_via_sep53() {
-    let (env, client, v) = setup();
-    let r = reg(&v, "makerSep53OnStellarTestnet");
-    let account = bn::<32>(&env, &r["account"]);
-
-    // The other legal path for a Stellar-home owner (#404): a detached SEP-53 signature rather than
-    // `require_auth`, which is what lets the relayer submit on the tenant's behalf. Same account and
-    // same digest as `makerOnStellarTestnet` — only the authorisation differs.
-    client.register(
-        &account,
-        &OwnerAuth::Sep53(bn::<64>(&env, &r["ownerSig"]["sig"])),
-        &bn::<96>(&env, &r["pkNative"]),
-        &bn::<192>(&env, &r["pop"]),
-        &0,
-    );
-
-    assert_eq!(
-        client.commitment_at(&account, &0),
-        bn::<32>(&env, &r["commitment"])
-    );
-    assert_eq!(client.nonce_of(&account), 1);
-}
-
-#[test]
-fn revoke_stellar_home_account_via_sep53() {
-    let (env, client, v) = setup();
-    let r = reg(&v, "makerSep53OnStellarTestnet");
-    let account = bn::<32>(&env, &r["account"]);
-
-    client.register(
-        &account,
-        &OwnerAuth::Sep53(bn::<64>(&env, &r["ownerSig"]["sig"])),
-        &bn::<96>(&env, &r["pkNative"]),
-        &bn::<192>(&env, &r["pop"]),
-        &0,
-    );
-    // The revoke digest binds the bumped nonce, so the register signature cannot be replayed here.
-    client.revoke(
-        &account,
-        &OwnerAuth::Sep53(bn::<64>(&env, &r["revokeAtNonce1"]["ownerSig"]["sig"])),
-        &1,
-    );
-
-    assert_eq!(
-        client.try_commitment_at(&account, &0),
-        Err(Ok(RegistryError::NoSuchSlot))
-    );
-    assert_eq!(client.nonce_of(&account), 2);
-}
-
-#[test]
-fn sep53_register_signature_does_not_authorise_the_revoke() {
-    let (env, client, v) = setup();
-    let r = reg(&v, "makerSep53OnStellarTestnet");
-    let account = bn::<32>(&env, &r["account"]);
-
-    client.register(
-        &account,
-        &OwnerAuth::Sep53(bn::<64>(&env, &r["ownerSig"]["sig"])),
-        &bn::<96>(&env, &r["pkNative"]),
-        &bn::<192>(&env, &r["pop"]),
-        &0,
-    );
-
-    // Each digest binds its own tag and nonce; a bad ed25519 signature traps rather than returning
-    // an error, so the host error is the assertion.
-    let replayed = bn::<64>(&env, &r["ownerSig"]["sig"]);
-    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.revoke(&account, &OwnerAuth::Sep53(replayed), &1)
-    }));
-    assert!(
-        err.is_err(),
-        "the register signature must not authorise a revoke"
-    );
-}
-
-#[test]
 fn revoke_evm_home_with_nonce1_signature() {
     let (env, client, v) = setup();
     let r = reg(&v, "bridgerOnStellarTestnet");
@@ -1005,6 +928,112 @@ fn panic_message(f: impl FnOnce()) -> std::string::String {
 const CRYPTO_TRAP: &str = "HostError: Error(Crypto, InvalidInput)";
 
 /// A signature bound to slot 0 / value 1 does not retire slot 1 or set another value.
+/// The other legal path for a Stellar-home owner (#404): a detached SEP-53 signature rather than
+/// `require_auth`, which is what lets the relayer submit on the tenant's behalf. Same account and
+/// the same digests as `makerOnStellarTestnet` — only the authorisation differs. The signature is
+/// the generator's, not one this test builds, so it is the cross-implementation check.
+const MAKER_SEP53: &str = "makerSep53OnStellarTestnet";
+
+fn sep53_sig(env: &Env, node: &serde_json::Value) -> BytesN<64> {
+    bn::<64>(env, &node["ownerSig"]["sig"])
+}
+
+fn register_via_sep53(
+    env: &Env,
+    client: &BlsKeyRegistryClient,
+    v: &serde_json::Value,
+) -> (BytesN<32>, serde_json::Value) {
+    let r = reg(v, MAKER_SEP53);
+    let account = bn::<32>(env, &r["account"]);
+    client.register(
+        &account,
+        &OwnerAuth::Sep53(sep53_sig(env, &r)),
+        &bn::<96>(env, &r["pkNative"]),
+        &bn::<192>(env, &r["pop"]),
+        &0,
+    );
+    (account, r)
+}
+
+#[test]
+fn register_stellar_home_account_via_sep53() {
+    let (env, client, v) = setup();
+    let (account, r) = register_via_sep53(&env, &client, &v);
+
+    assert_eq!(
+        client.commitment_at(&account, &0),
+        bn::<32>(&env, &r["commitment"])
+    );
+    assert_eq!(client.nonce_of(&account), 1);
+}
+
+#[test]
+fn revoke_stellar_home_account_via_sep53() {
+    let (env, client, v) = setup();
+    let (account, r) = register_via_sep53(&env, &client, &v);
+
+    // The revoke digest binds the bumped nonce, so this is a second, distinct signature.
+    client.revoke(
+        &account,
+        &OwnerAuth::Sep53(sep53_sig(&env, &r["revokeAtNonce1"])),
+        &1,
+    );
+
+    assert_eq!(
+        client.try_commitment_at(&account, &0),
+        Err(Ok(RegistryError::NoSuchSlot))
+    );
+    assert_eq!(client.nonce_of(&account), 2);
+}
+
+/// The replay a pre-signed kill switch has to survive: a revoke signature the owner really did
+/// produce, for the same account and the same tag, but bound to the previous nonce. Isolating the
+/// nonce is the point — replaying the *register* signature instead would differ in both the tag
+/// and the nonce and so could not tell the two bindings apart.
+#[test]
+fn sep53_revoke_signature_does_not_replay_across_nonces() {
+    let (env, client, v) = setup();
+    let (account, r) = register_via_sep53(&env, &client, &v);
+    let stale = sep53_sig(&env, &r["staleRevokeSigAtNonce0"]);
+
+    let msg = panic_message(|| {
+        client.revoke(&account, &OwnerAuth::Sep53(stale), &1);
+    });
+    assert!(
+        msg.starts_with(CRYPTO_TRAP),
+        "a revoke signature bound to nonce 0 must not authorise nonce 1, got: {msg}"
+    );
+
+    // And the refusal left nothing behind.
+    assert_eq!(
+        client.commitment_at(&account, &0),
+        bn::<32>(&env, &r["commitment"])
+    );
+    assert_eq!(client.nonce_of(&account), 1);
+}
+
+/// The tag half of the same binding: a register signature is not a revoke signature.
+#[test]
+fn sep53_register_signature_does_not_authorise_the_revoke() {
+    let (env, client, v) = setup();
+    let (account, r) = register_via_sep53(&env, &client, &v);
+    let replayed = sep53_sig(&env, &r);
+
+    let msg = panic_message(|| {
+        client.revoke(&account, &OwnerAuth::Sep53(replayed), &1);
+    });
+    assert!(
+        msg.starts_with(CRYPTO_TRAP),
+        "the register signature must not authorise a revoke, got: {msg}"
+    );
+
+    assert_eq!(
+        client.commitment_at(&account, &0),
+        bn::<32>(&env, &r["commitment"])
+    );
+    assert_eq!(client.nonce_of(&account), 1);
+}
+
 #[test]
 fn sep53_signature_bound_to_slot_and_value() {
     let (env, client, v) = setup();
