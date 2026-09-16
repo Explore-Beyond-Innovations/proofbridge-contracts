@@ -295,9 +295,11 @@ pub fn open_claim(env: &Env, order_hash: &BytesN<32>, entry: ClaimEntry, finaliz
 }
 
 /// `Open | Claimed → Filled`: close the window, count out. The SETTLED leaf (D8) is appended by
-/// `record_settled`, a separate call: a verify plus a Poseidon2 MMR append does not fit Soroban's
-/// 100M-instruction transaction budget (measured 105.8M against a 96.1M unlock). Counting out
-/// mirrors the leg's open (2.3c D1).
+/// `record_settled`, a separate call — a verify plus a Poseidon2 MMR append measured 105.8M
+/// instructions against a 96.1M unlock. (That was read as "over budget" against the SDK harness
+/// default of 100M; the network's actual limit is 400M, so the split now rests on matching the EVM
+/// leg so the relayer batches one shape, not on the CPU figure.) Counting out mirrors the leg's
+/// open (2.3c D1).
 pub fn fill(env: &Env, order_hash: &BytesN<32>, account: &BytesN<32>, by_evidence: bool) {
     storage::set_order_status(env, order_hash, Status::Filled);
     storage::remove_claim(env, order_hash);

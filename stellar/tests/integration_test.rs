@@ -110,28 +110,37 @@ const PROOF_AD_CREATOR: &[u8] = include_bytes!("fixtures/proof_ad_creator.bin");
 // ultrahonk ZK verify) on each escrow. CI builds with `stellar contract build
 // --optimize`, so the metered artifact is byte-identical to what the deploy
 // flow ships. This gate is ALSO the optimize backstop: an unoptimized unlock meters
-// ~109.8M CPU — over the 100M budget below — so a build that silently skipped
+// ~109.8M CPU — over the ceiling below — so a build that silently skipped
 // optimization fails right here.
 //
-// The CPU ceiling is the real Soroban default per-tx CPU budget: a regression that
-// pushes unlock over that budget would not submit on-chain, so it MUST fail the
-// gate. The metered call uses reset_unlimited() only so the test can *observe* an
-// over-budget number instead of aborting mid-call — the assert still enforces it.
+// These are regression detectors, not budget checks. The distinction was got wrong here before and
+// it drove design decisions, so it is worth stating precisely.
+//
+// The network's per-transaction limits, read from live testnet and mainnet with
+// `stellar network settings` (CLI 28.0.0, 2026-09-16):
+//
+//   tx_max_instructions = 400,000,000
+//   tx_memory_limit     =  41,943,040   (40 MB)
+//
+// The 100,000,000 this file used to call "the real Soroban default per-tx CPU budget" is
+// `DEFAULT_CPU_INSN_LIMIT` in soroban-env-host — the value the *SDK test harness* uses, whose own
+// comment says embedders should customise it to the network config. It is not what a transaction
+// gets on chain.
 //
 // Measured optimized baseline (`stellar contract build --optimize`):
-//   ad_manager.unlock:   ~96.37M CPU / ~5.62M mem
+//   ad_manager.unlock:   ~96.37M CPU / ~5.62M mem   — 24% of the network CPU budget, 13% of memory
 //   order_portal.unlock: ~96.24M CPU / ~5.62M mem
-// The mem ceilings carry the usual +12% and are re-baselined whenever the measured number moves, so
-// they stay a regression detector rather than a number nothing can reach.
-// ⚠️ Only ~4% CPU headroom under the 100M budget. We deliberately do NOT add the
-// usual +10% margin to the CPU ceiling — that would exceed the budget and make the
-// gate meaningless. The budget IS the ceiling. Any unlock change that grows CPU has
-// almost no room before it stops submitting on-chain; treat a failure here as a
-// protocol blocker (shrink the path or raise tx resources), not a number to bump.
-const SOROBAN_DEFAULT_TX_CPU_BUDGET: u64 = 100_000_000;
-const AD_UNLOCK_CPU_CEILING: u64 = SOROBAN_DEFAULT_TX_CPU_BUDGET;
+//
+// Verified that this is steady-state cost and not one-time module instantiation: metering an unlock
+// after a warm-up call to the same contract returns the identical figure.
+//
+// So the ceilings below sit just above the measurement, the same way the memory ones do. A failure
+// means CPU grew unexpectedly and someone should look at why — it is not, as the previous comment
+// claimed, a transaction that would fail to submit. There is roughly 4x headroom for that.
+const SOROBAN_TX_CPU_BUDGET: u64 = 400_000_000;
+const AD_UNLOCK_CPU_CEILING: u64 = 106_000_000; // ~96.37M baseline + ~10%
 const AD_UNLOCK_MEM_CEILING: u64 = 6_300_000; // ~5.62M baseline + ~12% headroom
-const OP_UNLOCK_CPU_CEILING: u64 = SOROBAN_DEFAULT_TX_CPU_BUDGET;
+const OP_UNLOCK_CPU_CEILING: u64 = 106_000_000; // ~96.24M baseline + ~10%
 const OP_UNLOCK_MEM_CEILING: u64 = 6_300_000; // ~5.62M baseline + ~12% headroom
 
 // ---------------------------------------------------------------------------
@@ -1314,7 +1323,14 @@ fn test_unlock_metering() {
         let b = s.env.cost_estimate().budget();
         let (cpu, mem) = (b.cpu_instruction_cost(), b.memory_bytes_cost());
         std::println!("ad_manager.unlock: cpu {} insns, mem {} bytes", cpu, mem);
-        assert!(cpu <= AD_UNLOCK_CPU_CEILING);
+        assert!(
+            cpu <= AD_UNLOCK_CPU_CEILING,
+            "unlock CPU grew: {cpu} over {AD_UNLOCK_CPU_CEILING}"
+        );
+        assert!(
+            cpu <= SOROBAN_TX_CPU_BUDGET,
+            "unlock would not submit on chain"
+        );
         assert!(mem <= AD_UNLOCK_MEM_CEILING);
     }
 
@@ -1342,14 +1358,27 @@ fn test_unlock_metering() {
         let b = s.env.cost_estimate().budget();
         let (cpu, mem) = (b.cpu_instruction_cost(), b.memory_bytes_cost());
         std::println!("order_portal.unlock: cpu {} insns, mem {} bytes", cpu, mem);
-        assert!(cpu <= OP_UNLOCK_CPU_CEILING);
+        assert!(
+            cpu <= OP_UNLOCK_CPU_CEILING,
+            "unlock CPU grew: {cpu} over {OP_UNLOCK_CPU_CEILING}"
+        );
+        assert!(
+            cpu <= SOROBAN_TX_CPU_BUDGET,
+            "unlock would not submit on chain"
+        );
         assert!(mem <= OP_UNLOCK_MEM_CEILING);
     }
 }
 
 /// 2.3e: the new paths that verify a proof (`present_settled`, `refund_by_cancel`) sit at the
 /// unlock's cost — the verify dominates — and the SETTLED append is its own transaction
-/// (`record_settled`): a verify plus a Poseidon2 append measured 105.8M, over the budget.
+/// (`record_settled`), because a verify plus a Poseidon2 append measured 105.8M.
+///
+/// Note on that 105.8M: it was judged "over budget" against the SDK harness default of 100M, not
+/// against the network's 400M. So the CPU argument for splitting `record_settled` out no longer
+/// holds on its own. The split still stands on its other reason — the EVM leg does the same, so the
+/// relayer batches one shape across both chains — but anyone revisiting it should know the
+/// measurement, not the old framing.
 #[test]
 fn test_termination_metering() {
     let s = setup();
@@ -1365,10 +1394,7 @@ fn test_termination_metering() {
         let b = s.env.cost_estimate().budget();
         let (cpu, mem) = (b.cpu_instruction_cost(), b.memory_bytes_cost());
         std::println!("{}: cpu {} insns, mem {} bytes", label, cpu, mem);
-        assert!(
-            cpu <= SOROBAN_DEFAULT_TX_CPU_BUDGET,
-            "{label} over the tx budget"
-        );
+        assert!(cpu <= SOROBAN_TX_CPU_BUDGET, "{label} over the tx budget");
         assert!(mem <= AD_UNLOCK_MEM_CEILING, "{label} over the mem ceiling");
     };
 
