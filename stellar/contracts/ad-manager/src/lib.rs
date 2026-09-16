@@ -16,7 +16,9 @@
 //! (accepted until `deadline + buffer - margin`) or a `present_settled` proof settles it; an
 //! unchallenged window releases the lock and records the CANCEL leaf the order leg refunds
 //! against. Every `Filled` gets a SETTLED leaf, appended by `record_settled` in its own
-//! transaction (Soroban's per-tx budget; EVM appends it inside the fill). The same state machine
+//! transaction (so the relayer batches one shape across both chains — not, as this once said, because
+//! Soroban's per-tx budget forces it: that was the SDK harness default of 100M, not the network's
+//! 400M). The same state machine
 //! as EVM:
 //!
 //! ```text

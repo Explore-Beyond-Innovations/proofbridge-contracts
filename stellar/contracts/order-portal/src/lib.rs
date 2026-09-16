@@ -16,7 +16,9 @@
 //! proves the lock, not the outcome; and a far backstop (`deadline + long_backstop`) opens a
 //! window in which only outcome evidence counts (a settled-leaf proof pays the maker, a cancel-leaf
 //! proof refunds the bridger, silence refunds the bridger), never a bare refund. Every `Filled` gets a
-//! SETTLED leaf, appended by `record_settled` in its own transaction (Soroban's per-tx budget;
+//! SETTLED leaf, appended by `record_settled` in its own transaction (to match the EVM leg so the
+//! relayer batches one shape — not Soroban's per-tx budget, which is 400M on the network and was
+//! misread as the harness default of 100M;
 //! EVM appends it inside the fill). The same state machine as EVM:
 //!
 //! ```text

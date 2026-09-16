@@ -42,8 +42,10 @@ import {TwoStepAdmin} from "../libraries/TwoStepAdmin.sol";
  *      included: a pause stops the clocks (`pausedSeconds`, measured from the leg's lock/create or
  *      from a backstop claim), so a window ends later by exactly the pause, and a window that had
  *      already closed stays closed. The
- *      SETTLED leaf is its own transaction on both chains (Soroban's per-tx budget forces it there;
- *      EVM matches so the relayer batches one shape), permissionless and single-shot.
+ *      SETTLED leaf is its own transaction on both chains so the relayer batches one shape,
+ *      permissionless and single-shot. (Historically this said Soroban's per-tx budget forced it
+ *      there; that was measured against the SDK harness default of 100M, not the network's 400M.
+ *      The split stands on the shape argument, not the CPU one.)
  */
 abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVerifierRegistry {
     using SafeERC20 for IERC20;
