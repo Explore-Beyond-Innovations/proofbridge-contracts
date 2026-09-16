@@ -219,6 +219,83 @@ fn revoke_stellar_home_then_key_is_gone() {
 }
 
 #[test]
+fn register_stellar_home_account_via_sep53() {
+    let (env, client, v) = setup();
+    let r = reg(&v, "makerSep53OnStellarTestnet");
+    let account = bn::<32>(&env, &r["account"]);
+
+    // The other legal path for a Stellar-home owner (#404): a detached SEP-53 signature rather than
+    // `require_auth`, which is what lets the relayer submit on the tenant's behalf. Same account and
+    // same digest as `makerOnStellarTestnet` — only the authorisation differs.
+    client.register(
+        &account,
+        &OwnerAuth::Sep53(bn::<64>(&env, &r["ownerSig"]["sig"])),
+        &bn::<96>(&env, &r["pkNative"]),
+        &bn::<192>(&env, &r["pop"]),
+        &0,
+    );
+
+    assert_eq!(
+        client.commitment_at(&account, &0),
+        bn::<32>(&env, &r["commitment"])
+    );
+    assert_eq!(client.nonce_of(&account), 1);
+}
+
+#[test]
+fn revoke_stellar_home_account_via_sep53() {
+    let (env, client, v) = setup();
+    let r = reg(&v, "makerSep53OnStellarTestnet");
+    let account = bn::<32>(&env, &r["account"]);
+
+    client.register(
+        &account,
+        &OwnerAuth::Sep53(bn::<64>(&env, &r["ownerSig"]["sig"])),
+        &bn::<96>(&env, &r["pkNative"]),
+        &bn::<192>(&env, &r["pop"]),
+        &0,
+    );
+    // The revoke digest binds the bumped nonce, so the register signature cannot be replayed here.
+    client.revoke(
+        &account,
+        &OwnerAuth::Sep53(bn::<64>(&env, &r["revokeAtNonce1"]["ownerSig"]["sig"])),
+        &1,
+    );
+
+    assert_eq!(
+        client.try_commitment_at(&account, &0),
+        Err(Ok(RegistryError::NoSuchSlot))
+    );
+    assert_eq!(client.nonce_of(&account), 2);
+}
+
+#[test]
+fn sep53_register_signature_does_not_authorise_the_revoke() {
+    let (env, client, v) = setup();
+    let r = reg(&v, "makerSep53OnStellarTestnet");
+    let account = bn::<32>(&env, &r["account"]);
+
+    client.register(
+        &account,
+        &OwnerAuth::Sep53(bn::<64>(&env, &r["ownerSig"]["sig"])),
+        &bn::<96>(&env, &r["pkNative"]),
+        &bn::<192>(&env, &r["pop"]),
+        &0,
+    );
+
+    // Each digest binds its own tag and nonce; a bad ed25519 signature traps rather than returning
+    // an error, so the host error is the assertion.
+    let replayed = bn::<64>(&env, &r["ownerSig"]["sig"]);
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.revoke(&account, &OwnerAuth::Sep53(replayed), &1)
+    }));
+    assert!(
+        err.is_err(),
+        "the register signature must not authorise a revoke"
+    );
+}
+
+#[test]
 fn revoke_evm_home_with_nonce1_signature() {
     let (env, client, v) = setup();
     let r = reg(&v, "bridgerOnStellarTestnet");
