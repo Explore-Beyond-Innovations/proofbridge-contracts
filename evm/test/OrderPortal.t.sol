@@ -5,7 +5,7 @@ import {Test, console} from "forge-std/Test.sol";
 import {IEscrow} from "src/interfaces/IEscrow.sol";
 import {IOrderPortal} from "src/interfaces/IOrderPortal.sol";
 import {OrderPortal} from "src/OrderPortal.sol";
-import {MockVerifier} from "src/mocks/MockVerifier.sol";
+import {MockVerifier} from "test/mocks/MockVerifier.sol";
 import {MerkleManager} from "src/MerkleManager.sol";
 import {IVerifier} from "src/Verifier.sol";
 import {IMerkleManager} from "src/MerkleManager.sol";

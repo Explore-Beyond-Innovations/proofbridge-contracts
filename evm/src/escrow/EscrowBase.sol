@@ -56,9 +56,6 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Admin role identifier.
-    bytes32 public constant ADMIN_ROLE = DEFAULT_ADMIN_ROLE;
-
     /// @notice Gas forwarded to the best-effort payout attempt; a failure credits `claimable`.
     uint256 private constant _PAYOUT_GAS_LIMIT = 150_000;
 
@@ -129,29 +126,29 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
                                  ADMIN
     //////////////////////////////////////////////////////////////*/
 
-    function pause() external onlyRole(ADMIN_ROLE) {
+    function pause() external onlyAdmin {
         _pause();
         _pausedAt = uint64(block.timestamp);
     }
 
-    function unpause() external onlyRole(ADMIN_ROLE) {
+    function unpause() external onlyAdmin {
         _unpause();
         pausedSeconds += uint64(block.timestamp) - _pausedAt;
     }
 
     /// @inheritdoc IEscrow
-    function setPeerEscrow(uint256 chainId, bytes32 peer) external onlyRole(ADMIN_ROLE) {
+    function setPeerEscrow(uint256 chainId, bytes32 peer) external onlyAdmin {
         peerEscrow[chainId] = peer;
         emit PeerEscrowSet(chainId, peer);
     }
 
     /// @inheritdoc IEscrow
-    function setRootVerifier(uint256 chainId, address verifier) external onlyRole(ADMIN_ROLE) {
+    function setRootVerifier(uint256 chainId, address verifier) external onlyAdmin {
         _setRootVerifier(chainId, verifier);
     }
 
     /// @inheritdoc IEscrow
-    function setTokenRoute(address localToken, uint256 peerChainId, bytes32 peerToken) external onlyRole(ADMIN_ROLE) {
+    function setTokenRoute(address localToken, uint256 peerChainId, bytes32 peerToken) external onlyAdmin {
         if (localToken == address(0) || peerToken == bytes32(0)) revert Escrow__RouteZeroAddress();
         if (peerEscrow[peerChainId] == bytes32(0)) revert Escrow__ChainNotSupported(peerChainId);
         tokenRoute[localToken][peerChainId] = peerToken;
@@ -159,20 +156,20 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     }
 
     /// @inheritdoc IEscrow
-    function removeTokenRoute(address localToken, uint256 peerChainId) external onlyRole(ADMIN_ROLE) {
+    function removeTokenRoute(address localToken, uint256 peerChainId) external onlyAdmin {
         delete tokenRoute[localToken][peerChainId];
         emit TokenRouteRemoved(localToken, peerChainId);
     }
 
     /// @inheritdoc IEscrow
-    function setRouteTiming(uint256 chainId, RouteTiming.Timing calldata timing) external onlyRole(ADMIN_ROLE) {
+    function setRouteTiming(uint256 chainId, RouteTiming.Timing calldata timing) external onlyAdmin {
         RouteTiming.validate(timing);
         routeTiming[chainId] = timing;
         emit RouteTimingSet(chainId, timing);
     }
 
     /// @inheritdoc IEscrow
-    function setRootAnchor(IRootAnchor anchor) external onlyRole(ADMIN_ROLE) {
+    function setRootAnchor(IRootAnchor anchor) external onlyAdmin {
         if (address(anchor) == address(0)) revert Escrow__ZeroAddress();
         rootAnchor = anchor;
         emit RootAnchorSet(address(anchor));
@@ -279,8 +276,8 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     }
 
     /// @dev The leg is `Open` or in a presentation window: evidence may still settle it.
-    function _requirePresentable(bytes32 orderHash) internal view returns (Status s) {
-        s = _orders[orderHash].status;
+    function _requirePresentable(bytes32 orderHash) internal view {
+        Status s = _orders[orderHash].status;
         if (s != Status.Open && s != Status.Claimed) revert Escrow__NotClaimable(orderHash, s);
     }
 
@@ -335,9 +332,7 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
         bytes calldata proof,
         uint256 side
     ) internal view {
-        bytes32[] memory publicInputs = RequestAuth.buildPublicInputs(
-            i_merkleManager, nullifierHash, targetRoot, orderHash, side
-        );
+        bytes32[] memory publicInputs = RequestAuth.buildPublicInputs(nullifierHash, targetRoot, orderHash, side);
         if (!i_verifier.verify(proof, publicInputs)) revert Escrow__InvalidProof();
     }
 
@@ -389,17 +384,22 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
      */
     function _windowEnd(bytes32 orderHash, uint256 deadline, uint64 buffer) internal view returns (uint256) {
         Order storage o = _orders[orderHash];
-        if (o.status == Status.Claimed) {
-            Termination.Claim storage c = claims[orderHash];
-            return uint256(c.finalizeAt) + (pausedSeconds - c.pausedAtOpen);
-        }
+        if (o.status == Status.Claimed) return _claimedWindowEnd(orderHash);
         return deadline + buffer + (pausedSeconds - o.pausedAtOpen);
     }
 
+    /// @dev The claimed arm of {_windowEnd}, for callers that have already asserted `Claimed`.
+    function _claimedWindowEnd(bytes32 orderHash) internal view returns (uint256) {
+        Termination.Claim storage c = claims[orderHash];
+        return uint256(c.finalizeAt) + (pausedSeconds - c.pausedAtOpen);
+    }
+
     /// @dev The leg must be `Claimed` and its window over; returns nothing, the caller then `_cancel`s.
-    function _requireFinalizable(bytes32 orderHash, uint64 buffer) internal view {
+    ///      No route read: `validate` rejects a zero buffer and nothing ever clears `routeTiming`, so a
+    ///      claim record is itself proof the route's clocks were set.
+    function _requireFinalizable(bytes32 orderHash) internal view {
         if (_orders[orderHash].status != Status.Claimed) revert Escrow__NotClaimed(orderHash);
-        _requireReached(_windowEnd(orderHash, 0, buffer));
+        _requireReached(_claimedWindowEnd(orderHash));
     }
 
     /// @dev `→ Cancelled`: close the window, count out. The leaf and the funds are the caller's.
@@ -427,11 +427,6 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     /// @inheritdoc IEscrow
     function hasOpenPositions(bytes32 account) external view returns (bool) {
         return inFlightOf[account] > 0;
-    }
-
-    /// @inheritdoc IEscrow
-    function getLatestMerkleRoot() external view returns (bytes32) {
-        return i_merkleManager.getRoot();
     }
 
     /// @inheritdoc IEscrow

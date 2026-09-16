@@ -158,7 +158,6 @@ interface IEscrow {
     function pausedSeconds() external view returns (uint64);
     /// @notice BLSKeyRegistry revoke guard: true while the account has a leg open on this escrow.
     function hasOpenPositions(bytes32 account) external view returns (bool);
-    function getLatestMerkleRoot() external view returns (bytes32);
     function getHistoricalRoot(uint256 index) external view returns (bytes32);
     function getMerkleLeafCount() external view returns (uint256);
 }

@@ -28,6 +28,12 @@ contract OrderHashParityTest is Test {
         assertEq(OrderHash.ORDER_TYPEHASH, v.readBytes32("._meta.orderTypehash"));
     }
 
+    /// The separator is pinned as a literal to keep three keccaks out of every digest; this is the
+    /// guard that the literal still is what the domain's parts hash to.
+    function test_domainSeparatorConstantMatchesItsParts() public pure {
+        assertEq(OrderHash.domainSeparator(), OrderHash.computeDomainSeparator());
+    }
+
     function test_domainSeparatorMatchesFixture() public view {
         assertEq(OrderHash.domainSeparator(), v.readBytes32("._meta.domainSeparator"));
     }

@@ -7,6 +7,7 @@ import {MerkleManager, IMerkleManager} from "src/MerkleManager.sol";
 import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
 import {RequestAuth} from "src/libraries/RequestAuth.sol";
 import {LeafDomain} from "src/libraries/LeafDomain.sol";
+import {MMRPoseidon2} from "@solidity-mmr/MMRPoseidon2.sol";
 
 contract InputsHarness {
     IMerkleManager internal immutable mm;
@@ -20,11 +21,16 @@ contract InputsHarness {
         view
         returns (bytes32[] memory)
     {
-        return RequestAuth.buildPublicInputs(mm, nullifier, root, orderHash, side);
+        return RequestAuth.buildPublicInputs(nullifier, root, orderHash, side);
     }
 
     function eventClaim(bytes32 root, bytes32 subject, uint256 domain) external pure returns (bytes32[] memory) {
         return RequestAuth.buildEventInputs(root, subject, domain);
+    }
+
+    /// The local reduction both input builders use, and the manager's, must be the same function.
+    function fieldModAgrees(bytes32 x) external view returns (bool) {
+        return MMRPoseidon2._fieldMod(x) == mm.fieldMod(x);
     }
 }
 
@@ -73,6 +79,13 @@ contract EventClaimTest is Test {
         g[6] = vm.toString(secret);
         g[7] = vm.toString(subject);
         (proof, pub) = abi.decode(vm.ffi(g), (bytes, bytes32[]));
+    }
+
+    /// The deposit inputs now reduce locally; this is what keeps that equal to the manager's `fieldMod`.
+    function test_fieldModMatchesTheMerkleManager() public view {
+        assertTrue(inputs.fieldModAgrees(bytes32(uint256(1))));
+        assertTrue(inputs.fieldModAgrees(keccak256("order")));
+        assertTrue(inputs.fieldModAgrees(bytes32(type(uint256).max)));
     }
 
     function test_eventClaim_verifiesForEveryEventDomain() public {

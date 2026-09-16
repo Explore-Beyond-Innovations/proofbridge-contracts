@@ -3,7 +3,6 @@ pragma solidity ^0.8.34;
 
 import {Test} from "forge-std/Test.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
-import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {RootAnchor} from "src/RootAnchor.sol";
 import {IRootAnchor} from "src/interfaces/IRootAnchor.sol";
 import {TwoStepAdmin} from "src/libraries/TwoStepAdmin.sol";
@@ -53,8 +52,8 @@ contract RootAnchorTest is Test {
         set[0] = who;
     }
 
-    function _unauthorized(address who) internal pure returns (bytes memory) {
-        return abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, who, bytes32(0));
+    function _unauthorized(address) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(TwoStepAdmin.NotAdmin.selector);
     }
 
     /*//////////////////////////////////////////////////////////////

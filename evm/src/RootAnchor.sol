@@ -31,9 +31,6 @@ contract RootAnchor is IRootAnchor, TwoStepAdmin, Pausable {
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Admin role identifier.
-    bytes32 public constant ADMIN_ROLE = DEFAULT_ADMIN_ROLE;
-
     /// @notice Upper bound on a route's delay: keeps {isAnchored} arithmetic trivially safe and an
     ///         incident stopgap from becoming a silent brick.
     uint64 public constant MAX_ANCHOR_DELAY = 30 days;
@@ -169,7 +166,7 @@ contract RootAnchor is IRootAnchor, TwoStepAdmin, Pausable {
 
     /// @notice Replace the notary set — the ladder rung (admin key → quorum → light client). Pending
     ///         approvals from the previous set stop counting.
-    function setSigners(address[] calldata signers_, uint32 threshold_) external onlyRole(ADMIN_ROLE) {
+    function setSigners(address[] calldata signers_, uint32 threshold_) external onlyAdmin {
         _setSigners(signers_, threshold_);
     }
 
@@ -178,7 +175,7 @@ contract RootAnchor is IRootAnchor, TwoStepAdmin, Pausable {
      *         real history, usable during the delay or after. Its approvals never count again; a fresh
      *         anchoring needs a fresh threshold. `latestSeq` is left for {resetLatestSeq}.
      */
-    function revokeAnchor(uint256 sourceChainId, bytes32 root) external onlyRole(ADMIN_ROLE) {
+    function revokeAnchor(uint256 sourceChainId, bytes32 root) external onlyAdmin {
         Anchor storage a = _anchors[sourceChainId][root];
         if (a.approvals == 0 && a.anchoredAt == 0) revert RootAnchor__NoSuchAnchor();
         a.gen += 1;
@@ -189,28 +186,28 @@ contract RootAnchor is IRootAnchor, TwoStepAdmin, Pausable {
     }
 
     /// @notice Recover a route whose sequence was pinned wrongly (a buggy or compromised publisher).
-    function resetLatestSeq(uint256 sourceChainId, uint64 seq) external onlyRole(ADMIN_ROLE) {
+    function resetLatestSeq(uint256 sourceChainId, uint64 seq) external onlyAdmin {
         latestSeq[sourceChainId] = seq;
         emit LatestSeqReset(sourceChainId, seq);
     }
 
-    function setAnchorDelay(uint256 sourceChainId, uint64 delay) external onlyRole(ADMIN_ROLE) {
+    function setAnchorDelay(uint256 sourceChainId, uint64 delay) external onlyAdmin {
         if (delay > MAX_ANCHOR_DELAY) revert RootAnchor__DelayTooLong(MAX_ANCHOR_DELAY, delay);
         anchorDelay[sourceChainId] = delay;
         emit AnchorDelaySet(sourceChainId, delay);
     }
 
-    function setMonotonic(bool monotonic_) external onlyRole(ADMIN_ROLE) {
+    function setMonotonic(bool monotonic_) external onlyAdmin {
         monotonic = monotonic_;
         emit MonotonicSet(monotonic_);
     }
 
     /// @notice Gates {anchor} only; {isAnchored} keeps answering.
-    function pause() external onlyRole(ADMIN_ROLE) {
+    function pause() external onlyAdmin {
         _pause();
     }
 
-    function unpause() external onlyRole(ADMIN_ROLE) {
+    function unpause() external onlyAdmin {
         _unpause();
     }
 
