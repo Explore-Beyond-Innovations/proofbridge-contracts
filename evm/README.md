@@ -63,13 +63,16 @@ forge test -vvv
 
 ## Deploy
 
-```bash
-export PRIVATE_KEY=0xYOUR_KEY
+Deploys go through the CLI, not `forge script`. The shipped bundle carries only `out/`, so the CLI
+instantiates from the built artifacts with `ethers.ContractFactory`; there is no Solidity source to
+run a script against. Production deploys are run by a human from `scripts/deploy/` in the monorepo —
+there is deliberately no CI deploy.
 
-forge script script/DeployProofbridge.s.sol:DeployProofbridge \
-  --rpc-url https://YOUR_RPC \
-  --broadcast --verify
+```bash
+pnpm --filter @proofbridge/evm-deploy deploy
 ```
+
+See `evm/deploy/README.md` for the environment it reads.
 
 ## Post-Deploy Configuration
 

@@ -92,7 +92,15 @@ pub fn transfer_admin(env: &Env, config: &ContractConfig, to: Address) {
     .publish(env);
 }
 
-/// The pending admin's half. The caller has already authorised `pending`.
+/// The standing nomination, or `NotPendingAdmin`. Paired with [`accept_admin`]: the caller reads the
+/// nominee here, authorises it, then commits — so the lookup can never be skipped, and
+/// `require_auth` stays in the contract where an auditor reads the entry point.
+pub fn pending_admin(env: &Env) -> Result<Address, Fault> {
+    storage::get_pending_admin(env).ok_or(Fault::NotPendingAdmin)
+}
+
+/// Commit the handover. `pending` must be the address [`pending_admin`] returned and the caller must
+/// have authorised it.
 pub fn accept_admin(env: &Env, config: &mut ContractConfig, pending: Address) {
     let old = core::mem::replace(&mut config.admin, pending.clone());
     storage::set_config(env, config);

@@ -132,7 +132,7 @@ impl AdManagerContract {
     }
 
     pub fn accept_admin(env: Env) -> Result<(), AdManagerError> {
-        let pending = storage::get_pending_admin(&env).ok_or(AdManagerError::NotPendingAdmin)?;
+        let pending = ops::pending_admin(&env)?;
         pending.require_auth();
         let mut config = storage::get_config(&env)?;
         ops::accept_admin(&env, &mut config, pending);
