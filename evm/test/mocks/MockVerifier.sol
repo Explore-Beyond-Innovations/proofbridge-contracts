@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import {IVerifier} from "../Verifier.sol";
+import {IVerifier} from "src/Verifier.sol";
 
 contract MockVerifier is IVerifier {
     bool public pass;

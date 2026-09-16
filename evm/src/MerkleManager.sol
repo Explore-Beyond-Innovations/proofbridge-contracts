@@ -12,7 +12,7 @@ import {IMerkleManager} from "./interfaces/IMerkleManager.sol";
  * @title MerkleManager
  * @dev Manages all order hashes for ProofBridge protocol per chain
  */
-contract MerkleManager is IMerkleManager, TwoStepAdmin, Pausable, ReentrancyGuardTransient {
+contract MerkleManager is IMerkleManager, TwoStepAdmin, AccessControl, Pausable, ReentrancyGuardTransient {
     using MMRPoseidon2 for MMRPoseidon2.Tree;
 
     MMRPoseidon2.Tree _tree;
@@ -40,12 +40,19 @@ contract MerkleManager is IMerkleManager, TwoStepAdmin, Pausable, ReentrancyGuar
         _tree.setHasher(poseidon2Yul);
     }
 
-    function pause() external onlyRole(ADMIN_ROLE) {
+    function pause() external onlyAdmin {
         _pause();
     }
 
-    function unpause() external onlyRole(ADMIN_ROLE) {
+    function unpause() external onlyAdmin {
         _unpause();
+    }
+
+    /// @dev The only contract here that runs roles: `MANAGER_ROLE` is granted to the escrows, so the
+    ///      admin handover has to carry `DEFAULT_ADMIN_ROLE` (its role admin) with it.
+    function _afterAdminChange(address from, address to) internal override {
+        if (to != address(0)) _grantRole(DEFAULT_ADMIN_ROLE, to);
+        if (from != address(0)) _revokeRole(DEFAULT_ADMIN_ROLE, from);
     }
 
     /**

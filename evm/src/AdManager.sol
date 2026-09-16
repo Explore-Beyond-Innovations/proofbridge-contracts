@@ -63,7 +63,7 @@ contract AdManager is EscrowBase, IAdManager {
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IAdManager
-    function setKeyRegistry(IKeyRegistry registry) external onlyRole(ADMIN_ROLE) {
+    function setKeyRegistry(IKeyRegistry registry) external onlyAdmin {
         if (address(registry) == address(0)) revert Escrow__ZeroAddress();
         keyRegistry = registry;
         emit KeyRegistrySet(address(registry));
@@ -234,7 +234,7 @@ contract AdManager is EscrowBase, IAdManager {
     /// @inheritdoc IAdManager
     function finalizeCancel(OrderParams calldata params) external nonReentrant whenNotPaused {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
-        _requireFinalizable(orderHash, _timing(params.orderChainId).buffer);
+        _requireFinalizable(orderHash);
 
         Ad storage ad = ads[params.adId];
         uint256 adAmount = _adAmount(params);

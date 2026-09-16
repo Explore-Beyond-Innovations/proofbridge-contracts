@@ -161,7 +161,7 @@ contract OrderPortal is EscrowBase, IOrderPortal {
     /// @inheritdoc IOrderPortal
     function finalizeBackstop(OrderParams calldata params) external nonReentrant whenNotPaused {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
-        _requireFinalizable(orderHash, _timing(params.adChainId).buffer);
+        _requireFinalizable(orderHash);
         _cancel(orderHash, params.bridger, false);
         _refundBridger(orderHash, params);
     }

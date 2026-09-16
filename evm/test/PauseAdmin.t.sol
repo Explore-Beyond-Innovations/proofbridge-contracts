@@ -12,6 +12,8 @@ import {AdManager} from "src/AdManager.sol";
 import {OrderPortal} from "src/OrderPortal.sol";
 import {BLSKeyRegistry} from "src/BLSKeyRegistry.sol";
 import {TwoStepAdmin} from "src/libraries/TwoStepAdmin.sol";
+import {MerkleManager} from "src/MerkleManager.sol";
+import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
 
 contract AdManagerPauseTest is AdManagerTest {
     function test_pause_blocksAllEntryPoints() public {
@@ -175,5 +177,50 @@ contract RegistryPauseTest is Test {
         registry.pause();
         vm.prank(next);
         registry.pause();
+    }
+}
+
+/// MerkleManager is the one contract that still runs OZ roles (`MANAGER_ROLE` for the escrows), so its
+/// admin handover has to carry `DEFAULT_ADMIN_ROLE` along or the next admin cannot grant an escrow.
+contract MerkleManagerAdminRoleTest is Test {
+    MerkleManager internal mm;
+    address internal admin = address(0xA11CE);
+    address internal next = address(0xB0B);
+    address internal escrow = address(0xE5C0);
+
+    function setUp() public {
+        mm = new MerkleManager(admin, address(new Poseidon2Yul()));
+    }
+
+    function test_adminHandoverCarriesTheRoleAdmin() public {
+        // Cached: an argument that is itself a call would eat the prank meant for the next line.
+        bytes32 roleAdmin = mm.DEFAULT_ADMIN_ROLE();
+        bytes32 manager = mm.MANAGER_ROLE();
+        assertTrue(mm.hasRole(roleAdmin, admin));
+
+        vm.prank(admin);
+        mm.transferAdmin(next);
+        vm.prank(next);
+        mm.acceptAdmin();
+
+        assertTrue(mm.hasRole(roleAdmin, next));
+        assertFalse(mm.hasRole(roleAdmin, admin));
+
+        vm.prank(next);
+        mm.grantRole(manager, escrow);
+        assertTrue(mm.hasRole(manager, escrow));
+
+        vm.expectRevert();
+        vm.prank(admin);
+        mm.grantRole(manager, address(0xDEAD));
+    }
+
+    function test_pauseIsAdminOnly() public {
+        vm.prank(next);
+        vm.expectRevert(TwoStepAdmin.NotAdmin.selector);
+        mm.pause();
+
+        vm.prank(admin);
+        mm.pause();
     }
 }

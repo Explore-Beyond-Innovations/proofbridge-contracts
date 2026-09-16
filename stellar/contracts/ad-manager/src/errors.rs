@@ -158,3 +158,26 @@ impl proofbridge_core::errors::ProofBridgeError for AdManagerError {
         Self::InvalidAccountAddress
     }
 }
+
+/// The shared escrow code reports an opaque reason; this is where it becomes this contract's own
+/// `#[contracterror]` discriminant, which is ABI and stays this contract's.
+impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
+    fn from(f: proofbridge_core::escrow_ops::Fault) -> Self {
+        use proofbridge_core::escrow_ops::Fault::*;
+        match f {
+            ContractPaused => AdManagerError::ContractPaused,
+            NoRouteTiming => AdManagerError::NoRouteTiming,
+            DeadlineTooSoon => AdManagerError::DeadlineTooSoon,
+            TooEarly => AdManagerError::TooEarly,
+            NotClaimable => AdManagerError::NotClaimable,
+            NotClaimed => AdManagerError::NotClaimed,
+            NoRootAnchor => AdManagerError::NoRootAnchor,
+            RootNotAnchored => AdManagerError::RootNotAnchored,
+            NotFilled => AdManagerError::NotFilled,
+            SettledRecorded => AdManagerError::SettledRecorded,
+            NothingToClaim => AdManagerError::NothingToClaim,
+            InvalidTiming => AdManagerError::InvalidTiming,
+            NotPendingAdmin => AdManagerError::NotPendingAdmin,
+        }
+    }
+}

@@ -152,3 +152,26 @@ impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
         Self::InvalidAccountAddress
     }
 }
+
+/// The shared escrow code reports an opaque reason; this is where it becomes this contract's own
+/// `#[contracterror]` discriminant, which is ABI and stays this contract's.
+impl From<proofbridge_core::escrow_ops::Fault> for OrderPortalError {
+    fn from(f: proofbridge_core::escrow_ops::Fault) -> Self {
+        use proofbridge_core::escrow_ops::Fault::*;
+        match f {
+            ContractPaused => OrderPortalError::ContractPaused,
+            NoRouteTiming => OrderPortalError::NoRouteTiming,
+            DeadlineTooSoon => OrderPortalError::DeadlineTooSoon,
+            TooEarly => OrderPortalError::TooEarly,
+            NotClaimable => OrderPortalError::NotClaimable,
+            NotClaimed => OrderPortalError::NotClaimed,
+            NoRootAnchor => OrderPortalError::NoRootAnchor,
+            RootNotAnchored => OrderPortalError::RootNotAnchored,
+            NotFilled => OrderPortalError::NotFilled,
+            SettledRecorded => OrderPortalError::SettledRecorded,
+            NothingToClaim => OrderPortalError::NothingToClaim,
+            InvalidTiming => OrderPortalError::InvalidTiming,
+            NotPendingAdmin => OrderPortalError::NotPendingAdmin,
+        }
+    }
+}

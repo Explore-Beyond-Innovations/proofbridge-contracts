@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import {IMerkleManager} from "../interfaces/IMerkleManager.sol";
 import {MMRPoseidon2} from "@solidity-mmr/MMRPoseidon2.sol";
 
 /**
@@ -18,24 +17,23 @@ import {MMRPoseidon2} from "@solidity-mmr/MMRPoseidon2.sol";
 library RequestAuth {
     /**
      * @notice Assemble the 4-element public-input vector for the zk verifier.
-     * @param merkleManager MerkleManager used to field-mod the order hash.
+     * @dev Pure, like {buildEventInputs}: the reduction is the MMR library's own, the same one the
+     *      MerkleManager's `fieldMod` returns, so there is no call to make. `EventClaim.t.sol` pins
+     *      the two to each other.
      * @param nullifierHash One-time proof nullifier.
      * @param targetRoot Source-chain merkle root consumed by the proof.
      * @param orderHash EIP-712 order hash.
      * @param sideFlag Side indicator (1 = AdManager side, 0 = OrderPortal side).
      * @return inputs `[nullifierHash, orderHash % p, targetRoot, sideFlag]`.
      */
-    function buildPublicInputs(
-        IMerkleManager merkleManager,
-        bytes32 nullifierHash,
-        bytes32 targetRoot,
-        bytes32 orderHash,
-        uint256 sideFlag
-    ) internal view returns (bytes32[] memory inputs) {
-        bytes32 orderHashMod = merkleManager.fieldMod(orderHash);
+    function buildPublicInputs(bytes32 nullifierHash, bytes32 targetRoot, bytes32 orderHash, uint256 sideFlag)
+        internal
+        pure
+        returns (bytes32[] memory inputs)
+    {
         inputs = new bytes32[](4);
         inputs[0] = nullifierHash;
-        inputs[1] = orderHashMod;
+        inputs[1] = MMRPoseidon2._fieldMod(orderHash);
         inputs[2] = targetRoot;
         inputs[3] = bytes32(sideFlag);
     }
