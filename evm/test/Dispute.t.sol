@@ -215,25 +215,56 @@ contract DisputeTest is AdManagerTest {
         adManager.finalizeDispute(p);
     }
 
-    /// The bond flag is absolute — "the filer is the bridger" — and both arms matter.
+    /// The outcome table, read from the shared vector rather than restated here.
     ///
-    /// Reading it as "the filer is my counterparty" inverted the routing on the follower leg,
-    /// because each escrow authenticates a different party: a forfeited bond came back to the party
-    /// that had just lost, and a vindicated filer's bond was taken. Caught by the Soroban module's
-    /// unit tests; this is the EVM guard for the same mistake.
-    function test_bondRoutingIsSymmetricInTheFlag() public pure {
-        // A ruling against the party who filed forfeits their bond, whichever side they are.
-        assertFalse(Dispute.bondReturnsToFiler(Dispute.Outcome.BridgerForfeit, true));
-        assertFalse(Dispute.bondReturnsToFiler(Dispute.Outcome.MakerForfeit, false));
-        // A ruling against the other side vindicates the filer, whichever side they are.
-        assertTrue(Dispute.bondReturnsToFiler(Dispute.Outcome.MakerForfeit, true));
-        assertTrue(Dispute.bondReturnsToFiler(Dispute.Outcome.BridgerForfeit, false));
-        // Neither side shown wrong: the bond comes back.
-        assertTrue(Dispute.bondReturnsToFiler(Dispute.Outcome.MutualRefund, true));
-        assertTrue(Dispute.bondReturnsToFiler(Dispute.Outcome.MutualRefund, false));
-        // Evidence proved the trade fine, so the filer disputed a settleable trade.
-        assertFalse(Dispute.bondReturnsToFiler(Dispute.Outcome.TradeProceeds, true));
-        assertFalse(Dispute.bondReturnsToFiler(Dispute.Outcome.TradeProceeds, false));
+    /// This is the point of that file. The routing was implemented twice, once per chain, and the
+    /// two agreed on the ad leg and disagreed on the order leg — a hand-written table on each side
+    /// cannot catch that, because each side writes the table it already believes.
+    function test_bondRoutingMatchesTheSharedVector() public view {
+        string memory v = vm.readFile("../test-vectors/dispute.json");
+        uint256 n = vm.parseJsonUint(v, ".counts.bondRouting");
+        assertEq(n, 10, "5 outcomes x both arms of the flag");
+
+        for (uint256 i = 0; i < n; i++) {
+            string memory at = string.concat(".bondRouting[", vm.toString(i), "]");
+            uint256 outcomeValue = vm.parseJsonUint(v, string.concat(at, ".outcomeValue"));
+            bool filerIsBridger = vm.parseJsonBool(v, string.concat(at, ".filerIsBridger"));
+            bool expected = vm.parseJsonBool(v, string.concat(at, ".bondReturnsToFiler"));
+            assertEq(
+                Dispute.bondReturnsToFiler(Dispute.Outcome(outcomeValue), filerIsBridger),
+                expected,
+                "routing disagrees with the shared vector"
+            );
+        }
+    }
+
+    /// The enum discriminants are ABI and are pinned by the same file.
+    function test_outcomeDiscriminantsMatchTheSharedVector() public view {
+        string memory v = vm.readFile("../test-vectors/dispute.json");
+        assertEq(vm.parseJsonUint(v, ".outcomes[0].value"), uint256(Dispute.Outcome.None));
+        assertEq(vm.parseJsonUint(v, ".outcomes[1].value"), uint256(Dispute.Outcome.MutualRefund));
+        assertEq(vm.parseJsonUint(v, ".outcomes[2].value"), uint256(Dispute.Outcome.TradeProceeds));
+        assertEq(vm.parseJsonUint(v, ".outcomes[3].value"), uint256(Dispute.Outcome.BridgerForfeit));
+        assertEq(vm.parseJsonUint(v, ".outcomes[4].value"), uint256(Dispute.Outcome.MakerForfeit));
+    }
+
+    /// Bond sizing, likewise: the cases live in the vector, not in each chain's head.
+    function test_bondSizingMatchesTheSharedVector() public view {
+        string memory v = vm.readFile("../test-vectors/dispute.json");
+        uint256 n = vm.parseJsonUint(v, ".counts.bondSizing");
+        for (uint256 i = 0; i < n; i++) {
+            string memory at = string.concat(".bondSizing[", vm.toString(i), "]");
+            Dispute.Params memory p = Dispute.Params({
+                challengePeriod: CHALLENGE,
+                bondFloor: uint128(vm.parseJsonUint(v, string.concat(at, ".bondFloor"))),
+                bondBps: uint16(vm.parseJsonUint(v, string.concat(at, ".bondBps")))
+            });
+            assertEq(
+                Dispute.bondFor(vm.parseJsonUint(v, string.concat(at, ".amount")), p),
+                vm.parseJsonUint(v, string.concat(at, ".bond")),
+                "bond sizing disagrees with the shared vector"
+            );
+        }
     }
 
     /// A second dispute on the same order is refused by the module.

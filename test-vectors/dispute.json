@@ -1,0 +1,176 @@
+{
+  "_meta": {
+    "purpose": "The dispute outcome table and bond maths, shared by both chains so the two implementations cannot drift apart.",
+    "generator": "scripts/bls-vectors/src/gen-dispute.ts",
+    "spec": "docs/engineering/t2/2.3-build/07-dispute-functions.md",
+    "note": "`filerIsBridger` is absolute — a fact about the dispute, not about which escrow is asking. Reading it as 'is the filer my counterparty' inverted the routing on the follower leg."
+  },
+  "counts": {
+    "bondSizing": 6,
+    "bondRouting": 10,
+    "paramValidation": 4
+  },
+  "constants": {
+    "bpsDenominator": "10000",
+    "minChallengePeriod": 3600,
+    "maxBondBps": 1000
+  },
+  "outcomes": [
+    {
+      "name": "None",
+      "value": 0
+    },
+    {
+      "name": "MutualRefund",
+      "value": 1
+    },
+    {
+      "name": "TradeProceeds",
+      "value": 2
+    },
+    {
+      "name": "BridgerForfeit",
+      "value": 3
+    },
+    {
+      "name": "MakerForfeit",
+      "value": 4
+    }
+  ],
+  "bondSizing": [
+    {
+      "label": "the floor dominates a small order",
+      "amount": "1000",
+      "bondFloor": "1000",
+      "bondBps": 100,
+      "bond": "1000"
+    },
+    {
+      "label": "the percentage dominates a large order",
+      "amount": "1000000",
+      "bondFloor": "1000",
+      "bondBps": 100,
+      "bond": "10000"
+    },
+    {
+      "label": "at the crossover the floor still wins",
+      "amount": "100000",
+      "bondFloor": "1000",
+      "bondBps": 100,
+      "bond": "1000"
+    },
+    {
+      "label": "a zero rate leaves only the floor",
+      "amount": "1000000",
+      "bondFloor": "500",
+      "bondBps": 0,
+      "bond": "500"
+    },
+    {
+      "label": "rounds down, so a dust order still pays the floor",
+      "amount": "1",
+      "bondFloor": "7",
+      "bondBps": 100,
+      "bond": "7"
+    },
+    {
+      "label": "the ceiling rate, 10%",
+      "amount": "1000000",
+      "bondFloor": "1",
+      "bondBps": 1000,
+      "bond": "100000"
+    }
+  ],
+  "bondRouting": [
+    {
+      "outcome": "None",
+      "outcomeValue": 0,
+      "filerIsBridger": true,
+      "bondReturnsToFiler": false
+    },
+    {
+      "outcome": "None",
+      "outcomeValue": 0,
+      "filerIsBridger": false,
+      "bondReturnsToFiler": false
+    },
+    {
+      "outcome": "MutualRefund",
+      "outcomeValue": 1,
+      "filerIsBridger": true,
+      "bondReturnsToFiler": true
+    },
+    {
+      "outcome": "MutualRefund",
+      "outcomeValue": 1,
+      "filerIsBridger": false,
+      "bondReturnsToFiler": true
+    },
+    {
+      "outcome": "TradeProceeds",
+      "outcomeValue": 2,
+      "filerIsBridger": true,
+      "bondReturnsToFiler": false
+    },
+    {
+      "outcome": "TradeProceeds",
+      "outcomeValue": 2,
+      "filerIsBridger": false,
+      "bondReturnsToFiler": false
+    },
+    {
+      "outcome": "BridgerForfeit",
+      "outcomeValue": 3,
+      "filerIsBridger": true,
+      "bondReturnsToFiler": false
+    },
+    {
+      "outcome": "BridgerForfeit",
+      "outcomeValue": 3,
+      "filerIsBridger": false,
+      "bondReturnsToFiler": true
+    },
+    {
+      "outcome": "MakerForfeit",
+      "outcomeValue": 4,
+      "filerIsBridger": true,
+      "bondReturnsToFiler": true
+    },
+    {
+      "outcome": "MakerForfeit",
+      "outcomeValue": 4,
+      "filerIsBridger": false,
+      "bondReturnsToFiler": false
+    }
+  ],
+  "paramValidation": [
+    {
+      "label": "challenge period below the minimum",
+      "challengePeriod": 60,
+      "bondFloor": "1",
+      "bondBps": 100,
+      "validField": 1
+    },
+    {
+      "label": "a zero floor could round a bond to nothing",
+      "challengePeriod": 3600,
+      "bondFloor": "0",
+      "bondBps": 100,
+      "validField": 2
+    },
+    {
+      "label": "above the bps ceiling",
+      "challengePeriod": 3600,
+      "bondFloor": "1",
+      "bondBps": 1001,
+      "validField": 3
+    },
+    {
+      "label": "the smallest legal set",
+      "challengePeriod": 3600,
+      "bondFloor": "1",
+      "bondBps": 0,
+      "validField": 0
+    }
+  ]
+}

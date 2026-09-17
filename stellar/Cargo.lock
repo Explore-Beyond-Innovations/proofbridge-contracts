@@ -591,6 +591,7 @@ name = "dispute-manager"
 version = "0.1.0"
 dependencies = [
  "proofbridge-core",
+ "serde_json",
  "soroban-sdk",
  "test-token",
 ]

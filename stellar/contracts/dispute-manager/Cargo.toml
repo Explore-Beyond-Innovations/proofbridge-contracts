@@ -15,6 +15,7 @@ proofbridge-core = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils", "alloc"] }
 test-token = { path = "../test-token" }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
 
 [features]
 testutils = ["soroban-sdk/testutils"]

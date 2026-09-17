@@ -14,6 +14,8 @@ use soroban_sdk::{
 };
 use test_token::{TokenContract, TokenContractClient};
 
+const DISPUTE_VECTORS: &str = include_str!("../../../../test-vectors/dispute.json");
+
 const T0: u64 = 1_700_000_000;
 const CHAIN: u128 = 1_000_002;
 const CHALLENGE: u64 = 2 * 60 * 60;
@@ -292,24 +294,80 @@ fn a_ruling_against_the_filer_forfeits_the_bond_to_the_fee_pool() {
     assert_eq!(t.balance(&f.fee_pool), bond as i128);
 }
 
-/// The flag is absolute — "the filer is the bridger" — and both arms matter, because reading it as
-/// "the filer is my counterparty" inverted the routing on the follower leg: a forfeited bond came
-/// back and a vindicated one was taken.
+/// The outcome table and the bond maths, read from the shared vector rather than restated here.
+///
+/// This is the point of the vector file. The routing was implemented twice, once per chain, and the
+/// two agreed on the ad leg and disagreed on the order leg — a hand-written table on each side
+/// cannot catch that, because each side writes the table it already believes.
 #[test]
-fn bond_routing_is_symmetric_in_the_flag() {
+fn bond_routing_matches_the_shared_vector() {
     use proofbridge_core::dispute::bond_returns_to_filer as returns;
-    // A ruling against the party who filed forfeits their bond, whichever side they are.
-    assert!(!returns(DisputeOutcome::BridgerForfeit, true));
-    assert!(!returns(DisputeOutcome::MakerForfeit, false));
-    // A ruling against the other side vindicates the filer, whichever side they are.
-    assert!(returns(DisputeOutcome::MakerForfeit, true));
-    assert!(returns(DisputeOutcome::BridgerForfeit, false));
-    // Neither side shown wrong: the bond comes back.
-    assert!(returns(DisputeOutcome::MutualRefund, true));
-    assert!(returns(DisputeOutcome::MutualRefund, false));
-    // Evidence proved the trade fine, so the filer disputed a settleable trade.
-    assert!(!returns(DisputeOutcome::TradeProceeds, true));
-    assert!(!returns(DisputeOutcome::TradeProceeds, false));
+    let v: serde_json::Value = serde_json::from_str(DISPUTE_VECTORS).unwrap();
+
+    let rows = v["bondRouting"].as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        10,
+        "the table must be exhaustive: 5 outcomes x 2 arms"
+    );
+    for row in rows {
+        let outcome = match row["outcome"].as_str().unwrap() {
+            "None" => DisputeOutcome::None,
+            "MutualRefund" => DisputeOutcome::MutualRefund,
+            "TradeProceeds" => DisputeOutcome::TradeProceeds,
+            "BridgerForfeit" => DisputeOutcome::BridgerForfeit,
+            other => {
+                assert_eq!(other, "MakerForfeit");
+                DisputeOutcome::MakerForfeit
+            }
+        };
+        let filer_is_bridger = row["filerIsBridger"].as_bool().unwrap();
+        assert_eq!(
+            returns(outcome, filer_is_bridger),
+            row["bondReturnsToFiler"].as_bool().unwrap(),
+            "routing disagrees with the shared vector for {:?} / filerIsBridger={}",
+            outcome,
+            filer_is_bridger
+        );
+    }
+}
+
+/// The enum discriminants are ABI and are pinned by the same file.
+#[test]
+fn outcome_discriminants_match_the_shared_vector() {
+    let v: serde_json::Value = serde_json::from_str(DISPUTE_VECTORS).unwrap();
+    for o in v["outcomes"].as_array().unwrap() {
+        let expected = o["value"].as_u64().unwrap() as u32;
+        let actual = match o["name"].as_str().unwrap() {
+            "None" => DisputeOutcome::None as u32,
+            "MutualRefund" => DisputeOutcome::MutualRefund as u32,
+            "TradeProceeds" => DisputeOutcome::TradeProceeds as u32,
+            "BridgerForfeit" => DisputeOutcome::BridgerForfeit as u32,
+            _ => DisputeOutcome::MakerForfeit as u32,
+        };
+        assert_eq!(actual, expected, "discriminant drift on {}", o["name"]);
+    }
+}
+
+/// Bond sizing, likewise: the cases live in the vector, not in each chain's head.
+#[test]
+fn bond_sizing_matches_the_shared_vector() {
+    let v: serde_json::Value = serde_json::from_str(DISPUTE_VECTORS).unwrap();
+    for c in v["bondSizing"].as_array().unwrap() {
+        let p = DisputeParams {
+            challenge_period: CHALLENGE,
+            bond_floor: c["bondFloor"].as_str().unwrap().parse().unwrap(),
+            bond_bps: c["bondBps"].as_u64().unwrap() as u32,
+        };
+        let amount: u128 = c["amount"].as_str().unwrap().parse().unwrap();
+        let expected: u128 = c["bond"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            proofbridge_core::dispute::bond_for(amount, &p),
+            expected,
+            "{}",
+            c["label"]
+        );
+    }
 }
 
 #[test]
