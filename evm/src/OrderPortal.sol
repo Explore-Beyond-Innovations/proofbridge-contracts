@@ -161,8 +161,10 @@ contract OrderPortal is EscrowBase, IOrderPortal {
             _refundBridger(orderHash, params);
         }
 
-        // This leg authenticates the bridger, so a filer who is not the bridger is the counterparty.
-        _disputeManager().settleBond(orderHash, initiator != params.bridger.toAddressChecked());
+        // The flag is absolute: was this filed by the bridger? This leg authenticates the bridger,
+        // so that is an equality here and an inequality on the ad leg. Phrasing it relative to the
+        // calling escrow inverted the routing on exactly one of the two.
+        _disputeManager().settleBond(orderHash, initiator == params.bridger.toAddressChecked());
         emit OrderCancelled(orderHash, false);
     }
 

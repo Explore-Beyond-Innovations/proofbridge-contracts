@@ -187,7 +187,7 @@ impl DisputeManagerContract {
         env: Env,
         escrow: Address,
         order_hash: BytesN<32>,
-        filer_was_counterparty: bool,
+        filer_is_bridger: bool,
     ) -> Result<(), Error> {
         Self::require_escrow(&env, &escrow)?;
         let d = storage::get_dispute(&env, &order_hash).ok_or(Error::NotDisputed)?;
@@ -203,7 +203,7 @@ impl DisputeManagerContract {
         storage::remove_dispute(&env, &order_hash);
 
         if d.bond != 0 {
-            let to_filer = dispute::bond_returns_to_filer(outcome, filer_was_counterparty);
+            let to_filer = dispute::bond_returns_to_filer(outcome, filer_is_bridger);
             // An unset fee pool must not strand the bond; the filer keeps it rather than this
             // contract holding it forever.
             let to = if to_filer {

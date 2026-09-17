@@ -365,17 +365,21 @@ pub fn dispute_outcome(
 }
 
 /// Tell the module the dispute is over so it can route the bond and close its record.
+/// `filer_is_bridger` is absolute, not relative to the calling escrow. Each leg authenticates a
+/// different party, so "the filer is my counterparty" means opposite things on the two escrows —
+/// phrasing it that way inverted the routing on the follower leg, returning a forfeited bond and
+/// forfeiting a vindicated one.
 pub fn settle_bond(
     env: &Env,
     escrow: &Address,
     order_hash: &BytesN<32>,
-    filer_was_counterparty: bool,
+    filer_is_bridger: bool,
 ) -> Result<(), Fault> {
     let manager = dispute_manager(env)?;
     cross_contract::DisputeManagerClient::new(env, &manager).settle_bond(
         escrow,
         order_hash,
-        &filer_was_counterparty,
+        &filer_is_bridger,
     );
     Ok(())
 }

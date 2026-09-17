@@ -215,6 +215,27 @@ contract DisputeTest is AdManagerTest {
         adManager.finalizeDispute(p);
     }
 
+    /// The bond flag is absolute — "the filer is the bridger" — and both arms matter.
+    ///
+    /// Reading it as "the filer is my counterparty" inverted the routing on the follower leg,
+    /// because each escrow authenticates a different party: a forfeited bond came back to the party
+    /// that had just lost, and a vindicated filer's bond was taken. Caught by the Soroban module's
+    /// unit tests; this is the EVM guard for the same mistake.
+    function test_bondRoutingIsSymmetricInTheFlag() public pure {
+        // A ruling against the party who filed forfeits their bond, whichever side they are.
+        assertFalse(Dispute.bondReturnsToFiler(Dispute.Outcome.BridgerForfeit, true));
+        assertFalse(Dispute.bondReturnsToFiler(Dispute.Outcome.MakerForfeit, false));
+        // A ruling against the other side vindicates the filer, whichever side they are.
+        assertTrue(Dispute.bondReturnsToFiler(Dispute.Outcome.MakerForfeit, true));
+        assertTrue(Dispute.bondReturnsToFiler(Dispute.Outcome.BridgerForfeit, false));
+        // Neither side shown wrong: the bond comes back.
+        assertTrue(Dispute.bondReturnsToFiler(Dispute.Outcome.MutualRefund, true));
+        assertTrue(Dispute.bondReturnsToFiler(Dispute.Outcome.MutualRefund, false));
+        // Evidence proved the trade fine, so the filer disputed a settleable trade.
+        assertFalse(Dispute.bondReturnsToFiler(Dispute.Outcome.TradeProceeds, true));
+        assertFalse(Dispute.bondReturnsToFiler(Dispute.Outcome.TradeProceeds, false));
+    }
+
     /// A second dispute on the same order is refused by the module.
     function test_oneDisputePerOrder() public {
         (IAdManager.OrderParams memory p,) = _lockedOrder(12);

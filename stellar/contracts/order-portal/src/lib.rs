@@ -566,20 +566,21 @@ impl OrderPortalContract {
             Self::refund_bridger(&env, &config, &order_hash, &params);
         }
 
-        // This leg authenticates the bridger, so a filer who is not the bridger is the counterparty.
+        // The flag is absolute: was this filed by the bridger? This leg authenticates the bridger,
+        // so that is an equality here and an inequality on the ad leg.
         let bridger_addr = proofbridge_core::token::bytes32_to_account_address::<OrderPortalError>(
             &env,
             &params.bridger,
         )?;
-        let filer_was_counterparty = match initiator {
-            Some(ref who) => *who != bridger_addr,
-            None => true,
+        let filer_is_bridger = match initiator {
+            Some(ref who) => *who == bridger_addr,
+            None => false,
         };
         ops::settle_bond(
             &env,
             &env.current_contract_address(),
             &order_hash,
-            filer_was_counterparty,
+            filer_is_bridger,
         )?;
         storage::extend_instance_ttl(&env);
         Ok(())

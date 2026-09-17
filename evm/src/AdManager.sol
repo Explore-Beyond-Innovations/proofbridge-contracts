@@ -281,7 +281,8 @@ contract AdManager is EscrowBase, IAdManager {
 
         _orders[orderHash].status = Status.Resolved;
         _countOut(params.adSettlementSigner);
-        // This leg authenticates the maker, so a filer who is not the maker is the counterparty.
+        // The flag is absolute: was this filed by the bridger? On the ad leg the maker is the party
+        // this escrow authenticates, so anyone else filing is the bridger.
         _disputeManager().settleBond(orderHash, initiator != ad.maker);
         _appendLeaf(orderHash, LeafDomain.CANCEL);
         emit OrderCancelled(orderHash, false);

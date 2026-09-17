@@ -768,8 +768,9 @@ impl AdManagerContract {
             &params.ad_settlement_signer,
             storage::get_in_flight(&env, &params.ad_settlement_signer) - 1,
         );
-        // This leg authenticates the maker, so a filer who is not the maker is the counterparty.
-        let filer_was_counterparty = match initiator {
+        // The flag is absolute: was this filed by the bridger? On the ad leg the maker is the party
+        // this escrow authenticates, so anyone else filing is the bridger.
+        let filer_is_bridger = match initiator {
             Some(ref who) => *who != ad.maker,
             None => true,
         };
@@ -777,7 +778,7 @@ impl AdManagerContract {
             &env,
             &env.current_contract_address(),
             &order_hash,
-            filer_was_counterparty,
+            filer_is_bridger,
         )?;
         cross_contract::append_to_merkle(
             &env,

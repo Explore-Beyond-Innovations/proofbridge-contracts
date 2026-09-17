@@ -43,8 +43,12 @@ interface IDisputeManager {
      * @notice Settle the bond for a dispute the escrow has just finalized, and close the record.
      * @dev Escrow-only. The module holds the bond, so this is the one direction funds move — out of
      *      the module, never out of the escrow.
-     * @param filerWasCounterparty True when the filer is not the party this escrow authenticates;
-     *        the escrow is the only side that knows that, so it tells the module.
+     * @param filerIsBridger True when the dispute was filed by the bridger.
+     *
+     *        Absolute, not relative to the calling escrow. Each leg authenticates a different party,
+     *        so "the filer is my counterparty" means opposite things on the two escrows — phrasing
+     *        it that way inverted the bond routing on the follower leg, returning a forfeited bond
+     *        and forfeiting a vindicated one. The escrow answers the same question either way.
      */
-    function settleBond(bytes32 orderHash, bool filerWasCounterparty) external;
+    function settleBond(bytes32 orderHash, bool filerIsBridger) external;
 }

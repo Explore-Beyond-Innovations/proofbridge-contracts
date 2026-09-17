@@ -39,7 +39,7 @@ pub trait DisputeManagerInterface {
         filer: Address,
         evidence: BytesN<32>,
     ) -> u128;
-    fn settle_bond(env: Env, escrow: Address, order_hash: BytesN<32>, filer_was_counterparty: bool);
+    fn settle_bond(env: Env, escrow: Address, order_hash: BytesN<32>, filer_is_bridger: bool);
     fn outcome_of(
         env: Env,
         order_hash: BytesN<32>,

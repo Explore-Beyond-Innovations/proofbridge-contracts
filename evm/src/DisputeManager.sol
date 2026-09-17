@@ -171,7 +171,7 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     }
 
     /// @inheritdoc IDisputeManager
-    function settleBond(bytes32 orderHash, bool filerWasCounterparty) external onlyEscrow {
+    function settleBond(bytes32 orderHash, bool filerIsBridger) external onlyEscrow {
         if (disputeEscrow[orderHash] != msg.sender) revert DisputeManager__NotEscrow();
         Dispute.Record storage d = disputes[orderHash];
         if (d.initiator == address(0)) revert DisputeManager__NotDisputed(orderHash);
@@ -183,7 +183,7 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         delete disputeEscrow[orderHash];
 
         if (bond != 0) {
-            bool toFiler = Dispute.bondReturnsToFiler(outcome, filerWasCounterparty);
+            bool toFiler = Dispute.bondReturnsToFiler(outcome, filerIsBridger);
             address to = toFiler ? filer : protocolFeePool;
             // An unset fee pool must not strand the bond; the filer keeps it rather than this
             // contract holding it forever.
