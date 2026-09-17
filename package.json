@@ -4,7 +4,7 @@
   "packageManager": "pnpm@10.10.0",
   "pnpm": {
     "overrides": {
-      "proofbridge-mmr": "1.2.1"
+      "proofbridge-mmr": "1.4.0"
     }
   }
 }
