@@ -2152,6 +2152,120 @@ fn test_t14_set_settlement_signer_while_paused_succeeds() {
     assert_eq!(s.ad_manager.get_ad(&ad_id).unwrap().settlement_signer, next);
 }
 
+/// T-58 (2.3h): `claim` is the one entry point a pause must not freeze. It moves no order state and
+/// creates no credit — it hands an already-credited balance to the account that already owns it.
+/// Freezing it would not contain an incident, only hold honest users' money while one is
+/// investigated. Asserted as an explicit success so the exception is pinned, not implied.
+#[test]
+fn test_2_3h_claim_succeeds_while_paused() {
+    let s = setup();
+    let params = ad_manager_order_params(&s.env, &s.tp);
+    s.ad_manager.lock_for_order(&params);
+
+    // Park a credit the way one really arises: the payout push fails, so the escrow credits instead.
+    let token_client = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    token_client.set_fail_transfers(&true);
+    let empty = Bytes::new(&s.env);
+    assert!(ad_unlock(&s, &params, &empty), "unlock still settles");
+    token_client.set_fail_transfers(&false);
+
+    let recipient = bytes32_to_bytesn(&s.env, &s.tp.order_recipient);
+    let token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+    let recipient_addr = account_addr(&s, &s.tp.order_recipient);
+    let before = token_client.balance(&recipient_addr);
+
+    // Now pause, and claim anyway.
+    s.ad_manager.pause();
+    s.ad_manager.claim(&recipient, &token);
+    assert!(
+        token_client.balance(&recipient_addr) > before,
+        "a credited balance must stay reachable while paused"
+    );
+}
+
+/// T-57 (2.3h): a credited balance must not archive. Its TTL is extended on every write, so the
+/// entry outlives the ~30-day persistent threshold without anyone touching it — an archived credit
+/// is money its owner cannot reach until somebody pays to restore the entry.
+///
+/// Asserted on the entry's actual TTL rather than by advancing the ledger and seeing whether a read
+/// still works. The test environment does not evict expired entries, so the read succeeds either
+/// way: the first version of this test passed with the bump removed, which is no test at all.
+#[test]
+fn test_2_3h_a_credited_balance_gets_its_ttl_extended() {
+    use proofbridge_core::ttl::{PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD};
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let s = setup();
+    let params = ad_manager_order_params(&s.env, &s.tp);
+    s.ad_manager.lock_for_order(&params);
+
+    // Park a credit the way one really arises: the payout push fails, so the escrow credits instead.
+    let token_client = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    token_client.set_fail_transfers(&true);
+    let empty = Bytes::new(&s.env);
+    assert!(ad_unlock(&s, &params, &empty), "unlock still settles");
+    token_client.set_fail_transfers(&false);
+
+    let recipient = bytes32_to_bytesn(&s.env, &s.tp.order_recipient);
+    let token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+
+    let ttl = s.env.as_contract(&s.ad_manager.address, || {
+        let key = (
+            soroban_sdk::symbol_short!("claim"),
+            recipient.clone(),
+            token.clone(),
+        );
+        s.env.storage().persistent().get_ttl(&key)
+    });
+    assert!(
+        ttl >= PERSISTENT_BUMP_AMOUNT,
+        "the credit was written without a TTL bump: {ttl} < {PERSISTENT_BUMP_AMOUNT}"
+    );
+    assert!(
+        ttl > PERSISTENT_LIFETIME_THRESHOLD,
+        "a credit must outlive the archival threshold"
+    );
+}
+
+/// T-57, the other fund-bearing write: an ad holds the maker's liquidity in `ad.balance`, so an
+/// idle ad that archives is money its owner cannot withdraw until the entry is restored.
+#[test]
+fn test_2_3h_an_ad_gets_its_ttl_extended() {
+    use proofbridge_core::ttl::{PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD};
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let s = setup();
+    let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
+    assert!(
+        s.ad_manager.get_ad(&ad_id).is_some(),
+        "the fixture's ad exists"
+    );
+
+    let ttl = s.env.as_contract(&s.ad_manager.address, || {
+        let key = (soroban_sdk::symbol_short!("ads"), ad_id.clone());
+        s.env.storage().persistent().get_ttl(&key)
+    });
+    assert!(
+        ttl >= PERSISTENT_BUMP_AMOUNT,
+        "the ad was written without a TTL bump: {ttl} < {PERSISTENT_BUMP_AMOUNT}"
+    );
+    assert!(
+        ttl > PERSISTENT_LIFETIME_THRESHOLD,
+        "an ad holding liquidity must outlive the archival threshold"
+    );
+}
+
+/// ...and the pause still holds for everything else, so the exception is exactly one call wide.
+#[test]
+fn test_2_3h_the_pause_still_holds_for_everything_else() {
+    let s = setup();
+    let params = ad_manager_order_params(&s.env, &s.tp);
+    s.ad_manager.pause();
+    assert!(s.ad_manager.try_lock_for_order(&params).is_err());
+    assert!(s.ad_manager.try_claim_cancel(&params).is_err());
+    assert!(s.ad_manager.try_finalize_cancel(&params).is_err());
+}
+
 #[test]
 fn test_t14_lock_after_key_retired_errors() {
     // The ad still points at its signer, but the key was retired since (set_valid_until, a

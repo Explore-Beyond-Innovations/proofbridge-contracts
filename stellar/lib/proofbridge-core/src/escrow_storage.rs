@@ -265,8 +265,11 @@ pub fn get_claimable(env: &Env, recipient: &BytesN<32>, token: &BytesN<32>) -> u
         .unwrap_or(0)
 }
 
+/// A credited balance owed to `recipient`. Fund-bearing, so its TTL is extended on every write
+/// (2.3h D2): an archived credit is money the owner cannot reach until somebody pays to restore the
+/// entry. The dispute module has done this since it was written; these older escrow writes did not.
 pub fn set_claimable(env: &Env, recipient: &BytesN<32>, token: &BytesN<32>, amount: u128) {
-    env.storage()
-        .persistent()
-        .set(&(KEY_CLAIM, recipient.clone(), token.clone()), &amount);
+    let key = (KEY_CLAIM, recipient.clone(), token.clone());
+    env.storage().persistent().set(&key, &amount);
+    crate::ttl::extend_persistent(env, &key);
 }

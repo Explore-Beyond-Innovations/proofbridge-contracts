@@ -71,6 +71,37 @@ contract PayoutFallbackTest is AdManagerTest {
         adManager.claim(address(receiver), NATIVE_TOKEN_ADDRESS);
     }
 
+    /// T-58 (2.3h): `claim` is the one entry point a pause must not freeze. It moves no order state
+    /// and creates no credit — it hands an already-credited balance to the account that already owns
+    /// it, so freezing it does not contain an incident, it only holds honest users' money while one
+    /// is investigated. Asserted as an explicit success so the exception is pinned, not implied.
+    function test_2_3h_claimSucceedsWhilePaused() public {
+        IAdManager.OrderParams memory p = _unlockNativeTo(address(receiver), TestField.fe("PZ"));
+        assertEq(adManager.claimable(address(receiver), NATIVE_TOKEN_ADDRESS), p.amount, "credited");
+
+        vm.prank(admin);
+        adManager.pause();
+
+        receiver.setAccepting(true);
+        adManager.claim(address(receiver), NATIVE_TOKEN_ADDRESS);
+        assertEq(address(receiver).balance, p.amount, "a credit stays reachable while paused");
+    }
+
+    /// ...and the pause still holds for everything else, so the exception is exactly one call wide.
+    function test_2_3h_thePauseStillHoldsForEverythingElse() public {
+        // Params need only be well-formed: the pause gate fires before any of them is read.
+        IAdManager.OrderParams memory p;
+        vm.prank(admin);
+        adManager.pause();
+
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        adManager.lockForOrder(p);
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        adManager.claimCancel(p);
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        adManager.finalizeCancel(p);
+    }
+
     /// Escrow solvency across both payout paths: wrapped-native holdings always
     /// cover the ad pool plus every outstanding credit.
     function testFuzz_solvency_acrossPushAndFallback(uint256 seed) public {
