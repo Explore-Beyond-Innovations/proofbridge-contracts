@@ -447,8 +447,16 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     function _openDispute(bytes32 orderHash, uint256 amount, uint256 peerChainId, bytes32 evidence) internal {
         Status s = _orders[orderHash].status;
         if (s != Status.Open && s != Status.Claimed) revert Escrow__NotDisputable(orderHash, s);
-        _orders[orderHash].status = Status.Disputed;
+
+        // Order matters, and it is the cheap half of keeping the two contracts in step. The module
+        // call is the fallible step — an unset route, an underfunded bond — so it runs *before* this
+        // contract commits anything. A caller that ever swallowed its revert would then leave the
+        // order `Open` with no record, which is merely a failed filing; writing the status first
+        // would instead leave it `Disputed` with no record, which is an order nobody can finalize.
+        // The invariant "Disputed here implies a record there" is what `Dispute.t.sol` asserts over
+        // arbitrary call sequences; this ordering is what makes the bad direction unreachable.
         _disputeManager().openDispute{value: msg.value}(orderHash, amount, peerChainId, msg.sender, evidence);
+        _orders[orderHash].status = Status.Disputed;
     }
 
     /// @dev Evidence terminated a disputed order, so the dispute is over whatever the arbiter

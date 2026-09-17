@@ -223,3 +223,11 @@ contract DisputeTest is AdManagerTest {
         _file(p, filer);
     }
 }
+
+/*//////////////////////////////////////////////////////////////
+        The correspondence, over arbitrary call sequences
+//////////////////////////////////////////////////////////////*/
+
+/// Drives the dispute surface with whatever the fuzzer picks, swallowing reverts so that only
+/// *successful* paths shape the state. Anything that gets through here has to leave the two
+/// contracts agreeing.

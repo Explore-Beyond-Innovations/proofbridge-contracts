@@ -1,6 +1,6 @@
 //! Shared data types for ProofBridge contracts
 
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, BytesN};
 
 // =============================================================================
 // Order Lifecycle
@@ -58,6 +58,54 @@ pub enum ClaimEntry {
     Deadline = 1,
     Backstop = 2,
     Dispute = 3,
+}
+
+/// How a dispute ended (2.3g).
+///
+/// `TradeProceeds` stays in the enum because it *is* the outcome of an evidence termination —
+/// removing it would misname the result. The arbiter is refused it at the boundary instead, which
+/// is a guard on the caller rather than on the vocabulary. Discriminants mirror the EVM enum.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DisputeOutcome {
+    None = 0,
+    MutualRefund = 1,
+    TradeProceeds = 2,
+    BridgerForfeit = 3,
+    MakerForfeit = 4,
+}
+
+/// Per-peer-chain dispute parameters, admin-set and validated at the write.
+///
+/// Deliberately not more fields on `RouteTiming`: that five-tuple is read by the deploy CLI, the
+/// relayer and the manifest, and widening it would ripple through all three.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisputeParams {
+    /// How long after filing the arbiter may still rule. Pause-aware at read time.
+    pub challenge_period: u64,
+    /// The bond floor, in the wrapped native token. Dominates on small orders.
+    pub bond_floor: u128,
+    /// Basis points of the order amount. Dominates on large ones.
+    pub bond_bps: u32,
+}
+
+/// One dispute, keyed by order hash.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisputeRecord {
+    pub initiator: Address,
+    pub bond: u128,
+    pub challenge_deadline: u64,
+    /// The module's paused-seconds counter when the dispute opened: a pause must not expire a
+    /// challenge period while nobody can present.
+    pub paused_at_open: u64,
+    pub initiator_evidence: BytesN<32>,
+    pub responder_evidence: BytesN<32>,
+    pub ruling: DisputeOutcome,
+    /// Which escrow opened it — the only one allowed to finalize it.
+    pub escrow: Address,
 }
 
 /// The order's leg on this chain: its status and the escrow's paused-seconds counter when the leg

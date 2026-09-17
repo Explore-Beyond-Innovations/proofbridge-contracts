@@ -22,6 +22,28 @@ pub trait MerkleManagerInterface {
     fn field_mod(env: Env, order_hash: BytesN<32>) -> BytesN<32>;
 }
 
+/// Typed interface for the DisputeManager module (2.3g).
+///
+/// The escrow's whole dependency on it, and the direction is one-way: the escrow calls in, the
+/// module never calls back. `escrow` is passed so the module can `require_auth` it — the host then
+/// proves the caller's identity, which is why there is no address to spoof.
+#[allow(dead_code)]
+#[contractclient(name = "DisputeManagerClient")]
+pub trait DisputeManagerInterface {
+    fn open_dispute(
+        env: Env,
+        escrow: Address,
+        order_hash: BytesN<32>,
+        amount: u128,
+        peer_chain_id: u128,
+        filer: Address,
+        evidence: BytesN<32>,
+    ) -> u128;
+    fn settle_bond(env: Env, escrow: Address, order_hash: BytesN<32>, filer_was_counterparty: bool);
+    fn outcome_of(env: Env, order_hash: BytesN<32>) -> (crate::types::DisputeOutcome, bool, Option<Address>);
+    fn is_disputed(env: Env, order_hash: BytesN<32>) -> bool;
+}
+
 /// Typed interface for cross-contract calls to the Verifier contract.
 #[allow(dead_code)]
 #[contractclient(name = "VerifierClient")]

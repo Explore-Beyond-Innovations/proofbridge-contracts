@@ -994,10 +994,11 @@ impl AdManagerContract {
         Ok(ops::require_presentable(env, order_hash)?)
     }
 
-    /// The co-signed unlock's status gate: `Open`, or `Claimed` (the unlock is the presentation).
+    /// The co-signed unlock's status gate: `Open`, `Claimed` (the unlock is the presentation), or
+    /// `Disputed` — a co-signed unlock is evidence, and evidence beats arbitration (2.3g D5).
     fn require_settleable(env: &Env, order_hash: &BytesN<32>) -> Result<(), AdManagerError> {
         match storage::get_order_status(env, order_hash) {
-            Status::Open | Status::Claimed => Ok(()),
+            Status::Open | Status::Claimed | Status::Disputed => Ok(()),
             _ => Err(AdManagerError::OrderNotOpen),
         }
     }

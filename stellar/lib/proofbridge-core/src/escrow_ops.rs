@@ -228,7 +228,9 @@ pub fn require_status(env: &Env, order_hash: &BytesN<32>, expected: Status) -> R
 /// `Open` or in a presentation window: evidence may still settle or refund it.
 pub fn require_presentable(env: &Env, order_hash: &BytesN<32>) -> Result<(), Fault> {
     match storage::get_order_status(env, order_hash) {
-        Status::Open | Status::Claimed => Ok(()),
+        // `Disputed` belongs here because evidence beats arbitration at any time (2.3g D5) —
+        // including while a ruling's own window runs, which is what makes a ruling overridable.
+        Status::Open | Status::Claimed | Status::Disputed => Ok(()),
         _ => Err(Fault::NotClaimable),
     }
 }

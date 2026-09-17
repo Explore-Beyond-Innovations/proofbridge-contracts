@@ -587,6 +587,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dispute-manager"
+version = "0.1.0"
+dependencies = [
+ "proofbridge-core",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
