@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  proofbridge-mmr: 1.2.1
+  proofbridge-mmr: 1.4.0
 
 importers:
 
@@ -32,8 +32,8 @@ importers:
         specifier: ^0.1.0
         version: 0.1.0
       proofbridge-mmr:
-        specifier: 1.2.1
-        version: 1.2.1
+        specifier: 1.4.0
+        version: 1.4.0
     devDependencies:
       '@types/node':
         specifier: ^20.0.0
@@ -63,8 +63,8 @@ importers:
         specifier: ^6.15.0
         version: 6.17.0
       proofbridge-mmr:
-        specifier: 1.2.1
-        version: 1.2.1
+        specifier: 1.4.0
+        version: 1.4.0
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
@@ -424,6 +424,7 @@ packages:
 
   crypto-js@4.2.0:
     resolution: {integrity: sha512-KALDyEYgpY+Rlob/iriUtjV6d5Eq+Y191A5g4UqLAi8CyGP9N1+FdVbkc1SxKc2r4YAYqG8JzO2KGL+AizD70Q==}
+    deprecated: Active development of CryptoJS has been discontinued. This library is no longer maintained.
 
   debug@4.4.3:
     resolution: {integrity: sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==}
@@ -548,8 +549,8 @@ packages:
   pako@2.2.0:
     resolution: {integrity: sha512-zJq6RP/5q+TO2OpFV3FHzlPnFjmkb7Nc99a5SNjJE+uu/PkpChs+NIZSSzbBoD+6kjiISXjfYdwj1ZRQ81dz/w==}
 
-  proofbridge-mmr@1.2.1:
-    resolution: {integrity: sha512-atsIAZ6mUMF2v021YyRtoWX1JRRolw2Gko/y3VROGZBOgY/OR9MZycBqMZPCpW89Px3X1XxUAD5OcwOggKfHOg==}
+  proofbridge-mmr@1.4.0:
+    resolution: {integrity: sha512-xw/LMuH117QE9x48CCjSOqb7iewo6kYrUrf5hztkp0q6/Bsdm5Nvygs+RjImrtcXOybzSFtc3rE9S5QY9vYPpg==}
 
   protocol-buffers-encodings@1.2.0:
     resolution: {integrity: sha512-daeNPuKh1NlLD1uDfbLpD+xyUTc07nEtfHwmBZmt/vH0B7VOM+JOCOpDcx9ZRpqHjAiIkGqyTDi+wfGSl17R9w==}
@@ -1064,7 +1065,7 @@ snapshots:
 
   pako@2.2.0: {}
 
-  proofbridge-mmr@1.2.1:
+  proofbridge-mmr@1.4.0:
     dependencies:
       '@zkpassport/poseidon2': 0.6.2
       abstract-level: 3.1.1
@@ -1107,7 +1108,7 @@ snapshots:
 
   signed-varint@2.0.1:
     dependencies:
-      varint: 5.0.0
+      varint: 5.0.2
 
   stream-shift@1.0.3: {}
 
