@@ -10,6 +10,7 @@ import {IVerifier} from "../interfaces/IVerifier.sol";
 import {IMerkleManager} from "../interfaces/IMerkleManager.sol";
 import {IRootAnchor} from "../interfaces/IRootAnchor.sol";
 import {IDisputeManager} from "../interfaces/IDisputeManager.sol";
+import {Dispute} from "../libraries/Dispute.sol";
 import {IwNativeToken, SafeNativeToken} from "../wNativeToken.sol";
 import {AddressCast} from "../libraries/AddressCast.sol";
 import {LeafDomain} from "../libraries/LeafDomain.sol";
@@ -103,11 +104,6 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     /// @notice Whether the order's SETTLED leaf is in the MMR (`recordSettled`, once per fill).
     mapping(bytes32 orderHash => bool) public settledRecorded;
 
-    /// @notice The dispute module (2.3g). The escrow reads it and applies its own half of the
-    ///         outcome; the module never moves these funds. Unset means disputes are simply
-    ///         unavailable on this escrow, which is a safe default rather than a broken one.
-    IDisputeManager public disputeManager;
-
     /// @notice The pause clock: a pause freezes evidence, so it must not run the windows. Every
     ///         presentation window is measured in unpaused seconds — `pausedSeconds` accumulates at
     ///         each unpause, each leg snapshots it when it opens, and a window's real end moves by
@@ -174,13 +170,6 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
         RouteTiming.validate(timing);
         routeTiming[chainId] = timing;
         emit RouteTimingSet(chainId, timing);
-    }
-
-    /// @inheritdoc IEscrow
-    function setDisputeManager(IDisputeManager manager) external onlyAdmin {
-        if (address(manager) == address(0)) revert Escrow__ZeroAddress();
-        disputeManager = manager;
-        emit DisputeManagerSet(address(manager));
     }
 
     /// @inheritdoc IEscrow
@@ -422,50 +411,6 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     function _requireFinalizable(bytes32 orderHash) internal view {
         if (_orders[orderHash].status != Status.Claimed) revert Escrow__NotClaimed(orderHash);
         _requireReached(_claimedWindowEnd(orderHash));
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                              DISPUTES (2.3g)
-    //////////////////////////////////////////////////////////////*/
-
-    /// @dev The module, or `NoDisputeManager` — unset means disputes are unavailable here, which is
-    ///      a safe default rather than a broken one.
-    function _disputeManager() internal view returns (IDisputeManager m) {
-        m = disputeManager;
-        if (address(m) == address(0)) revert Escrow__NoDisputeManager();
-    }
-
-    /**
-     * @dev `Open | Claimed → Disputed`, with the bond handed straight to the module.
-     *
-     *      Note the direction: the escrow calls the module and the module never calls back. An
-     *      earlier draft gave the module a permissioned write so it could mark the status itself;
-     *      it does not need one, because filing has to start here anyway — only this contract can
-     *      hash an order and vouch for its amount, since a leg stores `{status, pausedAtOpen}` and
-     *      nothing else. So the trust edge runs one way and carries no callback.
-     */
-    function _openDispute(bytes32 orderHash, uint256 amount, uint256 peerChainId, bytes32 evidence) internal {
-        Status s = _orders[orderHash].status;
-        if (s != Status.Open && s != Status.Claimed) revert Escrow__NotDisputable(orderHash, s);
-
-        // Order matters, and it is the cheap half of keeping the two contracts in step. The module
-        // call is the fallible step — an unset route, an underfunded bond — so it runs *before* this
-        // contract commits anything. A caller that ever swallowed its revert would then leave the
-        // order `Open` with no record, which is merely a failed filing; writing the status first
-        // would instead leave it `Disputed` with no record, which is an order nobody can finalize.
-        // The invariant "Disputed here implies a record there" is what `Dispute.t.sol` asserts over
-        // arbitrary call sequences; this ordering is what makes the bad direction unreachable.
-        _disputeManager().openDispute{value: msg.value}(orderHash, amount, peerChainId, msg.sender, evidence);
-        _orders[orderHash].status = Status.Disputed;
-    }
-
-    /// @dev Evidence terminated a disputed order, so the dispute is over whatever the arbiter
-    ///      thought. Called from the settle and refund paths; a no-op when nothing was disputed.
-    function _closeDisputeByEvidence(bytes32 orderHash) internal {
-        IDisputeManager m = disputeManager;
-        if (address(m) != address(0) && m.isDisputed(orderHash)) {
-            m.settleBond(orderHash, false);
-        }
     }
 
     /// @dev `→ Cancelled`: close the window, count out. The leaf and the funds are the caller's.

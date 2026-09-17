@@ -52,13 +52,23 @@ library Dispute {
     struct Record {
         address initiator;
         uint128 bond;
+        /// @dev Unadjusted. Every read goes through `effectiveChallengeDeadline`, which applies the
+        ///      escrow's paused seconds once; storing an already-adjusted value here would let a
+        ///      later read adjust it twice.
         uint64 challengeDeadline;
-        /// @dev The escrow's paused-seconds counter when the dispute opened (D10): a pause must not
-        ///      expire a challenge period while nobody can present.
+        /// @dev The *escrow's* paused-seconds counter when the dispute opened (D10). The escrow's,
+        ///      not this contract's: a pause is what stops someone presenting, and it is the escrow
+        ///      that gates presentation.
         uint64 pausedAtOpen;
         bytes32 initiatorEvidence;
         bytes32 responderEvidence;
         Outcome ruling;
+        /// @dev The order's signed deadline and the route's buffer, handed over by the escrow at
+        ///      filing. They are what keep a dispute from finalizing early (D3, T-50): no dispute
+        ///      path may complete before `deadline + buffer`, however short the challenge period is.
+        ///      Both pack into the slot `ruling` already occupies, so the record costs no more.
+        uint64 orderDeadline;
+        uint64 buffer;
     }
 
     /*//////////////////////////////////////////////////////////////

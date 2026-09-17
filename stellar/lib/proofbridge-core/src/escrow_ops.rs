@@ -319,6 +319,7 @@ pub fn dispute_manager(env: &Env) -> Result<Address, Fault> {
 /// the module call runs *before* the status is committed, so a caller that ever swallowed its
 /// failure would leave the order `Open` with no record — a failed filing — rather than `Disputed`
 /// with no record, which is an order nobody can finalize.
+#[allow(clippy::too_many_arguments)]
 pub fn open_dispute(
     env: &Env,
     escrow: &Address,
@@ -327,6 +328,8 @@ pub fn open_dispute(
     peer_chain_id: u128,
     filer: &Address,
     evidence: &BytesN<32>,
+    deadline: u64,
+    buffer: u64,
 ) -> Result<u128, Fault> {
     match storage::get_order_status(env, order_hash) {
         Status::Open | Status::Claimed => {}
@@ -340,6 +343,9 @@ pub fn open_dispute(
         &peer_chain_id,
         filer,
         evidence,
+        &deadline,
+        &buffer,
+        &storage::get_paused_seconds(env),
     );
     storage::set_order_status(env, order_hash, Status::Disputed);
     Ok(bond)
@@ -352,7 +358,8 @@ pub fn dispute_outcome(
 ) -> Result<(DisputeOutcome, Option<Address>), Fault> {
     let manager = dispute_manager(env)?;
     let (outcome, window_over, initiator) =
-        cross_contract::DisputeManagerClient::new(env, &manager).outcome_of(order_hash);
+        cross_contract::DisputeManagerClient::new(env, &manager)
+            .outcome_of(order_hash, &storage::get_paused_seconds(env));
     if !window_over {
         return Err(Fault::DisputeNotResolved);
     }
@@ -373,24 +380,61 @@ pub fn settle_bond(
     env: &Env,
     escrow: &Address,
     order_hash: &BytesN<32>,
+    outcome: DisputeOutcome,
     filer_is_bridger: bool,
 ) -> Result<(), Fault> {
     let manager = dispute_manager(env)?;
     cross_contract::DisputeManagerClient::new(env, &manager).settle_bond(
         escrow,
         order_hash,
+        &outcome,
         &filer_is_bridger,
     );
     Ok(())
 }
 
+/// Record the counterparty's response. Escrow-only on the module's side, because only the escrow
+/// knows the order's two parties (D11).
+pub fn record_response(
+    env: &Env,
+    escrow: &Address,
+    order_hash: &BytesN<32>,
+    responder: &Address,
+    evidence: &BytesN<32>,
+) -> Result<(), Fault> {
+    let manager = dispute_manager(env)?;
+    cross_contract::DisputeManagerClient::new(env, &manager)
+        .record_response(escrow, order_hash, responder, evidence);
+    Ok(())
+}
+
+/// Who filed, or `None` when nothing is disputed here. The escrows need it to answer
+/// `filer_is_bridger` on the evidence paths, where no ruling is involved.
+pub fn dispute_filer(env: &Env, order_hash: &BytesN<32>) -> Option<Address> {
+    let manager = storage::get_dispute_manager(env)?;
+    cross_contract::DisputeManagerClient::new(env, &manager).initiator_of(order_hash)
+}
+
 /// Evidence terminated a disputed order, so the dispute is over whatever the arbiter thought.
-/// A no-op when nothing was disputed, so the evidence paths can call it unconditionally.
-pub fn close_dispute_by_evidence(env: &Env, escrow: &Address, order_hash: &BytesN<32>) {
+///
+/// A no-op when nothing was disputed, so every path that admits `Disputed` can call it
+/// unconditionally — and every one of them must, or the bond has no exit at all: once the status
+/// leaves `Disputed`, `finalize_dispute` can never run again and the module holds the bond forever.
+///
+/// `outcome` is what the path proved, not what anyone ruled: a settle is `TradeProceeds`, a
+/// cancel-refund is `MutualRefund`. Reading the record's ruling here would route the bond by a
+/// finding this evidence has just overturned.
+pub fn close_dispute_by_evidence(
+    env: &Env,
+    escrow: &Address,
+    order_hash: &BytesN<32>,
+    outcome: DisputeOutcome,
+    filer_is_bridger: bool,
+) {
     if let Some(manager) = storage::get_dispute_manager(env) {
         let client = cross_contract::DisputeManagerClient::new(env, &manager);
         if client.is_disputed(order_hash) {
-            client.settle_bond(escrow, order_hash, &false);
+            client.settle_bond(escrow, order_hash, &outcome, &filer_is_bridger);
         }
     }
 }
@@ -414,6 +458,16 @@ pub fn fill(env: &Env, order_hash: &BytesN<32>, account: &BytesN<32>, by_evidenc
 
 /// `→ Cancelled`: close the window, count out. The leaf, where there is one, and the funds are the
 /// caller's.
+/// `→ Resolved`: the dispute terminal. Mirrors `cancel`'s bookkeeping — in particular it clears the
+/// claim, so "terminal implies no open claim" holds here too. A `Claimed` leg that is then disputed
+/// and resolved would otherwise keep a live claim with a past `finalize_at`, which #345's
+/// conservation sweep and the relayer's projections both read.
+pub fn resolve(env: &Env, order_hash: &BytesN<32>, account: &BytesN<32>) {
+    storage::set_order_status(env, order_hash, Status::Resolved);
+    storage::remove_claim(env, order_hash);
+    storage::set_in_flight(env, account, storage::get_in_flight(env, account) - 1);
+}
+
 pub fn cancel(env: &Env, order_hash: &BytesN<32>, account: &BytesN<32>, by_evidence: bool) {
     storage::set_order_status(env, order_hash, Status::Cancelled);
     storage::remove_claim(env, order_hash);

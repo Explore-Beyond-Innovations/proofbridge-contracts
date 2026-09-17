@@ -12,7 +12,6 @@ import {LeafDomain} from "./libraries/LeafDomain.sol";
 import {OrderHash} from "./libraries/OrderHash.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {RouteTiming} from "./libraries/RouteTiming.sol";
-import {Dispute} from "./libraries/Dispute.sol";
 import {Termination} from "./libraries/Termination.sol";
 
 /**
@@ -133,39 +132,30 @@ contract OrderPortal is EscrowBase, IOrderPortal {
                               DISPUTES (2.3g)
     //////////////////////////////////////////////////////////////*/
 
-    /// @inheritdoc IOrderPortal
-    function dispute(OrderParams calldata params, bytes32 evidence) external payable nonReentrant whenNotPaused {
+    /**
+     * @notice Apply a `BridgerForfeit` ruling made on the ad chain: the deposit goes to the maker.
+     * @dev The follower's whole part in a dispute, and it is proof-only by design. This escrow has
+     *      no dispute, no arbiter and no dispute clock — the AdManager is the head, this is the
+     *      follower, and the follower never originates a termination. It learns how a dispute ended
+     *      the way it learns every other cross-chain fact: an anchored proof of the primary's leaf.
+     *
+     *      Only `BridgerForfeit` comes through here. The other rulings all mean "refund the
+     *      bridger", which is what a CANCEL leaf has always meant, so they arrive through
+     *      {refundByCancel} with no new path at all.
+     */
+    function payMakerByForfeit(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof)
+        external
+        nonReentrant
+        whenNotPaused
+    {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
-        // The amount is vouched for by the hash the caller had to reproduce; the module cannot do
-        // that itself, which is why filing starts here.
-        _openDispute(orderHash, params.amount, params.adChainId, evidence);
-    }
-
-    /// @inheritdoc IOrderPortal
-    function finalizeDispute(OrderParams calldata params) external nonReentrant whenNotPaused {
-        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
-        _requireStatus(orderHash, Status.Disputed);
-
-        (Dispute.Outcome outcome, bool windowOver, address initiator) = _disputeManager().outcomeOf(orderHash);
-        if (!windowOver) revert Escrow__DisputeNotResolved(orderHash);
-        // No ruling means the fallback: a mutual refund (D4).
-        if (outcome == Dispute.Outcome.None) outcome = Dispute.Outcome.MutualRefund;
-
-        _orders[orderHash].status = Status.Resolved;
-        _countOut(params.bridger);
-        if (outcome == Dispute.Outcome.BridgerForfeit) {
-            // The bridger forfeits its deposit: it goes to the maker's recipient on this chain.
-            _payMaker(params);
-        } else {
-            // Mutual refund, or a ruling against the maker — either way the deposit goes home.
-            _refundBridger(orderHash, params);
-        }
-
-        // The flag is absolute: was this filed by the bridger? This leg authenticates the bridger,
-        // so that is an equality here and an inequality on the ad leg. Phrasing it relative to the
-        // calling escrow inverted the routing on exactly one of the two.
-        _disputeManager().settleBond(orderHash, initiator == params.bridger.toAddressChecked());
-        emit OrderCancelled(orderHash, false);
+        _requirePresentable(orderHash);
+        _requireAnchored(params.adChainId, targetRoot);
+        _requireEventProof(targetRoot, orderHash, proof, LeafDomain.FORFEIT);
+        // No deadline read: like the cancel refund, this is the primary's decision arriving, and it
+        // is valid whenever it arrives (D4's rule, T-41).
+        _fill(orderHash, params.bridger, true);
+        _payMaker(params);
     }
 
     /// @inheritdoc IOrderPortal

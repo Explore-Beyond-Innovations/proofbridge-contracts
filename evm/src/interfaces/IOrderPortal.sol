@@ -74,10 +74,14 @@ interface IOrderPortal is IEscrow {
     ///         own transaction — the relayer batches it behind the fill.
     function recordSettled(OrderParams calldata params) external;
 
-    /// @notice File a dispute on an open or claimed leg, posting the route's bond in native value.
-    function dispute(OrderParams calldata params, bytes32 evidence) external payable;
-    /// @notice Apply the module's outcome once its window is over, and settle the bond.
-    function finalizeDispute(OrderParams calldata params) external;
+    /**
+     * @notice Apply a `BridgerForfeit` ruling made on the ad chain: the deposit goes to the maker.
+     * @dev The follower's entire part in a dispute, and proof-only by design — this escrow has no
+     *      dispute, no arbiter and no dispute clock. The other rulings all mean "refund the
+     *      bridger", which is what a CANCEL leaf already means, so they arrive via
+     *      {refundByCancel}.
+     */
+    function payMakerByForfeit(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof) external;
     /// @notice Open the backstop window at `now ≥ deadline + longBackstop` (an anchor outage): the
     ///         window is claim-anchored and may be finalized at `now + buffer`. Permissionless.
     function claimBackstop(OrderParams calldata params) external;

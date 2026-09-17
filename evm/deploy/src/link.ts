@@ -254,10 +254,11 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
       "DisputeManager",
       signer,
     );
-    for (const [name, escrow] of [
-      ["AdManager", adManager],
-      ["OrderPortal", orderPortal],
-    ] as const) {
+    // The primary only. The OrderPortal is the follower: it has no dispute, no arbiter and no clock
+    // of its own, and learns how one ended from an anchored proof of the primary's leaf. Wiring a
+    // module to it would be the first step of the mistake review pass 1 found, so there is nothing
+    // here to wire it with.
+    for (const [name, escrow] of [["AdManager", adManager]] as const) {
       const cur = await escrow.getFunction("disputeManager")();
       if (sameHex(cur, moduleAddr)) {
         console.log(`  [skip] ${name}.setDisputeManager already ${moduleAddr}`);
@@ -414,7 +415,10 @@ function disputeParamsFromEnv(env: string): DisputeParams {
   };
   return {
     challengePeriod: read("DISPUTE_CHALLENGE_PERIOD_S", "3600"),
-    bondFloor: read("DISPUTE_BOND_FLOOR", "0"),
+    // 1, not 0: `Dispute.validate` rejects a zero floor, because a zero floor with a zero bps
+    // is a free dispute. "The smallest legal value" is the rule everywhere here, and for this
+    // parameter the smallest legal value is one.
+    bondFloor: read("DISPUTE_BOND_FLOOR", "1"),
     bondBps: Number(read("DISPUTE_BOND_BPS", "0")),
   };
 }

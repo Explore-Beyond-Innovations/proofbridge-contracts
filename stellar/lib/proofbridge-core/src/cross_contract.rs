@@ -30,6 +30,7 @@ pub trait MerkleManagerInterface {
 #[allow(dead_code)]
 #[contractclient(name = "DisputeManagerClient")]
 pub trait DisputeManagerInterface {
+    #[allow(clippy::too_many_arguments)]
     fn open_dispute(
         env: Env,
         escrow: Address,
@@ -38,13 +39,41 @@ pub trait DisputeManagerInterface {
         peer_chain_id: u128,
         filer: Address,
         evidence: BytesN<32>,
+        deadline: u64,
+        buffer: u64,
+        escrow_paused_seconds: u64,
     ) -> u128;
-    fn settle_bond(env: Env, escrow: Address, order_hash: BytesN<32>, filer_is_bridger: bool);
+    fn settle_bond(
+        env: Env,
+        escrow: Address,
+        order_hash: BytesN<32>,
+        outcome: crate::types::DisputeOutcome,
+        filer_is_bridger: bool,
+    );
+    fn record_response(
+        env: Env,
+        escrow: Address,
+        order_hash: BytesN<32>,
+        responder: Address,
+        evidence: BytesN<32>,
+    );
     fn outcome_of(
         env: Env,
         order_hash: BytesN<32>,
+        escrow_paused_seconds: u64,
     ) -> (crate::types::DisputeOutcome, bool, Option<Address>);
+    fn initiator_of(env: Env, order_hash: BytesN<32>) -> Option<Address>;
     fn is_disputed(env: Env, order_hash: BytesN<32>) -> bool;
+}
+
+/// The one thing the dispute module reads back off an escrow: its pause clock (2.3g D10).
+///
+/// Its own interface rather than a full escrow client, deliberately — the module depends on exactly
+/// this much, and saying so keeps the dependency visible and hard to widen by accident.
+#[allow(dead_code)]
+#[contractclient(name = "EscrowPauseClient")]
+pub trait EscrowPauseInterface {
+    fn paused_seconds(env: Env) -> u64;
 }
 
 /// Typed interface for cross-contract calls to the Verifier contract.
@@ -180,6 +209,10 @@ pub const LEAF_DOMAIN_AD: u32 = 1;
 pub const LEAF_DOMAIN_CANCEL: u32 = 2;
 pub const LEAF_DOMAIN_SETTLED: u32 = 3;
 pub const LEAF_DOMAIN_REGISTERED: u32 = 4;
+/// The primary's ruling that the bridger forfeits (2.3g). Its own domain because the follower must
+/// distinguish "refund the bridger" (CANCEL) from "pay the maker", and those are the only two
+/// actions a dispute can ask of it.
+pub const LEAF_DOMAIN_FORFEIT: u32 = 5;
 
 /// `x mod r` for BN254's scalar field: what the MMR hashes as a leaf's data (the MerkleManager's
 /// own `field_mod`). Local, so a consumer with no MerkleManager needs no reference to build inputs.

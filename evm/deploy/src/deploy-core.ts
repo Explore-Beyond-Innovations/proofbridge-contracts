@@ -275,6 +275,37 @@ export async function deployCore(
     },
   );
 
+  // The arbiter and the fee pool, without which the module is deployed but inert: `resolveDispute`
+  // reverts for every caller, so every dispute falls to the fallback, and an unset fee pool returns
+  // every forfeited bond to the filer. Both are set here rather than left to a follow-up, because a
+  // half-wired dispute module is indistinguishable from a working one until someone files.
+  //
+  // The arbiter must not be the admin (2.3g D6): its whole containment is that it cannot pause an
+  // escrow, re-route tokens or re-point the anchor. Outside a local deploy both are explicit.
+  {
+    const dm = attachContract(disputeManagerAddr, "DisputeManager", "DisputeManager", signer);
+    const arbiterAddr = disputeRole("DISPUTE_ARBITER", env, admin);
+    const feePoolAddr = disputeRole("DISPUTE_FEE_POOL", env, admin);
+    if (env !== "local" && arbiterAddr.toLowerCase() === admin.toLowerCase()) {
+      throw new Error(
+        "deploy-core: DISPUTE_ARBITER must not be the admin — the arbiter's containment is that it holds no escrow powers",
+      );
+    }
+    for (const [name, fn, value] of [
+      ["arbiter", "setArbiter", arbiterAddr],
+      ["protocolFeePool", "setProtocolFeePool", feePoolAddr],
+    ] as const) {
+      const cur = await dm.getFunction(name)();
+      if (cur.toLowerCase() === value.toLowerCase()) {
+        console.log(`  [skip] DisputeManager.${fn} already ${value}`);
+        continue;
+      }
+      const tx = await dm.getFunction(fn)(value, { nonce: nonces.next() });
+      await tx.wait();
+      console.log(`  [deploy] DisputeManager.${fn}(${value})`);
+    }
+  }
+
   // ── wire the escrows as the registry's revoke guards ──────────────
   // Re-set every run (idempotent); guards only gate key revocation/rotation.
   {
@@ -413,4 +444,15 @@ export async function deployCore(
       disputeManager: disputeManagerAddr,
     },
   };
+}
+
+/// A dispute role address from env. Local deploys fall back to the admin so a dev stack works out of
+/// the box; everywhere else it must be named, like every other dispute parameter.
+function disputeRole(name: string, env: string, fallback: string): string {
+  const v = process.env[name];
+  if (v) return v;
+  if (env === "local") return fallback;
+  throw new Error(
+    `deploy-core: ${name} is unset for env=${env}; set it or deploy with DEPLOY_ENV=local`,
+  );
 }

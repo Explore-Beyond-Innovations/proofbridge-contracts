@@ -42,14 +42,16 @@ mod token;
 mod types;
 mod validation;
 
-use proofbridge_core::cross_contract::{LEAF_DOMAIN_AD, LEAF_DOMAIN_CANCEL, LEAF_DOMAIN_SETTLED};
+use proofbridge_core::cross_contract::{
+    LEAF_DOMAIN_AD, LEAF_DOMAIN_CANCEL, LEAF_DOMAIN_FORFEIT, LEAF_DOMAIN_SETTLED,
+};
 use proofbridge_core::escrow_ops as ops;
 use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env};
 
 pub use errors::OrderPortalError;
 pub use types::{
-    ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, DisputeOutcome, OrderParams, OrderRecord,
-    RouteTiming, Status, NATIVE_TOKEN_ADDRESS,
+    ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, OrderParams, OrderRecord, RouteTiming,
+    Status, NATIVE_TOKEN_ADDRESS,
 };
 
 // =============================================================================
@@ -187,16 +189,6 @@ impl OrderPortalContract {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
         Ok(ops::set_route_timing(&env, chain_id, timing)?)
-    }
-
-    /// Set the dispute module this escrow reads (2.3g). Unset means disputes are unavailable here,
-    /// which is a safe default rather than a broken one.
-    pub fn set_dispute_manager(env: Env, manager: Address) -> Result<(), OrderPortalError> {
-        let config = storage::get_config(&env)?;
-        config.admin.require_auth();
-        storage::set_dispute_manager(&env, &manager);
-        storage::extend_instance_ttl(&env);
-        Ok(())
     }
 
     /// The order hash this leg computes for these params — what the dispute module is keyed by.
@@ -531,73 +523,42 @@ impl OrderPortalContract {
 
     /// After an unchallenged backstop window: refund the bridger.
     // =========================================================================
-    // Disputes (2.3g)
+    // Disputes (2.3g) — the follower's entire part, and it is proof-only
     // =========================================================================
 
-    /// File a dispute on an open or claimed leg, posting the route's bond.
-    /// The bond goes straight to the module; this escrow never holds it.
-    pub fn dispute(
+    /// Apply a `BridgerForfeit` ruling made on the ad chain: the deposit goes to the maker.
+    ///
+    /// This escrow has no dispute, no arbiter and no dispute clock. The ad-manager is the head and
+    /// this is the follower, and the follower never originates a termination — it learns how a
+    /// dispute ended the way it learns every other cross-chain fact, from an anchored proof of the
+    /// primary's leaf.
+    ///
+    /// Only `BridgerForfeit` arrives here. Every other ruling means "refund the bridger", which is
+    /// what a CANCEL leaf has always meant, so those come through `refund_by_cancel` unchanged.
+    pub fn pay_maker_by_forfeit(
         env: Env,
         params: OrderParams,
-        filer: Address,
-        evidence: BytesN<32>,
-    ) -> Result<u128, OrderPortalError> {
+        target_root: BytesN<32>,
+        proof: Bytes,
+    ) -> Result<(), OrderPortalError> {
         Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
-        let bond = ops::open_dispute(
+        Self::require_presentable(&env, &order_hash)?;
+        Self::require_anchored(&env, params.ad_chain_id, &target_root)?;
+
+        let inputs = proofbridge_core::cross_contract::build_event_public_inputs(
             &env,
-            &env.current_contract_address(),
+            &target_root,
             &order_hash,
-            params.amount,
-            params.ad_chain_id,
-            &filer,
-            &evidence,
-        )?;
-        storage::extend_instance_ttl(&env);
-        Ok(bond)
-    }
-
-    /// Apply the module's outcome once its window is over, and settle the bond.
-    pub fn finalize_dispute(env: Env, params: OrderParams) -> Result<(), OrderPortalError> {
-        Self::require_not_paused(&env)?;
-        let config = storage::get_config(&env)?;
-        let order_hash = Self::order_hash(&env, &config, &params);
-        Self::require_status(&env, &order_hash, Status::Disputed)?;
-
-        let (outcome, initiator) = ops::dispute_outcome(&env, &order_hash)?;
-
-        storage::set_order_status(&env, &order_hash, Status::Resolved);
-        storage::set_in_flight(
-            &env,
-            &params.bridger,
-            storage::get_in_flight(&env, &params.bridger) - 1,
+            LEAF_DOMAIN_FORFEIT,
         );
+        cross_contract::verify_proof(&env, &config.verifier, &inputs, &proof)?;
 
-        if outcome == DisputeOutcome::BridgerForfeit {
-            // The bridger forfeits its deposit: it goes to the maker's recipient on this chain.
-            Self::pay_maker(&env, &config, &params);
-        } else {
-            // Mutual refund, or a ruling against the maker — either way the deposit goes home.
-            Self::refund_bridger(&env, &config, &order_hash, &params);
-        }
-
-        // The flag is absolute: was this filed by the bridger? This leg authenticates the bridger,
-        // so that is an equality here and an inequality on the ad leg.
-        let bridger_addr = proofbridge_core::token::bytes32_to_account_address::<OrderPortalError>(
-            &env,
-            &params.bridger,
-        )?;
-        let filer_is_bridger = match initiator {
-            Some(ref who) => *who == bridger_addr,
-            None => false,
-        };
-        ops::settle_bond(
-            &env,
-            &env.current_contract_address(),
-            &order_hash,
-            filer_is_bridger,
-        )?;
+        // No deadline read: like the cancel refund, this is the primary's decision arriving, and it
+        // is valid whenever it arrives.
+        Self::fill(&env, &order_hash, &params.bridger, true);
+        Self::pay_maker(&env, &config, &params);
         storage::extend_instance_ttl(&env);
         Ok(())
     }
@@ -701,11 +662,6 @@ impl OrderPortalContract {
     /// The notary the evidence paths read, if set.
     pub fn get_root_anchor(env: Env) -> Option<Address> {
         storage::get_root_anchor(&env)
-    }
-
-    /// The dispute module this escrow files to (2.3g). `None` = disputes unavailable here.
-    pub fn get_dispute_manager(env: Env) -> Option<Address> {
-        storage::get_dispute_manager(&env)
     }
 
     /// The open presentation window on an order, if any.

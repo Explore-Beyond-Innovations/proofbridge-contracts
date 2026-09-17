@@ -288,9 +288,10 @@ export async function link(
         return null;
       }
     };
+    // The primary only. The OrderPortal is the follower: no dispute, no arbiter, no clock of its
+    // own — it learns how one ended from an anchored proof of the primary's leaf.
     for (const [name, escrow] of [
       ["AdManager", local.contracts.adManager.address],
-      ["OrderPortal", local.contracts.orderPortal.address],
     ] as const) {
       if (readOne(escrow, "get_dispute_manager", []) === moduleAddr) {
         console.log(`  [skip] ${name}.set_dispute_manager already ${moduleAddr}`);
@@ -423,7 +424,10 @@ function disputeParamsFromEnv(env: string): DisputeParams {
   };
   return {
     challengePeriod: read("DISPUTE_CHALLENGE_PERIOD_S", "3600"),
-    bondFloor: read("DISPUTE_BOND_FLOOR", "0"),
+    // 1, not 0: `Dispute.validate` rejects a zero floor, because a zero floor with a zero bps
+    // is a free dispute. "The smallest legal value" is the rule everywhere here, and for this
+    // parameter the smallest legal value is one.
+    bondFloor: read("DISPUTE_BOND_FLOOR", "1"),
     bondBps: Number(read("DISPUTE_BOND_BPS", "0")),
   };
 }

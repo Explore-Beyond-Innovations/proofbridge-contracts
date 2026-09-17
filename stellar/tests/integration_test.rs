@@ -239,7 +239,7 @@ struct TestParams {
     order_chain_id: u128,
     ad_chain_id: u128,
     // Event-claim roots for domains 2, 3, 4
-    event_roots: [[u8; 32]; 3],
+    event_roots: [[u8; 32]; 4],
 }
 
 fn hex_to_array(hex_str: &str) -> [u8; 32] {
@@ -293,7 +293,7 @@ fn load_test_params() -> TestParams {
         ad_settlement_signer: strkey_to_array(&json.order_params.ad_settlement_signer),
         order_chain_id: json.chain_ids.order_chain_id,
         ad_chain_id: json.chain_ids.ad_chain_id,
-        event_roots: [2u32, 3, 4].map(|d| hex_to_array(&json.event_roots[&d.to_string()])),
+        event_roots: [2u32, 3, 4, 5].map(|d| hex_to_array(&json.event_roots[&d.to_string()])),
     }
 }
 
@@ -1424,10 +1424,10 @@ fn test_termination_metering() {
 
 use proofbridge_core::cross_contract::{
     build_event_public_inputs, build_public_inputs as build_deposit_inputs, LEAF_DOMAIN_AD,
-    LEAF_DOMAIN_CANCEL, LEAF_DOMAIN_REGISTERED, LEAF_DOMAIN_SETTLED,
+    LEAF_DOMAIN_CANCEL, LEAF_DOMAIN_FORFEIT, LEAF_DOMAIN_REGISTERED, LEAF_DOMAIN_SETTLED,
 };
 
-const EVENT_CLAIMS: [(u32, &[u8]); 3] = [
+const EVENT_CLAIMS: [(u32, &[u8]); 4] = [
     (
         LEAF_DOMAIN_CANCEL,
         include_bytes!("fixtures/event_claim_2.bin"),
@@ -1439,6 +1439,10 @@ const EVENT_CLAIMS: [(u32, &[u8]); 3] = [
     (
         LEAF_DOMAIN_REGISTERED,
         include_bytes!("fixtures/event_claim_4.bin"),
+    ),
+    (
+        LEAF_DOMAIN_FORFEIT,
+        include_bytes!("fixtures/event_claim_5.bin"),
     ),
 ];
 
@@ -3258,6 +3262,74 @@ fn test_t41_filled_primary_no_cancel_leaf_is_reachable() {
     assert_eq!(ad_leaves(&s), 2, "no cancel leaf");
 }
 
+// --- 2.3g: the follower's whole part in a dispute, and it is proof-only ---------------------------
+
+fn forfeit_proof(s: &TestSetup) -> (BytesN<32>, Bytes) {
+    (
+        bytes32_to_bytesn(&s.env, &s.tp.event_roots[3]),
+        Bytes::from_slice(&s.env, EVENT_CLAIMS[3].1),
+    )
+}
+
+/// A `BridgerForfeit` ruled on the ad chain arrives here as a proof of the primary's FORFEIT leaf
+/// and pays the maker. The follower has no dispute, no arbiter and no clock of its own — the
+/// ad-manager is the head, this is the follower, and the follower never originates a termination.
+#[test]
+fn test_2_3g_follower_pays_the_maker_on_a_forfeit_proof() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = created_portal_order(&s);
+    let (root, proof) = forfeit_proof(&s);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &root);
+    let maker_side = account_addr(&s, &s.tp.ad_recipient);
+    let token = TokenContractClient::new(&s.env, &s.order_token_addr);
+    let before = token.balance(&maker_side);
+
+    s.order_portal.pay_maker_by_forfeit(&p, &root, &proof);
+
+    assert_eq!(portal_status(&s), order_portal_contract::Status::Filled);
+    assert_eq!(
+        token.balance(&maker_side),
+        before + s.tp.amount as i128,
+        "the deposit went to the maker"
+    );
+}
+
+/// The domains are not interchangeable. A CANCEL leaf means "refund the bridger" and must never be
+/// replayable to pay the maker instead — that separation is what the whole revision rests on.
+#[test]
+fn test_2_3g_a_cancel_proof_cannot_pay_the_maker() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = created_portal_order(&s);
+    let (root, proof) = cancel_proof(&s);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &root);
+
+    assert!(
+        s.order_portal
+            .try_pay_maker_by_forfeit(&p, &root, &proof)
+            .is_err(),
+        "a cancel proof must not reach the forfeit path"
+    );
+}
+
+/// ...and the converse: a FORFEIT leaf cannot be replayed to refund the bridger.
+#[test]
+fn test_2_3g_a_forfeit_proof_cannot_refund_the_bridger() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = created_portal_order(&s);
+    let (root, proof) = forfeit_proof(&s);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &root);
+
+    assert!(
+        s.order_portal
+            .try_refund_by_cancel(&p, &root, &proof)
+            .is_err(),
+        "a forfeit proof must not reach the refund path"
+    );
+}
+
 // --- T-40 / T-41 / T-44: the follower's refund by cancel proof ------------------------------------
 
 fn refund_reads_no_clock_at(t: u64) {
@@ -3922,7 +3994,9 @@ fn wire_dispute_manager(
 
     let arbiter = Address::generate(&s.env);
     let fee_pool = Address::generate(&s.env);
-    let filer = Address::generate(&s.env);
+    // Only the order's two parties may file (D11), so the fixture files as the maker. A generated
+    // bystander is refused now, which is the point — see `test_2_3g_only_a_party_may_file`.
+    let filer = s.maker_addr.clone();
 
     dm.initialize(&s.admin_addr, &s.ad_token_addr);
     dm.set_escrow(&s.ad_manager.address, &true);
@@ -3940,6 +4014,18 @@ fn wire_dispute_manager(
 
     TokenContractClient::new(&s.env, &s.ad_token_addr).mint(&filer, &1_000_000);
     (dm, arbiter, filer)
+}
+
+/// Past the window the module actually enforces, not past the challenge period alone: those differ
+/// whenever the order's deadline is further out, which is the normal case.
+fn warp_past_dispute_window(
+    s: &TestSetup,
+    dm: &dispute_manager_contract::Client<'static>,
+    order_hash: &BytesN<32>,
+) {
+    use soroban_sdk::testutils::Ledger;
+    let until = dm.effective_challenge_deadline(order_hash);
+    s.env.ledger().set_timestamp(until + 1);
 }
 
 /// The escrow and the module must agree: an order is `Disputed` on one iff a record exists on the
@@ -4054,9 +4140,16 @@ fn test_2_3g_the_unresolved_fallback_refunds_and_returns_the_bond() {
         .dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
     let after_filing = token.balance(&filer);
 
+    // The challenge period alone is not enough — the order still has time on its own clock.
     use soroban_sdk::testutils::Ledger;
     let now = s.env.ledger().timestamp();
     s.env.ledger().set_timestamp(now + DISPUTE_CHALLENGE + 1);
+    assert!(
+        s.ad_manager.try_finalize_dispute(&params).is_err(),
+        "no dispute path may complete before the order's own deadline + buffer"
+    );
+
+    warp_past_dispute_window(&s, &dm, &order_hash);
     s.ad_manager.finalize_dispute(&params);
 
     assert_eq!(
@@ -4067,11 +4160,81 @@ fn test_2_3g_the_unresolved_fallback_refunds_and_returns_the_bond() {
     assert!(!dm.is_disputed(&order_hash), "the record is closed");
 }
 
+/// B1: a bystander could file on anybody's live order and, one short challenge period later,
+/// cancel it. Filing is restricted to the order's two parties.
+#[test]
+fn test_2_3g_only_a_party_may_file() {
+    let s = setup();
+    let (_dm, _arbiter, _filer) = wire_dispute_manager(&s);
+    let params = locked_ad_order(&s);
+    let stranger = Address::generate(&s.env);
+    TokenContractClient::new(&s.env, &s.ad_token_addr).mint(&stranger, &1_000_000);
+
+    assert!(
+        s.ad_manager
+            .try_dispute(&params, &stranger, &bytes32_to_bytesn(&s.env, &[0xEE; 32]))
+            .is_err(),
+        "a bystander cannot dispute somebody else's order"
+    );
+}
+
+/// B2: evidence terminates a disputed order, and the dispute has to end with it — otherwise the
+/// status leaves `Disputed`, `finalize_dispute` can never run again, and the bond is stranded.
+#[test]
+fn test_2_3g_evidence_closes_the_dispute_and_releases_the_bond() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let params = locked_ad_order(&s);
+    let order_hash = s.ad_manager.hash_order(&params);
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+
+    s.ad_manager
+        .dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    assert!(dm.is_disputed(&order_hash));
+
+    s.ad_manager.unlock(
+        &params,
+        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+        &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
+    );
+
+    assert!(
+        !dm.is_disputed(&order_hash),
+        "the evidence path closed the dispute with the order"
+    );
+    assert_eq!(
+        token.balance(&dm.address),
+        0,
+        "no bond left stranded in the module"
+    );
+}
+
+/// S3: the responder slot is single, so anyone able to write it could overwrite the genuine
+/// counterparty's evidence hash one ledger before the arbiter reads it.
+#[test]
+fn test_2_3g_only_the_other_party_may_respond() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let params = locked_ad_order(&s);
+    let stranger = Address::generate(&s.env);
+
+    s.ad_manager
+        .dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    assert!(
+        s.ad_manager
+            .try_respond_to_dispute(&params, &stranger, &bytes32_to_bytesn(&s.env, &[0x11; 32]))
+            .is_err(),
+        "only the order's other party may respond"
+    );
+}
+
 /// `in_flight` returns to zero on `Resolved`, as on every other terminal (T-13).
 #[test]
 fn test_2_3g_in_flight_clears_on_resolved() {
     let s = setup();
-    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
     let params = locked_ad_order(&s);
     let signer = bytes32_to_bytesn(&s.env, &s.tp.ad_settlement_signer);
 
@@ -4079,9 +4242,8 @@ fn test_2_3g_in_flight_clears_on_resolved() {
         .dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
     assert!(s.ad_manager.has_open_positions(&signer));
 
-    use soroban_sdk::testutils::Ledger;
-    let now = s.env.ledger().timestamp();
-    s.env.ledger().set_timestamp(now + DISPUTE_CHALLENGE + 1);
+    let order_hash = s.ad_manager.hash_order(&params);
+    warp_past_dispute_window(&s, &dm, &order_hash);
     s.ad_manager.finalize_dispute(&params);
 
     assert!(!s.ad_manager.has_open_positions(&signer));

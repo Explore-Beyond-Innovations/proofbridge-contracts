@@ -8,6 +8,7 @@
   "counts": {
     "bondSizing": 6,
     "bondRouting": 10,
+    "legActions": 4,
     "paramValidation": 4
   },
   "constants": {
@@ -141,6 +142,32 @@
       "outcomeValue": 4,
       "filerIsBridger": false,
       "bondReturnsToFiler": false
+    }
+  ],
+  "legActions": [
+    {
+      "outcome": "MutualRefund",
+      "primaryLeaf": 2,
+      "followerAction": "refundBridger",
+      "note": "neither side was shown wrong; both legs go home"
+    },
+    {
+      "outcome": "MakerForfeit",
+      "primaryLeaf": 2,
+      "followerAction": "refundBridger",
+      "note": "the maker's stake is paid to the bridger on the ad chain; the deposit still goes home"
+    },
+    {
+      "outcome": "BridgerForfeit",
+      "primaryLeaf": 5,
+      "followerAction": "payMaker",
+      "note": "the only outcome the follower treats differently from a cancel, hence its own domain"
+    },
+    {
+      "outcome": "TradeProceeds",
+      "primaryLeaf": 3,
+      "followerAction": "presentSettled",
+      "note": "reached by evidence alone, never by a ruling; the existing 2.3e path"
     }
   ],
   "paramValidation": [

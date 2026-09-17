@@ -97,15 +97,23 @@ pub struct DisputeParams {
 pub struct DisputeRecord {
     pub initiator: Address,
     pub bond: u128,
+    /// Unadjusted. Every read goes through `effective_challenge_deadline`, which applies the
+    /// escrow's paused seconds once; storing an already-adjusted value here would double-count.
     pub challenge_deadline: u64,
-    /// The module's paused-seconds counter when the dispute opened: a pause must not expire a
-    /// challenge period while nobody can present.
+    /// The *escrow's* paused-seconds counter when the dispute opened. The escrow's, not this
+    /// module's: a pause matters because it stops the parties presenting, and presentation is gated
+    /// by the escrow.
     pub paused_at_open: u64,
     pub initiator_evidence: BytesN<32>,
     pub responder_evidence: BytesN<32>,
     pub ruling: DisputeOutcome,
     /// Which escrow opened it — the only one allowed to finalize it.
     pub escrow: Address,
+    /// The order's signed deadline and the route's buffer, handed over by the escrow at filing.
+    /// They keep a short challenge period from finalizing a dispute before the order's own deadline
+    /// (D3, T-50) — without them a third party could cancel an order with a week still to run.
+    pub order_deadline: u64,
+    pub buffer: u64,
 }
 
 /// The order's leg on this chain: its status and the escrow's paused-seconds counter when the leg

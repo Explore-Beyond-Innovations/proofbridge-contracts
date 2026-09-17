@@ -247,6 +247,25 @@ export async function deployCore(
     console.log(`  [reuse] DisputeManager: ${disputeManager}`);
   }
 
+  // The arbiter and the fee pool, without which the module is deployed but inert: `resolve_dispute`
+  // fails for every caller, so every dispute falls to the fallback, and an unset fee pool returns
+  // every forfeited bond to the filer. A half-wired dispute module looks exactly like a working one
+  // until someone files, so both are set at deploy rather than left to a follow-up.
+  //
+  // The arbiter must not be the admin (2.3g D6): its containment is that it holds no escrow powers.
+  {
+    const arbiterAddr = disputeRole("DISPUTE_ARBITER", env, adminStrkey);
+    const feePoolAddr = disputeRole("DISPUTE_FEE_POOL", env, adminStrkey);
+    if (env !== "local" && arbiterAddr === adminStrkey) {
+      throw new Error(
+        "deploy-core: DISPUTE_ARBITER must not be the admin — the arbiter's containment is that it holds no escrow powers",
+      );
+    }
+    invokeContract(disputeManager, "set_arbiter", ["--arbiter", arbiterAddr]);
+    invokeContract(disputeManager, "set_protocol_fee_pool", ["--pool", feePoolAddr]);
+    console.log(`  [deploy] DisputeManager arbiter=${arbiterAddr} feePool=${feePoolAddr}`);
+  }
+
   // ── Grant MANAGER permission on MerkleManager (idempotent) ─────
   for (const manager of [adManager, orderPortal, registrar]) {
     invokeContract(merkleManager, "set_manager", [
@@ -318,4 +337,15 @@ export async function deployCore(
       disputeManager,
     },
   };
+}
+
+/// A dispute role address from env. Local deploys fall back to the admin so a dev stack works out of
+/// the box; everywhere else it must be named, like every other dispute parameter.
+function disputeRole(name: string, env: string, fallback: string): string {
+  const v = process.env[name];
+  if (v) return v;
+  if (env === "local") return fallback;
+  throw new Error(
+    `deploy-core: ${name} is unset for env=${env}; set it or deploy with DEPLOY_ENV=local`,
+  );
 }

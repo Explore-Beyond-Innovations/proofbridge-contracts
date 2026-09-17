@@ -129,6 +129,8 @@ pub enum OrderPortalError {
     NotDisputable = 86,
     /// The module's window has not closed, so there is nothing to apply yet.
     DisputeNotResolved = 87,
+    /// Only the order's two parties may file or respond to a dispute (D11).
+    NotAParty = 88,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {

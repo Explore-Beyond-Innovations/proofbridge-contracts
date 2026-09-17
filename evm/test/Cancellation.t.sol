@@ -1094,6 +1094,67 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         assertEq(orderToken.balanceOf(bridger), before + p.amount);
     }
 
+    /*//////////// 2.3g: the follower's whole part in a dispute ////////////*/
+
+    /// A `BridgerForfeit` ruled on the ad chain arrives here as a proof of the primary's FORFEIT
+    /// leaf, and pays the maker. This is the follower's entire dispute surface: proof-only, with no
+    /// dispute, no arbiter and no clock of its own.
+    function test_2_3g_forfeitLeafPaysTheMaker() public {
+        _wireAnchor();
+        (IOrderPortal.OrderParams memory p, bytes32 h) = _create(40);
+        _useRealVerifier();
+        (bytes memory proof, bytes32 root) = _eventProof(LeafDomain.FORFEIT, h);
+        _anchorRoot(root);
+
+        uint256 before = orderToken.balanceOf(adRecipient);
+        portal.payMakerByForfeit(p, root, proof);
+
+        assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Filled), "the deposit was paid out");
+        assertEq(orderToken.balanceOf(adRecipient), before + p.amount, "and it went to the maker");
+    }
+
+    /// The domains must not be interchangeable: a CANCEL leaf means "refund the bridger" and can
+    /// never be replayed to pay the maker instead. This is the separation the whole revision rests
+    /// on — one domain per follower action.
+    function test_2_3g_cancelLeafCannotPayTheMaker() public {
+        _wireAnchor();
+        (IOrderPortal.OrderParams memory p, bytes32 h) = _create(41);
+        _useRealVerifier();
+        (bytes memory proof, bytes32 root) = _eventProof(LeafDomain.CANCEL, h);
+        _anchorRoot(root);
+
+        vm.expectRevert();
+        portal.payMakerByForfeit(p, root, proof);
+    }
+
+    /// ...and the converse: a FORFEIT leaf cannot be replayed to refund the bridger.
+    function test_2_3g_forfeitLeafCannotRefundTheBridger() public {
+        _wireAnchor();
+        (IOrderPortal.OrderParams memory p, bytes32 h) = _create(42);
+        _useRealVerifier();
+        (bytes memory proof, bytes32 root) = _eventProof(LeafDomain.FORFEIT, h);
+        _anchorRoot(root);
+
+        vm.expectRevert();
+        portal.refundByCancel(p, root, proof);
+    }
+
+    /// The follower originates nothing. It held `dispute`, `respondToDispute` and `finalizeDispute`
+    /// in the first build — with no test on any of them, which is why it shipped — and every one of
+    /// them moved funds reading only a local module, with no proof from the ad chain at all.
+    function test_2_3g_followerExposesNoDisputeEntryPoint() public {
+        string[4] memory gone = [
+            "dispute((bytes32,bytes32,uint256,bytes32,bytes32,uint256,bytes32,string,bytes32,bytes32,uint256,uint8,uint8,uint256,bytes32),bytes32)",
+            "finalizeDispute((bytes32,bytes32,uint256,bytes32,bytes32,uint256,bytes32,string,bytes32,bytes32,uint256,uint8,uint8,uint256,bytes32))",
+            "respondToDispute((bytes32,bytes32,uint256,bytes32,bytes32,uint256,bytes32,string,bytes32,bytes32,uint256,uint8,uint8,uint256,bytes32),bytes32)",
+            "setDisputeManager(address)"
+        ];
+        for (uint256 i = 0; i < gone.length; i++) {
+            (bool ok,) = address(portal).call(abi.encodeWithSelector(bytes4(keccak256(bytes(gone[i])))));
+            assertFalse(ok, "the follower must expose no dispute entry point");
+        }
+    }
+
     function test_T40_realProof_settledLeafCannotRefund() public {
         _wireAnchor();
         (IOrderPortal.OrderParams memory p, bytes32 h) = _create(15);

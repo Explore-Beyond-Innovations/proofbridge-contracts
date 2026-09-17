@@ -111,7 +111,11 @@ contract DisputeInvariantTest is Test {
         h = adManager.lockForOrder(p);
         uint256 required = Dispute.bondFor(LOCK, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
         uint256 sent = bound(value, required, required * 2);
-        vm.deal(address(this), sent);
+        // Only the order's two parties may file (D11). The maker is one of them; a test contract
+        // filing as itself is refused, which is how the vacuity guard caught this harness the
+        // moment the party check landed.
+        vm.deal(maker, sent);
+        vm.prank(maker);
         adManager.dispute{value: sent}(p, bytes32("e"));
     }
 
@@ -162,10 +166,43 @@ contract DisputeInvariantTest is Test {
         uint256 owed;
         uint256 n = handler.seenCount();
         for (uint256 i = 0; i < n; i++) {
-            (, uint128 bond,,,,,) = dm.disputes(handler.seenAt(i));
+            (, uint128 bond,,,,,,,) = dm.disputes(handler.seenAt(i));
             owed += bond;
         }
         assertGe(wNative.balanceOf(address(dm)), owed, "module cannot cover its bonds");
+    }
+
+    /// No order may sit in a terminal state while the module still holds its dispute. This is the
+    /// structural version of "every evidence path must close the dispute": a new path that forgets
+    /// to strands the bond forever, because once the status leaves `Disputed` nothing can call
+    /// `finalizeDispute` again. Stating it as an invariant means the next such path fails here
+    /// rather than shipping — which is how the first four escaped review.
+    function invariant_noTerminalOrderKeepsItsDispute() public view {
+        uint256 n = handler.seenCount();
+        for (uint256 i = 0; i < n; i++) {
+            bytes32 h = handler.seenAt(i);
+            IEscrow.Status st = adManager.orders(h);
+            bool terminal =
+                st == IEscrow.Status.Filled || st == IEscrow.Status.Cancelled || st == IEscrow.Status.Resolved;
+            if (terminal) assertFalse(dm.isDisputed(h), "terminal order still holds a dispute");
+        }
+    }
+
+    /// No dispute may finalize before the order's own deadline plus the route buffer, however short
+    /// the challenge period is (T-50). The bug this catches let any third party cancel a week-long
+    /// order an hour after filing.
+    function invariant_noDisputeFinalizesBeforeTheDeadline() public view {
+        uint256 n = handler.seenCount();
+        for (uint256 i = 0; i < n; i++) {
+            bytes32 h = handler.seenAt(i);
+            if (!dm.isDisputed(h)) continue;
+            (,,,,,,, uint64 orderDeadline, uint64 buffer) = dm.disputes(h);
+            assertGe(
+                dm.effectiveChallengeDeadline(h),
+                uint256(orderDeadline) + buffer,
+                "a dispute could finalize before deadline + buffer"
+            );
+        }
     }
 
     /// Proves the harness reaches the state the invariants police. Without this a handler that
