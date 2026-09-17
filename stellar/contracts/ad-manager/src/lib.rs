@@ -996,6 +996,11 @@ impl AdManagerContract {
         storage::get_root_anchor(&env)
     }
 
+    /// The dispute module this escrow files to (2.3g). `None` = disputes unavailable here.
+    pub fn get_dispute_manager(env: Env) -> Option<Address> {
+        storage::get_dispute_manager(&env)
+    }
+
     /// The open presentation window on an order, if any.
     pub fn get_claim(env: Env, order_hash: BytesN<32>) -> Option<ClaimRecord> {
         storage::get_claim(&env, &order_hash)

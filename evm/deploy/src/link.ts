@@ -2,6 +2,7 @@ import {
   readManifest,
   type ChainDeploymentManifest,
   type RouteTiming,
+  type DisputeParams,
 } from "@proofbridge/deployment-manifest";
 import { connect, requireEnv } from "./common.js";
 import { attachContract } from "./artifacts.js";
@@ -241,6 +242,75 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     console.log("  [link] no RootAnchor in the local manifest; the escrows' evidence paths stay fail-closed");
   }
 
+  // ── Dispute module: both directions, then the route's params (2.3g) ──
+  // The escrow must know the module to file, and the module must know the escrow to accept the
+  // filing. Wiring one without the other leaves disputes dead in a way that only shows at use,
+  // so both edges are set here or neither is.
+  if (local.contracts.disputeManager) {
+    const moduleAddr = local.contracts.disputeManager.address;
+    const disputeManager = attachContract(
+      moduleAddr,
+      "DisputeManager",
+      "DisputeManager",
+      signer,
+    );
+    for (const [name, escrow] of [
+      ["AdManager", adManager],
+      ["OrderPortal", orderPortal],
+    ] as const) {
+      const cur = await escrow.getFunction("disputeManager")();
+      if (sameHex(cur, moduleAddr)) {
+        console.log(`  [skip] ${name}.setDisputeManager already ${moduleAddr}`);
+      } else {
+        const tx = await escrow.getFunction("setDisputeManager")(moduleAddr, {
+          nonce: nonces.next(),
+        });
+        await tx.wait();
+        chainTxs++;
+        console.log(`  [link] ${name}.setDisputeManager(${moduleAddr})`);
+      }
+      const escrowAddr = await escrow.getAddress();
+      if (await disputeManager.getFunction("isEscrow")(escrowAddr)) {
+        console.log(`  [skip] DisputeManager.setEscrow(${name}) already allowed`);
+      } else {
+        const tx = await disputeManager.getFunction("setEscrow")(escrowAddr, true, {
+          nonce: nonces.next(),
+        });
+        await tx.wait();
+        chainTxs++;
+        console.log(`  [link] DisputeManager.setEscrow(${name}=${escrowAddr}, true)`);
+      }
+    }
+
+    // DISPUTE_{CHALLENGE_PERIOD_S,BOND_FLOOR,BOND_BPS}. Same rule as the clocks and the anchor
+    // delay: local deploys get the smallest legal values, anywhere else every variable is
+    // explicit, because a bond that silently defaults is a bond nobody chose.
+    const params = disputeParamsFromEnv(local.meta.env);
+    const cur = await disputeManager.getFunction("disputeParams")(peerChainId);
+    const same =
+      BigInt(cur[0]) === BigInt(params.challengePeriod) &&
+      BigInt(cur[1]) === BigInt(params.bondFloor) &&
+      Number(cur[2]) === params.bondBps;
+    if (same) {
+      console.log(`  [skip] DisputeManager.setDisputeParams(${peerChainId}) already set`);
+    } else {
+      const tx = await disputeManager.getFunction("setDisputeParams")(
+        peerChainId,
+        [params.challengePeriod, params.bondFloor, params.bondBps],
+        { nonce: nonces.next() },
+      );
+      await tx.wait();
+      chainTxs++;
+      console.log(
+        `  [link] DisputeManager.setDisputeParams(${peerChainId}, challengePeriod=${params.challengePeriod}s bondFloor=${params.bondFloor} bondBps=${params.bondBps})`,
+      );
+    }
+    local.disputeParams[peerChainId.toString()] = params;
+    await writeManifest(localPath, local);
+  } else {
+    console.log("  [link] no DisputeManager in the local manifest; disputes stay unavailable on this chain");
+  }
+
   // ── Per-pair token routes (two directions per pairKey) ────────────
   let routeTxs = 0;
   for (const localTok of local.tokens) {
@@ -322,6 +392,30 @@ function routeTimingFromEnv(env: string): RouteTiming {
     margin: read("ROUTE_MARGIN_S", "0"),
     longBackstop: read("ROUTE_LONG_BACKSTOP_S", "86400"),
     claimStagger: read("ROUTE_CLAIM_STAGGER_S", "0"),
+  };
+}
+
+/**
+ * The contract's own floor is 1 hour and its bond cap is 10%; both are re-checked by the manifest
+ * schema, so a bad value fails before it reaches a transaction.
+ */
+function disputeParamsFromEnv(env: string): DisputeParams {
+  const isLocal = env === "local";
+  const read = (name: string, localDefault: string): string => {
+    const v = process.env[name];
+    if (v !== undefined) {
+      if (!/^\d+$/.test(v)) throw new Error(`link: ${name}="${v}" is not a whole number`);
+      return v;
+    }
+    if (isLocal) return localDefault;
+    throw new Error(
+      `link: ${name} is unset for env=${env}; set every DISPUTE_* parameter or deploy with DEPLOY_ENV=local`,
+    );
+  };
+  return {
+    challengePeriod: read("DISPUTE_CHALLENGE_PERIOD_S", "3600"),
+    bondFloor: read("DISPUTE_BOND_FLOOR", "0"),
+    bondBps: Number(read("DISPUTE_BOND_BPS", "0")),
   };
 }
 

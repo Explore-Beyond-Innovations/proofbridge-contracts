@@ -328,6 +328,18 @@ impl DisputeManagerContract {
         storage::get_dispute(&env, &order_hash)
     }
 
+    /// Whether this escrow may file here. The EVM twin exposes the same thing as a public mapping;
+    /// the deploy CLI reads it to make the escrow ↔ module wiring idempotent.
+    pub fn is_escrow(env: Env, escrow: Address) -> bool {
+        storage::is_escrow(&env, &escrow)
+    }
+
+    /// The dispute parameters for a peer route. `None` = disputes are not configured for it, which
+    /// the filing path treats as fail-closed.
+    pub fn dispute_params(env: Env, chain_id: u128) -> Option<DisputeParams> {
+        storage::get_params(&env, chain_id)
+    }
+
     pub fn claimable(env: Env, who: Address) -> u128 {
         storage::get_claimable(&env, &who)
     }

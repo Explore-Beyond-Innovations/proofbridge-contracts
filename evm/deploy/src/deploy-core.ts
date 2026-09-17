@@ -49,6 +49,7 @@ export interface DeployCoreResult {
     counterpartyVerifier: string;
     rootAnchor: string;
     registrar: string;
+    disputeManager: string;
   };
 }
 
@@ -261,6 +262,19 @@ export async function deployCore(
     },
   );
 
+  // The dispute module (2.3g) both escrows share. It holds bonds, never escrow funds, and takes no
+  // MerkleManager role — disputes append no leaf. Escrow ↔ module wiring happens at link time.
+  const disputeManagerAddr = await deployIfMissing(
+    "DisputeManager",
+    existing?.contracts.disputeManager?.address,
+    async () => {
+      const f = contractFactory("DisputeManager", "DisputeManager", signer);
+      const c = await f.deploy(admin, wNativeAddr, { nonce: nonces.next() });
+      await c.deploymentTransaction()?.wait();
+      return c as ethers.Contract;
+    },
+  );
+
   // ── wire the escrows as the registry's revoke guards ──────────────
   // Re-set every run (idempotent); guards only gate key revocation/rotation.
   {
@@ -364,12 +378,15 @@ export async function deployCore(
       counterpartyVerifier: counterpartyVerifierAddr,
       rootAnchor: rootAnchorAddr,
       registrar: registrarAddr,
+      disputeManager: disputeManagerAddr,
     },
     // Preserve tokens already in the manifest (added by deploy-test-tokens / hand-curation).
     tokens: (existing?.tokens ?? []) as BuildManifestInput["tokens"],
     // What the anchor was configured with; per-route delays are added by link.
     // The route clocks link set last time; a redeploy keeps them until link runs again.
     routeTiming: existing?.routeTiming,
+    // Same rule as the clocks: a redeploy keeps the dispute params until link runs again.
+    disputeParams: existing?.disputeParams,
     rootAnchorConfig: existing?.contracts.rootAnchor
       ? existing.rootAnchorConfig
       : { signers: anchorSigners, threshold: anchorThreshold, anchorDelays: {} },
@@ -393,6 +410,7 @@ export async function deployCore(
       counterpartyVerifier: counterpartyVerifierAddr,
       rootAnchor: rootAnchorAddr,
       registrar: registrarAddr,
+      disputeManager: disputeManagerAddr,
     },
   };
 }

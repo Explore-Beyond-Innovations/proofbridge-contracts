@@ -47,6 +47,7 @@ export interface DeployStellarCoreResult {
     blsKeyRegistry: string;
     counterpartyVerifier: string;
     rootAnchor: string;
+    disputeManager: string;
     registrar: string;
   };
 }
@@ -230,6 +231,22 @@ export async function deployCore(
     console.log(`  [reuse] Registrar: ${registrar}`);
   }
 
+  // The dispute module (2.3g) both escrows share. Holds bonds, never escrow funds, and takes no
+  // MerkleManager role — disputes append no leaf. Escrow ↔ module wiring happens at link time.
+  let disputeManager = reused(existing?.contracts.disputeManager?.address);
+  if (!disputeManager) {
+    disputeManager = deployContract(path.join(wasmBase, "dispute_manager.wasm"));
+    invokeContract(disputeManager, "initialize", [
+      "--admin",
+      adminStrkey,
+      "--w_native",
+      wNativeToken,
+    ]);
+    console.log(`  [deploy] DisputeManager: ${disputeManager}`);
+  } else {
+    console.log(`  [reuse] DisputeManager: ${disputeManager}`);
+  }
+
   // ── Grant MANAGER permission on MerkleManager (idempotent) ─────
   for (const manager of [adManager, orderPortal, registrar]) {
     invokeContract(merkleManager, "set_manager", [
@@ -258,10 +275,13 @@ export async function deployCore(
       counterpartyVerifier,
       rootAnchor,
       registrar,
+      disputeManager,
     },
     // What the anchor was configured with; per-route delays are added by link.
     // The route clocks link set last time; a redeploy keeps them until link runs again.
     routeTiming: existing?.routeTiming,
+    // Same rule as the clocks: a redeploy keeps the dispute params until link runs again.
+    disputeParams: existing?.disputeParams,
     rootAnchorConfig: existing?.contracts.rootAnchor
       ? existing.rootAnchorConfig
       : { signers: anchorSigners, threshold: anchorThreshold, anchorDelays: {} },
@@ -295,6 +315,7 @@ export async function deployCore(
       counterpartyVerifier,
       rootAnchor,
       registrar,
+      disputeManager,
     },
   };
 }
