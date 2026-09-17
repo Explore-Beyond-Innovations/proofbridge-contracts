@@ -406,7 +406,7 @@ impl OrderPortalContract {
             &nullifier_hash,
             &target_root,
             &order_hash,
-        );
+        )?;
         // Gate 2 - root authenticity (BLS co-signature). Mandatory: unlock is
         // impossible until the route's verifier module is configured.
         let module = storage::get_root_verifier(&env, params.ad_chain_id)
@@ -463,7 +463,7 @@ impl OrderPortalContract {
             &target_root,
             &order_hash,
             LEAF_DOMAIN_CANCEL,
-        );
+        )?;
         cross_contract::verify_proof(&env, &config.verifier, &inputs, &proof)?;
 
         Self::cancel(&env, &order_hash, &params.bridger, true);
@@ -491,7 +491,7 @@ impl OrderPortalContract {
             &target_root,
             &order_hash,
             LEAF_DOMAIN_SETTLED,
-        );
+        )?;
         cross_contract::verify_proof(&env, &config.verifier, &inputs, &proof)?;
 
         Self::fill(&env, &order_hash, &params.bridger, true);
@@ -552,7 +552,7 @@ impl OrderPortalContract {
             &target_root,
             &order_hash,
             LEAF_DOMAIN_FORFEIT,
-        );
+        )?;
         cross_contract::verify_proof(&env, &config.verifier, &inputs, &proof)?;
 
         // No deadline read: like the cancel refund, this is the primary's decision arriving, and it

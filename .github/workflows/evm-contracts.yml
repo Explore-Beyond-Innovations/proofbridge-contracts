@@ -87,8 +87,10 @@ jobs:
           forge test --match-contract OrderHashParity -vvv | tee /tmp/parity.log
           grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/parity.log
 
+      # Invariants are excluded here and run in the `invariants` job below: they are 596s of this
+      # suite's 647s, so leaving them in makes every other signal wait on them.
       - name: Run Forge tests
-        run: forge test -vvv
+        run: forge test -vvv --no-match-contract Invariant
         id: test
 
       - name: Unlock gas baseline gate (1.6c)
@@ -97,3 +99,28 @@ jobs:
           forge test --match-contract UnlockGas -vv | tee /tmp/gas.log
           grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/gas.log
         id: gas-baseline
+
+  invariants:
+    name: EVM Invariants
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: evm
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      # The full campaign, on pull requests as well as on main: 256 runs x 500 calls per invariant.
+      # Splitting this into its own job does not make it faster — it is the critical path, and
+      # parallelism cannot shorten a long pole — but it keeps the fast signals from waiting on it.
+      - name: Invariant campaigns
+        run: |
+          set -o pipefail
+          forge test --match-contract Invariant -vvv | tee /tmp/inv.log
+          # forge exits 0 on zero matches, so a renamed contract must fail the step rather than
+          # silently skip the campaigns — the same trap the parity step guards against.
+          grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/inv.log

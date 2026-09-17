@@ -39,13 +39,13 @@ pub fn build_public_inputs(
     nullifier_hash: &BytesN<32>,
     target_root: &BytesN<32>,
     order_hash: &BytesN<32>,
-) -> Bytes {
-    proofbridge_core::cross_contract::build_public_inputs(
+) -> Result<Bytes, AdManagerError> {
+    Ok(proofbridge_core::cross_contract::build_public_inputs(
         env,
         merkle_manager,
         nullifier_hash,
         target_root,
         order_hash,
         1, // destination/ad chain
-    )
+    )?)
 }

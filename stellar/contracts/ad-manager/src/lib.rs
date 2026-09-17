@@ -675,7 +675,7 @@ impl AdManagerContract {
             &nullifier_hash,
             &target_root,
             &order_hash,
-        );
+        )?;
         cross_contract::verify_proof(&env, &config.verifier, &public_inputs, &proof)?;
 
         storage::set_nullifier_used(&env, &nullifier_hash);
@@ -930,7 +930,7 @@ impl AdManagerContract {
             &target_root,
             &order_hash,
             LEAF_DOMAIN_SETTLED,
-        );
+        )?;
         cross_contract::verify_proof(&env, &config.verifier, &inputs, &proof)?;
 
         // Evidence beats arbitration: if this order was disputed, that dispute ends here and the

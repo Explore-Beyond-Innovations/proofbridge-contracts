@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
+import {TestField} from "test/utils/TestField.sol";
+
 import {OrderPortalGateTest, AdManagerGateTest} from "./UnlockGates.t.sol";
 import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
 import {console2} from "forge-std/console2.sol";
@@ -29,7 +31,7 @@ contract OrderPortalUnlockGas is OrderPortalGateTest {
         bytes memory cosig = _cosigData();
 
         uint256 g0 = gasleft();
-        portal.unlock(gp, bytes32("NG"), vOrderRoot, hex"", cosig);
+        portal.unlock(gp, TestField.fe("NG"), vOrderRoot, hex"", cosig);
         uint256 used = g0 - gasleft();
 
         console2.log("OrderPortal.unlock gas (full, real BLS verify):", used);
@@ -50,7 +52,7 @@ contract AdManagerUnlockGas is AdManagerGateTest {
         _prepareUnlock(address(new MockRootVerifier(true)), bytes32(uint256(5)));
 
         uint256 g0 = gasleft();
-        adManager.unlock(gp, bytes32("NG"), bytes32(uint256(5)), hex"", hex"");
+        adManager.unlock(gp, TestField.fe("NG"), bytes32(uint256(5)), hex"", hex"");
         uint256 used = g0 - gasleft();
 
         console2.log("AdManager.unlock gas (escrow-only, mock verifier, excl. BLS verify):", used);
@@ -63,7 +65,7 @@ contract AdManagerUnlockGas is AdManagerGateTest {
     // Later appends merge more peaks (one hash each), so this is the floor, not the cost.
     function test_recordSettledGas() public {
         _prepareUnlock(address(new MockRootVerifier(true)), bytes32(uint256(5)));
-        adManager.unlock(gp, bytes32("NG"), bytes32(uint256(5)), hex"", hex"");
+        adManager.unlock(gp, TestField.fe("NG"), bytes32(uint256(5)), hex"", hex"");
 
         uint256 g0 = gasleft();
         adManager.recordSettled(gp);

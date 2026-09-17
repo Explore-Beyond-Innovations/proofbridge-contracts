@@ -397,5 +397,46 @@
       "expect": "reject",
       "reason": "w1 and w2 swapped"
     }
+  ],
+  "canonicalityFields": {
+    "checked": [
+      "nullifierHash"
+    ],
+    "validatedUpstream": [
+      "targetRoot"
+    ],
+    "reduced": [
+      "orderHash"
+    ]
+  },
+  "canonicalityCount": 5,
+  "canonicality": [
+    {
+      "name": "canonical/below-the-prime",
+      "value": "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000",
+      "canonical": true
+    },
+    {
+      "name": "non-canonical/at-the-prime",
+      "value": "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001",
+      "canonical": false
+    },
+    {
+      "name": "non-canonical/alias-of-a-small-value",
+      "value": "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f000303a",
+      "canonical": false,
+      "aliasOf": "0x0000000000000000000000000000000000000000000000000000000000003039",
+      "note": "reduces to the same field element as aliasOf, which is exactly the collision"
+    },
+    {
+      "name": "non-canonical/max-word",
+      "value": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "canonical": false
+    },
+    {
+      "name": "canonical/zero",
+      "value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "canonical": true
+    }
   ]
 }

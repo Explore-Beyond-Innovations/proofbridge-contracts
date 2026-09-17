@@ -3,6 +3,7 @@
 //! Defines typed `#[contractclient]` traits so contracts can call
 //! MerkleManager and Verifier without raw `env.invoke_contract`.
 
+use crate::escrow_ops::Fault;
 use soroban_sdk::{contractclient, crypto::bn254::Bn254Fr, Address, Bytes, BytesN, Env};
 
 use crate::errors::ProofBridgeError;
@@ -185,7 +186,18 @@ pub fn build_public_inputs(
     target_root: &BytesN<32>,
     order_hash: &BytesN<32>,
     chain_flag_value: u8,
-) -> Bytes {
+) -> Result<Bytes, Fault> {
+    // The nullifier, and only the nullifier. Checked here rather than at each call site because this
+    // builder is the one place every deposit proof passes through, so a caller cannot forget.
+    //
+    // The root is deliberately not checked. Every caller validates it *before* reaching here — the
+    // co-signed root on this path, the notary's anchored root on the event path — and both are
+    // equality checks against known-good stored data, so a non-canonical root is already refused
+    // upstream. The nullifier has no such comparison: it is a *write* key in the replay ledger,
+    // which is exactly why it is the one that can alias.
+    if !is_canonical(nullifier_hash) {
+        return Err(Fault::NonCanonicalInput);
+    }
     let order_hash_mod = get_field_mod(env, merkle_manager, order_hash);
 
     // Chain flag as bytes32 (big-endian)
@@ -198,7 +210,7 @@ pub fn build_public_inputs(
     inputs.append(&Bytes::from_slice(env, &target_root.to_array()));
     inputs.append(&Bytes::from_slice(env, &chain_flag));
 
-    inputs
+    Ok(inputs)
 }
 
 /// What an MMR leaf records, and the proof's last public input. ORDER/AD are deposits (the side
@@ -220,6 +232,20 @@ pub fn field_mod(data: &BytesN<32>) -> BytesN<32> {
     Bn254Fr::from_bytes(data.clone()).to_bytes()
 }
 
+/// Whether `value` is the canonical representative of its field element (2.3h, residual 9).
+///
+/// Defined as "the reduction is a no-op", so the SDK's own arithmetic is the definition and there is
+/// no second copy of the prime anywhere on this side. The EVM twin re-exports the MMR library's
+/// constant for the same reason.
+///
+/// It matters because the verifier reduces whatever it is handed: `n` and `n + PRIME` are one
+/// element to the proof, while the escrow keys its nullifier ledger on the raw 32 bytes and sees
+/// two. Without this, one proof yields unboundedly many nullifiers and the replay guard stops
+/// guarding.
+pub fn is_canonical(value: &BytesN<32>) -> bool {
+    field_mod(value) == *value
+}
+
 /// Public inputs for an event claim: `[0, subject % p, target_root, domain]` (128 bytes). No secret,
 /// so the nullifier is zero; `domain` is a `LEAF_DOMAIN_*` event constant fixed by the caller.
 pub fn build_event_public_inputs(
@@ -227,7 +253,9 @@ pub fn build_event_public_inputs(
     target_root: &BytesN<32>,
     subject: &BytesN<32>,
     domain: u32,
-) -> Bytes {
+) -> Result<Bytes, Fault> {
+    // Nothing to check: the event path's nullifier slot is a literal zero, and its root is already
+    // anchored-checked by every caller before this runs. The subject is reduced below.
     let subject_mod = field_mod(subject);
 
     let mut domain_word = [0u8; 32];
@@ -238,7 +266,7 @@ pub fn build_event_public_inputs(
     inputs.append(&Bytes::from_slice(env, &subject_mod.to_array()));
     inputs.append(&Bytes::from_slice(env, &target_root.to_array()));
     inputs.append(&Bytes::from_slice(env, &domain_word));
-    inputs
+    Ok(inputs)
 }
 
 /// keccak256("ProofBridge.BLSKeyRegistry.RegistrationLeaf.v1")

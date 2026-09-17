@@ -1479,10 +1479,144 @@ fn test_event_claims_verify_for_every_event_domain() {
     let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
     for (domain, proof) in EVENT_CLAIMS {
         let inputs =
-            build_event_public_inputs(&s.env, &event_root(&s, domain), &order_hash, domain);
+            build_event_public_inputs(&s.env, &event_root(&s, domain), &order_hash, domain)
+                .unwrap();
         s.verifier
             .verify_proof(&inputs, &Bytes::from_slice(&s.env, proof));
     }
+}
+
+/// 2.3h / T-65 — residual 9. The verifier reduces whatever it is handed, so `n` and `n + PRIME` are
+/// one element to the proof, while the escrow keys its nullifier ledger on the raw 32 bytes and sees
+/// two. The builders are the choke point: every public input reaches a verifier through one of them.
+#[test]
+fn test_2_3h_non_canonical_public_inputs_are_refused() {
+    use proofbridge_core::cross_contract::is_canonical;
+    let s = event_setup();
+    let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
+    let root = event_root(&s, LEAF_DOMAIN_CANCEL);
+    let zero = BytesN::from_array(&s.env, &[0u8; 32]);
+
+    // BN254's scalar field modulus, big-endian. Not a second copy of the constant: it is asserted
+    // against the SDK's own reduction below, which is what `is_canonical` is defined in terms of.
+    let prime: [u8; 32] = [
+        0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58,
+        0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00,
+        0x00, 0x01,
+    ];
+    let at_prime = BytesN::from_array(&s.env, &prime);
+    assert!(
+        !is_canonical(&at_prime),
+        "the prime itself is not canonical"
+    );
+
+    // A root is a Poseidon2 output, so it is a field element by construction and always canonical.
+    // That is what makes this check safe to enforce: every legitimate nullifier and root is already
+    // below the prime, so only a caller doing something odd can trip it.
+    assert!(is_canonical(&root), "an MMR root is a field element");
+
+    // An order hash is *not* necessarily canonical — it is a raw EIP-712 digest uniform over 2^256,
+    // and the BN254 prime is about 0.19 of that, so roughly four in five are above it. That is
+    // precisely why the builders reduce the subject instead of checking it: enforcing canonicality
+    // there would reject most real orders. `test_2_3h_the_subject_is_reduced_not_rejected` pins it.
+
+    // The deposit path binds the nullifier and the root.
+    assert!(build_deposit_inputs(
+        &s.env,
+        &s.merkle,
+        &at_prime,
+        &root,
+        &order_hash,
+        LEAF_DOMAIN_AD as u8
+    )
+    .is_err());
+    // The root is deliberately *not* checked: every caller validates it before the builder runs,
+    // against the co-signed root here and the notary's anchored root on the event path. Both are
+    // equality checks against known-good data, so a non-canonical root is refused upstream.
+    assert!(build_deposit_inputs(
+        &s.env,
+        &s.merkle,
+        &zero,
+        &at_prime,
+        &order_hash,
+        LEAF_DOMAIN_AD as u8
+    )
+    .is_ok());
+    assert!(build_event_public_inputs(&s.env, &at_prime, &order_hash, LEAF_DOMAIN_CANCEL).is_ok());
+
+    // ...and the canonical forms still build.
+    assert!(build_event_public_inputs(&s.env, &root, &order_hash, LEAF_DOMAIN_CANCEL).is_ok());
+}
+
+/// The same bytes the EVM suite asserts, read from the shared vector rather than restated. This is
+/// the file `parity-fixture` regenerates and diffs, so the cases cannot drift from their generator.
+#[test]
+fn test_2_3h_canonicality_matches_the_shared_vector() {
+    use proofbridge_core::cross_contract::is_canonical;
+    let s = event_setup();
+    let v: serde_json::Value = serde_json::from_str(VERIFIER_NEGATIVE_JSON).unwrap();
+    let rows = v["canonicality"].as_array().unwrap();
+    assert_eq!(
+        rows.len() as u64,
+        v["canonicalityCount"].as_u64().unwrap(),
+        "the case set was shortened without the count following"
+    );
+
+    let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
+    let root = event_root(&s, LEAF_DOMAIN_CANCEL);
+    let mut rejected = 0;
+    for r in rows {
+        let hex = r["value"].as_str().unwrap().trim_start_matches("0x");
+        let value = bytes32_to_bytesn(&s.env, &hex_to_array(hex));
+        let expected = r["canonical"].as_bool().unwrap();
+        assert_eq!(
+            is_canonical(&value),
+            expected,
+            "canonicality disagrees with the shared vector on {}",
+            r["name"]
+        );
+        if !expected {
+            rejected += 1;
+            // ...and the builder actually refuses it, on both paths it can reach.
+            assert!(build_deposit_inputs(
+                &s.env,
+                &s.merkle,
+                &value,
+                &root,
+                &order_hash,
+                LEAF_DOMAIN_AD as u8
+            )
+            .is_err());
+        }
+    }
+    assert_eq!(rejected, 3, "every rejection case was actually driven");
+}
+
+/// The order hash is exempt on purpose: it is reduced on the way in, so a non-canonical one is not
+/// an error, it is simply reduced. Pinned so nobody "fixes" it into a rejection later.
+#[test]
+fn test_2_3h_the_subject_is_reduced_not_rejected() {
+    let s = event_setup();
+    let root = event_root(&s, LEAF_DOMAIN_CANCEL);
+    let mut raw = [0u8; 32];
+    raw[31] = 7;
+    let small = BytesN::from_array(&s.env, &raw);
+
+    // 7 + PRIME, which reduces to 7.
+    let aliased: [u8; 32] = [
+        0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58,
+        0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00,
+        0x00, 0x08,
+    ];
+    let a = build_event_public_inputs(&s.env, &root, &small, LEAF_DOMAIN_CANCEL).unwrap();
+    let b = build_event_public_inputs(
+        &s.env,
+        &root,
+        &BytesN::from_array(&s.env, &aliased),
+        LEAF_DOMAIN_CANCEL,
+    )
+    .unwrap();
+    assert_eq!(a, b, "the reduction makes the two subjects one input");
 }
 
 #[test]
@@ -1492,7 +1626,8 @@ fn test_event_claim_rejected_under_another_domain_or_as_a_deposit() {
     let root = event_root(&s, LEAF_DOMAIN_CANCEL);
     let proof = Bytes::from_slice(&s.env, EVENT_CLAIMS[0].1);
 
-    let other_domain = build_event_public_inputs(&s.env, &root, &order_hash, LEAF_DOMAIN_SETTLED);
+    let other_domain =
+        build_event_public_inputs(&s.env, &root, &order_hash, LEAF_DOMAIN_SETTLED).unwrap();
     assert!(s.verifier.try_verify_proof(&other_domain, &proof).is_err());
 
     let zero = BytesN::from_array(&s.env, &[0u8; 32]);
@@ -1503,7 +1638,8 @@ fn test_event_claim_rejected_under_another_domain_or_as_a_deposit() {
         &root,
         &order_hash,
         LEAF_DOMAIN_AD as u8,
-    );
+    )
+    .unwrap();
     assert!(s.verifier.try_verify_proof(&as_deposit, &proof).is_err());
 }
 
@@ -1512,7 +1648,8 @@ fn test_deposit_proof_rejected_as_an_event_claim() {
     let s = event_setup();
     let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
     let order_root = bytes32_to_bytesn(&s.env, &s.tp.order_root);
-    let inputs = build_event_public_inputs(&s.env, &order_root, &order_hash, LEAF_DOMAIN_CANCEL);
+    let inputs =
+        build_event_public_inputs(&s.env, &order_root, &order_hash, LEAF_DOMAIN_CANCEL).unwrap();
     assert!(s
         .verifier
         .try_verify_proof(&inputs, &Bytes::from_slice(&s.env, PROOF_BRIDGER))

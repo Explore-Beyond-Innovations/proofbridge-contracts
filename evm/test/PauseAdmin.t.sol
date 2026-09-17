@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
+import {TestField} from "test/utils/TestField.sol";
+
 import {Test} from "forge-std/Test.sol";
 import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
@@ -39,7 +41,7 @@ contract AdManagerPauseTest is AdManagerTest {
 
         vm.prank(bridger);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        adManager.unlock(p, bytes32("N"), bytes32(0), hex"", hex"");
+        adManager.unlock(p, TestField.fe("N"), bytes32(0), hex"", hex"");
     }
 
     function test_unpause_restores() public {
@@ -119,11 +121,11 @@ contract OrderPortalPauseTest is OrderPortalTest {
         portal.createOrder(p2);
 
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        portal.unlock(p, bytes32("N"), bytes32(0), hex"", hex"");
+        portal.unlock(p, TestField.fe("N"), bytes32(0), hex"", hex"");
 
         vm.prank(admin);
         portal.unpause();
-        portal.unlock(p, bytes32("N"), bytes32(0), hex"", hex"");
+        portal.unlock(p, TestField.fe("N"), bytes32(0), hex"", hex"");
     }
 
     function test_twoStepAdmin_transferAndAccept() public {

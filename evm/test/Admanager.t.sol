@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
+import {TestField} from "test/utils/TestField.sol";
+
 import {Test} from "forge-std/Test.sol";
 import {IEscrow} from "src/interfaces/IEscrow.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
@@ -952,7 +954,7 @@ contract AdManagerTest is Test {
         (IAdManager.OrderParams memory p2, bytes32 oh2) =
             _openOrder(adId, address(adToken), 90 ether, 778, other, recipient);
 
-        bytes32 nullifier = keccak256("N");
+        bytes32 nullifier = TestField.fe("N");
 
         bytes32 t_root = bytes32(uint256(0));
 
@@ -988,7 +990,7 @@ contract AdManagerTest is Test {
 
         vm.prank(bridger);
         vm.expectRevert(IEscrow.Escrow__InvalidProof.selector);
-        adManager.unlock(p, keccak256("X"), t_root, hex"", hex"");
+        adManager.unlock(p, TestField.fe("X"), t_root, hex"", hex"");
 
         // State unchanged
         (IEscrow.Status statusAfter) = adManager.orders(orderHash);
@@ -1015,13 +1017,13 @@ contract AdManagerTest is Test {
 
         // Expect event
         vm.expectEmit(true, true, true, true);
-        emit IEscrow.OrderUnlocked(orderHash, p.orderRecipient, bytes32("N1"));
+        emit IEscrow.OrderUnlocked(orderHash, p.orderRecipient, TestField.fe("N1"));
 
         bytes32 targetRoot = bytes32(uint256(5));
 
         // Verify success
         vm.prank(bridger);
-        adManager.unlock(p, bytes32("N1"), targetRoot, hex"", hex"");
+        adManager.unlock(p, TestField.fe("N1"), targetRoot, hex"", hex"");
 
         // Status -> Filled
         (IEscrow.Status status) = adManager.orders(orderHash);
@@ -1039,8 +1041,8 @@ contract AdManagerTest is Test {
 
         vm.prank(bridger);
         // A replayed unlock is refused on its spent nullifier first (the cheaper read), then on status.
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NullifierUsed.selector, bytes32("N1")));
-        adManager.unlock(p, bytes32("N1"), targetRoot, hex"", hex"");
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NullifierUsed.selector, TestField.fe("N1")));
+        adManager.unlock(p, TestField.fe("N1"), targetRoot, hex"", hex"");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1062,7 +1064,7 @@ contract AdManagerTest is Test {
 
         // Verify success
         vm.prank(bridger);
-        adManager.unlock(p, bytes32("N2"), targetRoot, hex"", hex"");
+        adManager.unlock(p, TestField.fe("N2"), targetRoot, hex"", hex"");
 
         // status
         (IEscrow.Status status) = adManager.orders(orderHash);
@@ -1102,7 +1104,7 @@ contract AdManagerTest is Test {
         bytes32 targetRoot = bytes32(uint256(5));
 
         vm.prank(bridger);
-        adManager.unlock(p, bytes32("NBAL"), targetRoot, hex"", hex"");
+        adManager.unlock(p, TestField.fe("NBAL"), targetRoot, hex"", hex"");
 
         (,,,,,,, uint256 balanceAfter, uint256 lockedAfter) = adManager.ads(p.adId);
         uint256 contractBalAfter = adToken.balanceOf(address(adManager));
@@ -1137,7 +1139,7 @@ contract AdManagerTest is Test {
         bytes32 targetRoot = bytes32(uint256(7));
 
         vm.prank(bridger);
-        adManager.unlock(p, bytes32("NDRN"), targetRoot, hex"", hex"");
+        adManager.unlock(p, TestField.fe("NDRN"), targetRoot, hex"", hex"");
 
         uint256 remaining = totalDeposited - lockAmt;
 
@@ -1175,7 +1177,7 @@ contract AdManagerTest is Test {
         bytes32 targetRoot = bytes32(uint256(9));
 
         vm.prank(bridger);
-        adManager.unlock(p, bytes32("NCLS"), targetRoot, hex"", hex"");
+        adManager.unlock(p, TestField.fe("NCLS"), targetRoot, hex"", hex"");
 
         uint256 closeRecipientBalBefore = adToken.balanceOf(other);
 

@@ -23,3 +23,16 @@ testnet = "${RPC_URL}"
 
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+# Invariant campaigns dominate this suite: measured locally, the invariant contracts take 596s while
+# every other test in the repo totals 51s. They are the critical path, so they run as their own CI
+# job — not to make them faster, which parallelism cannot do to a long pole, but so the fast signals
+# (unit, gas, parity) stop queueing behind ten minutes of fuzzing.
+#
+# The campaign itself is deliberately NOT reduced on pull requests. The full 256 x 500 runs before a
+# change merges, not after it.
+#
+# If that ever needs trading down, the measurements say cut `runs`, not `depth`: 128 x 250 and
+# 64 x 500 are both 32,000 calls, but the first takes 83s and the second 168s — deep sequences
+# accumulate state and each call slows. And depth buys little here, since a dispute lifecycle is
+# five to ten calls.

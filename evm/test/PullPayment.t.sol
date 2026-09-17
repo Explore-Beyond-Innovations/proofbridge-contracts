@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
+import {TestField} from "test/utils/TestField.sol";
+
 import {AdManagerTest} from "./Admanager.t.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
 import {IEscrow} from "src/interfaces/IEscrow.sol";
@@ -42,7 +44,7 @@ contract PayoutFallbackTest is AdManagerTest {
 
     function test_happyPath_paysDirectly_nothingClaimable() public {
         receiver.setAccepting(true);
-        IAdManager.OrderParams memory p = _unlockNativeTo(address(receiver), bytes32("HP"));
+        IAdManager.OrderParams memory p = _unlockNativeTo(address(receiver), TestField.fe("HP"));
 
         assertEq(address(receiver).balance, p.amount, "not paid directly");
         assertEq(adManager.claimable(address(receiver), NATIVE_TOKEN_ADDRESS), 0);
@@ -50,7 +52,7 @@ contract PayoutFallbackTest is AdManagerTest {
 
     function test_failingRecipient_neverBlocksUnlock_creditsInstead() public {
         // receiver rejects payouts: unlock must still settle
-        IAdManager.OrderParams memory p = _unlockNativeTo(address(receiver), bytes32("FB"));
+        IAdManager.OrderParams memory p = _unlockNativeTo(address(receiver), TestField.fe("FB"));
 
         assertEq(address(receiver).balance, 0, "push should have failed");
         assertEq(adManager.claimable(address(receiver), NATIVE_TOKEN_ADDRESS), p.amount, "not credited");

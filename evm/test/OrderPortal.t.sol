@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
+import {TestField} from "test/utils/TestField.sol";
+
 import {Test, console} from "forge-std/Test.sol";
 import {IEscrow} from "src/interfaces/IEscrow.sol";
 import {IOrderPortal} from "src/interfaces/IOrderPortal.sol";
@@ -506,7 +508,7 @@ contract OrderPortalTest is Test {
         bytes32 t_root = bytes32(uint256(0));
 
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderNotOpen.selector, orderHash));
-        portal.unlock(p, bytes32("N"), t_root, hex"", hex"");
+        portal.unlock(p, TestField.fe("N"), t_root, hex"", hex"");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -525,13 +527,13 @@ contract OrderPortalTest is Test {
         emit IEscrow.OrderUnlocked(
             portal.hashOrderPublic(p),
             p.adRecipient, // NOTE: contract emits dstRecipient in 2nd arg
-            bytes32("N")
+            TestField.fe("N")
         );
-        portal.unlock(p, bytes32("N"), t_root, hex"AA", hex"");
+        portal.unlock(p, TestField.fe("N"), t_root, hex"AA", hex"");
 
         // Second unlock with same nullifier reverts
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NullifierUsed.selector, bytes32("N")));
-        portal.unlock(p, bytes32("N"), t_root, hex"BB", hex"");
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NullifierUsed.selector, TestField.fe("N")));
+        portal.unlock(p, TestField.fe("N"), t_root, hex"BB", hex"");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -551,7 +553,7 @@ contract OrderPortalTest is Test {
         bytes32 t_root = bytes32(uint256(0));
 
         vm.expectRevert(IEscrow.Escrow__InvalidProof.selector);
-        portal.unlock(p, bytes32("X"), t_root, hex"", hex"");
+        portal.unlock(p, TestField.fe("X"), t_root, hex"", hex"");
 
         // Status & balances unchanged
         (IEscrow.Status status) = portal.orders(orderHash);
@@ -577,7 +579,7 @@ contract OrderPortalTest is Test {
         uint256 balRecipientBefore = orderToken.balanceOf(address(uint160(uint256(p.adRecipient))));
 
         bytes memory proof = hex"ABCD";
-        bytes32 nullifier = bytes32("NOK");
+        bytes32 nullifier = TestField.fe("NOK");
 
         bytes32 t_root = bytes32(uint256(0));
 
@@ -607,10 +609,10 @@ contract OrderPortalTest is Test {
         (IOrderPortal.OrderParams memory p, bytes32 orderHash) = _openOrder(40 ether, 321);
         bytes32 t_root = bytes32(uint256(0));
 
-        portal.unlock(p, bytes32("one"), t_root, hex"", hex"");
+        portal.unlock(p, TestField.fe("one"), t_root, hex"", hex"");
 
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderNotOpen.selector, orderHash));
-        portal.unlock(p, bytes32("two"), t_root, hex"", hex"");
+        portal.unlock(p, TestField.fe("two"), t_root, hex"", hex"");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -625,7 +627,7 @@ contract OrderPortalTest is Test {
         uint256 balRecipientBefore = address(uint160(uint256(p.adRecipient))).balance;
 
         bytes memory proof = hex"ABCD";
-        bytes32 nullifier = bytes32("NATIVE");
+        bytes32 nullifier = TestField.fe("NATIVE");
 
         bytes32 t_root = bytes32(uint256(0));
 
