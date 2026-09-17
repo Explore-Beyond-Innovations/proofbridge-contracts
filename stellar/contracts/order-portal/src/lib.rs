@@ -189,6 +189,22 @@ impl OrderPortalContract {
         Ok(ops::set_route_timing(&env, chain_id, timing)?)
     }
 
+    /// Set the dispute module this escrow reads (2.3g). Unset means disputes are unavailable here,
+    /// which is a safe default rather than a broken one.
+    pub fn set_dispute_manager(env: Env, manager: Address) -> Result<(), OrderPortalError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        storage::set_dispute_manager(&env, &manager);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// The order hash this leg computes for these params — what the dispute module is keyed by.
+    pub fn hash_order(env: Env, params: OrderParams) -> Result<BytesN<32>, OrderPortalError> {
+        let config = storage::get_config(&env)?;
+        Ok(Self::order_hash(&env, &config, &params))
+    }
+
     /// Set the notary the evidence paths read (2.3e D7). Settlement never touches it.
     pub fn set_root_anchor(env: Env, anchor: Address) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;

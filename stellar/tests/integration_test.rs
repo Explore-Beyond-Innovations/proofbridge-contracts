@@ -26,6 +26,8 @@ use stellar_tokens::fungible::{Base, FungibleToken};
 const VERIFIER_WASM: &[u8] = include_bytes!("../target/wasm32v1-none/release/verifier.wasm");
 const MERKLE_WASM: &[u8] = include_bytes!("../target/wasm32v1-none/release/merkle_manager.wasm");
 const AD_MANAGER_WASM: &[u8] = include_bytes!("../target/wasm32v1-none/release/ad_manager.wasm");
+const DISPUTE_MANAGER_WASM: &[u8] =
+    include_bytes!("../target/wasm32v1-none/release/dispute_manager.wasm");
 const ORDER_PORTAL_WASM: &[u8] =
     include_bytes!("../target/wasm32v1-none/release/order_portal.wasm");
 
@@ -96,6 +98,10 @@ mod ad_manager_contract {
 
 mod order_portal_contract {
     soroban_sdk::contractimport!(file = "target/wasm32v1-none/release/order_portal.wasm");
+}
+
+mod dispute_manager_contract {
+    soroban_sdk::contractimport!(file = "target/wasm32v1-none/release/dispute_manager.wasm");
 }
 
 // ---------------------------------------------------------------------------
@@ -3895,4 +3901,188 @@ fn test_pause_gates_every_termination_path() {
         s.order_portal.try_record_settled(&q),
         Err(Ok(OpErr::ContractPaused))
     );
+}
+
+// =============================================================================
+// 2.3g — the escrow/module boundary, with both contracts real
+// =============================================================================
+
+const DISPUTE_CHALLENGE: u64 = 2 * 60 * 60;
+const DISPUTE_BOND_FLOOR: u128 = 1_000;
+const DISPUTE_BOND_BPS: u32 = 100;
+
+/// Deploy the module, wire it to the ad-manager, and fund a filer. Returns the module client and the
+/// filer's address.
+fn wire_dispute_manager(
+    s: &TestSetup,
+) -> (dispute_manager_contract::Client<'static>, Address, Address) {
+    let dm_addr = Address::generate(&s.env);
+    s.env.register_at(&dm_addr, DISPUTE_MANAGER_WASM, ());
+    let dm = dispute_manager_contract::Client::new(&s.env, &dm_addr);
+
+    let arbiter = Address::generate(&s.env);
+    let fee_pool = Address::generate(&s.env);
+    let filer = Address::generate(&s.env);
+
+    dm.initialize(&s.admin_addr, &s.ad_token_addr);
+    dm.set_escrow(&s.ad_manager.address, &true);
+    dm.set_arbiter(&arbiter);
+    dm.set_protocol_fee_pool(&fee_pool);
+    dm.set_dispute_params(
+        &s.tp.order_chain_id,
+        &dispute_manager_contract::DisputeParams {
+            challenge_period: DISPUTE_CHALLENGE,
+            bond_floor: DISPUTE_BOND_FLOOR,
+            bond_bps: DISPUTE_BOND_BPS,
+        },
+    );
+    s.ad_manager.set_dispute_manager(&dm_addr);
+
+    TokenContractClient::new(&s.env, &s.ad_token_addr).mint(&filer, &1_000_000);
+    (dm, arbiter, filer)
+}
+
+/// The escrow and the module must agree: an order is `Disputed` on one iff a record exists on the
+/// other. This is the property the two-contract split created the need for.
+#[test]
+fn test_2_3g_escrow_and_module_agree_on_a_filing() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let params = locked_ad_order(&s);
+    let order_hash = s.ad_manager.hash_order(&params);
+
+    assert_eq!(
+        s.ad_manager.get_order_status(&order_hash),
+        ad_manager_contract::Status::Open
+    );
+    assert!(!dm.is_disputed(&order_hash));
+
+    s.ad_manager
+        .dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+
+    assert_eq!(
+        s.ad_manager.get_order_status(&order_hash),
+        ad_manager_contract::Status::Disputed
+    );
+    assert!(dm.is_disputed(&order_hash), "the module holds the record");
+}
+
+/// The bond lands in the module, never in the escrow — which is what keeps "the escrow's balance is
+/// its order escrow" a single-contract invariant for 2.3h.
+#[test]
+fn test_2_3g_the_bond_never_rests_in_the_escrow() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let params = locked_ad_order(&s);
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let escrow_before = token.balance(&s.ad_manager.address);
+
+    let bond = s
+        .ad_manager
+        .dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+
+    assert_eq!(token.balance(&dm.address), bond as i128);
+    assert_eq!(
+        token.balance(&s.ad_manager.address),
+        escrow_before,
+        "the escrow took none of it"
+    );
+}
+
+/// Evidence beats arbitration: a co-signed unlock still settles a disputed order, and the dispute
+/// record goes with it.
+#[test]
+fn test_2_3g_evidence_terminates_a_disputed_order() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let params = locked_ad_order(&s);
+    let order_hash = s.ad_manager.hash_order(&params);
+
+    s.ad_manager
+        .dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    assert_eq!(
+        s.ad_manager.get_order_status(&order_hash),
+        ad_manager_contract::Status::Disputed
+    );
+
+    // The unlock's status gate admits `Disputed` (D5), so the proof still lands.
+    s.ad_manager.unlock(
+        &params,
+        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+        &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
+    );
+    assert_eq!(
+        s.ad_manager.get_order_status(&order_hash),
+        ad_manager_contract::Status::Filled
+    );
+}
+
+/// The escrow refuses to finalize while the module's window is still open.
+#[test]
+fn test_2_3g_finalize_waits_for_the_modules_window() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let params = locked_ad_order(&s);
+    let order_hash = s.ad_manager.hash_order(&params);
+
+    s.ad_manager
+        .dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    dm.resolve_dispute(
+        &order_hash,
+        &dispute_manager_contract::DisputeOutcome::MutualRefund,
+    );
+
+    assert!(
+        s.ad_manager.try_finalize_dispute(&params).is_err(),
+        "the window has not closed"
+    );
+}
+
+/// A dispute nobody rules still resolves, and the bond comes home.
+#[test]
+fn test_2_3g_the_unresolved_fallback_refunds_and_returns_the_bond() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let params = locked_ad_order(&s);
+    let order_hash = s.ad_manager.hash_order(&params);
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+
+    let bond = s
+        .ad_manager
+        .dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    let after_filing = token.balance(&filer);
+
+    use soroban_sdk::testutils::Ledger;
+    let now = s.env.ledger().timestamp();
+    s.env.ledger().set_timestamp(now + DISPUTE_CHALLENGE + 1);
+    s.ad_manager.finalize_dispute(&params);
+
+    assert_eq!(
+        s.ad_manager.get_order_status(&order_hash),
+        ad_manager_contract::Status::Resolved
+    );
+    assert_eq!(token.balance(&filer), after_filing + bond as i128);
+    assert!(!dm.is_disputed(&order_hash), "the record is closed");
+}
+
+/// `in_flight` returns to zero on `Resolved`, as on every other terminal (T-13).
+#[test]
+fn test_2_3g_in_flight_clears_on_resolved() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let params = locked_ad_order(&s);
+    let signer = bytes32_to_bytesn(&s.env, &s.tp.ad_settlement_signer);
+
+    s.ad_manager
+        .dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    assert!(s.ad_manager.has_open_positions(&signer));
+
+    use soroban_sdk::testutils::Ledger;
+    let now = s.env.ledger().timestamp();
+    s.env.ledger().set_timestamp(now + DISPUTE_CHALLENGE + 1);
+    s.ad_manager.finalize_dispute(&params);
+
+    assert!(!s.ad_manager.has_open_positions(&signer));
 }
