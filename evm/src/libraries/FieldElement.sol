@@ -10,10 +10,19 @@ import {MMRPoseidon2} from "@solidity-mmr/MMRPoseidon2.sol";
  * @notice Canonicality for the BN254 scalar field: a 32-byte public input must be the unique
  *         representative of its field element, not one of the several that reduce to it (2.3h,
  *         residual 9).
- * @dev Why this matters, and where it does not. The verifier reduces whatever it is handed, so `n`
- *      and `n + PRIME` present as the same element to the proof. The escrow does not reduce — it
- *      keys `nullifierUsed` on the raw 32 bytes. So without this check one proof yields unboundedly
- *      many distinct nullifiers, and the replay guard stops guarding.
+ * @dev Why this is here, and what it does *not* claim.
+ *
+ *      A non-canonical input is already refused by both shipped verifiers — the transcript
+ *      hashes public inputs as given, so `n` and `n + PRIME` produce different challenges and a
+ *      proof made for one fails for the other. `verifier-negative.json`'s `deposit/public-input-ge-r`
+ *      vector pins exactly that, on both chains.
+ *
+ *      So this is defence in depth, not the closing of an open hole. It earns its place by not
+ *      depending on verifier internals: it fails locally, cheaply, with a named error, and it keeps
+ *      holding if the verifier is ever ported (T3) to one that reduces instead of rejecting. The
+ *      escrow's `nullifierUsed` ledger keys on raw bytes, so a reducing verifier *would* turn one
+ *      proof into unboundedly many nullifiers; this makes the escrow's guarantee independent of
+ *      which verifier is underneath.
  *
  *      The order hash is exempt because it is already reduced by `_fieldMod` on the way in, so it is
  *      canonical by construction. Side flags and leaf domains are contract constants, never calldata.

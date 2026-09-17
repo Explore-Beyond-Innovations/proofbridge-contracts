@@ -187,14 +187,11 @@ pub fn build_public_inputs(
     order_hash: &BytesN<32>,
     chain_flag_value: u8,
 ) -> Result<Bytes, Fault> {
-    // The nullifier, and only the nullifier. Checked here rather than at each call site because this
-    // builder is the one place every deposit proof passes through, so a caller cannot forget.
-    //
-    // The root is deliberately not checked. Every caller validates it *before* reaching here — the
-    // co-signed root on this path, the notary's anchored root on the event path — and both are
-    // equality checks against known-good stored data, so a non-canonical root is already refused
-    // upstream. The nullifier has no such comparison: it is a *write* key in the replay ledger,
-    // which is exactly why it is the one that can alias.
+    // The nullifier and only the nullifier, checked here rather than at each of the seven call
+    // sites so a caller cannot forget. The root is validated before this runs on every path — the
+    // co-signed root here, the notary's anchored root on the event path — and both compare against
+    // known-good stored data. The nullifier has no such comparison: it is a *write* key in the
+    // replay ledger, which is why it is the one worth guarding.
     if !is_canonical(nullifier_hash) {
         return Err(Fault::NonCanonicalInput);
     }
@@ -238,10 +235,13 @@ pub fn field_mod(data: &BytesN<32>) -> BytesN<32> {
 /// no second copy of the prime anywhere on this side. The EVM twin re-exports the MMR library's
 /// constant for the same reason.
 ///
-/// It matters because the verifier reduces whatever it is handed: `n` and `n + PRIME` are one
-/// element to the proof, while the escrow keys its nullifier ledger on the raw 32 bytes and sees
-/// two. Without this, one proof yields unboundedly many nullifiers and the replay guard stops
-/// guarding.
+/// Defence in depth. Both shipped verifiers already reject a non-canonical public input — the
+/// transcript hashes inputs as given, so `n` and `n + r` produce different challenges, which
+/// `verifier-negative.json`'s `deposit/public-input-ge-r` vector pins on both chains.
+///
+/// It earns its place by not depending on verifier internals: the escrow's nullifier ledger keys on
+/// raw bytes, so a verifier that *reduced* instead of rejecting would turn one proof into
+/// unboundedly many nullifiers. Checking here makes that guarantee the escrow's own.
 pub fn is_canonical(value: &BytesN<32>) -> bool {
     field_mod(value) == *value
 }
@@ -253,9 +253,11 @@ pub fn build_event_public_inputs(
     target_root: &BytesN<32>,
     subject: &BytesN<32>,
     domain: u32,
-) -> Result<Bytes, Fault> {
-    // Nothing to check: the event path's nullifier slot is a literal zero, and its root is already
-    // anchored-checked by every caller before this runs. The subject is reduced below.
+) -> Bytes {
+    // Infallible, and typed that way: the event path's nullifier slot is a literal zero, its root is
+    // anchored-checked by every caller before this runs, and the subject is reduced below. A
+    // `Result` here would be one no caller could ever take, which is how a catch-all arm ends up
+    // silently swallowing a fault added later.
     let subject_mod = field_mod(subject);
 
     let mut domain_word = [0u8; 32];
@@ -266,7 +268,7 @@ pub fn build_event_public_inputs(
     inputs.append(&Bytes::from_slice(env, &subject_mod.to_array()));
     inputs.append(&Bytes::from_slice(env, &target_root.to_array()));
     inputs.append(&Bytes::from_slice(env, &domain_word));
-    Ok(inputs)
+    inputs
 }
 
 /// keccak256("ProofBridge.BLSKeyRegistry.RegistrationLeaf.v1")

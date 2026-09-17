@@ -1,6 +1,5 @@
 //! Error types for the BLSKeyRegistry contract
 
-use proofbridge_core::escrow_ops::Fault;
 use soroban_sdk::contracterror;
 
 #[contracterror]
@@ -42,19 +41,9 @@ pub enum RegistryError {
     SourceNotAllowed = 19,
     /// Enabling proof registration with no source chains
     ProofRegistrationRefsUnset = 20,
-    /// A public input at or above the field prime (2.3h, residual 9): the verifier would reduce it,
-    /// so two distinct 32-byte values would present as one element.
-    NonCanonicalInput = 21,
 }
 
-/// The registry consumes one shared helper that can fail — the public-input builder — so it maps the
-/// single `Fault` that reaches it rather than growing the `ProofBridgeError` trait.
-impl From<Fault> for RegistryError {
-    fn from(f: Fault) -> Self {
-        match f {
-            Fault::NonCanonicalInput => RegistryError::NonCanonicalInput,
-            // No other shared fault is reachable from this contract's call sites.
-            _ => RegistryError::InvalidLeafProof,
-        }
-    }
-}
+// No `From<Fault>` here on purpose. The registry's only shared helper is the event public-input
+// builder, which is infallible, so the conversion would exist solely to carry a catch-all arm — and
+// a catch-all would map any fault added later to `InvalidLeafProof`, reporting the wrong cause. If a
+// fallible helper is ever consumed here, add the arm for it explicitly.

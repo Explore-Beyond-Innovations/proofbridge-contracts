@@ -32,16 +32,16 @@ library RequestAuth {
         pure
         returns (bytes32[] memory inputs)
     {
-        // The nullifier, and only the nullifier. Checked here rather than at each call site because
-        // this builder is the one place every deposit proof passes through, so a caller cannot
-        // forget.
+        // Defence in depth, not a hole being closed: both shipped verifiers already reject a
+        // non-canonical public input, because the transcript hashes inputs as given. This fails
+        // earlier, locally, with a named error, and keeps holding if the verifier is ever ported to
+        // one that reduces — see `FieldElement`.
         //
-        // The root is deliberately not checked. Every caller validates it *before* reaching here —
-        // `_requireRootValid` against the co-signed root on this path, `_requireAnchored` against the
-        // notary's on the event path — and both are equality checks against known-good stored data,
-        // so a non-canonical root is already refused upstream. The nullifier has no such comparison:
-        // it is a *write* key (`nullifierUsed[nullifierHash]`), which is exactly why it is the one
-        // that can alias. The order hash is reduced below; the side flag is a contract constant.
+        // The nullifier and only the nullifier. The root is validated *before* this runs on every
+        // path — `_requireRootValid` against the co-signed root, `_requireAnchored` against the
+        // notary's — and both compare against known-good stored data. The nullifier has no such
+        // comparison: it is a *write* key, which is why it is the one worth guarding. The order hash
+        // is reduced below; the side flag is a contract constant.
         FieldElement.requireCanonical(nullifierHash);
 
         inputs = new bytes32[](4);

@@ -1479,16 +1479,16 @@ fn test_event_claims_verify_for_every_event_domain() {
     let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
     for (domain, proof) in EVENT_CLAIMS {
         let inputs =
-            build_event_public_inputs(&s.env, &event_root(&s, domain), &order_hash, domain)
-                .unwrap();
+            build_event_public_inputs(&s.env, &event_root(&s, domain), &order_hash, domain);
         s.verifier
             .verify_proof(&inputs, &Bytes::from_slice(&s.env, proof));
     }
 }
 
-/// 2.3h / T-65 — residual 9. The verifier reduces whatever it is handed, so `n` and `n + PRIME` are
-/// one element to the proof, while the escrow keys its nullifier ledger on the raw 32 bytes and sees
-/// two. The builders are the choke point: every public input reaches a verifier through one of them.
+/// 2.3h / T-65 — residual 9. Defence in depth: the shipped verifiers hash public inputs as given, so
+/// they already reject `n + PRIME`. The escrow keys its nullifier ledger on the raw 32 bytes, so a
+/// verifier that *reduced* instead would turn one proof into many nullifiers — refusing at the
+/// builder, the choke point every public input passes through, makes that the escrow's own property.
 #[test]
 fn test_2_3h_non_canonical_public_inputs_are_refused() {
     use proofbridge_core::cross_contract::is_canonical;
@@ -1542,10 +1542,11 @@ fn test_2_3h_non_canonical_public_inputs_are_refused() {
         LEAF_DOMAIN_AD as u8
     )
     .is_ok());
-    assert!(build_event_public_inputs(&s.env, &at_prime, &order_hash, LEAF_DOMAIN_CANCEL).is_ok());
 
-    // ...and the canonical forms still build.
-    assert!(build_event_public_inputs(&s.env, &root, &order_hash, LEAF_DOMAIN_CANCEL).is_ok());
+    // The event builder checks nothing and cannot fail — its nullifier slot is a literal zero and
+    // its root is anchored-checked upstream — so it is infallible by type, not by convention.
+    let _ = build_event_public_inputs(&s.env, &at_prime, &order_hash, LEAF_DOMAIN_CANCEL);
+    let _ = build_event_public_inputs(&s.env, &root, &order_hash, LEAF_DOMAIN_CANCEL);
 }
 
 /// The same bytes the EVM suite asserts, read from the shared vector rather than restated. This is
@@ -1589,7 +1590,7 @@ fn test_2_3h_canonicality_matches_the_shared_vector() {
             .is_err());
         }
     }
-    assert_eq!(rejected, 3, "every rejection case was actually driven");
+    assert!(rejected >= 3, "the rejection cases shrank");
 }
 
 /// The order hash is exempt on purpose: it is reduced on the way in, so a non-canonical one is not
@@ -1608,14 +1609,13 @@ fn test_2_3h_the_subject_is_reduced_not_rejected() {
         0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00,
         0x00, 0x08,
     ];
-    let a = build_event_public_inputs(&s.env, &root, &small, LEAF_DOMAIN_CANCEL).unwrap();
+    let a = build_event_public_inputs(&s.env, &root, &small, LEAF_DOMAIN_CANCEL);
     let b = build_event_public_inputs(
         &s.env,
         &root,
         &BytesN::from_array(&s.env, &aliased),
         LEAF_DOMAIN_CANCEL,
-    )
-    .unwrap();
+    );
     assert_eq!(a, b, "the reduction makes the two subjects one input");
 }
 
@@ -1626,8 +1626,7 @@ fn test_event_claim_rejected_under_another_domain_or_as_a_deposit() {
     let root = event_root(&s, LEAF_DOMAIN_CANCEL);
     let proof = Bytes::from_slice(&s.env, EVENT_CLAIMS[0].1);
 
-    let other_domain =
-        build_event_public_inputs(&s.env, &root, &order_hash, LEAF_DOMAIN_SETTLED).unwrap();
+    let other_domain = build_event_public_inputs(&s.env, &root, &order_hash, LEAF_DOMAIN_SETTLED);
     assert!(s.verifier.try_verify_proof(&other_domain, &proof).is_err());
 
     let zero = BytesN::from_array(&s.env, &[0u8; 32]);
@@ -1648,8 +1647,7 @@ fn test_deposit_proof_rejected_as_an_event_claim() {
     let s = event_setup();
     let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
     let order_root = bytes32_to_bytesn(&s.env, &s.tp.order_root);
-    let inputs =
-        build_event_public_inputs(&s.env, &order_root, &order_hash, LEAF_DOMAIN_CANCEL).unwrap();
+    let inputs = build_event_public_inputs(&s.env, &order_root, &order_hash, LEAF_DOMAIN_CANCEL);
     assert!(s
         .verifier
         .try_verify_proof(&inputs, &Bytes::from_slice(&s.env, PROOF_BRIDGER))
@@ -2252,6 +2250,102 @@ fn test_2_3h_an_ad_gets_its_ttl_extended() {
     assert!(
         ttl > PERSISTENT_LIFETIME_THRESHOLD,
         "an ad holding liquidity must outlive the archival threshold"
+    );
+}
+
+/// T-57, the writes that hold no money but still strand settlement. A token route or a root
+/// verifier that archives makes every order on that pair unsettleable until someone restores the
+/// entry; an archived nullifier is worse than stranded, because a missing entry reads as *unused*
+/// and so reopens a spent proof. All three are written once at wiring time and then only read, so
+/// nothing else would ever bump them.
+#[test]
+fn test_2_3h_settlement_bearing_entries_get_their_ttl_extended() {
+    use proofbridge_core::ttl::PERSISTENT_LIFETIME_THRESHOLD;
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let s = setup();
+    let params = ad_manager_order_params(&s.env, &s.tp);
+    s.ad_manager.lock_for_order(&params);
+    let empty = Bytes::new(&s.env);
+    assert!(
+        ad_unlock(&s, &params, &empty),
+        "the unlock burns a nullifier"
+    );
+
+    let nullifier = bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier);
+    let token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+
+    let keys: [(&str, soroban_sdk::Val); 3] = s.env.as_contract(&s.ad_manager.address, || {
+        use soroban_sdk::IntoVal;
+        [
+            (
+                "token route",
+                (
+                    soroban_sdk::symbol_short!("routes"),
+                    token.clone(),
+                    s.tp.order_chain_id,
+                )
+                    .into_val(&s.env),
+            ),
+            (
+                "root verifier",
+                (soroban_sdk::symbol_short!("rverif"), s.tp.order_chain_id).into_val(&s.env),
+            ),
+            (
+                "nullifier",
+                (soroban_sdk::symbol_short!("nulls"), nullifier.clone()).into_val(&s.env),
+            ),
+        ]
+    });
+
+    for (what, key) in keys {
+        let ttl = s.env.as_contract(&s.ad_manager.address, || {
+            s.env.storage().persistent().get_ttl(&key)
+        });
+        assert!(
+            ttl > PERSISTENT_LIFETIME_THRESHOLD,
+            "the {what} entry was written without a TTL bump: {ttl}"
+        );
+    }
+}
+
+/// T-57's other half: a credit drained to zero is deleted, not kept alive at zero. `get_claimable`
+/// reads a missing key as 0, so the two are the same value — but one keeps paying rent forever and
+/// would be bumped by every write, which is how a ledger fills with rows that owe nothing.
+#[test]
+fn test_2_3h_a_drained_credit_is_removed_not_kept_at_zero() {
+    let s = setup();
+    let params = ad_manager_order_params(&s.env, &s.tp);
+    s.ad_manager.lock_for_order(&params);
+
+    // Park a credit the way one really arises, then let the recipient take it.
+    let token_client = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    token_client.set_fail_transfers(&true);
+    let empty = Bytes::new(&s.env);
+    assert!(ad_unlock(&s, &params, &empty), "unlock still settles");
+    token_client.set_fail_transfers(&false);
+
+    let recipient = bytes32_to_bytesn(&s.env, &s.tp.order_recipient);
+    let token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+    let key = (
+        soroban_sdk::symbol_short!("claim"),
+        recipient.clone(),
+        token.clone(),
+    );
+
+    assert!(
+        s.env.as_contract(&s.ad_manager.address, || {
+            s.env.storage().persistent().has(&key)
+        }),
+        "the credit exists before the claim"
+    );
+
+    s.ad_manager.claim(&recipient, &token);
+    assert!(
+        !s.env.as_contract(&s.ad_manager.address, || {
+            s.env.storage().persistent().has(&key)
+        }),
+        "a drained credit was left behind as a zero row"
     );
 }
 

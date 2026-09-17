@@ -79,8 +79,12 @@ contract FieldElementTest is Test {
     /// generator, and the Soroban suite asserts the same rows.
     function test_canonicalityMatchesTheSharedVector() public {
         string memory v = vm.readFile("../test-vectors/verifier-negative.json");
-        uint256 n = vm.parseJsonUint(v, ".canonicalityCount");
-        assertEq(n, 5, "the case set shrank");
+        // The loop is bound by the array itself, so a row added to the vector is driven here rather
+        // than silently skipped; the count field is then cross-checked, not trusted.
+        uint256 n;
+        while (vm.keyExistsJson(v, string.concat(".canonicality[", vm.toString(n), "]"))) n++;
+        assertEq(vm.parseJsonUint(v, ".canonicalityCount"), n, "the count field disagrees with the array");
+        assertGe(n, 5, "the case set shrank");
 
         uint256 rejected;
         for (uint256 i = 0; i < n; i++) {
@@ -94,7 +98,7 @@ contract FieldElementTest is Test {
                 h.deposit(value, bytes32(uint256(1)), bytes32(uint256(2)));
             }
         }
-        assertEq(rejected, 3, "every rejection case was actually driven");
+        assertGe(rejected, 3, "the rejection cases shrank");
     }
 
     function testFuzz_canonicalIffBelowThePrime(uint256 v) public pure {

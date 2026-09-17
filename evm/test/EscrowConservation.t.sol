@@ -35,7 +35,7 @@ contract EscrowConservationInvariantTest is Test {
     DisputeManager internal dm;
     MerkleManager internal merkleManager;
     wNativeToken internal wNative;
-    ERC20Mock internal adToken;
+    RefusableERC20 internal adToken;
 
     address internal admin = makeAddr("admin");
     address internal maker = makeAddr("maker");
@@ -53,7 +53,7 @@ contract EscrowConservationInvariantTest is Test {
     uint256 internal constant LOCK = 1 ether;
 
     EscrowHandler internal handler;
-    uint256 internal deadlineAt;
+    mapping(uint256 salt => uint256) internal deadlineOf;
 
     function setUp() public {
         merkleManager = new MerkleManager(admin, address(new Poseidon2Yul()));
@@ -82,7 +82,7 @@ contract EscrowConservationInvariantTest is Test {
         dm.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
         vm.stopPrank();
 
-        adToken = new ERC20Mock();
+        adToken = new RefusableERC20();
         adToken.mint(maker, 1_000_000 ether);
         vm.startPrank(admin);
         adManager.setTokenRoute(address(adToken), orderChainId, bytes32(uint256(uint160(orderToken))));
@@ -100,7 +100,6 @@ contract EscrowConservationInvariantTest is Test {
         );
         vm.stopPrank();
 
-        deadlineAt = block.timestamp + 7 days;
         handler = new EscrowHandler(this);
         targetContract(address(handler));
     }
@@ -109,6 +108,13 @@ contract EscrowConservationInvariantTest is Test {
 
     /// Open an order against the ad, locking `LOCK` of its liquidity.
     function handlerLock(uint256 salt) external returns (bytes32 h) {
+        // Each salt gets its own deadline, fixed the first time it is locked. A single shared
+        // deadline froze the campaign: `handlerCancel` warps past it, `vm.warp` is not rolled back
+        // when the enclosing call reverts, so the first cancel pinned `block.timestamp` beyond every
+        // order's deadline and every later lock and unlock failed its clock gate for the rest of the
+        // run. The handler swallows reverts, so 128,000 calls still reported `reverts: 0` while
+        // exploring nothing. `test_theCampaignKeepsExploringAfterACancel` is the guard.
+        if (deadlineOf[salt] == 0) deadlineOf[salt] = block.timestamp + 7 days;
         IAdManager.OrderParams memory p = _params(salt);
         vm.prank(maker);
         h = adManager.lockForOrder(p);
@@ -141,6 +147,12 @@ contract EscrowConservationInvariantTest is Test {
         adManager.claim(recipient, address(adToken));
     }
 
+    /// Flip the recipient's ability to receive. With it refusing, an unlock credits instead of
+    /// paying, which is the branch the solvency invariant exists to police.
+    function handlerSetRefusing(bool v) external {
+        adToken.setRefusing(v);
+    }
+
     function _params(uint256 salt) internal view returns (IAdManager.OrderParams memory p) {
         p.orderChainToken = bytes32(uint256(uint160(orderToken)));
         p.adChainToken = bytes32(uint256(uint160(address(adToken))));
@@ -155,11 +167,10 @@ contract EscrowConservationInvariantTest is Test {
         p.salt = salt;
         p.orderDecimals = 18;
         p.adDecimals = 18;
-        // Fixed, not `block.timestamp + 7 days`. The handler warps, and a deadline relative to
-        // "now" makes `_params(salt)` return different params — and so a different order hash — on
-        // each call. The same salt then opens two distinct orders, both locked, and the invariant
-        // sees liquidity it cannot account for. Which is how this was found.
-        p.deadline = deadlineAt;
+        // Per salt and fixed at its lock, never `block.timestamp + 7 days` computed here: the
+        // handler warps, so a deadline relative to "now" would make `_params(salt)` return different
+        // params — and a different order hash — on each call, opening two orders under one salt.
+        p.deadline = deadlineOf[salt];
         p.adSettlementSigner = bytes32(uint256(uint160(maker)));
     }
 
@@ -203,9 +214,58 @@ contract EscrowConservationInvariantTest is Test {
         assertEq(lockedAfterClose, 0, "the handler never closed one");
     }
 
+    /// The credit branch must actually be reachable, or `invariant_escrowHoldsWhatItOwes` reduces to
+    /// `balance >= adBalance` and never tests what it claims to.
+    function test_theCreditBranchIsReachable() public {
+        this.handlerLock(7);
+        this.handlerSetRefusing(true);
+        this.handlerUnlock(7);
+        assertGt(
+            adManager.claimable(recipient, address(adToken)),
+            0,
+            "a refused push must leave a credit, or the solvency invariant is vacuous"
+        );
+    }
+
+    /// The campaign must keep exploring after a cancel. It did not: one shared deadline plus a warp
+    /// that survives a revert froze every clock-gated path, and nothing failed — the handler
+    /// swallows reverts, so the run still reported 128,000 calls. `test_handlerOpensAndClosesOrders`
+    /// cannot see this because it starts from a fresh `setUp`; only a sequence can.
+    function test_theCampaignKeepsExploringAfterACancel() public {
+        this.handlerLock(1);
+        this.handlerCancel(1);
+
+        this.handlerLock(2);
+        (,,,,,,,, uint256 locked) = adManager.ads("inv");
+        assertEq(locked, LOCK, "a new order must still be openable after a cancel");
+
+        this.handlerUnlock(2);
+        (,,,,,,,, uint256 lockedAfter) = adManager.ads("inv");
+        assertEq(lockedAfter, 0, "and still settleable");
+    }
+
     mapping(uint256 salt => bool) internal live;
     mapping(uint256 salt => bool) internal everSeen;
     uint256[] internal seen;
+}
+
+/// An ERC20 that can be told to refuse transfers, so the escrow's credit path is actually reached.
+///
+/// Without this the solvency invariant was a triviality: `ERC20Mock.transfer` never fails and the
+/// recipient is an EOA, so `_payOrCredit` never took its catch branch, `claimable` was always zero,
+/// and the assertion reduced to `balance >= adBalance`. The property its name promises — that a
+/// failed push becomes a credit and the two move together — went unexercised.
+contract RefusableERC20 is ERC20Mock {
+    bool public refusing;
+
+    function setRefusing(bool v) external {
+        refusing = v;
+    }
+
+    function transfer(address to, uint256 amount) public override returns (bool) {
+        require(!refusing, "refusing");
+        return super.transfer(to, amount);
+    }
 }
 
 /// Drives the escrow surface, swallowing reverts so only successful paths shape state.
@@ -230,5 +290,9 @@ contract EscrowHandler {
 
     function claim() external {
         try t.handlerClaim() {} catch {}
+    }
+
+    function setRefusing(bool v) external {
+        try t.handlerSetRefusing(v) {} catch {}
     }
 }

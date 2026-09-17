@@ -131,8 +131,8 @@ pub enum OrderPortalError {
     DisputeNotResolved = 87,
     /// Only the order's two parties may file or respond to a dispute (D11).
     NotAParty = 88,
-    /// A public input at or above the field prime (2.3h, residual 9): the verifier would
-    /// reduce it, so two distinct 32-byte values would present as one element.
+    /// A public input at or above the field prime (2.3h, residual 9). Refused here as defence in
+    /// depth — both shipped verifiers already reject one.
     NonCanonicalInput = 89,
 }
 

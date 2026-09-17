@@ -297,7 +297,7 @@ impl BlsKeyRegistry {
             &target_root,
             &subject,
             LEAF_DOMAIN_REGISTERED,
-        )?;
+        );
         match VerifierClient::new(&env, &cfg.verifier).try_verify_proof(&inputs, &proof) {
             Ok(Ok(())) => {}
             _ => return Err(RegistryError::InvalidLeafProof),

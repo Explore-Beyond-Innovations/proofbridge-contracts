@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "evm/**"
+      - "test-vectors/**"
       - ".github/workflows/evm-contracts.yml"
   pull_request:
   workflow_call:
@@ -112,7 +113,11 @@ jobs:
         with:
           submodules: recursive
 
+      # Same pin as the `check` job: an unpinned nightly would let the two jobs run different forge
+      # versions, and the campaign's meaning depends on the fuzzer.
       - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
 
       # The full campaign, on pull requests as well as on main: 256 runs x 500 calls per invariant.
       # Splitting this into its own job does not make it faster — it is the critical path, and

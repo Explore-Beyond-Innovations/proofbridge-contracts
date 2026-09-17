@@ -18,6 +18,13 @@ solc_version = "0.8.34"
 evm_version = "prague"
 fs_permissions = [{ access = "read", path = "../test-vectors" }, { access = "read", path = "./test/fixtures" }]
 
+# Pinned, not left to forge's defaults: the CI comment below and the campaign's meaning both depend
+# on the size, so a change to a forge default must not quietly change what "the full campaign" is.
+[invariant]
+runs = 256
+depth = 500
+fail_on_revert = false
+
 [rpc_endpoints]
 testnet = "${RPC_URL}"
 

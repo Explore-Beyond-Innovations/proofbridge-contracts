@@ -463,7 +463,7 @@ impl OrderPortalContract {
             &target_root,
             &order_hash,
             LEAF_DOMAIN_CANCEL,
-        )?;
+        );
         cross_contract::verify_proof(&env, &config.verifier, &inputs, &proof)?;
 
         Self::cancel(&env, &order_hash, &params.bridger, true);
@@ -491,7 +491,7 @@ impl OrderPortalContract {
             &target_root,
             &order_hash,
             LEAF_DOMAIN_SETTLED,
-        )?;
+        );
         cross_contract::verify_proof(&env, &config.verifier, &inputs, &proof)?;
 
         Self::fill(&env, &order_hash, &params.bridger, true);
@@ -552,7 +552,7 @@ impl OrderPortalContract {
             &target_root,
             &order_hash,
             LEAF_DOMAIN_FORFEIT,
-        )?;
+        );
         cross_contract::verify_proof(&env, &config.verifier, &inputs, &proof)?;
 
         // No deadline read: like the cancel refund, this is the primary's decision arriving, and it
@@ -600,9 +600,7 @@ impl OrderPortalContract {
         ops::pay_or_credit(env, w_native, recipient, token, amount)
     }
 
-    /// Pay out a credited unlock. Permissionless: funds can only go to the
-    /// credited recipient.
-    /// Withdraw a credited balance.
+    /// Withdraw a credited balance. Permissionless: funds can only go to the credited recipient.
     ///
     /// Deliberately not pause-gated, and the only entry point here that is not. A pause is the
     /// mass-incident brake: it stops orders moving while something is wrong. This call moves no

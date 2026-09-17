@@ -930,7 +930,7 @@ impl AdManagerContract {
             &target_root,
             &order_hash,
             LEAF_DOMAIN_SETTLED,
-        )?;
+        );
         cross_contract::verify_proof(&env, &config.verifier, &inputs, &proof)?;
 
         // Evidence beats arbitration: if this order was disputed, that dispute ends here and the
@@ -966,9 +966,7 @@ impl AdManagerContract {
         ops::pay_or_credit(env, w_native, recipient, token, amount)
     }
 
-    /// Pay out a credited unlock. Permissionless: funds can only go to the
-    /// credited recipient.
-    /// Withdraw a credited balance.
+    /// Withdraw a credited balance. Permissionless: funds can only go to the credited recipient.
     ///
     /// Deliberately not pause-gated, and the only entry point here that is not. A pause is the
     /// mass-incident brake: it stops orders moving while something is wrong. This call moves no
