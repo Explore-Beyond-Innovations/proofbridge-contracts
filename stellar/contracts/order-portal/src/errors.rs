@@ -121,6 +121,16 @@ pub enum OrderPortalError {
     SettledRecorded = 83,
     /// record_settled: the order is not `Filled`
     NotFilled = 84,
+
+    // Disputes (2.3g)
+    /// No dispute module is wired, so disputes are unavailable on this escrow.
+    NoDisputeManager = 85,
+    /// The order is not in a state a dispute can be filed on.
+    NotDisputable = 86,
+    /// The module's window has not closed, so there is nothing to apply yet.
+    DisputeNotResolved = 87,
+    /// Only the order's two parties may file or respond to a dispute (D11).
+    NotAParty = 88,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
@@ -172,6 +182,9 @@ impl From<proofbridge_core::escrow_ops::Fault> for OrderPortalError {
             NothingToClaim => OrderPortalError::NothingToClaim,
             InvalidTiming => OrderPortalError::InvalidTiming,
             NotPendingAdmin => OrderPortalError::NotPendingAdmin,
+            NoDisputeManager => OrderPortalError::NoDisputeManager,
+            NotDisputable => OrderPortalError::NotDisputable,
+            DisputeNotResolved => OrderPortalError::DisputeNotResolved,
         }
     }
 }

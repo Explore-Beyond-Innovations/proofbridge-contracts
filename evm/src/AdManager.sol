@@ -3,6 +3,7 @@ pragma solidity ^0.8.34;
 
 import {EscrowBase} from "./escrow/EscrowBase.sol";
 import {IAdManager} from "./interfaces/IAdManager.sol";
+import {IDisputeManager} from "./interfaces/IDisputeManager.sol";
 import {IKeyRegistry} from "./interfaces/IKeyRegistry.sol";
 import {IVerifier} from "./interfaces/IVerifier.sol";
 import {IMerkleManager} from "./interfaces/IMerkleManager.sol";
@@ -13,6 +14,7 @@ import {LeafDomain} from "./libraries/LeafDomain.sol";
 import {OrderHash} from "./libraries/OrderHash.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {RouteTiming} from "./libraries/RouteTiming.sol";
+import {Dispute} from "./libraries/Dispute.sol";
 import {Termination} from "./libraries/Termination.sol";
 
 /**
@@ -207,6 +209,11 @@ contract AdManager is EscrowBase, IAdManager {
         );
         _requireDepositProof(orderHash, nullifierHash, targetRoot, proof, _PUBLIC_INPUT_SIDE_AD);
 
+        // A co-signed unlock is evidence too (D5), and `_requireSettleable` admits `Disputed`, so
+        // this path can terminate a disputed order and must close its dispute like any other.
+        _closeDisputeByEvidence(
+            orderHash, Dispute.Outcome.TradeProceeds, _disputeFiler(orderHash) != ads[params.adId].maker
+        );
         _settle(orderHash, nullifierHash, params.adSettlementSigner);
         _payFromAd(params);
 
@@ -245,6 +252,186 @@ contract AdManager is EscrowBase, IAdManager {
         emit LockCancelled(params.adId, orderHash, adAmount);
     }
 
+    /*//////////////////////////////////////////////////////////////
+                              DISPUTES (2.3g)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @inheritdoc IAdManager
+    function dispute(OrderParams calldata params, bytes32 evidence) external payable nonReentrant whenNotPaused {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        // Only the order's two parties may file. Without this any address could dispute any live
+        // order and, one short challenge period later, cancel it out from under both of them.
+        _requireParty(ads[params.adId].maker, params.orderRecipient.toAddressChecked());
+        // The amount is validated by the hash the caller had to reproduce, which is why filing
+        // starts here and not on the module: only this contract can vouch for it.
+        _openDispute(
+            orderHash,
+            _adAmount(params),
+            params.orderChainId,
+            evidence,
+            uint64(params.deadline),
+            _timing(params.orderChainId).buffer
+        );
+    }
+
+    /// @inheritdoc IAdManager
+    function respondToDispute(OrderParams calldata params, bytes32 evidence) external nonReentrant whenNotPaused {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        _requireStatus(orderHash, Status.Disputed);
+        address responder =
+            _requireResponder(orderHash, ads[params.adId].maker, params.orderRecipient.toAddressChecked());
+        _disputeManager().recordResponse(orderHash, responder, evidence);
+    }
+
+    /// @inheritdoc IAdManager
+    function finalizeDispute(OrderParams calldata params) external nonReentrant whenNotPaused {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        _requireStatus(orderHash, Status.Disputed);
+
+        (Dispute.Outcome outcome, bool windowOver, address initiator) =
+            _disputeManager().outcomeOf(orderHash, pausedSeconds);
+        if (!windowOver) revert Escrow__DisputeNotResolved(orderHash);
+        // No ruling means the fallback: a mutual refund, the unified primitive's terminal (D4).
+        if (outcome == Dispute.Outcome.None) outcome = Dispute.Outcome.MutualRefund;
+
+        Ad storage ad = ads[params.adId];
+        uint256 adAmount = _adAmount(params);
+        ad.locked -= adAmount;
+        if (outcome == Dispute.Outcome.MakerForfeit) {
+            // The maker forfeits its stake: the locked amount leaves the ad for the order's
+            // recipient. Every other vacuum outcome just releases the lock back to liquidity,
+            // which the decrement above already did.
+            ad.balance -= adAmount;
+            _payOrCredit(params.orderRecipient.toAddressChecked(), ad.token, adAmount);
+        }
+
+        _resolve(orderHash, params.adSettlementSigner);
+        // The flag is absolute: was this filed by the bridger? Filing is restricted to the order's
+        // two parties, so on the ad leg "not the maker" is exactly "the bridger".
+        _disputeManager().settleBond(orderHash, outcome, initiator != ad.maker);
+
+        // Broadcast the outcome to the follower, which has no dispute of its own and acts only on
+        // this leaf. CANCEL means "refund the bridger" and already did before 2.3g; FORFEIT is the
+        // one outcome that asks the follower for something else, so it is the one that needs a
+        // domain of its own. Appending CANCEL here for a forfeit — which is what the first build
+        // did — hands the follower a proof of the opposite ruling.
+        _appendLeaf(orderHash, outcome == Dispute.Outcome.BridgerForfeit ? LeafDomain.FORFEIT : LeafDomain.CANCEL);
+        emit OrderCancelled(orderHash, false);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                              DISPUTES (2.3g)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice The dispute module (2.3g). This escrow reads it and applies its own half of the
+    ///         outcome; the module never moves these funds. Unset means disputes are unavailable
+    ///         here, which is a safe default rather than a broken one.
+    /// @dev Lives on the primary, not on `EscrowBase`. The OrderPortal is the follower and has no
+    ///      dispute of its own — giving it this field back is the first step of the mistake review
+    ///      pass 1 found, so the type system is where that should be refused.
+    IDisputeManager public disputeManager;
+
+    /// @inheritdoc IAdManager
+    function setDisputeManager(IDisputeManager manager) external onlyAdmin {
+        if (address(manager) == address(0)) revert Escrow__ZeroAddress();
+        disputeManager = manager;
+        emit DisputeManagerSet(address(manager));
+    }
+
+    /// @dev The module, or `NoDisputeManager` — unset means disputes are unavailable here, which is
+    ///      a safe default rather than a broken one.
+    function _disputeManager() internal view returns (IDisputeManager m) {
+        m = disputeManager;
+        if (address(m) == address(0)) revert Escrow__NoDisputeManager();
+    }
+
+    /**
+     * @dev `Open | Claimed → Disputed`, with the bond handed straight to the module.
+     *
+     *      Note the direction: the escrow calls the module and the module never calls back. An
+     *      earlier draft gave the module a permissioned write so it could mark the status itself;
+     *      it does not need one, because filing has to start here anyway — only this contract can
+     *      hash an order and vouch for its amount, since a leg stores `{status, pausedAtOpen}` and
+     *      nothing else. So the trust edge runs one way and carries no callback.
+     */
+    function _openDispute(
+        bytes32 orderHash,
+        uint256 amount,
+        uint256 peerChainId,
+        bytes32 evidence,
+        uint64 deadline,
+        uint64 buffer
+    ) internal {
+        Status s = _orders[orderHash].status;
+        if (s != Status.Open && s != Status.Claimed) revert Escrow__NotDisputable(orderHash, s);
+
+        // Order matters, and it is the cheap half of keeping the two contracts in step. The module
+        // call is the fallible step — an unset route, an underfunded bond — so it runs *before* this
+        // contract commits anything. A caller that ever swallowed its revert would then leave the
+        // order `Open` with no record, which is merely a failed filing; writing the status first
+        // would instead leave it `Disputed` with no record, which is an order nobody can finalize.
+        // The invariant "Disputed here implies a record there" is what `Dispute.t.sol` asserts over
+        // arbitrary call sequences; this ordering is what makes the bad direction unreachable.
+        _disputeManager().openDispute{value: msg.value}(
+            orderHash, amount, peerChainId, msg.sender, evidence, deadline, buffer, pausedSeconds
+        );
+        _orders[orderHash].status = Status.Disputed;
+    }
+
+    /// @dev The order's two parties, as this chain knows them: whoever it would pay. Filing and
+    ///      responding are both restricted to them (D11), and that restriction is what makes
+    ///      `filerIsBridger` provable rather than inferred — with only two possible filers, "not the
+    ///      maker" and "is the bridger" are the same statement.
+    ///
+    ///      Note these are the *payout* addresses on this chain, not the cross-chain identities:
+    ///      `adCreator` is who the maker is on the ad chain and need not be anything they control
+    ///      here, so it cannot stand in for them on the order leg.
+    function _requireParty(address maker, address bridger) internal view {
+        if (msg.sender != maker && msg.sender != bridger) revert Escrow__NotAParty(msg.sender);
+    }
+
+    /// @dev The party that did not file. Reverts unless the caller is the other one.
+    function _requireResponder(bytes32 orderHash, address maker, address bridger) internal view returns (address) {
+        _requireParty(maker, bridger);
+        return msg.sender;
+    }
+
+    /**
+     * @dev Evidence terminated a disputed order, so the dispute is over whatever the arbiter
+     *      thought. A no-op when nothing was disputed, so every path that admits `Disputed` can call
+     *      it unconditionally — and every one of them must, or the bond has no exit at all: once the
+     *      status leaves `Disputed`, `finalizeDispute` can never run again and the module would hold
+     *      the bond forever.
+     *
+     *      `outcome` is what the path proved, not what anyone ruled: a settle is `TradeProceeds`, a
+     *      cancel-refund is `MutualRefund`. Reading the record's ruling here would route the bond by
+     *      a finding this evidence has just overturned.
+     */
+    function _closeDisputeByEvidence(bytes32 orderHash, Dispute.Outcome outcome, bool filerIsBridger) internal {
+        IDisputeManager m = disputeManager;
+        if (address(m) != address(0) && m.isDisputed(orderHash)) {
+            m.settleBond(orderHash, outcome, filerIsBridger);
+        }
+    }
+
+    /// @dev Who filed, or the zero address when nothing is disputed here. The escrows need it to
+    ///      answer `filerIsBridger` on the evidence paths, where no ruling is involved.
+    function _disputeFiler(bytes32 orderHash) internal view returns (address) {
+        IDisputeManager m = disputeManager;
+        if (address(m) == address(0)) return address(0);
+        return m.initiatorOf(orderHash);
+    }
+
+    /// @dev `→ Resolved`: the dispute terminal. Mirrors {_cancel}'s bookkeeping — in particular it
+    ///      clears `claims`, so "terminal implies no open claim" holds here too. A `Claimed` leg that
+    ///      is then disputed and resolved would otherwise keep a live claim with a past `finalizeAt`,
+    ///      which #345's conservation sweep and the relayer's projections both read.
+    function _resolve(bytes32 orderHash, bytes32 account) internal {
+        _orders[orderHash].status = Status.Resolved;
+        delete claims[orderHash];
+        _countOut(account);
+    }
+
     /// @inheritdoc IAdManager
     function cancelNeverLocked(OrderParams calldata params) external nonReentrant whenNotPaused {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
@@ -275,6 +462,11 @@ contract AdManager is EscrowBase, IAdManager {
         _requireAnchored(params.orderChainId, targetRoot);
         _requireEventProof(targetRoot, orderHash, proof, LeafDomain.SETTLED);
 
+        // Evidence beats arbitration: if this order was disputed, that dispute is now over and the
+        // bond settles on what the proof shows, not on whatever the arbiter had ruled.
+        _closeDisputeByEvidence(
+            orderHash, Dispute.Outcome.TradeProceeds, _disputeFiler(orderHash) != ads[params.adId].maker
+        );
         _fill(orderHash, params.adSettlementSigner, true);
         _payFromAd(params);
     }

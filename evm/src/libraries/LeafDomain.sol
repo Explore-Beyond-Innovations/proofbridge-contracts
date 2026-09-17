@@ -14,4 +14,8 @@ library LeafDomain {
     uint256 internal constant CANCEL = 2;
     uint256 internal constant SETTLED = 3;
     uint256 internal constant REGISTERED = 4;
+    /// @dev The primary's ruling that the bridger forfeits (2.3g). Its own domain because the
+    ///      follower must distinguish "refund the bridger" (CANCEL) from "pay the maker", and those
+    ///      are the only two actions a dispute can ask of it.
+    uint256 internal constant FORFEIT = 5;
 }

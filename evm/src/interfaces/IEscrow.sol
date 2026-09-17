@@ -5,6 +5,7 @@ import {IVerifier} from "./IVerifier.sol";
 import {IMerkleManager} from "./IMerkleManager.sol";
 import {IwNativeToken} from "../wNativeToken.sol";
 import {IRootAnchor} from "./IRootAnchor.sol";
+import {IDisputeManager} from "./IDisputeManager.sol";
 import {RouteTiming} from "../libraries/RouteTiming.sol";
 import {Termination} from "../libraries/Termination.sol";
 
@@ -102,6 +103,15 @@ interface IEscrow {
     error Escrow__NotFilled(bytes32 orderHash);
     /// @notice `recordSettled`: the order's SETTLED leaf is already in the MMR.
     error Escrow__SettledRecorded(bytes32 orderHash);
+    /// @notice The order is not in a state a dispute can be filed on.
+    error Escrow__NotDisputable(bytes32 orderHash, Status status);
+
+    /// @notice Only the order's two parties may file or respond to a dispute (2.3g D11).
+    error Escrow__NotAParty(address caller);
+    /// @notice No dispute module is wired, so disputes are unavailable on this escrow.
+    error Escrow__NoDisputeManager();
+    /// @notice The dispute has not reached a terminal state yet.
+    error Escrow__DisputeNotResolved(bytes32 orderHash);
 
     /*//////////////////////////////////////////////////////////////
                                  ADMIN

@@ -47,6 +47,7 @@ export interface DeployStellarCoreResult {
     blsKeyRegistry: string;
     counterpartyVerifier: string;
     rootAnchor: string;
+    disputeManager: string;
     registrar: string;
   };
 }
@@ -230,6 +231,41 @@ export async function deployCore(
     console.log(`  [reuse] Registrar: ${registrar}`);
   }
 
+  // The dispute module (2.3g) both escrows share. Holds bonds, never escrow funds, and takes no
+  // MerkleManager role — disputes append no leaf. Escrow ↔ module wiring happens at link time.
+  let disputeManager = reused(existing?.contracts.disputeManager?.address);
+  if (!disputeManager) {
+    disputeManager = deployContract(path.join(wasmBase, "dispute_manager.wasm"));
+    invokeContract(disputeManager, "initialize", [
+      "--admin",
+      adminStrkey,
+      "--w_native",
+      wNativeToken,
+    ]);
+    console.log(`  [deploy] DisputeManager: ${disputeManager}`);
+  } else {
+    console.log(`  [reuse] DisputeManager: ${disputeManager}`);
+  }
+
+  // The arbiter and the fee pool, without which the module is deployed but inert: `resolve_dispute`
+  // fails for every caller, so every dispute falls to the fallback, and an unset fee pool returns
+  // every forfeited bond to the filer. A half-wired dispute module looks exactly like a working one
+  // until someone files, so both are set at deploy rather than left to a follow-up.
+  //
+  // The arbiter must not be the admin (2.3g D6): its containment is that it holds no escrow powers.
+  {
+    const arbiterAddr = disputeRole("DISPUTE_ARBITER", env, adminStrkey);
+    const feePoolAddr = disputeRole("DISPUTE_FEE_POOL", env, adminStrkey);
+    if (env !== "local" && arbiterAddr === adminStrkey) {
+      throw new Error(
+        "deploy-core: DISPUTE_ARBITER must not be the admin — the arbiter's containment is that it holds no escrow powers",
+      );
+    }
+    invokeContract(disputeManager, "set_arbiter", ["--arbiter", arbiterAddr]);
+    invokeContract(disputeManager, "set_protocol_fee_pool", ["--pool", feePoolAddr]);
+    console.log(`  [deploy] DisputeManager arbiter=${arbiterAddr} feePool=${feePoolAddr}`);
+  }
+
   // ── Grant MANAGER permission on MerkleManager (idempotent) ─────
   for (const manager of [adManager, orderPortal, registrar]) {
     invokeContract(merkleManager, "set_manager", [
@@ -258,10 +294,13 @@ export async function deployCore(
       counterpartyVerifier,
       rootAnchor,
       registrar,
+      disputeManager,
     },
     // What the anchor was configured with; per-route delays are added by link.
     // The route clocks link set last time; a redeploy keeps them until link runs again.
     routeTiming: existing?.routeTiming,
+    // Same rule as the clocks: a redeploy keeps the dispute params until link runs again.
+    disputeParams: existing?.disputeParams,
     rootAnchorConfig: existing?.contracts.rootAnchor
       ? existing.rootAnchorConfig
       : { signers: anchorSigners, threshold: anchorThreshold, anchorDelays: {} },
@@ -295,6 +334,18 @@ export async function deployCore(
       counterpartyVerifier,
       rootAnchor,
       registrar,
+      disputeManager,
     },
   };
+}
+
+/// A dispute role address from env. Local deploys fall back to the admin so a dev stack works out of
+/// the box; everywhere else it must be named, like every other dispute parameter.
+function disputeRole(name: string, env: string, fallback: string): string {
+  const v = process.env[name];
+  if (v) return v;
+  if (env === "local") return fallback;
+  throw new Error(
+    `deploy-core: ${name} is unset for env=${env}; set it or deploy with DEPLOY_ENV=local`,
+  );
 }

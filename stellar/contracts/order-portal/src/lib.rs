@@ -16,7 +16,9 @@
 //! proves the lock, not the outcome; and a far backstop (`deadline + long_backstop`) opens a
 //! window in which only outcome evidence counts (a settled-leaf proof pays the maker, a cancel-leaf
 //! proof refunds the bridger, silence refunds the bridger), never a bare refund. Every `Filled` gets a
-//! SETTLED leaf, appended by `record_settled` in its own transaction (Soroban's per-tx budget;
+//! SETTLED leaf, appended by `record_settled` in its own transaction (to match the EVM leg so the
+//! relayer batches one shape — not Soroban's per-tx budget, which is 400M on the network and was
+//! misread as the harness default of 100M;
 //! EVM appends it inside the fill). The same state machine as EVM:
 //!
 //! ```text
@@ -40,7 +42,9 @@ mod token;
 mod types;
 mod validation;
 
-use proofbridge_core::cross_contract::{LEAF_DOMAIN_AD, LEAF_DOMAIN_CANCEL, LEAF_DOMAIN_SETTLED};
+use proofbridge_core::cross_contract::{
+    LEAF_DOMAIN_AD, LEAF_DOMAIN_CANCEL, LEAF_DOMAIN_FORFEIT, LEAF_DOMAIN_SETTLED,
+};
 use proofbridge_core::escrow_ops as ops;
 use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env};
 
@@ -185,6 +189,12 @@ impl OrderPortalContract {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
         Ok(ops::set_route_timing(&env, chain_id, timing)?)
+    }
+
+    /// The order hash this leg computes for these params — what the dispute module is keyed by.
+    pub fn hash_order(env: Env, params: OrderParams) -> Result<BytesN<32>, OrderPortalError> {
+        let config = storage::get_config(&env)?;
+        Ok(Self::order_hash(&env, &config, &params))
     }
 
     /// Set the notary the evidence paths read (2.3e D7). Settlement never touches it.
@@ -512,6 +522,47 @@ impl OrderPortalContract {
     }
 
     /// After an unchallenged backstop window: refund the bridger.
+    // =========================================================================
+    // Disputes (2.3g) — the follower's entire part, and it is proof-only
+    // =========================================================================
+
+    /// Apply a `BridgerForfeit` ruling made on the ad chain: the deposit goes to the maker.
+    ///
+    /// This escrow has no dispute, no arbiter and no dispute clock. The ad-manager is the head and
+    /// this is the follower, and the follower never originates a termination — it learns how a
+    /// dispute ended the way it learns every other cross-chain fact, from an anchored proof of the
+    /// primary's leaf.
+    ///
+    /// Only `BridgerForfeit` arrives here. Every other ruling means "refund the bridger", which is
+    /// what a CANCEL leaf has always meant, so those come through `refund_by_cancel` unchanged.
+    pub fn pay_maker_by_forfeit(
+        env: Env,
+        params: OrderParams,
+        target_root: BytesN<32>,
+        proof: Bytes,
+    ) -> Result<(), OrderPortalError> {
+        Self::require_not_paused(&env)?;
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        Self::require_presentable(&env, &order_hash)?;
+        Self::require_anchored(&env, params.ad_chain_id, &target_root)?;
+
+        let inputs = proofbridge_core::cross_contract::build_event_public_inputs(
+            &env,
+            &target_root,
+            &order_hash,
+            LEAF_DOMAIN_FORFEIT,
+        );
+        cross_contract::verify_proof(&env, &config.verifier, &inputs, &proof)?;
+
+        // No deadline read: like the cancel refund, this is the primary's decision arriving, and it
+        // is valid whenever it arrives.
+        Self::fill(&env, &order_hash, &params.bridger, true);
+        Self::pay_maker(&env, &config, &params);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
     pub fn finalize_backstop(env: Env, params: OrderParams) -> Result<(), OrderPortalError> {
         Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;

@@ -20,6 +20,9 @@ const KEY_PAUSED: Symbol = symbol_short!("paused");
 const KEY_PENDADM: Symbol = symbol_short!("pendadm");
 const KEY_INITIALIZED: Symbol = symbol_short!("init");
 const KEY_ANCHOR: Symbol = symbol_short!("anchor");
+/// The dispute module the escrow reads (2.3g). Unset means disputes are unavailable here, which
+/// is a safe default rather than a broken one.
+const KEY_DSPMGR: Symbol = symbol_short!("dspmgr");
 const KEY_PAUSED_AT: Symbol = symbol_short!("pausedat");
 const KEY_PAUSEDSEC: Symbol = symbol_short!("pausedsec");
 
@@ -135,6 +138,14 @@ pub fn get_root_anchor(env: &Env) -> Option<Address> {
 
 pub fn set_root_anchor(env: &Env, anchor: &Address) {
     env.storage().instance().set(&KEY_ANCHOR, anchor);
+}
+
+pub fn get_dispute_manager(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&KEY_DSPMGR)
+}
+
+pub fn set_dispute_manager(env: &Env, manager: &Address) {
+    env.storage().instance().set(&KEY_DSPMGR, manager);
 }
 
 pub fn get_claim(env: &Env, order_hash: &BytesN<32>) -> Option<ClaimRecord> {

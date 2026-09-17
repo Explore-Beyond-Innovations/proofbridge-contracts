@@ -88,7 +88,8 @@ jobs:
       # without the optimize feature the flag is rejected and the build fails
       # instead of silently shipping unoptimized wasm. The metering gate
       # (integration_test.rs) is the backstop — unoptimized unlock meters over the
-      # 100M budget and fails there.
+      # 106M regression ceiling and fails there. (The ceiling is a tripwire just above the
+      # measurement, not the network budget — that is 400M.)
       - name: Build contract WASMs
         run: |
           stellar contract build --optimize --package ad-manager
@@ -100,6 +101,7 @@ jobs:
           stellar contract build --optimize --package bls-key-registry
           stellar contract build --optimize --package root-anchor
           stellar contract build --optimize --package registrar
+          stellar contract build --optimize --package dispute-manager
         working-directory: stellar
 
       - name: Build event circuit

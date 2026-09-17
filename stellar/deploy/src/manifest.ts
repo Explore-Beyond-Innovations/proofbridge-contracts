@@ -9,6 +9,7 @@ import {
   writeManifest,
   type RootAnchorConfig,
   type RouteTiming,
+  type DisputeParams,
 } from "@proofbridge/deployment-manifest";
 import { deploymentsDir } from "./common.js";
 import { strkeyToHex } from "./stellar-cli.js";
@@ -69,11 +70,14 @@ export interface BuildStellarManifestInput {
     counterpartyVerifier?: string;
     rootAnchor?: string;
     registrar?: string;
+    disputeManager?: string;
   };
   tokens: StellarTokenInput[];
   rootAnchorConfig?: RootAnchorConfig;
   /** Per peer chain id → the clocks link set; preserved across redeploys, written by link. */
   routeTiming?: Record<string, RouteTiming>;
+  /** Per peer chain id → the dispute params link set; preserved the same way (2.3g). */
+  disputeParams?: Record<string, DisputeParams>;
 }
 
 export function buildManifest(
@@ -113,10 +117,14 @@ export function buildManifest(
       ...(input.contracts.registrar
         ? { registrar: stellarContractEntry(input.contracts.registrar) }
         : {}),
+      ...(input.contracts.disputeManager
+        ? { disputeManager: stellarContractEntry(input.contracts.disputeManager) }
+        : {}),
     },
     tokens: input.tokens.map(tokenEntry),
     ...(input.rootAnchorConfig ? { rootAnchorConfig: input.rootAnchorConfig } : {}),
     routeTiming: input.routeTiming ?? {},
+    disputeParams: input.disputeParams ?? {},
     meta: {
       deployedAt: new Date().toISOString(),
       deployer: input.deployer,

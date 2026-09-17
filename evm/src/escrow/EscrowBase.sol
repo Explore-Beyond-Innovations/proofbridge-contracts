@@ -9,6 +9,8 @@ import {IEscrow} from "../interfaces/IEscrow.sol";
 import {IVerifier} from "../interfaces/IVerifier.sol";
 import {IMerkleManager} from "../interfaces/IMerkleManager.sol";
 import {IRootAnchor} from "../interfaces/IRootAnchor.sol";
+import {IDisputeManager} from "../interfaces/IDisputeManager.sol";
+import {Dispute} from "../libraries/Dispute.sol";
 import {IwNativeToken, SafeNativeToken} from "../wNativeToken.sol";
 import {AddressCast} from "../libraries/AddressCast.sol";
 import {LeafDomain} from "../libraries/LeafDomain.sol";
@@ -42,8 +44,10 @@ import {TwoStepAdmin} from "../libraries/TwoStepAdmin.sol";
  *      included: a pause stops the clocks (`pausedSeconds`, measured from the leg's lock/create or
  *      from a backstop claim), so a window ends later by exactly the pause, and a window that had
  *      already closed stays closed. The
- *      SETTLED leaf is its own transaction on both chains (Soroban's per-tx budget forces it there;
- *      EVM matches so the relayer batches one shape), permissionless and single-shot.
+ *      SETTLED leaf is its own transaction on both chains so the relayer batches one shape,
+ *      permissionless and single-shot. (Historically this said Soroban's per-tx budget forced it
+ *      there; that was measured against the SDK harness default of 100M, not the network's 400M.
+ *      The split stands on the shape argument, not the CPU one.)
  */
 abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVerifierRegistry {
     using SafeERC20 for IERC20;
@@ -275,10 +279,14 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
         if (block.timestamp > cutoff) revert Escrow__OrderExpired(cutoff);
     }
 
-    /// @dev The leg is `Open` or in a presentation window: evidence may still settle it.
+    /// @dev The leg is `Open`, in a presentation window, or disputed: evidence may still settle it.
+    ///      `Disputed` belongs here because evidence beats arbitration at any time (2.3g D5) —
+    ///      including while a ruling's own window runs, which is what makes a ruling overridable.
     function _requirePresentable(bytes32 orderHash) internal view {
         Status s = _orders[orderHash].status;
-        if (s != Status.Open && s != Status.Claimed) revert Escrow__NotClaimable(orderHash, s);
+        if (s != Status.Open && s != Status.Claimed && s != Status.Disputed) {
+            revert Escrow__NotClaimable(orderHash, s);
+        }
     }
 
     /// @dev The leg must be exactly `expected` (`Open` before a claim, `None` before a never-locked cancel).
@@ -296,7 +304,10 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     function _requireSettleable(bytes32 orderHash, bytes32 nullifierHash) internal view {
         if (nullifierUsed[nullifierHash]) revert Escrow__NullifierUsed(nullifierHash);
         Status s = _orders[orderHash].status;
-        if (s != Status.Open && s != Status.Claimed) revert Escrow__OrderNotOpen(orderHash);
+        // `Disputed` too (2.3g D5): a co-signed unlock is evidence, and evidence beats arbitration.
+        if (s != Status.Open && s != Status.Claimed && s != Status.Disputed) {
+            revert Escrow__OrderNotOpen(orderHash);
+        }
     }
 
     /// @dev Gate for the evidence paths: the root must be notarized by the wired anchor (2.3e D7).

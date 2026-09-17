@@ -2,6 +2,7 @@
 pragma solidity ^0.8.34;
 
 import {IEscrow} from "./IEscrow.sol";
+import {Dispute} from "../libraries/Dispute.sol";
 
 /**
  * @title IOrderPortal — the bridger's leg: deposits against an ad, unlocked by the maker.
@@ -72,6 +73,15 @@ interface IOrderPortal is IEscrow {
     /// @notice Append the deposit's SETTLED leaf after a fill (D8). Permissionless, single-shot, its
     ///         own transaction — the relayer batches it behind the fill.
     function recordSettled(OrderParams calldata params) external;
+
+    /**
+     * @notice Apply a `BridgerForfeit` ruling made on the ad chain: the deposit goes to the maker.
+     * @dev The follower's entire part in a dispute, and proof-only by design — this escrow has no
+     *      dispute, no arbiter and no dispute clock. The other rulings all mean "refund the
+     *      bridger", which is what a CANCEL leaf already means, so they arrive via
+     *      {refundByCancel}.
+     */
+    function payMakerByForfeit(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof) external;
     /// @notice Open the backstop window at `now ≥ deadline + longBackstop` (an anchor outage): the
     ///         window is claim-anchored and may be finalized at `now + buffer`. Permissionless.
     function claimBackstop(OrderParams calldata params) external;

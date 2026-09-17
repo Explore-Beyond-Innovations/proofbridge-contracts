@@ -11,6 +11,7 @@ extern crate alloc;
 pub mod auth;
 pub mod cross_contract;
 pub mod decimal_scaling;
+pub mod dispute;
 pub mod eip712;
 pub mod errors;
 pub mod escrow_events;

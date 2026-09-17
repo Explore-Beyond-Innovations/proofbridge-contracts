@@ -9,6 +9,7 @@ import {
   writeManifest,
   type RootAnchorConfig,
   type RouteTiming,
+  type DisputeParams,
 } from "@proofbridge/deployment-manifest";
 import { deploymentsDir, evmAddressToBytes32 } from "./common.js";
 
@@ -71,11 +72,14 @@ export interface BuildManifestInput {
     counterpartyVerifier?: string;
     rootAnchor?: string;
     registrar?: string;
+    disputeManager?: string;
   };
   tokens: EvmTokenInput[];
   rootAnchorConfig?: RootAnchorConfig;
   /** Per peer chain id → the clocks link set; preserved across redeploys, written by link. */
   routeTiming?: Record<string, RouteTiming>;
+  /** Per peer chain id → the dispute params link set; preserved the same way (2.3g). */
+  disputeParams?: Record<string, DisputeParams>;
 }
 
 export function buildManifest(
@@ -119,10 +123,14 @@ export function buildManifest(
       ...(input.contracts.registrar
         ? { registrar: evmContractEntry(input.contracts.registrar) }
         : {}),
+      ...(input.contracts.disputeManager
+        ? { disputeManager: evmContractEntry(input.contracts.disputeManager) }
+        : {}),
     },
     tokens: input.tokens.map(tokenEntry),
     ...(input.rootAnchorConfig ? { rootAnchorConfig: input.rootAnchorConfig } : {}),
     routeTiming: input.routeTiming ?? {},
+    disputeParams: input.disputeParams ?? {},
     meta: {
       deployedAt: new Date().toISOString(),
       deployer: input.deployer,

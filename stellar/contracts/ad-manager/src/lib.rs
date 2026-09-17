@@ -16,7 +16,9 @@
 //! (accepted until `deadline + buffer - margin`) or a `present_settled` proof settles it; an
 //! unchallenged window releases the lock and records the CANCEL leaf the order leg refunds
 //! against. Every `Filled` gets a SETTLED leaf, appended by `record_settled` in its own
-//! transaction (Soroban's per-tx budget; EVM appends it inside the fill). The same state machine
+//! transaction (so the relayer batches one shape across both chains — not, as this once said, because
+//! Soroban's per-tx budget forces it: that was the SDK harness default of 100M, not the network's
+//! 400M). The same state machine
 //! as EVM:
 //!
 //! ```text
@@ -41,15 +43,15 @@ mod types;
 mod validation;
 
 use proofbridge_core::cross_contract::{
-    LEAF_DOMAIN_CANCEL, LEAF_DOMAIN_ORDER, LEAF_DOMAIN_SETTLED,
+    LEAF_DOMAIN_CANCEL, LEAF_DOMAIN_FORFEIT, LEAF_DOMAIN_ORDER, LEAF_DOMAIN_SETTLED,
 };
 use proofbridge_core::escrow_ops as ops;
 use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String};
 
 pub use errors::AdManagerError;
 pub use types::{
-    Ad, ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, OrderParams, OrderRecord, RouteTiming,
-    Status, NATIVE_TOKEN_ADDRESS,
+    Ad, ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, DisputeOutcome, OrderParams,
+    OrderRecord, RouteTiming, Status, NATIVE_TOKEN_ADDRESS,
 };
 
 // =============================================================================
@@ -199,6 +201,22 @@ impl AdManagerContract {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
         Ok(ops::set_route_timing(&env, chain_id, timing)?)
+    }
+
+    /// Set the dispute module this escrow reads (2.3g). Unset means disputes are unavailable here,
+    /// which is a safe default rather than a broken one.
+    pub fn set_dispute_manager(env: Env, manager: Address) -> Result<(), AdManagerError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        storage::set_dispute_manager(&env, &manager);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// The order hash this leg computes for these params — what the dispute module is keyed by.
+    pub fn hash_order(env: Env, params: OrderParams) -> Result<BytesN<32>, AdManagerError> {
+        let config = storage::get_config(&env)?;
+        Ok(Self::order_hash(&env, &config, &params))
     }
 
     /// Set the notary the evidence paths read (2.3e D7). Settlement never touches it.
@@ -661,6 +679,9 @@ impl AdManagerContract {
         cross_contract::verify_proof(&env, &config.verifier, &public_inputs, &proof)?;
 
         storage::set_nullifier_used(&env, &nullifier_hash);
+        // Evidence beats arbitration: if this order was disputed, that dispute ends here and the
+        // bond settles on what the proof shows, not on whatever the arbiter had ruled.
+        Self::close_dispute(&env, &order_hash, DisputeOutcome::TradeProceeds, &params)?;
         Self::fill(&env, &order_hash, &params.ad_settlement_signer, false);
         Self::pay_from_ad(&env, &config, &params)?;
 
@@ -698,6 +719,134 @@ impl AdManagerContract {
 
     /// After an unchallenged window: release the lock, mark `Cancelled`, append the CANCEL leaf
     /// the order leg refunds against.
+    // =========================================================================
+    // Disputes (2.3g)
+    // =========================================================================
+
+    /// File a dispute on an open or claimed leg, posting the route's bond.
+    ///
+    /// The bond goes straight to the module; this escrow never holds it, which is what keeps
+    /// "the escrow's balance is its order escrow" a single-contract invariant for 2.3h.
+    pub fn dispute(
+        env: Env,
+        params: OrderParams,
+        filer: Address,
+        evidence: BytesN<32>,
+    ) -> Result<u128, AdManagerError> {
+        Self::require_not_paused(&env)?;
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        // The amount is vouched for by the hash the caller had to reproduce; the module cannot do
+        // that itself, which is why filing starts here.
+        let amount = Self::ad_amount(&params)?;
+        // Only the order's two parties may file. Without this any address could dispute any live
+        // order and, one short challenge period later, cancel it out from under both of them.
+        // The bridger side is the same address this chain would pay, resolved the same way, so
+        // "who may file" and "who gets paid" cannot drift apart.
+        let ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
+        Self::require_party(&env, &filer, &ad.maker, &params.order_recipient)?;
+        let timing = Self::timing(&env, params.order_chain_id)?;
+        let bond = ops::open_dispute(
+            &env,
+            &env.current_contract_address(),
+            &order_hash,
+            amount,
+            params.order_chain_id,
+            &filer,
+            &evidence,
+            params.deadline,
+            timing.buffer,
+        )?;
+        storage::extend_instance_ttl(&env);
+        Ok(bond)
+    }
+
+    /// Record the counterparty's evidence hash on an open dispute.
+    ///
+    /// Only the order's other party may call it: the responder slot is single rather than an
+    /// append, so anyone able to write it could overwrite the genuine response one ledger before
+    /// the arbiter reads it.
+    pub fn respond_to_dispute(
+        env: Env,
+        params: OrderParams,
+        responder: Address,
+        evidence: BytesN<32>,
+    ) -> Result<(), AdManagerError> {
+        Self::require_not_paused(&env)?;
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        Self::require_status(&env, &order_hash, Status::Disputed)?;
+        let ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
+        Self::require_party(&env, &responder, &ad.maker, &params.order_recipient)?;
+        ops::record_response(
+            &env,
+            &env.current_contract_address(),
+            &order_hash,
+            &responder,
+            &evidence,
+        )?;
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Apply the module's outcome once its window is over, and settle the bond.
+    pub fn finalize_dispute(env: Env, params: OrderParams) -> Result<(), AdManagerError> {
+        Self::require_not_paused(&env)?;
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        Self::require_status(&env, &order_hash, Status::Disputed)?;
+
+        let (outcome, initiator) = ops::dispute_outcome(&env, &order_hash)?;
+
+        let ad_amount = Self::ad_amount(&params)?;
+        let mut ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
+        ad.locked -= ad_amount;
+        if outcome == DisputeOutcome::MakerForfeit {
+            // The maker forfeits its stake: the locked amount leaves the ad for the order's
+            // recipient. Every other vacuum outcome releases the lock back to liquidity, which the
+            // decrement above already did.
+            ad.balance -= ad_amount;
+        }
+        storage::set_ad(&env, &params.ad_id, &ad);
+        if outcome == DisputeOutcome::MakerForfeit {
+            ops::pay_or_credit(
+                &env,
+                &config.w_native_token,
+                &params.order_recipient,
+                &params.ad_chain_token,
+                ad_amount,
+            );
+        }
+
+        ops::resolve(&env, &order_hash, &params.ad_settlement_signer);
+        // The flag is absolute: was this filed by the bridger? Filing is restricted to the order's
+        // two parties, so on the ad leg "not the maker" is exactly "the bridger".
+        let filer_is_bridger = match initiator {
+            Some(ref who) => *who != ad.maker,
+            None => true,
+        };
+        ops::settle_bond(
+            &env,
+            &env.current_contract_address(),
+            &order_hash,
+            outcome,
+            filer_is_bridger,
+        )?;
+        // Broadcast the outcome to the follower, which has no dispute of its own and acts only on
+        // this leaf. CANCEL means "refund the bridger" and already did before 2.3g; FORFEIT is the
+        // one outcome that asks the follower for something else, so it is the one that needs a
+        // domain of its own. Appending CANCEL for a forfeit — which is what the first build did —
+        // hands the follower a proof of the opposite ruling.
+        let domain = if outcome == DisputeOutcome::BridgerForfeit {
+            LEAF_DOMAIN_FORFEIT
+        } else {
+            LEAF_DOMAIN_CANCEL
+        };
+        cross_contract::append_to_merkle(&env, &config.merkle_manager, &order_hash, domain)?;
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
     pub fn finalize_cancel(env: Env, params: OrderParams) -> Result<(), AdManagerError> {
         Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
@@ -784,6 +933,9 @@ impl AdManagerContract {
         );
         cross_contract::verify_proof(&env, &config.verifier, &inputs, &proof)?;
 
+        // Evidence beats arbitration: if this order was disputed, that dispute ends here and the
+        // bond settles on what the proof shows, not on whatever the arbiter had ruled.
+        Self::close_dispute(&env, &order_hash, DisputeOutcome::TradeProceeds, &params)?;
         Self::fill(&env, &order_hash, &params.ad_settlement_signer, true);
         Self::pay_from_ad(&env, &config, &params)?;
         storage::extend_instance_ttl(&env);
@@ -888,6 +1040,11 @@ impl AdManagerContract {
         storage::get_root_anchor(&env)
     }
 
+    /// The dispute module this escrow files to (2.3g). `None` = disputes unavailable here.
+    pub fn get_dispute_manager(env: Env) -> Option<Address> {
+        storage::get_dispute_manager(&env)
+    }
+
     /// The open presentation window on an order, if any.
     pub fn get_claim(env: Env, order_hash: BytesN<32>) -> Option<ClaimRecord> {
         storage::get_claim(&env, &order_hash)
@@ -967,6 +1124,59 @@ impl AdManagerContract {
 
     // ---- termination core (2.3e), mirrored by the order-portal ----
 
+    /// The order's two parties, as this chain knows them: whoever it would pay. Filing and
+    /// responding are both restricted to them (D11), and that restriction is what makes
+    /// `filer_is_bridger` provable rather than inferred — with only two possible filers, "not the
+    /// maker" and "is the bridger" are the same statement.
+    ///
+    /// The bridger side is resolved through the same conversion the payout uses, so the set of
+    /// addresses that may file and the set that can be paid cannot drift apart.
+    /// Close any dispute this evidence path has just overridden. A no-op when nothing was
+    /// disputed — but every path that admits `Disputed` must call it, or the status leaves
+    /// `Disputed`, `finalize_dispute` can never run again, and the bond is stranded for good.
+    fn close_dispute(
+        env: &Env,
+        order_hash: &BytesN<32>,
+        outcome: DisputeOutcome,
+        params: &OrderParams,
+    ) -> Result<(), AdManagerError> {
+        let filer = match ops::dispute_filer(env, order_hash) {
+            Some(who) => who,
+            None => return Ok(()),
+        };
+        let maker = match storage::get_ad(env, &params.ad_id) {
+            Some(ad) => ad.maker,
+            None => return Ok(()),
+        };
+        ops::close_dispute_by_evidence(
+            env,
+            &env.current_contract_address(),
+            order_hash,
+            outcome,
+            filer != maker,
+        );
+        Ok(())
+    }
+
+    fn require_party(
+        env: &Env,
+        filer: &Address,
+        maker: &Address,
+        bridger_side: &BytesN<32>,
+    ) -> Result<(), AdManagerError> {
+        if filer == maker {
+            return Ok(());
+        }
+        let bridger = proofbridge_core::token::bytes32_to_account_address::<AdManagerError>(
+            env,
+            bridger_side,
+        )?;
+        if *filer == bridger {
+            return Ok(());
+        }
+        Err(AdManagerError::NotAParty)
+    }
+
     /// The route's clocks, or `NoRouteTiming` (the `RootVerifierNotSet` posture).
     fn timing(env: &Env, chain_id: u128) -> Result<RouteTiming, AdManagerError> {
         Ok(ops::timing(env, chain_id)?)
@@ -992,10 +1202,11 @@ impl AdManagerContract {
         Ok(ops::require_presentable(env, order_hash)?)
     }
 
-    /// The co-signed unlock's status gate: `Open`, or `Claimed` (the unlock is the presentation).
+    /// The co-signed unlock's status gate: `Open`, `Claimed` (the unlock is the presentation), or
+    /// `Disputed` — a co-signed unlock is evidence, and evidence beats arbitration (2.3g D5).
     fn require_settleable(env: &Env, order_hash: &BytesN<32>) -> Result<(), AdManagerError> {
         match storage::get_order_status(env, order_hash) {
-            Status::Open | Status::Claimed => Ok(()),
+            Status::Open | Status::Claimed | Status::Disputed => Ok(()),
             _ => Err(AdManagerError::OrderNotOpen),
         }
     }

@@ -422,7 +422,9 @@ async function main() {
 
   // ----- Event claims: the same order's leaf under each event domain, no secret -----
   const eventRoots: Record<number, string> = {};
-  for (const domain of [2, 3, 4]) {
+  // 5 = FORFEIT (2.3g): the primary's BridgerForfeit ruling, the one dispute outcome the follower
+  // acts on differently from a cancel.
+  for (const domain of [2, 3, 4, 5]) {
     console.log(`Generating event claim (domain ${domain})...`);
     const tree = await buildSideTree(orderHashMod.toString(), domain);
     const { witness } = await noir.execute({

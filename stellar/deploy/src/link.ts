@@ -2,6 +2,7 @@ import {
   readManifest,
   type ChainDeploymentManifest,
   type RouteTiming,
+  type DisputeParams,
 } from "@proofbridge/deployment-manifest";
 import { DEFAULT_STELLAR_CHAIN_ID } from "./common.js";
 import { invokeContract } from "./stellar-cli.js";
@@ -273,6 +274,88 @@ export async function link(
     console.log("  [link] no RootAnchor in the local manifest; the escrows' evidence paths stay fail-closed");
   }
 
+  // ── Dispute module: both directions, then the route's params (2.3g) ──
+  // The escrow must know the module to file, and the module must know the escrow to accept the
+  // filing. Wiring one without the other leaves disputes dead in a way that only shows at use,
+  // so both edges are set here or neither is.
+  if (local.contracts.disputeManager) {
+    const moduleAddr = local.contracts.disputeManager.address;
+    const readOne = (contract: string, fn: string, args: string[]): unknown => {
+      try {
+        const out = invokeContract(contract, fn, args, { send: false });
+        return JSON.parse(out.split("\n").filter(Boolean).pop() ?? "null");
+      } catch {
+        return null;
+      }
+    };
+    // The primary only. The OrderPortal is the follower: no dispute, no arbiter, no clock of its
+    // own — it learns how one ended from an anchored proof of the primary's leaf.
+    for (const [name, escrow] of [
+      ["AdManager", local.contracts.adManager.address],
+    ] as const) {
+      if (readOne(escrow, "get_dispute_manager", []) === moduleAddr) {
+        console.log(`  [skip] ${name}.set_dispute_manager already ${moduleAddr}`);
+      } else {
+        invokeContract(escrow, "set_dispute_manager", ["--manager", moduleAddr]);
+        chainTxs++;
+        console.log(`  [link] ${name}.set_dispute_manager(${moduleAddr})`);
+      }
+      if (readOne(moduleAddr, "is_escrow", ["--escrow", escrow]) === true) {
+        console.log(`  [skip] DisputeManager.set_escrow(${name}) already allowed`);
+      } else {
+        invokeContract(moduleAddr, "set_escrow", ["--escrow", escrow, "--allowed", "true"]);
+        chainTxs++;
+        console.log(`  [link] DisputeManager.set_escrow(${name}=${escrow}, true)`);
+      }
+    }
+
+    // DISPUTE_{CHALLENGE_PERIOD_S,BOND_FLOOR,BOND_BPS}. Same rule as the clocks and the anchor
+    // delay: local deploys get the smallest legal values, anywhere else every variable is
+    // explicit, because a bond that silently defaults is a bond nobody chose.
+    const params = disputeParamsFromEnv(local.meta.env);
+    // u64/u32 slots go out as JSON numbers (a string there is read as an enum variant name);
+    // the u128 bond floor goes out as a string, which is how the CLI carries a u128.
+    const challengePeriod = BigInt(params.challengePeriod);
+    if (challengePeriod > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(
+        `link: DISPUTE_CHALLENGE_PERIOD_S=${params.challengePeriod} exceeds 2^53; the CLI JSON path cannot carry it exactly`,
+      );
+    }
+    const paramsArg = JSON.stringify({
+      challenge_period: Number(challengePeriod),
+      bond_floor: params.bondFloor,
+      bond_bps: params.bondBps,
+    });
+    const cur = readOne(moduleAddr, "dispute_params", ["--chain_id", peerChainId]) as {
+      challenge_period?: string | number;
+      bond_floor?: string | number;
+      bond_bps?: string | number;
+    } | null;
+    const same =
+      !!cur &&
+      BigInt(cur.challenge_period ?? -1) === challengePeriod &&
+      BigInt(cur.bond_floor ?? -1) === BigInt(params.bondFloor) &&
+      Number(cur.bond_bps ?? -1) === params.bondBps;
+    if (same) {
+      console.log(`  [skip] DisputeManager.set_dispute_params(${peerChainId}) already set`);
+    } else {
+      invokeContract(moduleAddr, "set_dispute_params", [
+        "--chain_id",
+        peerChainId,
+        "--params",
+        paramsArg,
+      ]);
+      chainTxs++;
+      console.log(
+        `  [link] DisputeManager.set_dispute_params(${peerChainId}, challengePeriod=${params.challengePeriod}s bondFloor=${params.bondFloor} bondBps=${params.bondBps})`,
+      );
+    }
+    local.disputeParams[peerChainId] = params;
+    await writeManifest(localPath, local);
+  } else {
+    console.log("  [link] no DisputeManager in the local manifest; disputes stay unavailable on this chain");
+  }
+
   // ── Per-pair token routes (two directions per pairKey) ────────────
   let routeTxs = 0;
   for (const localTok of local.tokens) {
@@ -321,6 +404,33 @@ export async function link(
 }
 
 export type { ChainDeploymentManifest };
+
+/**
+ * The dispute params from env, same rule as the clocks. The contract's floor is 1 hour and its bond
+ * cap is 10%; both are re-checked by the manifest schema, so a bad value fails before a transaction.
+ */
+function disputeParamsFromEnv(env: string): DisputeParams {
+  const isLocal = env === "local";
+  const read = (name: string, localDefault: string): string => {
+    const v = process.env[name];
+    if (v !== undefined) {
+      if (!/^\d+$/.test(v)) throw new Error(`link: ${name}="${v}" is not a whole number`);
+      return v;
+    }
+    if (isLocal) return localDefault;
+    throw new Error(
+      `link: ${name} is unset for env=${env}; set every DISPUTE_* parameter or deploy with DEPLOY_ENV=local`,
+    );
+  };
+  return {
+    challengePeriod: read("DISPUTE_CHALLENGE_PERIOD_S", "3600"),
+    // 1, not 0: `Dispute.validate` rejects a zero floor, because a zero floor with a zero bps
+    // is a free dispute. "The smallest legal value" is the rule everywhere here, and for this
+    // parameter the smallest legal value is one.
+    bondFloor: read("DISPUTE_BOND_FLOOR", "1"),
+    bondBps: Number(read("DISPUTE_BOND_BPS", "0")),
+  };
+}
 
 /** The route clocks from env: local deploys get the smallest legal set; elsewhere every var is required. */
 function routeTimingFromEnv(env: string): RouteTiming {

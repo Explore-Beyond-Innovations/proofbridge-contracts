@@ -1,0 +1,21 @@
+[package]
+name = "dispute-manager"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+proofbridge-core = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils", "alloc"] }
+test-token = { path = "../test-token" }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[features]
+testutils = ["soroban-sdk/testutils"]

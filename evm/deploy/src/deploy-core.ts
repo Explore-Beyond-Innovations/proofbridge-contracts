@@ -49,6 +49,7 @@ export interface DeployCoreResult {
     counterpartyVerifier: string;
     rootAnchor: string;
     registrar: string;
+    disputeManager: string;
   };
 }
 
@@ -261,6 +262,50 @@ export async function deployCore(
     },
   );
 
+  // The dispute module (2.3g) both escrows share. It holds bonds, never escrow funds, and takes no
+  // MerkleManager role — disputes append no leaf. Escrow ↔ module wiring happens at link time.
+  const disputeManagerAddr = await deployIfMissing(
+    "DisputeManager",
+    existing?.contracts.disputeManager?.address,
+    async () => {
+      const f = contractFactory("DisputeManager", "DisputeManager", signer);
+      const c = await f.deploy(admin, wNativeAddr, { nonce: nonces.next() });
+      await c.deploymentTransaction()?.wait();
+      return c as ethers.Contract;
+    },
+  );
+
+  // The arbiter and the fee pool, without which the module is deployed but inert: `resolveDispute`
+  // reverts for every caller, so every dispute falls to the fallback, and an unset fee pool returns
+  // every forfeited bond to the filer. Both are set here rather than left to a follow-up, because a
+  // half-wired dispute module is indistinguishable from a working one until someone files.
+  //
+  // The arbiter must not be the admin (2.3g D6): its whole containment is that it cannot pause an
+  // escrow, re-route tokens or re-point the anchor. Outside a local deploy both are explicit.
+  {
+    const dm = attachContract(disputeManagerAddr, "DisputeManager", "DisputeManager", signer);
+    const arbiterAddr = disputeRole("DISPUTE_ARBITER", env, admin);
+    const feePoolAddr = disputeRole("DISPUTE_FEE_POOL", env, admin);
+    if (env !== "local" && arbiterAddr.toLowerCase() === admin.toLowerCase()) {
+      throw new Error(
+        "deploy-core: DISPUTE_ARBITER must not be the admin — the arbiter's containment is that it holds no escrow powers",
+      );
+    }
+    for (const [name, fn, value] of [
+      ["arbiter", "setArbiter", arbiterAddr],
+      ["protocolFeePool", "setProtocolFeePool", feePoolAddr],
+    ] as const) {
+      const cur = await dm.getFunction(name)();
+      if (cur.toLowerCase() === value.toLowerCase()) {
+        console.log(`  [skip] DisputeManager.${fn} already ${value}`);
+        continue;
+      }
+      const tx = await dm.getFunction(fn)(value, { nonce: nonces.next() });
+      await tx.wait();
+      console.log(`  [deploy] DisputeManager.${fn}(${value})`);
+    }
+  }
+
   // ── wire the escrows as the registry's revoke guards ──────────────
   // Re-set every run (idempotent); guards only gate key revocation/rotation.
   {
@@ -364,12 +409,15 @@ export async function deployCore(
       counterpartyVerifier: counterpartyVerifierAddr,
       rootAnchor: rootAnchorAddr,
       registrar: registrarAddr,
+      disputeManager: disputeManagerAddr,
     },
     // Preserve tokens already in the manifest (added by deploy-test-tokens / hand-curation).
     tokens: (existing?.tokens ?? []) as BuildManifestInput["tokens"],
     // What the anchor was configured with; per-route delays are added by link.
     // The route clocks link set last time; a redeploy keeps them until link runs again.
     routeTiming: existing?.routeTiming,
+    // Same rule as the clocks: a redeploy keeps the dispute params until link runs again.
+    disputeParams: existing?.disputeParams,
     rootAnchorConfig: existing?.contracts.rootAnchor
       ? existing.rootAnchorConfig
       : { signers: anchorSigners, threshold: anchorThreshold, anchorDelays: {} },
@@ -393,6 +441,18 @@ export async function deployCore(
       counterpartyVerifier: counterpartyVerifierAddr,
       rootAnchor: rootAnchorAddr,
       registrar: registrarAddr,
+      disputeManager: disputeManagerAddr,
     },
   };
+}
+
+/// A dispute role address from env. Local deploys fall back to the admin so a dev stack works out of
+/// the box; everywhere else it must be named, like every other dispute parameter.
+function disputeRole(name: string, env: string, fallback: string): string {
+  const v = process.env[name];
+  if (v) return v;
+  if (env === "local") return fallback;
+  throw new Error(
+    `deploy-core: ${name} is unset for env=${env}; set it or deploy with DEPLOY_ENV=local`,
+  );
 }
