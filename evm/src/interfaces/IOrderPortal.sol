@@ -2,6 +2,7 @@
 pragma solidity ^0.8.34;
 
 import {IEscrow} from "./IEscrow.sol";
+import {Dispute} from "../libraries/Dispute.sol";
 
 /**
  * @title IOrderPortal — the bridger's leg: deposits against an ad, unlocked by the maker.
@@ -72,6 +73,11 @@ interface IOrderPortal is IEscrow {
     /// @notice Append the deposit's SETTLED leaf after a fill (D8). Permissionless, single-shot, its
     ///         own transaction — the relayer batches it behind the fill.
     function recordSettled(OrderParams calldata params) external;
+
+    /// @notice File a dispute on an open or claimed leg, posting the route's bond in native value.
+    function dispute(OrderParams calldata params, bytes32 evidence) external payable;
+    /// @notice Apply the module's outcome once its window is over, and settle the bond.
+    function finalizeDispute(OrderParams calldata params) external;
     /// @notice Open the backstop window at `now ≥ deadline + longBackstop` (an anchor outage): the
     ///         window is claim-anchored and may be finalized at `now + buffer`. Permissionless.
     function claimBackstop(OrderParams calldata params) external;

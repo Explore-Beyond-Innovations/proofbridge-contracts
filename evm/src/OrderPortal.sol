@@ -12,6 +12,7 @@ import {LeafDomain} from "./libraries/LeafDomain.sol";
 import {OrderHash} from "./libraries/OrderHash.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {RouteTiming} from "./libraries/RouteTiming.sol";
+import {Dispute} from "./libraries/Dispute.sol";
 import {Termination} from "./libraries/Termination.sol";
 
 /**
@@ -126,6 +127,43 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         // D4: no deadline read anywhere on this path.
         _cancel(orderHash, params.bridger, true);
         _refundBridger(orderHash, params);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                              DISPUTES (2.3g)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @inheritdoc IOrderPortal
+    function dispute(OrderParams calldata params, bytes32 evidence) external payable nonReentrant whenNotPaused {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        // The amount is vouched for by the hash the caller had to reproduce; the module cannot do
+        // that itself, which is why filing starts here.
+        _openDispute(orderHash, params.amount, params.adChainId, evidence);
+    }
+
+    /// @inheritdoc IOrderPortal
+    function finalizeDispute(OrderParams calldata params) external nonReentrant whenNotPaused {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        _requireStatus(orderHash, Status.Disputed);
+
+        (Dispute.Outcome outcome, bool windowOver, address initiator) = _disputeManager().outcomeOf(orderHash);
+        if (!windowOver) revert Escrow__DisputeNotResolved(orderHash);
+        // No ruling means the fallback: a mutual refund (D4).
+        if (outcome == Dispute.Outcome.None) outcome = Dispute.Outcome.MutualRefund;
+
+        _orders[orderHash].status = Status.Resolved;
+        _countOut(params.bridger);
+        if (outcome == Dispute.Outcome.BridgerForfeit) {
+            // The bridger forfeits its deposit: it goes to the maker's recipient on this chain.
+            _payMaker(params);
+        } else {
+            // Mutual refund, or a ruling against the maker — either way the deposit goes home.
+            _refundBridger(orderHash, params);
+        }
+
+        // This leg authenticates the bridger, so a filer who is not the bridger is the counterparty.
+        _disputeManager().settleBond(orderHash, initiator != params.bridger.toAddressChecked());
+        emit OrderCancelled(orderHash, false);
     }
 
     /// @inheritdoc IOrderPortal
