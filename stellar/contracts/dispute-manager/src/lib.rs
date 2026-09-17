@@ -61,7 +61,11 @@ impl DisputeManagerContract {
 
     /// Per-route parameters, validated at the write. Fail-closed: an unset route cannot be disputed
     /// rather than being disputed for free.
-    pub fn set_dispute_params(env: Env, chain_id: u128, params: DisputeParams) -> Result<(), Error> {
+    pub fn set_dispute_params(
+        env: Env,
+        chain_id: u128,
+        params: DisputeParams,
+    ) -> Result<(), Error> {
         Self::require_admin(&env)?;
         dispute::validate(&params).map_err(|f| match f {
             1 => Error::InvalidChallengePeriod,
@@ -106,7 +110,11 @@ impl DisputeManagerContract {
         let old = storage::get_admin(&env).ok_or(Error::NotInitialized)?;
         storage::set_admin(&env, &pending);
         storage::clear_pending_admin(&env);
-        events::AdminTransferred { from: old, to: pending }.publish(&env);
+        events::AdminTransferred {
+            from: old,
+            to: pending,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -296,7 +304,8 @@ impl DisputeManagerContract {
         match storage::get_dispute(&env, &order_hash) {
             None => (DisputeOutcome::None, false, None),
             Some(d) => {
-                let over = env.ledger().timestamp() >= Self::effective_challenge_deadline_of(&env, &d);
+                let over =
+                    env.ledger().timestamp() >= Self::effective_challenge_deadline_of(&env, &d);
                 (d.ruling, over, Some(d.initiator))
             }
         }

@@ -127,6 +127,14 @@ pub enum AdManagerError {
     SettledRecorded = 59,
     /// record_settled: the order is not `Filled`
     NotFilled = 60,
+
+    // Disputes (2.3g)
+    /// No dispute module is wired, so disputes are unavailable on this escrow.
+    NoDisputeManager = 61,
+    /// The order is not in a state a dispute can be filed on.
+    NotDisputable = 62,
+    /// The module's window has not closed, so there is nothing to apply yet.
+    DisputeNotResolved = 63,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for AdManagerError {
@@ -178,6 +186,9 @@ impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
             NothingToClaim => AdManagerError::NothingToClaim,
             InvalidTiming => AdManagerError::InvalidTiming,
             NotPendingAdmin => AdManagerError::NotPendingAdmin,
+            NoDisputeManager => AdManagerError::NoDisputeManager,
+            NotDisputable => AdManagerError::NotDisputable,
+            DisputeNotResolved => AdManagerError::DisputeNotResolved,
         }
     }
 }

@@ -16,7 +16,7 @@ use crate::cross_contract;
 use crate::errors::ProofBridgeError;
 use crate::escrow_events;
 use crate::escrow_storage as storage;
-use crate::types::{ClaimEntry, ClaimRecord, ContractConfig, RouteTiming, Status};
+use crate::types::{ClaimEntry, ClaimRecord, ContractConfig, DisputeOutcome, RouteTiming, Status};
 
 /// Why a shared check refused. Each escrow maps this onto its own error enum.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -34,6 +34,12 @@ pub enum Fault {
     NothingToClaim,
     InvalidTiming,
     NotPendingAdmin,
+    /// No dispute module is wired, so disputes are unavailable on this escrow.
+    NoDisputeManager,
+    /// The order is not in a state a dispute can be filed on.
+    NotDisputable,
+    /// The module's window has not closed, so there is nothing to apply yet.
+    DisputeNotResolved,
 }
 
 // =============================================================================
@@ -294,6 +300,95 @@ pub fn open_claim(env: &Env, order_hash: &BytesN<32>, entry: ClaimEntry, finaliz
         finalize_at,
     }
     .publish(env);
+}
+
+// =============================================================================
+// Disputes (2.3g)
+// =============================================================================
+
+/// The module, or `NoDisputeManager`.
+pub fn dispute_manager(env: &Env) -> Result<Address, Fault> {
+    storage::get_dispute_manager(env).ok_or(Fault::NoDisputeManager)
+}
+
+/// `Open | Claimed → Disputed`, with the bond handed straight to the module.
+///
+/// Note the direction, and the order. The escrow calls the module and the module never calls back —
+/// filing has to begin here anyway, because a leg stores `{status, paused_at_open}` and nothing
+/// else, so only this contract can hash an order and vouch for the amount that sizes the bond. And
+/// the module call runs *before* the status is committed, so a caller that ever swallowed its
+/// failure would leave the order `Open` with no record — a failed filing — rather than `Disputed`
+/// with no record, which is an order nobody can finalize.
+pub fn open_dispute(
+    env: &Env,
+    escrow: &Address,
+    order_hash: &BytesN<32>,
+    amount: u128,
+    peer_chain_id: u128,
+    filer: &Address,
+    evidence: &BytesN<32>,
+) -> Result<u128, Fault> {
+    match storage::get_order_status(env, order_hash) {
+        Status::Open | Status::Claimed => {}
+        _ => return Err(Fault::NotDisputable),
+    }
+    let manager = dispute_manager(env)?;
+    let bond = cross_contract::DisputeManagerClient::new(env, &manager).open_dispute(
+        escrow,
+        order_hash,
+        &amount,
+        &peer_chain_id,
+        filer,
+        evidence,
+    );
+    storage::set_order_status(env, order_hash, Status::Disputed);
+    Ok(bond)
+}
+
+/// The module's verdict, once its window has closed. `None` becomes the fallback's mutual refund.
+pub fn dispute_outcome(
+    env: &Env,
+    order_hash: &BytesN<32>,
+) -> Result<(DisputeOutcome, Option<Address>), Fault> {
+    let manager = dispute_manager(env)?;
+    let (outcome, window_over, initiator) =
+        cross_contract::DisputeManagerClient::new(env, &manager).outcome_of(order_hash);
+    if !window_over {
+        return Err(Fault::DisputeNotResolved);
+    }
+    let settled = if outcome == DisputeOutcome::None {
+        DisputeOutcome::MutualRefund
+    } else {
+        outcome
+    };
+    Ok((settled, initiator))
+}
+
+/// Tell the module the dispute is over so it can route the bond and close its record.
+pub fn settle_bond(
+    env: &Env,
+    escrow: &Address,
+    order_hash: &BytesN<32>,
+    filer_was_counterparty: bool,
+) -> Result<(), Fault> {
+    let manager = dispute_manager(env)?;
+    cross_contract::DisputeManagerClient::new(env, &manager).settle_bond(
+        escrow,
+        order_hash,
+        &filer_was_counterparty,
+    );
+    Ok(())
+}
+
+/// Evidence terminated a disputed order, so the dispute is over whatever the arbiter thought.
+/// A no-op when nothing was disputed, so the evidence paths can call it unconditionally.
+pub fn close_dispute_by_evidence(env: &Env, escrow: &Address, order_hash: &BytesN<32>) {
+    if let Some(manager) = storage::get_dispute_manager(env) {
+        let client = cross_contract::DisputeManagerClient::new(env, &manager);
+        if client.is_disputed(order_hash) {
+            client.settle_bond(escrow, order_hash, &false);
+        }
+    }
 }
 
 /// `Open | Claimed → Filled`: close the window, count out. The SETTLED leaf (D8) is appended by

@@ -50,8 +50,8 @@ use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String};
 
 pub use errors::AdManagerError;
 pub use types::{
-    Ad, ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, OrderParams, OrderRecord, RouteTiming,
-    Status, NATIVE_TOKEN_ADDRESS,
+    Ad, ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, DisputeOutcome, OrderParams,
+    OrderRecord, RouteTiming, Status, NATIVE_TOKEN_ADDRESS,
 };
 
 // =============================================================================
@@ -700,6 +700,95 @@ impl AdManagerContract {
 
     /// After an unchallenged window: release the lock, mark `Cancelled`, append the CANCEL leaf
     /// the order leg refunds against.
+    // =========================================================================
+    // Disputes (2.3g)
+    // =========================================================================
+
+    /// File a dispute on an open or claimed leg, posting the route's bond.
+    ///
+    /// The bond goes straight to the module; this escrow never holds it, which is what keeps
+    /// "the escrow's balance is its order escrow" a single-contract invariant for 2.3h.
+    pub fn dispute(
+        env: Env,
+        params: OrderParams,
+        filer: Address,
+        evidence: BytesN<32>,
+    ) -> Result<u128, AdManagerError> {
+        Self::require_not_paused(&env)?;
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        // The amount is vouched for by the hash the caller had to reproduce; the module cannot do
+        // that itself, which is why filing starts here.
+        let amount = Self::ad_amount(&params)?;
+        let bond = ops::open_dispute(
+            &env,
+            &env.current_contract_address(),
+            &order_hash,
+            amount,
+            params.order_chain_id,
+            &filer,
+            &evidence,
+        )?;
+        storage::extend_instance_ttl(&env);
+        Ok(bond)
+    }
+
+    /// Apply the module's outcome once its window is over, and settle the bond.
+    pub fn finalize_dispute(env: Env, params: OrderParams) -> Result<(), AdManagerError> {
+        Self::require_not_paused(&env)?;
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        Self::require_status(&env, &order_hash, Status::Disputed)?;
+
+        let (outcome, initiator) = ops::dispute_outcome(&env, &order_hash)?;
+
+        let ad_amount = Self::ad_amount(&params)?;
+        let mut ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
+        ad.locked -= ad_amount;
+        if outcome == DisputeOutcome::MakerForfeit {
+            // The maker forfeits its stake: the locked amount leaves the ad for the order's
+            // recipient. Every other vacuum outcome releases the lock back to liquidity, which the
+            // decrement above already did.
+            ad.balance -= ad_amount;
+        }
+        storage::set_ad(&env, &params.ad_id, &ad);
+        if outcome == DisputeOutcome::MakerForfeit {
+            ops::pay_or_credit(
+                &env,
+                &config.w_native_token,
+                &params.order_recipient,
+                &params.ad_chain_token,
+                ad_amount,
+            );
+        }
+
+        storage::set_order_status(&env, &order_hash, Status::Resolved);
+        storage::set_in_flight(
+            &env,
+            &params.ad_settlement_signer,
+            storage::get_in_flight(&env, &params.ad_settlement_signer) - 1,
+        );
+        // This leg authenticates the maker, so a filer who is not the maker is the counterparty.
+        let filer_was_counterparty = match initiator {
+            Some(ref who) => *who != ad.maker,
+            None => true,
+        };
+        ops::settle_bond(
+            &env,
+            &env.current_contract_address(),
+            &order_hash,
+            filer_was_counterparty,
+        )?;
+        cross_contract::append_to_merkle(
+            &env,
+            &config.merkle_manager,
+            &order_hash,
+            LEAF_DOMAIN_CANCEL,
+        )?;
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
     pub fn finalize_cancel(env: Env, params: OrderParams) -> Result<(), AdManagerError> {
         Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;

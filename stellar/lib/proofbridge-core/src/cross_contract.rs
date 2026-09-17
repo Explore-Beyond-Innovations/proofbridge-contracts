@@ -40,7 +40,10 @@ pub trait DisputeManagerInterface {
         evidence: BytesN<32>,
     ) -> u128;
     fn settle_bond(env: Env, escrow: Address, order_hash: BytesN<32>, filer_was_counterparty: bool);
-    fn outcome_of(env: Env, order_hash: BytesN<32>) -> (crate::types::DisputeOutcome, bool, Option<Address>);
+    fn outcome_of(
+        env: Env,
+        order_hash: BytesN<32>,
+    ) -> (crate::types::DisputeOutcome, bool, Option<Address>);
     fn is_disputed(env: Env, order_hash: BytesN<32>) -> bool;
 }
 

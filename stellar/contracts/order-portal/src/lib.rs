@@ -48,8 +48,8 @@ use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env};
 
 pub use errors::OrderPortalError;
 pub use types::{
-    ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, OrderParams, OrderRecord, RouteTiming,
-    Status, NATIVE_TOKEN_ADDRESS,
+    ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, DisputeOutcome, OrderParams, OrderRecord,
+    RouteTiming, Status, NATIVE_TOKEN_ADDRESS,
 };
 
 // =============================================================================
@@ -514,6 +514,77 @@ impl OrderPortalContract {
     }
 
     /// After an unchallenged backstop window: refund the bridger.
+    // =========================================================================
+    // Disputes (2.3g)
+    // =========================================================================
+
+    /// File a dispute on an open or claimed leg, posting the route's bond.
+    /// The bond goes straight to the module; this escrow never holds it.
+    pub fn dispute(
+        env: Env,
+        params: OrderParams,
+        filer: Address,
+        evidence: BytesN<32>,
+    ) -> Result<u128, OrderPortalError> {
+        Self::require_not_paused(&env)?;
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        let bond = ops::open_dispute(
+            &env,
+            &env.current_contract_address(),
+            &order_hash,
+            params.amount,
+            params.ad_chain_id,
+            &filer,
+            &evidence,
+        )?;
+        storage::extend_instance_ttl(&env);
+        Ok(bond)
+    }
+
+    /// Apply the module's outcome once its window is over, and settle the bond.
+    pub fn finalize_dispute(env: Env, params: OrderParams) -> Result<(), OrderPortalError> {
+        Self::require_not_paused(&env)?;
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        Self::require_status(&env, &order_hash, Status::Disputed)?;
+
+        let (outcome, initiator) = ops::dispute_outcome(&env, &order_hash)?;
+
+        storage::set_order_status(&env, &order_hash, Status::Resolved);
+        storage::set_in_flight(
+            &env,
+            &params.bridger,
+            storage::get_in_flight(&env, &params.bridger) - 1,
+        );
+
+        if outcome == DisputeOutcome::BridgerForfeit {
+            // The bridger forfeits its deposit: it goes to the maker's recipient on this chain.
+            Self::pay_maker(&env, &config, &params);
+        } else {
+            // Mutual refund, or a ruling against the maker — either way the deposit goes home.
+            Self::refund_bridger(&env, &config, &order_hash, &params);
+        }
+
+        // This leg authenticates the bridger, so a filer who is not the bridger is the counterparty.
+        let bridger_addr = proofbridge_core::token::bytes32_to_account_address::<OrderPortalError>(
+            &env,
+            &params.bridger,
+        )?;
+        let filer_was_counterparty = match initiator {
+            Some(ref who) => *who != bridger_addr,
+            None => true,
+        };
+        ops::settle_bond(
+            &env,
+            &env.current_contract_address(),
+            &order_hash,
+            filer_was_counterparty,
+        )?;
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
     pub fn finalize_backstop(env: Env, params: OrderParams) -> Result<(), OrderPortalError> {
         Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
