@@ -8,9 +8,10 @@
       "AD": 1,
       "CANCEL": 2,
       "SETTLED": 3,
-      "REGISTERED": 4
+      "REGISTERED": 4,
+      "FORFEIT": 5
     },
-    "domainMeaning": "the domain names the side/kind the leaf is CONSUMED on: 0 order-side unlock, 1 ad-side unlock, 2 cancel, 3 settled, 4 registered (2.1b, inner digest pinned there)",
+    "domainMeaning": "the domain names the side/kind the leaf is CONSUMED on: 0 order-side unlock, 1 ad-side unlock, 2 cancel, 3 settled, 4 registered (2.1b, inner digest pinned there), 5 forfeit (2.3g — the primary's BridgerForfeit ruling, which the follower pays the maker on)",
     "source": "leaf digests derive from order-hash-v2.json; regenerate that first"
   },
   "leafVectors": [
@@ -22,7 +23,8 @@
         "AD": "0x2f0f71f6f18ed3b47c30503a10b98b08309e57d63c3a6ba4e6f813cdb0ec3b7e",
         "CANCEL": "0x1e71cae68f4a80644016d35349172685954a59235d1f62998faa5f81f07f6b7b",
         "SETTLED": "0x1abd5552c0e5928c318bfa439a001453fa1e68bf1b59a21774b89f54aad14e8f",
-        "REGISTERED": "0x014f6e268923b9fa6ecb14e770fa21349c45616e9eb6eb46c4b173a6b41f7279"
+        "REGISTERED": "0x014f6e268923b9fa6ecb14e770fa21349c45616e9eb6eb46c4b173a6b41f7279",
+        "FORFEIT": "0x156a1b6009a62d81cda5a9a484ba940da2878e63947e661e987adee2d83d58e2"
       }
     },
     {
@@ -33,7 +35,8 @@
         "AD": "0x2b657fe8c542a2d63ed51e6d3b40e97b425d1cbbdeae5602f167d72940557d28",
         "CANCEL": "0x1d67d8912dbc0c1f7c85f9fc577dac29e4187ee296b201ff718d974b5854abf2",
         "SETTLED": "0x02de3c0cf0424f618d2638990d7973d8a00ab38665b47340deb8e7bfac3020a2",
-        "REGISTERED": "0x108d8e469069bae393ba3d91f872856db5b799ddcf8c614d8be821c93f44fcc8"
+        "REGISTERED": "0x108d8e469069bae393ba3d91f872856db5b799ddcf8c614d8be821c93f44fcc8",
+        "FORFEIT": "0x0a1476b26cccaa5eb4e1895da5cb52b9d56e2ba347b5478e9784ff70b0d91ae9"
       }
     },
     {
@@ -44,7 +47,8 @@
         "AD": "0x00069d40021711577eccb87baa985c2b5886524bb380b387cdda0c7224a2f09d",
         "CANCEL": "0x135cebc01b4b11519b9bf6f7e172d468ebc724519657f366a2e034ff1d683164",
         "SETTLED": "0x2a3918631516658c0f96d013ebfb7e67960806f9c794ed7416645ca424b3057e",
-        "REGISTERED": "0x2f46662fd4926ea19c43ea48f5ba60b54f3030c997fd9f6c7dd384ae7250e2db"
+        "REGISTERED": "0x2f46662fd4926ea19c43ea48f5ba60b54f3030c997fd9f6c7dd384ae7250e2db",
+        "FORFEIT": "0x2a946d797ab6955430ab23c2119473a801218b9101b2acc7fb8469f68e630e8c"
       }
     },
     {
@@ -55,7 +59,8 @@
         "AD": "0x2317a0fe9ed16601abd1ccc3bf2b09c58b89012ce30692b3da3f680efe9a602d",
         "CANCEL": "0x2ad7c59a4b918f551f09fd6c6ba26faa440b9b33f43f133f8d1086cf42017422",
         "SETTLED": "0x170357001234294aeb49bf238fb4af1cc6e7fe7b70b369cc2eaa6202925b6f08",
-        "REGISTERED": "0x243fe605722d6494716adfb3b0e1f921f05800ee3306f6ceb75b9aceacf4b061"
+        "REGISTERED": "0x243fe605722d6494716adfb3b0e1f921f05800ee3306f6ceb75b9aceacf4b061",
+        "FORFEIT": "0x2f8c1567a2fd1d96808744596ecc1d22dab6fcc2d3e30a190b7c73d942834bcd"
       }
     },
     {
@@ -66,7 +71,8 @@
         "AD": "0x13abb5d3b5f691a837436735b713aa7d4f17eb275921c5e242897f11c8cd7dac",
         "CANCEL": "0x17f38c82616f47aaa3604c78a165211c006c5d1ab31473bbf6ded99c1bb53765",
         "SETTLED": "0x1f786b0ed0fdf7b16ca461690029fd5884de9ec0f0511d77f6ee8f407ad222ca",
-        "REGISTERED": "0x2f9d1343dbe2be3a87304c3fa2750b95495f6c6f03dbb71e66c9bc7e27c287f9"
+        "REGISTERED": "0x2f9d1343dbe2be3a87304c3fa2750b95495f6c6f03dbb71e66c9bc7e27c287f9",
+        "FORFEIT": "0x20015d284e1384d433aabfbcbdfe314fdb66d7ad85a6571c8ad5dc271464dd3f"
       }
     },
     {
@@ -77,7 +83,8 @@
         "AD": "0x0f1f111c3e0234fac8c805303f0e9f66913543028997f360670052b977226a60",
         "CANCEL": "0x2b9774b79ede2be9483e483a7ab1926781635a5b07400a5ce3b794863a9abf00",
         "SETTLED": "0x21f3d8437a165ba41ba807242e56cd7d6d3b5a6247b59f51ba8c17e9d050bae7",
-        "REGISTERED": "0x28b1d590846b05b541ac45fec6e988cf2b7327efbde96f945daa1c98bdee813e"
+        "REGISTERED": "0x28b1d590846b05b541ac45fec6e988cf2b7327efbde96f945daa1c98bdee813e",
+        "FORFEIT": "0x09dfbb28bb181e5e4160fb37e3442e9a606e7268da8522bddbe77bc99bea1a41"
       }
     },
     {
@@ -88,7 +95,8 @@
         "AD": "0x2f605e91a0c3f43f027784e2ac3e0b62370dbfcae90557393dcf0d48483f2368",
         "CANCEL": "0x1736f038bdf07ae5165114f0f0cd5ee927ad10e2c1e6e94d7c1c87988fe0664d",
         "SETTLED": "0x2679adeb3460c2ce4dda5a1f5e09d9f45306b794765086d822169de3efd8324c",
-        "REGISTERED": "0x2bb303ee00de46316d7366b74b528a43dc9d76745169158587ff7b3c2a18c52d"
+        "REGISTERED": "0x2bb303ee00de46316d7366b74b528a43dc9d76745169158587ff7b3c2a18c52d",
+        "FORFEIT": "0x266021a31946ade4c77811057e5ee61bac5afe80c5bf184f92f260860e45960e"
       }
     },
     {
@@ -99,7 +107,8 @@
         "AD": "0x082973fe1c4d62329cb17a95b577b2c64e56bfb02d2e5376cd8f1fb25a8cfe32",
         "CANCEL": "0x148568a62bc84813a855d9eb3135fc1972eec348bce54345b99675d2ba78701e",
         "SETTLED": "0x2e24aab351a10d3518878ae43953829451851113a3bfaa398d706728a31798cf",
-        "REGISTERED": "0x0fc739012871e40b6f7e2a3d8b75b6eb6a6fa9a38b207a1439c67261bcff1d82"
+        "REGISTERED": "0x0fc739012871e40b6f7e2a3d8b75b6eb6a6fa9a38b207a1439c67261bcff1d82",
+        "FORFEIT": "0x0a2a872a443e31b7c0022948828bd6bb7261918252683b4d1a4711c4144efffc"
       }
     },
     {
@@ -110,7 +119,8 @@
         "AD": "0x1d2e26f5e95a7a3223c35ee916b8d32bf51d65ecd45584ab114a492bdbaf3543",
         "CANCEL": "0x2978646f59de6d160268e454ef112c6eeab88c23f2a2275961167d33b9a22474",
         "SETTLED": "0x2fffa8b46b3cc9fcf89deac029bfc499fe2c75df28646f41cad66f9d32f90617",
-        "REGISTERED": "0x29a92c61dee90cb84f89d46632591dd8c82105352ced34c62a402574ae725341"
+        "REGISTERED": "0x29a92c61dee90cb84f89d46632591dd8c82105352ced34c62a402574ae725341",
+        "FORFEIT": "0x02f67196af12046b0aafd98329de2f8f613af32528d313698ec2a2922d14e05b"
       }
     },
     {
@@ -121,7 +131,8 @@
         "AD": "0x04f0b4a9ed11cb7b63c3250ec29c2377f2a41a1db54b8d9ceb0939f4a3a884f9",
         "CANCEL": "0x0cb7835e2f9e9ce569803a9018efd9551db3c59b5c59033cceb5c7c3a94ac14f",
         "SETTLED": "0x11712867308a75b67968b1d5c1f3e9085ff9e2e410b2d62a1c63f3c7638e848e",
-        "REGISTERED": "0x299944c697774c76468c7b29eb55fa14ce75a748e5a92606a24fe042e2181c06"
+        "REGISTERED": "0x299944c697774c76468c7b29eb55fa14ce75a748e5a92606a24fe042e2181c06",
+        "FORFEIT": "0x006089737caf6ddfe3b8c50b5f0d851aae3728245ac2a511b369d0e948ed6986"
       }
     },
     {
@@ -132,7 +143,8 @@
         "AD": "0x148a69013c5264ddcb128bef0675373f78ae83807bf0dd6eb1f5cbaeb278d12f",
         "CANCEL": "0x2441a5bbbcfc81fe50fce358290982d46278ed70b2be8f228a400555753a13fe",
         "SETTLED": "0x041333ab0996edb10bdbab2f14c9c510fcf07618242894654219013d50bec332",
-        "REGISTERED": "0x2ea17885710f63157dc1c38f45420a1de8f713875cdbaa454e22b93e1a2106b7"
+        "REGISTERED": "0x2ea17885710f63157dc1c38f45420a1de8f713875cdbaa454e22b93e1a2106b7",
+        "FORFEIT": "0x2f709a0d26befd4710709fd96f15ace0b57d4dfb852c21c2b7ca38a4cadd3cca"
       }
     }
   ],
