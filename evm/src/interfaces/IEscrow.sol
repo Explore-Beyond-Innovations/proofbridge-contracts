@@ -5,6 +5,7 @@ import {IVerifier} from "./IVerifier.sol";
 import {IMerkleManager} from "./IMerkleManager.sol";
 import {IwNativeToken} from "../wNativeToken.sol";
 import {IRootAnchor} from "./IRootAnchor.sol";
+import {IDisputeManager} from "./IDisputeManager.sol";
 import {RouteTiming} from "../libraries/RouteTiming.sol";
 import {Termination} from "../libraries/Termination.sol";
 
@@ -65,6 +66,7 @@ interface IEscrow {
     event OrderCancelled(bytes32 indexed orderHash, bool byEvidence);
     event RouteTimingSet(uint256 indexed chainId, RouteTiming.Timing timing);
     event RootAnchorSet(address indexed rootAnchor);
+    event DisputeManagerSet(address indexed disputeManager);
     /// @notice A payout could not be pushed and was credited for `claim`.
     event PayoutCredited(address indexed recipient, address indexed token, uint256 amount);
     event PayoutClaimed(address indexed recipient, address indexed token, uint256 amount);
@@ -102,6 +104,12 @@ interface IEscrow {
     error Escrow__NotFilled(bytes32 orderHash);
     /// @notice `recordSettled`: the order's SETTLED leaf is already in the MMR.
     error Escrow__SettledRecorded(bytes32 orderHash);
+    /// @notice The order is not in a state a dispute can be filed on.
+    error Escrow__NotDisputable(bytes32 orderHash, Status status);
+    /// @notice No dispute module is wired, so disputes are unavailable on this escrow.
+    error Escrow__NoDisputeManager();
+    /// @notice The dispute has not reached a terminal state yet.
+    error Escrow__DisputeNotResolved(bytes32 orderHash);
 
     /*//////////////////////////////////////////////////////////////
                                  ADMIN
@@ -119,6 +127,8 @@ interface IEscrow {
     function setRouteTiming(uint256 chainId, RouteTiming.Timing calldata timing) external;
     /// @notice Set the notary the evidence paths (`presentSettled`, `refundByCancel`) read (2.3e D7).
     function setRootAnchor(IRootAnchor anchor) external;
+    /// @notice Set the dispute module this escrow reads (2.3g).
+    function setDisputeManager(IDisputeManager manager) external;
 
     /*//////////////////////////////////////////////////////////////
                                  ACTIONS
@@ -147,6 +157,7 @@ interface IEscrow {
         view
         returns (uint64 minWindow, uint64 buffer, uint64 margin, uint64 longBackstop, uint64 claimStagger);
     function rootAnchor() external view returns (IRootAnchor);
+    function disputeManager() external view returns (IDisputeManager);
     function claims(bytes32 orderHash)
         external
         view

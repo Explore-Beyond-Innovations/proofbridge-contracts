@@ -2,6 +2,7 @@
 pragma solidity ^0.8.34;
 
 import {IEscrow} from "./IEscrow.sol";
+import {Dispute} from "../libraries/Dispute.sol";
 import {IKeyRegistry} from "./IKeyRegistry.sol";
 
 /**
@@ -152,6 +153,12 @@ interface IAdManager is IEscrow {
     /// @notice Attest that an order the bridger deposited for was never locked here: `None` and
     ///         `now ≥ deadline` → `Cancelled` + CANCEL leaf. No funds move; nothing was counted.
     function cancelNeverLocked(OrderParams calldata params) external;
+
+    /// @notice File a dispute on an open or claimed leg, posting the route's bond in native value.
+    ///         The bond goes straight to the dispute module; this escrow never holds it.
+    function dispute(OrderParams calldata params, bytes32 evidence) external payable;
+    /// @notice Apply the module's outcome once its window is over, and settle the bond.
+    function finalizeDispute(OrderParams calldata params) external;
     /// @notice Settle the lock on a secret-free proof that the order leg already paid the maker (its
     ///         SETTLED leaf under a root the anchor notarized). `Open` or `Claimed`; no nullifier.
     function presentSettled(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof) external;

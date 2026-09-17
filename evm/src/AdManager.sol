@@ -13,6 +13,7 @@ import {LeafDomain} from "./libraries/LeafDomain.sol";
 import {OrderHash} from "./libraries/OrderHash.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {RouteTiming} from "./libraries/RouteTiming.sol";
+import {Dispute} from "./libraries/Dispute.sol";
 import {Termination} from "./libraries/Termination.sol";
 
 /**
@@ -243,6 +244,47 @@ contract AdManager is EscrowBase, IAdManager {
         _appendLeaf(orderHash, LeafDomain.CANCEL);
 
         emit LockCancelled(params.adId, orderHash, adAmount);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                              DISPUTES (2.3g)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @inheritdoc IAdManager
+    function dispute(OrderParams calldata params, bytes32 evidence) external payable nonReentrant whenNotPaused {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        // The amount is validated by the hash the caller had to reproduce, which is why filing
+        // starts here and not on the module: only this contract can vouch for it.
+        _openDispute(orderHash, _adAmount(params), params.orderChainId, evidence);
+    }
+
+    /// @inheritdoc IAdManager
+    function finalizeDispute(OrderParams calldata params) external nonReentrant whenNotPaused {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        _requireStatus(orderHash, Status.Disputed);
+
+        (Dispute.Outcome outcome, bool windowOver, address initiator) = _disputeManager().outcomeOf(orderHash);
+        if (!windowOver) revert Escrow__DisputeNotResolved(orderHash);
+        // No ruling means the fallback: a mutual refund, the unified primitive's terminal (D4).
+        if (outcome == Dispute.Outcome.None) outcome = Dispute.Outcome.MutualRefund;
+
+        Ad storage ad = ads[params.adId];
+        uint256 adAmount = _adAmount(params);
+        ad.locked -= adAmount;
+        if (outcome == Dispute.Outcome.MakerForfeit) {
+            // The maker forfeits its stake: the locked amount leaves the ad for the order's
+            // recipient. Every other vacuum outcome just releases the lock back to liquidity,
+            // which the decrement above already did.
+            ad.balance -= adAmount;
+            _payOrCredit(params.orderRecipient.toAddressChecked(), ad.token, adAmount);
+        }
+
+        _orders[orderHash].status = Status.Resolved;
+        _countOut(params.adSettlementSigner);
+        // This leg authenticates the maker, so a filer who is not the maker is the counterparty.
+        _disputeManager().settleBond(orderHash, initiator != ad.maker);
+        _appendLeaf(orderHash, LeafDomain.CANCEL);
+        emit OrderCancelled(orderHash, false);
     }
 
     /// @inheritdoc IAdManager
