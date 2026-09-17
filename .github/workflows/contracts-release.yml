@@ -113,22 +113,41 @@ jobs:
           VK_DIR="$STAGE/proof_circuits/events/target"
           mkdir -p "$WASM_DIR" "$EVM_OUT" "$VK_DIR"
 
-          cp stellar/target/wasm32v1-none/release/ad_manager.wasm      "$WASM_DIR/"
-          cp stellar/target/wasm32v1-none/release/order_portal.wasm    "$WASM_DIR/"
-          cp stellar/target/wasm32v1-none/release/merkle_manager.wasm  "$WASM_DIR/"
-          cp stellar/target/wasm32v1-none/release/verifier.wasm        "$WASM_DIR/"
-          cp stellar/target/wasm32v1-none/release/test_token.wasm      "$WASM_DIR/"
-          cp stellar/target/wasm32v1-none/release/agent_account.wasm   "$WASM_DIR/"
-          cp stellar/target/wasm32v1-none/release/root_anchor.wasm     "$WASM_DIR/"
-          cp stellar/target/wasm32v1-none/release/registrar.wasm       "$WASM_DIR/"
-          cp stellar/target/wasm32v1-none/release/bls_key_registry.wasm     "$WASM_DIR/"
-          cp stellar/target/wasm32v1-none/release/counterparty_verifier.wasm "$WASM_DIR/"
+          # Everything the build step produced, not a list kept in step with it by hand. The 5a072cf
+          # bundle shipped without dispute_manager.wasm because the contract was added to the build
+          # and not to the copy; `stellar contract build` already fails if a package does not
+          # compile, so copying what it made is both safer and self-maintaining.
+          cp stellar/target/wasm32v1-none/release/*.wasm "$WASM_DIR/"
+
+          # A bundle missing a contract looks exactly like a good one until somebody runs a deploy
+          # against it, so name what must be there and fail loudly if it is not.
+          for w in ad_manager order_portal merkle_manager verifier test_token agent_account \
+                   root_anchor registrar bls_key_registry counterparty_verifier dispute_manager; do
+            [ -f "$WASM_DIR/${w}.wasm" ] || { echo "::error::bundle is missing ${w}.wasm"; exit 1; }
+          done
 
           # Copy only the artifacts the deployer actually loads.
-          for c in OrderPortal AdManager MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20 BLSKeyRegistry CounterpartyVerifier libSCL_EIP6565 RootAnchor Registrar; do
+          EVM_ARTIFACTS="OrderPortal AdManager MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20 BLSKeyRegistry CounterpartyVerifier libSCL_EIP6565 RootAnchor Registrar DisputeManager"
+          for c in $EVM_ARTIFACTS; do
             mkdir -p "$EVM_OUT/${c}.sol"
             cp evm/out/${c}.sol/*.json "$EVM_OUT/${c}.sol/"
           done
+
+          # ...and cross-check that list against the CLI itself: every contract it instantiates has
+          # to be in the bundle. The list above stays explicit so the bundle's contents are
+          # reviewable, and this only ever *adds* a failure — if the scan under-matches, the bundle
+          # is still correct, it is merely less well guarded. DisputeManager shipped missing because
+          # nothing connected the two.
+          MISSING=""
+          for c in $(cat evm/deploy/src/*.ts | tr '\n' ' ' \
+                     | grep -oE '(contractFactoryLinked|contractFactory|attachContract)\([^)]*' \
+                     | grep -oE '"[A-Za-z0-9_]+" *, *"[A-Za-z0-9_]+"' \
+                     | sed -E 's/"([A-Za-z0-9_]+)".*/\1/' | sort -u); do
+            case " $EVM_ARTIFACTS " in *" $c "*) ;; *) MISSING="$MISSING $c" ;; esac
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::the deploy CLI loads these, and the bundle does not carry them:$MISSING"; exit 1
+          fi
 
           cp proof_circuits/events/target/vk "$VK_DIR/vk"
 
