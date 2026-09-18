@@ -5,7 +5,7 @@
 //! persistent, keyed by agent id, re-extended on every write and at use time.
 //! A revoked policy stays in place as the tombstone: `revoked: true` is sticky.
 
-use soroban_sdk::{contracttype, Address, BytesN, Env, Map, String, Symbol, TryFromVal, Val, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Env, String, Symbol, TryFromVal, Val, Vec};
 
 use proofbridge_core::rate_limit::{Bucket, Limit};
 
@@ -47,10 +47,11 @@ pub struct AgentPolicy {
     /// Per-token size and rate for this agent, in that token's own units. Every whitelisted token
     /// needs one: one number cannot be right for tokens that are not worth the same, which is the
     /// whole reason this is a map and not a scalar.
-    pub limits: Map<BytesN<32>, TokenLimit>,
-    /// Live bucket state, keyed the same way. Lives inside the policy rather than beside it so
-    /// there is no second entry that can archive on its own and read back as a full bucket (2.3h).
-    pub buckets: Map<BytesN<32>, Bucket>,
+    pub limits: Vec<TokenLimit>,
+    /// Live bucket state, one row per token spent from. Lives inside the policy rather than beside
+    /// it so there is no second entry that can archive on its own and read back as a full bucket
+    /// (2.3h).
+    pub buckets: Vec<TokenBucket>,
 }
 
 /// What an agent may do with one token: how big a single lock may be, and how fast it may keep
@@ -60,12 +61,65 @@ pub struct AgentPolicy {
 /// above `capacity` it can never bind, and below it, it is what forces a stolen key to make ten
 /// locks instead of one — ten chances for the watchtower to notice before the allowance is gone.
 #[contracttype]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TokenLimit {
+    /// Which token this row is for.
+    pub token: BytesN<32>,
     /// Cap on one lock, in this token's own units (what the escrow actually locks).
     pub max_per_order: u128,
     /// The refill bucket for this token.
     pub rate: Limit,
+}
+
+/// Live bucket state for one token, carried the same way and for the same reason.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenBucket {
+    pub token: BytesN<32>,
+    pub bucket: Bucket,
+}
+
+/// A `Vec` of rows carrying their own key, not a `Map<BytesN<32>, _>`.
+///
+/// The map is the obvious shape and it is unreadable off chain: `scValToNative` turns an `ScMap`
+/// into a JS object, and a 32-byte key becomes `String(Buffer)` — decoded as UTF-8, so any byte
+/// that is not valid UTF-8 lands on U+FFFD and the token id does not round-trip. Every off-chain
+/// mirror reads `policy()` through that path, so a map here would hand all of them limits they
+/// cannot attribute to a token. A vec of structs decodes losslessly: symbol keys for the fields,
+/// the token as a byte value rather than a key.
+///
+/// The cost on chain is a linear scan bounded by `MAX_WHITELIST_TOKENS` (16), which is what
+/// `token_whitelist.contains()` already does beside it.
+pub fn limit_for(policy: &AgentPolicy, token: &BytesN<32>) -> Option<TokenLimit> {
+    policy.limits.iter().find(|l| &l.token == token)
+}
+
+pub fn bucket_for(policy: &AgentPolicy, token: &BytesN<32>) -> Option<Bucket> {
+    policy
+        .buckets
+        .iter()
+        .find(|b| &b.token == token)
+        .map(|b| b.bucket)
+}
+
+/// Replace this token's bucket, or append it the first time it is spent from.
+pub fn put_bucket(policy: &mut AgentPolicy, token: &BytesN<32>, bucket: Bucket) {
+    for (i, b) in policy.buckets.iter().enumerate() {
+        if &b.token == token {
+            policy.buckets.set(
+                i as u32,
+                TokenBucket {
+                    token: token.clone(),
+                    bucket,
+                },
+            );
+            return;
+        }
+    }
+    policy.buckets.push_back(TokenBucket {
+        token: token.clone(),
+        bucket,
+    });
 }
 
 /// The 2.1c shape, kept so an account upgraded in place can still read what it wrote.
@@ -185,8 +239,8 @@ pub fn get_policy(env: &Env, agent: &AgentId) -> Option<AgentPolicy> {
             revoked: v1.revoked,
             settlement_signer: v1.settlement_signer,
             ad_scope: None,
-            limits: Map::new(env),
-            buckets: Map::new(env),
+            limits: Vec::new(env),
+            buckets: Vec::new(env),
         });
     }
     // Neither shape. Unreachable today — v1 and v2 are the only ones that have existed — and a
@@ -286,14 +340,20 @@ pub fn validate(env: &Env, policy: &AgentPolicy) -> Result<(), AccountError> {
         return Err(AccountError::BadPolicy);
     }
 
-    // Every whitelisted token needs a limit, and nothing outside the whitelist may carry one. The
-    // whitelist says which tokens are permitted at all; `limits` says how much. A token in one and
-    // not the other is a half-written policy, not a default.
+    // Every whitelisted token needs exactly one limit, and nothing outside the whitelist may carry
+    // one. The whitelist says which tokens are permitted at all; `limits` says how much, and a
+    // token in one and not the other is a half-written policy rather than a default.
+    //
+    // Two checks are enough, and a third would be unreachable. The loop below finds a row for every
+    // whitelisted token, which is ≥ N distinct rows for N tokens; with the count pinned to N there
+    // is no room left for a duplicate or for a row naming a token that is not on the list. An
+    // explicit "every row is whitelisted, and no row repeats" pass was written here first and could
+    // not be made to fail — the length plus the forward lookup already cover it.
     if policy.limits.len() != tokens.len() {
         return Err(AccountError::BadPolicy);
     }
     for t in tokens.iter() {
-        match policy.limits.get(t.clone()) {
+        match limit_for(policy, &t) {
             Some(l) => validate_token_limit(&l)?,
             None => return Err(AccountError::BadPolicy),
         }

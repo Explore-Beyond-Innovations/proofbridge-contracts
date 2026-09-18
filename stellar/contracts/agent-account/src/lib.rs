@@ -29,7 +29,7 @@ use soroban_sdk::{
     auth::{Context, CustomAccountInterface},
     contract, contractimpl,
     crypto::Hash,
-    vec, Address, BytesN, ContractExecutable, Env, IntoVal, Map, String, Symbol, Vec,
+    vec, Address, BytesN, ContractExecutable, Env, IntoVal, String, Symbol, Vec,
 };
 
 use policy::TokenLimit;
@@ -86,7 +86,7 @@ impl AgentAccount {
         valid_until: u64,
         settlement_signer: BytesN<32>,
         ad_scope: Option<Vec<String>>,
-        limits: Map<BytesN<32>, TokenLimit>,
+        limits: Vec<TokenLimit>,
     ) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
@@ -105,7 +105,7 @@ impl AgentAccount {
             settlement_signer: settlement_signer.clone(),
             ad_scope,
             limits,
-            buckets: Map::new(&env),
+            buckets: Vec::new(&env),
         };
         policy::validate(&env, &p)?;
         policy::set_policy(&env, &agent_id, &p);

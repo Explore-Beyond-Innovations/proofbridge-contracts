@@ -93,10 +93,8 @@ pub fn check_contract_call(
     let ad_decimals: u32 = field(env, &lock, "ad_decimals")?;
     let ad_amount = proofbridge_core::decimal_scaling::scale(amount, order_decimals, ad_decimals)
         .map_err(|_| AccountError::BadArgs)?;
-    let token_limit = policy
-        .limits
-        .get(ad_chain_token.clone())
-        .ok_or(AccountError::NoVolumeLimit)?;
+    let token_limit =
+        policy::limit_for(policy, &ad_chain_token).ok_or(AccountError::NoVolumeLimit)?;
     if ad_amount > token_limit.max_per_order {
         return Err(AccountError::CapExceeded);
     }
@@ -140,17 +138,13 @@ fn spend_volume(
     // tokens are permitted at all, `limits` says how much, and silence in the second is not
     // permission. `validate` already makes the two agree at install; this is the read-side half of
     // that, and it is what a policy written by an older wasm would trip on.
-    let agent_limit = policy
-        .limits
-        .get(token.clone())
+    let agent_limit = policy::limit_for(policy, token)
         .ok_or(AccountError::NoVolumeLimit)?
         .rate;
     // No stored bucket means never spent — the policy entry holds the buckets, so this cannot be
     // an entry that quietly archived and read back as full.
-    let agent_bucket = policy
-        .buckets
-        .get(token.clone())
-        .unwrap_or_else(|| Bucket::full(&agent_limit, now));
+    let agent_bucket =
+        policy::bucket_for(policy, token).unwrap_or_else(|| Bucket::full(&agent_limit, now));
 
     // Absence here means *unconfigured*, and refuses. The limit and the bucket share one entry
     // precisely so this read cannot see a live bucket with a vanished ceiling.
@@ -165,7 +159,7 @@ fn spend_volume(
     // has run. Writing it here would be wrong as well as wasteful: an auth entry carrying two
     // locks hands each context the same policy, so a per-context write would have the second
     // overwrite the first's debit and make the second lock free.
-    policy.buckets.set(token.clone(), next_agent);
+    policy::put_bucket(policy, token, next_agent);
     policy::set_account_volume(
         env,
         token,
