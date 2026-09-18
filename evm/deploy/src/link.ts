@@ -3,6 +3,7 @@ import {
   type ChainDeploymentManifest,
   type RouteTiming,
   type DisputeParams,
+  duplicatePairKeys,
 } from "@proofbridge/deployment-manifest";
 import { connect, requireEnv } from "./common.js";
 import { attachContract } from "./artifacts.js";
@@ -313,6 +314,27 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
   }
 
   // ── Per-pair token routes (two directions per pairKey) ────────────
+  //
+  // `pairKey` is the deployer's claim that the two sides are the SAME underlying asset, and the
+  // protocol relies on it rather than checking it: an order carries one `amount`, the counterpart
+  // figure is a power-of-ten decimal rescale, and nothing prices one token against the other. A
+  // pairKey shared by two different assets settles them 1:1 and silently mis-pays — and re-opens
+  // risk 01 F4, whose rate floor was withdrawn *because* routes are same-asset (design 01 §1.3).
+  //
+  // Same-asset is not machine-checkable across chains: WXLM and XLM are one asset under two
+  // symbols. What is checkable is that the claim is well formed, and this is the moment it is being
+  // made, with both manifests in hand. A duplicate key is the plausible way a wrong pairing
+  // arrives, and `find` below would silently route whichever row came first.
+  for (const [side, m] of [["local", local], ["peer", peer]] as const) {
+    const dupes = duplicatePairKeys(m.tokens);
+    if (dupes.length) {
+      throw new Error(
+        `link: the ${side} manifest uses pairKey ${dupes.map((d) => `"${d}"`).join(", ")} more than once — ` +
+          `a pairKey names one asset, and routing would pick one of the rows arbitrarily`,
+      );
+    }
+  }
+
   let routeTxs = 0;
   for (const localTok of local.tokens) {
     const peerTok = peer.tokens.find((t) => t.pairKey === localTok.pairKey);
