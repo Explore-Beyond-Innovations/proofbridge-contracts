@@ -5,7 +5,7 @@
 //! persistent, keyed by agent id, re-extended on every write and at use time.
 //! A revoked policy stays in place as the tombstone: `revoked: true` is sticky.
 
-use soroban_sdk::{contracttype, Address, BytesN, Env, Map, String, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Env, Map, String, Symbol, TryFromVal, Val, Vec};
 
 use proofbridge_core::rate_limit::{Bucket, Limit};
 
@@ -51,6 +51,24 @@ pub struct AgentPolicy {
     /// Live bucket state, keyed the same way. Lives inside the policy rather than beside it so
     /// there is no second entry that can archive on its own and read back as a full bucket (2.3h).
     pub buckets: Map<BytesN<32>, Bucket>,
+}
+
+/// The 2.1c shape, kept so an account upgraded in place can still read what it wrote.
+///
+/// A `#[contracttype]` struct is an `ScMap` keyed by field name, and the derived conversion wants
+/// the exact key set — so a v1 entry read straight into `AgentPolicy` does not return `None`, it
+/// traps. Without this, upgrading an account with policies installed would leave every one of its
+/// agent ids unusable *and* unrepairable: `__check_auth`, `policy`, `revoke_agent` and `set_policy`
+/// all read the entry first, so the owner could not even revoke.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AgentPolicyV1 {
+    pub allowed_actions: Vec<Symbol>,
+    pub token_whitelist: Vec<BytesN<32>>,
+    pub max_per_order: u128,
+    pub valid_until: u64,
+    pub revoked: bool,
+    pub settlement_signer: BytesN<32>,
 }
 
 #[contracttype]
@@ -125,10 +143,39 @@ pub fn set_targets(env: &Env, targets: &Vec<Address>) -> Result<(), AccountError
     Ok(())
 }
 
+/// Read a policy, migrating a 2.1c entry on the way through.
+///
+/// Lazy migration rather than a sweep: Soroban cannot enumerate keys, so there is no upgrade-time
+/// pass that could find every agent id. A v1 entry surfaces as a v2 policy with **no limits**,
+/// which makes it useless rather than dangerous — `spend_volume` refuses a token with no limit, so
+/// the agent cannot lock — while leaving the owner every repair: `policy` reads it, `revoke_agent`
+/// tombstones it, `set_policy` replaces it with a metered one. The `revoked` flag is carried across
+/// so the tombstone survives the upgrade; losing it would let a revoked id be re-installed.
+///
+/// The migration is read-only. Writing it back here would mean `__check_auth` persisting on a path
+/// that may go on to reject, and the owner has to re-install anyway to supply limits.
 pub fn get_policy(env: &Env, agent: &AgentId) -> Option<AgentPolicy> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::Policy(agent.clone()))
+    let key = DataKey::Policy(agent.clone());
+    let raw: Val = env.storage().persistent().get(&key)?;
+    if let Ok(p) = AgentPolicy::try_from_val(env, &raw) {
+        return Some(p);
+    }
+    if let Ok(v1) = AgentPolicyV1::try_from_val(env, &raw) {
+        return Some(AgentPolicy {
+            allowed_actions: v1.allowed_actions,
+            token_whitelist: v1.token_whitelist,
+            max_per_order: v1.max_per_order,
+            valid_until: v1.valid_until,
+            revoked: v1.revoked,
+            settlement_signer: v1.settlement_signer,
+            ad_scope: None,
+            limits: Map::new(env),
+            buckets: Map::new(env),
+        });
+    }
+    // Neither shape. Unreachable today — v1 and v2 are the only ones that have existed — and a
+    // strict read traps, which is what happened before this function knew about v1 at all.
+    env.storage().persistent().get(&key)
 }
 
 pub fn set_policy(env: &Env, agent: &AgentId, policy: &AgentPolicy) {
@@ -188,9 +235,17 @@ pub fn validate(env: &Env, policy: &AgentPolicy) -> Result<(), AccountError> {
     if tokens.is_empty() || tokens.len() > MAX_WHITELIST_TOKENS {
         return Err(AccountError::BadPolicy);
     }
-    for t in tokens.iter() {
+    for (i, t) in tokens.iter().enumerate() {
         if proofbridge_core::auth::is_zero_bytes32(&t) {
             return Err(AccountError::BadPolicy);
+        }
+        // Duplicates, like `allowed_actions` and `ad_scope`. Containment of `limits` is checked by
+        // length below, and a repeated token would make that length lie: `[A, A]` with limits
+        // `{A, B}` would balance, and `B` — never whitelisted — would carry a limit.
+        for j in 0..i {
+            if tokens.get(j as u32) == Some(t.clone()) {
+                return Err(AccountError::BadPolicy);
+            }
         }
     }
 
@@ -214,9 +269,16 @@ pub fn validate(env: &Env, policy: &AgentPolicy) -> Result<(), AccountError> {
         return Err(AccountError::BadPolicy);
     }
     for t in tokens.iter() {
-        match policy.limits.get(t) {
+        match policy.limits.get(t.clone()) {
             Some(l) => validate_limit(&l)?,
             None => return Err(AccountError::BadPolicy),
+        }
+        // And the account-wide ceiling has to exist too, or this policy installs cleanly and then
+        // fails on its first lock with `NoVolumeLimit`. Fail-closed either way, but the owner
+        // deserves the answer at install rather than from an agent that mysteriously cannot work,
+        // and `set_account_limit` before `set_policy` is an ordering nothing else states.
+        if get_account_volume(env, &t).is_none() {
+            return Err(AccountError::NoVolumeLimit);
         }
     }
 

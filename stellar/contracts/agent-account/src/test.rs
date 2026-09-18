@@ -123,6 +123,17 @@ fn fixture() -> Fixture {
     let order_token = b32(&env, 0xBB);
     let signer = address_to_bytes32(&env, &account);
     let tokens = vec![&env, ad_token.clone(), order_token.clone()];
+    // Ceilings first: `validate` refuses a policy naming a token the account has no limit for, so
+    // that a broken ordering is an install-time answer rather than an agent that cannot work.
+    for t in tokens.iter() {
+        client.set_account_limit(
+            &t,
+            &Limit {
+                capacity: u128::MAX / 2,
+                refill_per_second: 1,
+            },
+        );
+    }
     client.set_policy(
         &agent.id(&env),
         &vec![&env, lock_for_order(&env)],
@@ -133,17 +144,6 @@ fn fixture() -> Fixture {
         &None,
         &wide(&env, &tokens),
     );
-    // Every lock debits the account-wide bucket too, so an account with none configured cannot
-    // lock at all. Wide here for the same reason as `wide` above.
-    for t in tokens.iter() {
-        client.set_account_limit(
-            &t,
-            &Limit {
-                capacity: u128::MAX / 2,
-                refill_per_second: 1,
-            },
-        );
-    }
 
     Fixture {
         env,
@@ -1139,6 +1139,15 @@ fn escrow_fixture() -> Escrow {
 
     let agent = Agent::new(7);
     let signer = address_to_bytes32(&env, &account);
+    for t in [ad_token.clone(), order_token.clone()] {
+        client.set_account_limit(
+            &t,
+            &Limit {
+                capacity: u128::MAX / 2,
+                refill_per_second: 1,
+            },
+        );
+    }
     client.set_policy(
         &agent.id(&env),
         &vec![&env, lock_for_order(&env)],
@@ -1149,15 +1158,6 @@ fn escrow_fixture() -> Escrow {
         &None,
         &wide(&env, &vec![&env, ad_token.clone(), order_token.clone()]),
     );
-    for t in [ad_token.clone(), order_token.clone()] {
-        client.set_account_limit(
-            &t,
-            &Limit {
-                capacity: u128::MAX / 2,
-                refill_per_second: 1,
-            },
-        );
-    }
 
     Escrow {
         env,
@@ -1621,39 +1621,46 @@ fn t07_two_agents_share_one_account_ceiling() {
     expect_err(r, AccountError::VolumeExceeded);
 }
 
-/// The account bucket is not configured, so there is no ceiling to spend against. Absence refuses
-/// rather than reading as unlimited — the 2.3h rule, applied before it can bite.
+/// The account ceiling has to exist, and its absence refuses at both ends.
+///
+/// At install, because a policy naming a token the account has no limit for would install cleanly
+/// and then fail on its first lock — fail-closed, but the owner gets no answer until an agent
+/// mysteriously cannot work. At use, because the row can still go away underneath a live policy:
+/// its TTL is extended on every write, so an account idle past the window archives it. Absence
+/// refuses there too; it never reads as an unlimited ceiling (2.3h).
 #[test]
-fn an_unconfigured_account_limit_refuses_instead_of_admitting_everything() {
+fn a_missing_account_ceiling_refuses_at_install_and_at_use() {
     let f = fixture();
-    install_metered(&f, 1_000, 10, None);
-    let other = b32(&f.env, 0x5E);
-    let mut p = params(&f);
-    p.ad_chain_token = other.clone();
-    // Whitelist and meter the token on the policy, but never configure the account ceiling.
-    let tokens = vec![&f.env, other.clone(), f.order_token.clone()];
-    let mut limits = Map::new(&f.env);
-    for t in tokens.iter() {
-        limits.set(
-            t,
-            Limit {
-                capacity: 1_000,
-                refill_per_second: 1,
-            },
-        );
-    }
-    f.client.set_policy(
-        &f.agent.id(&f.env),
-        &vec![&f.env, lock_for_order(&f.env)],
-        &tokens,
-        &u128::MAX,
-        &0_u64,
-        &f.signer,
-        &None,
-        &limits,
+    let unmetered = b32(&f.env, 0x5E);
+    let tokens = vec![&f.env, unmetered.clone(), f.order_token.clone()];
+    assert_eq!(
+        f.client.try_set_policy(
+            &f.agent.id(&f.env),
+            &vec![&f.env, lock_for_order(&f.env)],
+            &tokens,
+            &1_u128,
+            &0_u64,
+            &f.signer,
+            &None,
+            &wide(&f.env, &tokens),
+        ),
+        Err(Ok(AccountError::NoVolumeLimit)),
+        "the account has no ceiling for this token"
     );
-    let ctxs = lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]);
-    expect_err(agent_check(&f, &ctxs), AccountError::NoVolumeLimit);
+
+    // Now the use-time half: a policy installed against a live ceiling, whose row then archives.
+    install_metered(&f, 1_000, 1, None);
+    agent_check(&f, &lock_of(&f, 1, "ad-1")).expect("works while the ceiling is there");
+    f.env.as_contract(&f.account, || {
+        f.env
+            .storage()
+            .persistent()
+            .remove(&policy::DataKey::AccountVolume(f.ad_token.clone()));
+    });
+    expect_err(
+        agent_check(&f, &lock_of(&f, 1, "ad-1")),
+        AccountError::NoVolumeLimit,
+    );
 }
 
 /// One auth entry carrying two locks must pay for both. The policy is read once and handed to
@@ -1838,9 +1845,41 @@ fn every_whitelisted_token_must_carry_a_limit() {
     }
 }
 
-/// Lowering the account ceiling applies at once and never tops the bucket up — an owner who could
-/// refill by re-setting the limit would have a cap that resets on demand, which is the fixed
-/// window this replaced.
+/// Raising the refill rate must not re-price the idle interval at the new rate. The first version
+/// of this test re-set the same rate at the same timestamp and so proved nothing: drain, wait,
+/// raise the rate, and the bucket came back full — the cap-resets-on-demand the clamp is supposed
+/// to prevent, reached through the rate instead of the level.
+#[test]
+fn raising_the_refill_rate_does_not_replay_the_idle_window() {
+    let f = fixture();
+    install_metered(&f, u128::MAX / 2, 1, None);
+    f.client.set_account_limit(
+        &f.ad_token,
+        &Limit {
+            capacity: 1_000,
+            refill_per_second: 1,
+        },
+    );
+    agent_check(&f, &lock_of(&f, 1_000, "ad-1")).unwrap();
+
+    // 100 idle seconds are worth 100 units at the old rate. Raising the rate must not make them
+    // worth 100_000.
+    f.env.ledger().set_timestamp(T0 + 100);
+    f.client.set_account_limit(
+        &f.ad_token,
+        &Limit {
+            capacity: 1_000,
+            refill_per_second: 1_000,
+        },
+    );
+    expect_err(
+        agent_check(&f, &lock_of(&f, 101, "ad-1")),
+        AccountError::VolumeExceeded,
+    );
+    agent_check(&f, &lock_of(&f, 100, "ad-1")).expect("the 100 seconds it actually idled");
+}
+
+/// Lowering the account ceiling applies at once and never tops the bucket up.
 #[test]
 fn re_setting_the_account_limit_clamps_and_never_refills() {
     let f = fixture();
@@ -1867,4 +1906,139 @@ fn re_setting_the_account_limit_clamps_and_never_refills() {
         AccountError::VolumeExceeded,
     );
     agent_check(&f, &lock_of(&f, 100, "ad-1")).expect("the remaining 100");
+}
+
+/// G1: an account upgraded in place must not lose the agents it already had.
+///
+/// A 2.1c policy is an `ScMap` with six keys; reading it straight into the nine-key 2.1d struct
+/// traps rather than returning `None`, and every entry point that touches an agent reads its policy
+/// first — so before the lazy migration, upgrading bricked the id in every direction at once: it
+/// could not act, be inspected, be revoked, or be replaced.
+#[test]
+fn a_2_1c_policy_survives_the_upgrade_useless_but_repairable() {
+    let f = fixture();
+    let old = Agent::new(11);
+    let id = old.id(&f.env);
+
+    // Write what 2.1c wrote, straight past the current `set_policy`.
+    f.env.as_contract(&f.account, || {
+        f.env.storage().persistent().set(
+            &policy::DataKey::Policy(id.clone()),
+            &policy::AgentPolicyV1 {
+                allowed_actions: vec![&f.env, lock_for_order(&f.env)],
+                token_whitelist: vec![&f.env, f.ad_token.clone(), f.order_token.clone()],
+                max_per_order: 1_000_000,
+                valid_until: 0,
+                revoked: false,
+                settlement_signer: f.signer.clone(),
+            },
+        );
+    });
+
+    // Readable, and the fields that existed came across.
+    let migrated = f.client.policy(&id).expect("a v1 policy still reads");
+    assert_eq!(migrated.max_per_order, 1_000_000);
+    assert_eq!(migrated.settlement_signer, f.signer);
+    assert!(migrated.ad_scope.is_none(), "unscoped, as it was");
+    assert!(migrated.limits.is_empty(), "no limits: it predates them");
+
+    // Useless rather than dangerous: with no limit the agent cannot lock.
+    let payload = b32(&f.env, 0x01);
+    let sig = old.sign(&f.env, &payload);
+    let r = f.env.try_invoke_contract_check_auth::<AccountError>(
+        &f.account,
+        &payload,
+        sig.into_val(&f.env),
+        &lock_of(&f, 1, "ad-1"),
+    );
+    expect_err(r, AccountError::NoVolumeLimit);
+
+    // And repairable: the owner can meter it, and it works.
+    let tokens = vec![&f.env, f.ad_token.clone(), f.order_token.clone()];
+    f.client.set_policy(
+        &id,
+        &vec![&f.env, lock_for_order(&f.env)],
+        &tokens,
+        &1_000_000_u128,
+        &0_u64,
+        &f.signer,
+        &None,
+        &wide(&f.env, &tokens),
+    );
+    let sig = old.sign(&f.env, &payload);
+    f.env
+        .try_invoke_contract_check_auth::<AccountError>(
+            &f.account,
+            &payload,
+            sig.into_val(&f.env),
+            &lock_of(&f, 1, "ad-1"),
+        )
+        .expect("re-installed and metered");
+}
+
+/// The tombstone has to survive the upgrade too, or a revoked id could be re-installed by an owner
+/// whose key was the reason it was revoked.
+#[test]
+fn a_revoked_2_1c_policy_is_still_revoked_after_the_upgrade() {
+    let f = fixture();
+    let id = Agent::new(12).id(&f.env);
+    f.env.as_contract(&f.account, || {
+        f.env.storage().persistent().set(
+            &policy::DataKey::Policy(id.clone()),
+            &policy::AgentPolicyV1 {
+                allowed_actions: vec![&f.env, lock_for_order(&f.env)],
+                token_whitelist: vec![&f.env, f.ad_token.clone()],
+                max_per_order: 1,
+                valid_until: 0,
+                revoked: true,
+                settlement_signer: f.signer.clone(),
+            },
+        );
+    });
+    assert!(f.client.is_revoked(&id));
+    let tokens = vec![&f.env, f.ad_token.clone()];
+    assert_eq!(
+        f.client.try_set_policy(
+            &id,
+            &vec![&f.env, lock_for_order(&f.env)],
+            &tokens,
+            &1_u128,
+            &0_u64,
+            &f.signer,
+            &None,
+            &wide(&f.env, &tokens),
+        ),
+        Err(Ok(AccountError::AgentRevoked))
+    );
+}
+
+/// G4: a repeated token would make the length-based containment check lie — `[A, A]` balances
+/// against limits `{A, B}`, and `B` would carry a limit while never being whitelisted.
+#[test]
+fn a_duplicate_whitelisted_token_is_refused() {
+    let f = fixture();
+    let dup = vec![&f.env, f.ad_token.clone(), f.ad_token.clone()];
+    let mut limits = Map::new(&f.env);
+    for t in [f.ad_token.clone(), f.order_token.clone()] {
+        limits.set(
+            t,
+            Limit {
+                capacity: 1,
+                refill_per_second: 1,
+            },
+        );
+    }
+    assert_eq!(
+        f.client.try_set_policy(
+            &f.agent.id(&f.env),
+            &vec![&f.env, lock_for_order(&f.env)],
+            &dup,
+            &1_u128,
+            &0_u64,
+            &f.signer,
+            &None,
+            &limits,
+        ),
+        Err(Ok(AccountError::BadPolicy))
+    );
 }

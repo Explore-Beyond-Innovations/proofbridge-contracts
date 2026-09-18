@@ -50,14 +50,17 @@ pub fn available(limit: &Limit, bucket: &Bucket, now: u64) -> u128 {
     // Checked, then clamped. A saturating multiply would silently pin an absurd refill_rate to
     // u128::MAX and then clamp to capacity — the same answer here, but only by luck, and the two
     // chains would have to get lucky identically. Overflow means "more than capacity" outright.
-    let refilled = match limit.refill_per_second.checked_mul(elapsed) {
-        Some(r) => bucket.level.saturating_add(r),
-        None => limit.capacity,
-    };
-    if refilled > limit.capacity {
-        limit.capacity
-    } else {
-        refilled
+    let refilled = limit
+        .refill_per_second
+        .checked_mul(elapsed)
+        .and_then(|r| bucket.level.checked_add(r));
+    match refilled {
+        Some(r) if r <= limit.capacity => r,
+        // Both arms of the arithmetic are checked, and both overflows mean the same thing: more
+        // than capacity. A saturating add would land on u128::MAX and clamp to the same answer by
+        // luck — and an EVM mirror would revert on the row instead of returning capacity, so the
+        // fixture that is supposed to prove the two agree could not cover it.
+        _ => limit.capacity,
     }
 }
 
@@ -70,9 +73,17 @@ pub fn try_spend(limit: &Limit, bucket: &Bucket, spend: u128, now: u64) -> Optio
     }
     Some(Bucket {
         level: level - spend,
-        // `now`, not `bucket.last_ts`: the refill above is already folded into `level`, so keeping
-        // the old timestamp would hand out the same seconds again on the next call.
-        last_ts: now,
+        // Never earlier than the stored stamp. `now` alone would let a call at an earlier timestamp
+        // rewind the clock, and the next call at the true time would then refill that interval a
+        // second time — so the "a clock that goes backwards is not a refund" rule would hold for a
+        // read and break across a sequence. Neither chain can produce a decreasing timestamp today;
+        // this file is the one 2.1g mirrors and 2.1h drives from a single fixture, where the two
+        // agreeing is the whole point.
+        last_ts: if now > bucket.last_ts {
+            now
+        } else {
+            bucket.last_ts
+        },
     })
 }
 
@@ -147,6 +158,31 @@ mod tests {
             0,
             "an earlier `now` is not a refill"
         );
+    }
+
+    /// F3: the rule has to survive a *sequence*, not just a query. Spend at an earlier stamp than
+    /// the stored one, then at the true time: the rewound interval must not be paid for twice.
+    #[test]
+    fn a_backwards_spend_does_not_rewind_the_stored_clock() {
+        let b = try_spend(&L, &Bucket::full(&L, 1_000), 1_000, 1_000).unwrap();
+        let b = try_spend(&L, &b, 0, 900).unwrap();
+        assert_eq!(b.last_ts, 1_000, "the stamp never moves backwards");
+        assert_eq!(available(&L, &b, 1_010), 100, "10s of refill, not 110s");
+    }
+
+    /// G3: a level near the ceiling plus a large refill must resolve to capacity through the
+    /// checked path, not by saturating to u128::MAX and clamping.
+    #[test]
+    fn an_overflowing_level_plus_refill_is_capacity_not_a_wrap() {
+        let wide = Limit {
+            capacity: u128::MAX,
+            refill_per_second: u128::MAX,
+        };
+        let b = Bucket {
+            level: u128::MAX - 1,
+            last_ts: 0,
+        };
+        assert_eq!(available(&wide, &b, 1), u128::MAX);
     }
 
     #[test]

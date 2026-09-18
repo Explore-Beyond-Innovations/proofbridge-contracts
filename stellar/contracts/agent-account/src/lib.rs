@@ -32,7 +32,7 @@ use soroban_sdk::{
     vec, Address, BytesN, ContractExecutable, Env, IntoVal, Map, String, Symbol, Vec,
 };
 
-use proofbridge_core::rate_limit::{Bucket, Limit};
+use proofbridge_core::rate_limit::{self, Bucket, Limit};
 
 pub use auth::{AccountSig, Ed25519Sig, SecpSig};
 pub use errors::AccountError;
@@ -134,20 +134,27 @@ impl AgentAccount {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
         policy::validate_limit(&limit)?;
+        let now = env.ledger().timestamp();
         let bucket = match policy::get_account_volume(&env, &token) {
             Some(v) => {
-                // A lowered capacity applies at once: clamp, never top up.
-                let level = if v.bucket.level > limit.capacity {
+                // Settle at the OLD rate first, then re-stamp. Carrying the old `last_ts` into a
+                // new limit would re-price the whole idle interval at the new `refill_per_second`:
+                // drain the bucket, wait, raise the rate, and the next lock sees a full bucket —
+                // the cap-that-resets-on-demand this method exists to prevent, reached through the
+                // rate instead of the level. Then clamp, so a lowered capacity applies at once and
+                // never tops up.
+                let settled = rate_limit::available(&v.limit, &v.bucket, now);
+                let level = if settled > limit.capacity {
                     limit.capacity
                 } else {
-                    v.bucket.level
+                    settled
                 };
                 Bucket {
                     level,
-                    last_ts: v.bucket.last_ts,
+                    last_ts: now,
                 }
             }
-            None => Bucket::full(&limit, env.ledger().timestamp()),
+            None => Bucket::full(&limit, now),
         };
         policy::set_account_volume(&env, &token, &policy::AccountVolume { limit, bucket });
         events::AccountLimitSet { token }.publish(&env);
@@ -178,6 +185,10 @@ impl AgentAccount {
         proofbridge_core::ttl::extend_instance(&env);
         env.deployer()
             .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
+        // The marker has to move with the code, or `schema_version()` reports whatever the
+        // constructor wrote years ago and nothing can branch on it. Policies migrate lazily on
+        // read (`policy::get_policy`); this is the part that says which shape new writes take.
+        policy::set_schema_version(&env);
         events::Upgraded { new_wasm_hash }.publish(&env);
         Ok(())
     }
