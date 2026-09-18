@@ -61,7 +61,10 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          # 20, matching the monorepo's copy of this workflow: the two run the same steps and a
+          # gate whose halves run on different runtimes will eventually pass on one and fail on
+          # the other.
+          node-version: "20"
           cache: "pnpm"
 
       - name: Install dependencies

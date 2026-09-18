@@ -74,7 +74,11 @@ jobs:
 
       - uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: stable
+          # Pinned, same as evm-contracts.yml: forge gas metering changed in newer releases and
+          # inflates the UnlockGas.t.sol budget deltas by ~52k at the same commit, solc and
+          # evm_version. This is the workflow that publishes the deployment bundle, so it is the
+          # last place a moving "stable" belongs. Bump deliberately, with the gas ceilings.
+          version: v1.7.1
 
       # ── builds ──────────────────────────────────────────────────────
       # --optimize is explicit so the bundle the deploy flow ships is optimized
