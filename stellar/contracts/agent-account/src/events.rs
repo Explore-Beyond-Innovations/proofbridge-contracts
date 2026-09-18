@@ -17,6 +17,14 @@ pub struct AgentRevoked {
     pub agent_id: BytesN<32>,
 }
 
+/// The account-wide volume ceiling for one token changed (2.1d). The numbers stay off the event:
+/// an indexer that wants them reads the row, and a limit is not a thing to reconstruct from logs.
+#[contractevent(topics = ["acct_lim"], data_format = "single-value")]
+pub struct AccountLimitSet {
+    #[topic]
+    pub token: BytesN<32>,
+}
+
 /// Emitted by the constructor and by `set_targets`, so an event-only indexer
 /// sees the initial escrow set too.
 #[contractevent(topics = ["tgt_set"], data_format = "single-value")]

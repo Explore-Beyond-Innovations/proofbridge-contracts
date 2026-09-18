@@ -92,6 +92,22 @@ fn deploy(
 
 /// Account + one pinned target + one installed agent policy (cap 1_000_000
 /// ad units, both tokens listed, no expiry).
+/// Volume limits wide enough that a test which is not about volume never trips them. Volume has
+/// its own tests; everything else should keep testing what it was written to test.
+fn wide(env: &Env, tokens: &Vec<BytesN<32>>) -> Map<BytesN<32>, Limit> {
+    let mut m = Map::new(env);
+    for t in tokens.iter() {
+        m.set(
+            t,
+            Limit {
+                capacity: u128::MAX / 2,
+                refill_per_second: 1,
+            },
+        );
+    }
+    m
+}
+
 fn fixture() -> Fixture {
     let env = Env::default();
     env.ledger().set_timestamp(T0);
@@ -106,14 +122,28 @@ fn fixture() -> Fixture {
     let ad_token = b32(&env, 0xAA);
     let order_token = b32(&env, 0xBB);
     let signer = address_to_bytes32(&env, &account);
+    let tokens = vec![&env, ad_token.clone(), order_token.clone()];
     client.set_policy(
         &agent.id(&env),
         &vec![&env, lock_for_order(&env)],
-        &vec![&env, ad_token.clone(), order_token.clone()],
+        &tokens,
         &1_000_000_u128,
         &0_u64,
         &signer,
+        &None,
+        &wide(&env, &tokens),
     );
+    // Every lock debits the account-wide bucket too, so an account with none configured cannot
+    // lock at all. Wide here for the same reason as `wide` above.
+    for t in tokens.iter() {
+        client.set_account_limit(
+            &t,
+            &Limit {
+                capacity: u128::MAX / 2,
+                refill_per_second: 1,
+            },
+        );
+    }
 
     Fixture {
         env,
@@ -300,6 +330,8 @@ fn non_owner_cannot_set_policy_revoke_or_set_targets() {
             &1_u128,
             &0_u64,
             &f.signer,
+            &None,
+            &wide(&f.env, &vec![&f.env, f.ad_token.clone()]),
         )
         .is_err());
     assert!(f.client.try_revoke_agent(&id).is_err());
@@ -331,6 +363,8 @@ fn set_policy_rejects_reserved_and_unknown_selectors() {
             &1_u128,
             &0_u64,
             &f.signer,
+            &None,
+            &wide(&f.env, &vec![&f.env, f.ad_token.clone()]),
         );
         assert_eq!(r, Err(Ok(AccountError::BadPolicy)), "{bad}");
     }
@@ -345,31 +379,59 @@ fn set_policy_validates_lengths_and_zero_values() {
     let ok_tokens = vec![&f.env, f.ad_token.clone()];
 
     // empty actions / 5 actions
-    let r = f
-        .client
-        .try_set_policy(&id, &Vec::new(&f.env), &ok_tokens, &1, &0, &f.signer);
+    let r = f.client.try_set_policy(
+        &id,
+        &Vec::new(&f.env),
+        &ok_tokens,
+        &1,
+        &0,
+        &f.signer,
+        &None,
+        &wide(&f.env, &ok_tokens),
+    );
     assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
     let mut five = Vec::new(&f.env);
     for _ in 0..5 {
         five.push_back(lock_for_order(&f.env));
     }
-    let r = f
-        .client
-        .try_set_policy(&id, &five, &ok_tokens, &1, &0, &f.signer);
+    let r = f.client.try_set_policy(
+        &id,
+        &five,
+        &ok_tokens,
+        &1,
+        &0,
+        &f.signer,
+        &None,
+        &wide(&f.env, &ok_tokens),
+    );
     assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
 
     // empty tokens / 17 tokens / zero token
-    let r = f
-        .client
-        .try_set_policy(&id, &ok_actions, &Vec::new(&f.env), &1, &0, &f.signer);
+    let r = f.client.try_set_policy(
+        &id,
+        &ok_actions,
+        &Vec::new(&f.env),
+        &1,
+        &0,
+        &f.signer,
+        &None,
+        &Map::new(&f.env),
+    );
     assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
     let mut seventeen = Vec::new(&f.env);
     for i in 1..=17u8 {
         seventeen.push_back(b32(&f.env, i));
     }
-    let r = f
-        .client
-        .try_set_policy(&id, &ok_actions, &seventeen, &1, &0, &f.signer);
+    let r = f.client.try_set_policy(
+        &id,
+        &ok_actions,
+        &seventeen,
+        &1,
+        &0,
+        &f.signer,
+        &None,
+        &wide(&f.env, &seventeen),
+    );
     assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
     let r = f.client.try_set_policy(
         &id,
@@ -378,36 +440,81 @@ fn set_policy_validates_lengths_and_zero_values() {
         &1,
         &0,
         &f.signer,
+        &None,
+        &wide(&f.env, &vec![&f.env, b32(&f.env, 0)]),
     );
     assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
 
     // zero cap / zero signer / expiry in the past
-    let r = f
-        .client
-        .try_set_policy(&id, &ok_actions, &ok_tokens, &0, &0, &f.signer);
+    let r = f.client.try_set_policy(
+        &id,
+        &ok_actions,
+        &ok_tokens,
+        &0,
+        &0,
+        &f.signer,
+        &None,
+        &wide(&f.env, &ok_tokens),
+    );
     assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
-    let r = f
-        .client
-        .try_set_policy(&id, &ok_actions, &ok_tokens, &1, &0, &b32(&f.env, 0));
+    let r = f.client.try_set_policy(
+        &id,
+        &ok_actions,
+        &ok_tokens,
+        &1,
+        &0,
+        &b32(&f.env, 0),
+        &None,
+        &wide(&f.env, &ok_tokens),
+    );
     assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
-    let r = f
-        .client
-        .try_set_policy(&id, &ok_actions, &ok_tokens, &1, &T0, &f.signer);
+    let r = f.client.try_set_policy(
+        &id,
+        &ok_actions,
+        &ok_tokens,
+        &1,
+        &T0,
+        &f.signer,
+        &None,
+        &wide(&f.env, &ok_tokens),
+    );
     assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
     // foreign settlement signer (F5: until 2.3b only this account may be named)
-    let r = f
-        .client
-        .try_set_policy(&id, &ok_actions, &ok_tokens, &1, &0, &b32(&f.env, 0x77));
+    let r = f.client.try_set_policy(
+        &id,
+        &ok_actions,
+        &ok_tokens,
+        &1,
+        &0,
+        &b32(&f.env, 0x77),
+        &None,
+        &wide(&f.env, &ok_tokens),
+    );
     assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
     // duplicate selector
     let dup = vec![&f.env, lock_for_order(&f.env), lock_for_order(&f.env)];
-    let r = f
-        .client
-        .try_set_policy(&id, &dup, &ok_tokens, &1, &0, &f.signer);
+    let r = f.client.try_set_policy(
+        &id,
+        &dup,
+        &ok_tokens,
+        &1,
+        &0,
+        &f.signer,
+        &None,
+        &wide(&f.env, &ok_tokens),
+    );
     assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
     // and the boundary that is fine
-    f.client
-        .set_policy(&id, &ok_actions, &ok_tokens, &1, &(T0 + 1), &f.signer);
+    f.client.set_policy(
+        &id,
+        &ok_actions,
+        &ok_tokens,
+        &1,
+        &(T0 + 1),
+        &f.signer,
+        &None,
+        &wide(&f.env, &ok_tokens),
+    );
 }
 
 #[test]
@@ -534,6 +641,11 @@ fn expired_policy_rejected_at_boundary() {
         &1_000_000,
         &(T0 + 100),
         &f.signer,
+        &None,
+        &wide(
+            &f.env,
+            &vec![&f.env, f.ad_token.clone(), f.order_token.clone()],
+        ),
     );
     let ctxs = lock_ctx(&f.env, &f.target, vec![&f.env, params(&f).into_val(&f.env)]);
 
@@ -572,6 +684,8 @@ fn revoked_agent_rejected_and_revocation_is_sticky() {
         &1,
         &0,
         &f.signer,
+        &None,
+        &wide(&f.env, &vec![&f.env, f.ad_token.clone()]),
     );
     assert_eq!(r, Err(Ok(AccountError::AgentRevoked)));
     expect_err(agent_check(&f, &ctxs), AccountError::AgentRevoked);
@@ -856,6 +970,11 @@ fn secp256k1_agent_authorizes_and_wrong_signer_has_no_policy() {
         &1_000_000,
         &0,
         &f.signer,
+        &None,
+        &wide(
+            &f.env,
+            &vec![&f.env, f.ad_token.clone(), f.order_token.clone()],
+        ),
     );
     let ctxs = lock_ctx(&f.env, &f.target, vec![&f.env, params(&f).into_val(&f.env)]);
     let payload = b32(&f.env, 0x01);
@@ -1027,7 +1146,18 @@ fn escrow_fixture() -> Escrow {
         &1_000_000_u128,
         &0_u64,
         &signer,
+        &None,
+        &wide(&env, &vec![&env, ad_token.clone(), order_token.clone()]),
     );
+    for t in [ad_token.clone(), order_token.clone()] {
+        client.set_account_limit(
+            &t,
+            &Limit {
+                capacity: u128::MAX / 2,
+                refill_per_second: 1,
+            },
+        );
+    }
 
     Escrow {
         env,
@@ -1367,4 +1497,374 @@ impl MockKeyRegistry {
             .get(&(soroban_sdk::symbol_short!("usable"), account))
             .unwrap_or(false)
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 2.1d — volume buckets and ad scope
+// ─────────────────────────────────────────────────────────────────────────
+
+/// A policy whose only wide thing is the token list: one token, a real limit, and a scope the
+/// caller picks. `cap`/`refill` are in ad-token units, the same units the escrow locks.
+fn install_metered(
+    f: &Fixture,
+    cap: u128,
+    refill: u128,
+    scope: Option<Vec<String>>,
+) -> Map<BytesN<32>, Limit> {
+    let tokens = vec![&f.env, f.ad_token.clone(), f.order_token.clone()];
+    let limit = Limit {
+        capacity: cap,
+        refill_per_second: refill,
+    };
+    let mut limits = Map::new(&f.env);
+    for t in tokens.iter() {
+        limits.set(t, limit);
+    }
+    f.client.set_policy(
+        &f.agent.id(&f.env),
+        &vec![&f.env, lock_for_order(&f.env)],
+        &tokens,
+        &u128::MAX,
+        &0_u64,
+        &f.signer,
+        &scope,
+        &limits,
+    );
+    limits
+}
+
+fn lock_of(f: &Fixture, amount: u128, ad_id: &str) -> Vec<Context> {
+    let mut p = params(f);
+    p.amount = amount;
+    p.ad_id = String::from_str(&f.env, ad_id);
+    lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)])
+}
+
+/// T-07, the boundary half. A fixed window passes this at 2×: spend the cap just before the
+/// rollover and again just after. Continuous refill has no rollover to sit either side of, so one
+/// second buys exactly one second of allowance and nothing else.
+#[test]
+fn t07_a_drained_bucket_refills_by_the_second_not_by_the_window() {
+    let f = fixture();
+    install_metered(&f, 1_000, 10, None);
+    f.client.set_account_limit(
+        &f.ad_token,
+        &Limit {
+            capacity: u128::MAX / 2,
+            refill_per_second: 1,
+        },
+    );
+
+    agent_check(&f, &lock_of(&f, 1_000, "ad-1")).unwrap();
+
+    f.env.ledger().set_timestamp(T0 + 1);
+    expect_err(
+        agent_check(&f, &lock_of(&f, 1_000, "ad-1")),
+        AccountError::VolumeExceeded,
+    );
+    expect_err(
+        agent_check(&f, &lock_of(&f, 11, "ad-1")),
+        AccountError::VolumeExceeded,
+    );
+    agent_check(&f, &lock_of(&f, 10, "ad-1")).expect("exactly one second of refill");
+}
+
+/// T-07, the aggregate half. Two agents, each with a full private bucket, drain one shared
+/// account ceiling — so N agents stop multiplying the exposure.
+#[test]
+fn t07_two_agents_share_one_account_ceiling() {
+    let f = fixture();
+    let tokens = vec![&f.env, f.ad_token.clone(), f.order_token.clone()];
+    let mut limits = Map::new(&f.env);
+    for t in tokens.iter() {
+        limits.set(
+            t,
+            Limit {
+                capacity: 1_000,
+                refill_per_second: 1,
+            },
+        );
+    }
+    let second = Agent::new(9);
+    for id in [f.agent.id(&f.env), second.id(&f.env)] {
+        f.client.set_policy(
+            &id,
+            &vec![&f.env, lock_for_order(&f.env)],
+            &tokens,
+            &u128::MAX,
+            &0_u64,
+            &f.signer,
+            &None,
+            &limits,
+        );
+    }
+    // The account allows one agent's worth in total, not one each.
+    f.client.set_account_limit(
+        &f.ad_token,
+        &Limit {
+            capacity: 1_000,
+            refill_per_second: 1,
+        },
+    );
+
+    agent_check(&f, &lock_of(&f, 1_000, "ad-1")).unwrap();
+
+    // The second agent's own bucket is untouched and full; the account's is empty.
+    let payload = b32(&f.env, 0x01);
+    let sig = second.sign(&f.env, &payload);
+    let r = f.env.try_invoke_contract_check_auth::<AccountError>(
+        &f.account,
+        &payload,
+        sig.into_val(&f.env),
+        &lock_of(&f, 1_000, "ad-1"),
+    );
+    expect_err(r, AccountError::VolumeExceeded);
+}
+
+/// The account bucket is not configured, so there is no ceiling to spend against. Absence refuses
+/// rather than reading as unlimited — the 2.3h rule, applied before it can bite.
+#[test]
+fn an_unconfigured_account_limit_refuses_instead_of_admitting_everything() {
+    let f = fixture();
+    install_metered(&f, 1_000, 10, None);
+    let other = b32(&f.env, 0x5E);
+    let mut p = params(&f);
+    p.ad_chain_token = other.clone();
+    // Whitelist and meter the token on the policy, but never configure the account ceiling.
+    let tokens = vec![&f.env, other.clone(), f.order_token.clone()];
+    let mut limits = Map::new(&f.env);
+    for t in tokens.iter() {
+        limits.set(
+            t,
+            Limit {
+                capacity: 1_000,
+                refill_per_second: 1,
+            },
+        );
+    }
+    f.client.set_policy(
+        &f.agent.id(&f.env),
+        &vec![&f.env, lock_for_order(&f.env)],
+        &tokens,
+        &u128::MAX,
+        &0_u64,
+        &f.signer,
+        &None,
+        &limits,
+    );
+    let ctxs = lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]);
+    expect_err(agent_check(&f, &ctxs), AccountError::NoVolumeLimit);
+}
+
+/// One auth entry carrying two locks must pay for both. The policy is read once and handed to
+/// every context, so a per-context write would have the second overwrite the first and make it
+/// free.
+#[test]
+fn two_locks_in_one_auth_entry_are_both_charged() {
+    let f = fixture();
+    install_metered(&f, 1_000, 1, None);
+    f.client.set_account_limit(
+        &f.ad_token,
+        &Limit {
+            capacity: u128::MAX / 2,
+            refill_per_second: 1,
+        },
+    );
+
+    let mut a = params(&f);
+    a.amount = 600;
+    let mut b = params(&f);
+    b.amount = 600;
+    b.salt = soroban_sdk::U256::from_u128(&f.env, 43);
+    let both = vec![
+        &f.env,
+        Context::Contract(ContractContext {
+            contract: f.target.clone(),
+            fn_name: lock_for_order(&f.env),
+            args: vec![&f.env, a.into_val(&f.env)],
+        }),
+        Context::Contract(ContractContext {
+            contract: f.target.clone(),
+            fn_name: lock_for_order(&f.env),
+            args: vec![&f.env, b.into_val(&f.env)],
+        }),
+    ];
+    expect_err(agent_check(&f, &both), AccountError::VolumeExceeded);
+}
+
+/// `None` scope is every ad this account owns — the 2.1c behaviour, pinned so it cannot regress
+/// into an accidental restriction.
+#[test]
+fn an_unscoped_agent_serves_every_ad() {
+    let f = fixture();
+    install_metered(&f, u128::MAX / 2, 1, None);
+    f.client.set_account_limit(
+        &f.ad_token,
+        &Limit {
+            capacity: u128::MAX / 2,
+            refill_per_second: 1,
+        },
+    );
+    for ad in ["ad-1", "ad-2", "something-else"] {
+        agent_check(&f, &lock_of(&f, 1, ad)).unwrap_or_else(|_| panic!("{ad}"));
+    }
+}
+
+/// A scoped agent serves its ads and nothing else, and a refusal leaves its allowance intact.
+///
+/// The second half holds because a rejected `__check_auth` discards the frame, **not** because the
+/// scope test runs before the debit — moving it after the debit leaves this test green. The
+/// property is worth pinning anyway; the ordering it looks like it proves, it does not.
+#[test]
+fn a_scoped_agent_is_held_to_its_ads_and_its_allowance_survives_a_refusal() {
+    let f = fixture();
+    install_metered(
+        &f,
+        1_000,
+        1,
+        Some(vec![&f.env, String::from_str(&f.env, "ad-1")]),
+    );
+    f.client.set_account_limit(
+        &f.ad_token,
+        &Limit {
+            capacity: 1_000,
+            refill_per_second: 1,
+        },
+    );
+
+    expect_err(
+        agent_check(&f, &lock_of(&f, 400, "ad-2")),
+        AccountError::AdNotAllowed,
+    );
+    // The whole capacity is still there: the refusal above spent nothing.
+    agent_check(&f, &lock_of(&f, 1_000, "ad-1")).expect("the refused lock left the bucket full");
+}
+
+#[test]
+fn ad_scope_is_validated_like_the_token_whitelist() {
+    let f = fixture();
+    let tokens = vec![&f.env, f.ad_token.clone(), f.order_token.clone()];
+    let limits = wide(&f.env, &tokens);
+    let id = f.agent.id(&f.env);
+    let install = |scope: Option<Vec<String>>| {
+        f.client.try_set_policy(
+            &id,
+            &vec![&f.env, lock_for_order(&f.env)],
+            &tokens,
+            &1_u128,
+            &0_u64,
+            &f.signer,
+            &scope,
+            &limits,
+        )
+    };
+    let dup = String::from_str(&f.env, "ad-1");
+    assert_eq!(
+        install(Some(Vec::new(&f.env))),
+        Err(Ok(AccountError::BadPolicy)),
+        "an empty scope means invalid here, never 'all ads'"
+    );
+    assert_eq!(
+        install(Some(vec![&f.env, dup.clone(), dup.clone()])),
+        Err(Ok(AccountError::BadPolicy)),
+        "duplicates"
+    );
+    assert_eq!(
+        install(Some(vec![&f.env, String::from_str(&f.env, "")])),
+        Err(Ok(AccountError::BadPolicy)),
+        "an empty ad id"
+    );
+}
+
+/// The whitelist says which tokens are permitted at all; `limits` says how much. A policy where
+/// the two disagree is half-written, and is refused rather than defaulted.
+#[test]
+fn every_whitelisted_token_must_carry_a_limit() {
+    let f = fixture();
+    let tokens = vec![&f.env, f.ad_token.clone(), f.order_token.clone()];
+    let mut only_one = Map::new(&f.env);
+    only_one.set(
+        f.ad_token.clone(),
+        Limit {
+            capacity: 1,
+            refill_per_second: 1,
+        },
+    );
+    let r = f.client.try_set_policy(
+        &f.agent.id(&f.env),
+        &vec![&f.env, lock_for_order(&f.env)],
+        &tokens,
+        &1_u128,
+        &0_u64,
+        &f.signer,
+        &None,
+        &only_one,
+    );
+    assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
+
+    // ...and a zero on either side of a limit is refused too: a zero capacity blocks the agent
+    // outright, a zero refill makes the bucket one-shot. Both read as a mis-set field.
+    for bad in [
+        Limit {
+            capacity: 0,
+            refill_per_second: 1,
+        },
+        Limit {
+            capacity: 1,
+            refill_per_second: 0,
+        },
+    ] {
+        let mut m = Map::new(&f.env);
+        for t in tokens.iter() {
+            m.set(t, bad);
+        }
+        assert_eq!(
+            f.client.try_set_policy(
+                &f.agent.id(&f.env),
+                &vec![&f.env, lock_for_order(&f.env)],
+                &tokens,
+                &1_u128,
+                &0_u64,
+                &f.signer,
+                &None,
+                &m,
+            ),
+            Err(Ok(AccountError::BadPolicy))
+        );
+        assert_eq!(
+            f.client.try_set_account_limit(&f.ad_token, &bad),
+            Err(Ok(AccountError::BadPolicy))
+        );
+    }
+}
+
+/// Lowering the account ceiling applies at once and never tops the bucket up — an owner who could
+/// refill by re-setting the limit would have a cap that resets on demand, which is the fixed
+/// window this replaced.
+#[test]
+fn re_setting_the_account_limit_clamps_and_never_refills() {
+    let f = fixture();
+    install_metered(&f, u128::MAX / 2, 1, None);
+    f.client.set_account_limit(
+        &f.ad_token,
+        &Limit {
+            capacity: 1_000,
+            refill_per_second: 1,
+        },
+    );
+    agent_check(&f, &lock_of(&f, 900, "ad-1")).unwrap();
+
+    // Same capacity again: the 100 left is still 100, not 1,000.
+    f.client.set_account_limit(
+        &f.ad_token,
+        &Limit {
+            capacity: 1_000,
+            refill_per_second: 1,
+        },
+    );
+    expect_err(
+        agent_check(&f, &lock_of(&f, 101, "ad-1")),
+        AccountError::VolumeExceeded,
+    );
+    agent_check(&f, &lock_of(&f, 100, "ad-1")).expect("the remaining 100");
 }

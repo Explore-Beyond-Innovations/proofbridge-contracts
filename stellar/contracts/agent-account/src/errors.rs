@@ -32,4 +32,11 @@ pub enum AccountError {
     BadTargets = 13,
     /// `owner` is this account: the owner path would need no signature.
     BadOwner = 14,
+    /// The lock names an ad outside the policy's `ad_scope`.
+    AdNotAllowed = 15,
+    /// A volume bucket — the agent's or the account's — cannot cover this lock (2.1d).
+    VolumeExceeded = 16,
+    /// The ad token is whitelisted but has no configured volume limit, on the policy or the
+    /// account. Silence is not permission.
+    NoVolumeLimit = 17,
 }
