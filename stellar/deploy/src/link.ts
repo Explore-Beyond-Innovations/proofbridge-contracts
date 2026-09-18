@@ -3,6 +3,7 @@ import {
   type ChainDeploymentManifest,
   type RouteTiming,
   type DisputeParams,
+  duplicatePairKeys,
 } from "@proofbridge/deployment-manifest";
 import { DEFAULT_STELLAR_CHAIN_ID } from "./common.js";
 import { invokeContract } from "./stellar-cli.js";
@@ -357,6 +358,27 @@ export async function link(
   }
 
   // ── Per-pair token routes (two directions per pairKey) ────────────
+  //
+  // Same guard as the EVM link, for the same reason and at the same moment. `pairKey` is the
+  // deployer's claim that the two sides are one underlying asset, and the protocol relies on it
+  // rather than checking it: an order carries a single `amount`, the counterpart figure is a
+  // power-of-ten rescale, and nothing prices one token against the other. A pairKey shared by two
+  // different assets settles them 1:1 and re-opens risk 01 F4, whose rate floor was withdrawn
+  // *because* routes are same-asset (design 01 §1.3).
+  //
+  // This half matters on its own: a two-chain deploy runs both CLIs, so the EVM link would catch a
+  // duplicate anyway — but the Stellar link can be run alone, and when it is, it holds both
+  // manifests, which is the whole reason the check lives here rather than in a repo check.
+  for (const [side, m] of [["local", local], ["peer", peer]] as const) {
+    const dupes = duplicatePairKeys(m.tokens);
+    if (dupes.length) {
+      throw new Error(
+        `link: the ${side} manifest uses pairKey ${dupes.map((d) => `"${d}"`).join(", ")} more than once — ` +
+          `a pairKey names one asset, and routing would pick one of the rows arbitrarily`,
+      );
+    }
+  }
+
   let routeTxs = 0;
   for (const localTok of local.tokens) {
     const peerTok = peer.tokens.find((t) => t.pairKey === localTok.pairKey);
