@@ -83,14 +83,21 @@ pub fn check_contract_call(
         return Err(AccountError::TokenNotAllowed);
     }
 
-    // The escrow locks `scale(amount, order_decimals, ad_decimals)` of the ad
-    // token; the cap is denominated in the same units.
+    // The escrow locks `scale(amount, order_decimals, ad_decimals)` of the ad token; the cap is
+    // denominated in the same units. Per token, because the whitelist can hold sixteen of them and
+    // one number cannot be right for two assets of different value — 1,000,000 units is a few
+    // cents of XLM and a few hundred dollars of wETH. Decimal scaling cannot fix that: it converts
+    // units, and what differs here is worth, which nothing on chain knows.
     let amount: u128 = field(env, &lock, "amount")?;
     let order_decimals: u32 = field(env, &lock, "order_decimals")?;
     let ad_decimals: u32 = field(env, &lock, "ad_decimals")?;
     let ad_amount = proofbridge_core::decimal_scaling::scale(amount, order_decimals, ad_decimals)
         .map_err(|_| AccountError::BadArgs)?;
-    if ad_amount > policy.max_per_order {
+    let token_limit = policy
+        .limits
+        .get(ad_chain_token.clone())
+        .ok_or(AccountError::NoVolumeLimit)?;
+    if ad_amount > token_limit.max_per_order {
         return Err(AccountError::CapExceeded);
     }
 
@@ -136,7 +143,8 @@ fn spend_volume(
     let agent_limit = policy
         .limits
         .get(token.clone())
-        .ok_or(AccountError::NoVolumeLimit)?;
+        .ok_or(AccountError::NoVolumeLimit)?
+        .rate;
     // No stored bucket means never spent — the policy entry holds the buckets, so this cannot be
     // an entry that quietly archived and read back as full.
     let agent_bucket = policy

@@ -33,8 +33,6 @@ pub struct AgentPolicy {
     pub allowed_actions: Vec<Symbol>,
     /// Both `ad_chain_token` and `order_chain_token` of a lock must be listed.
     pub token_whitelist: Vec<BytesN<32>>,
-    /// Cap on one lock, in ad-token units (what the escrow actually locks).
-    pub max_per_order: u128,
     /// Ledger timestamp; 0 = no expiry; usable while `now < valid_until`.
     pub valid_until: u64,
     /// Sticky tombstone: set by `revoke_agent`, never cleared, blocks re-install.
@@ -46,11 +44,28 @@ pub struct AgentPolicy {
     /// means all": `validate` already rejects an empty `token_whitelist`, so an empty list means
     /// *invalid* in this struct and must not mean the opposite one field down.
     pub ad_scope: Option<Vec<String>>,
-    /// Per-token volume limit for this agent, in ad-token units. Every whitelisted token needs one.
-    pub limits: Map<BytesN<32>, Limit>,
+    /// Per-token size and rate for this agent, in that token's own units. Every whitelisted token
+    /// needs one: one number cannot be right for tokens that are not worth the same, which is the
+    /// whole reason this is a map and not a scalar.
+    pub limits: Map<BytesN<32>, TokenLimit>,
     /// Live bucket state, keyed the same way. Lives inside the policy rather than beside it so
     /// there is no second entry that can archive on its own and read back as a full bucket (2.3h).
     pub buckets: Map<BytesN<32>, Bucket>,
+}
+
+/// What an agent may do with one token: how big a single lock may be, and how fast it may keep
+/// making them.
+///
+/// The two belong together because the per-order cap is only meaningful *relative to* the bucket:
+/// above `capacity` it can never bind, and below it, it is what forces a stolen key to make ten
+/// locks instead of one — ten chances for the watchtower to notice before the allowance is gone.
+#[contracttype]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TokenLimit {
+    /// Cap on one lock, in this token's own units (what the escrow actually locks).
+    pub max_per_order: u128,
+    /// The refill bucket for this token.
+    pub rate: Limit,
 }
 
 /// The 2.1c shape, kept so an account upgraded in place can still read what it wrote.
@@ -150,7 +165,9 @@ pub fn set_targets(env: &Env, targets: &Vec<Address>) -> Result<(), AccountError
 /// which makes it useless rather than dangerous — `spend_volume` refuses a token with no limit, so
 /// the agent cannot lock — while leaving the owner every repair: `policy` reads it, `revoke_agent`
 /// tombstones it, `set_policy` replaces it with a metered one. The `revoked` flag is carried across
-/// so the tombstone survives the upgrade; losing it would let a revoked id be re-installed.
+/// so the tombstone survives the upgrade; losing it would let a revoked id be re-installed. The v1
+/// `max_per_order` is dropped rather than carried: it was one scalar for the whole whitelist, and
+/// there is no per-token row to put it in without inventing rates the owner never chose.
 ///
 /// The migration is read-only. Writing it back here would mean `__check_auth` persisting on a path
 /// that may go on to reject, and the owner has to re-install anyway to supply limits.
@@ -164,7 +181,6 @@ pub fn get_policy(env: &Env, agent: &AgentId) -> Option<AgentPolicy> {
         return Some(AgentPolicy {
             allowed_actions: v1.allowed_actions,
             token_whitelist: v1.token_whitelist,
-            max_per_order: v1.max_per_order,
             valid_until: v1.valid_until,
             revoked: v1.revoked,
             settlement_signer: v1.settlement_signer,
@@ -212,6 +228,17 @@ pub fn validate_limit(limit: &Limit) -> Result<(), AccountError> {
     Ok(())
 }
 
+/// ...and a per-token row adds the size cap. Above `capacity` the cap can never bind, so a larger
+/// one is inert — refused rather than silently ignored, because an owner who wrote it meant
+/// something by it.
+pub fn validate_token_limit(tl: &TokenLimit) -> Result<(), AccountError> {
+    validate_limit(&tl.rate)?;
+    if tl.max_per_order == 0 || tl.max_per_order > tl.rate.capacity {
+        return Err(AccountError::BadPolicy);
+    }
+    Ok(())
+}
+
 /// Install-time validation; the auth path never re-checks these.
 pub fn validate(env: &Env, policy: &AgentPolicy) -> Result<(), AccountError> {
     let actions = &policy.allowed_actions;
@@ -249,9 +276,6 @@ pub fn validate(env: &Env, policy: &AgentPolicy) -> Result<(), AccountError> {
         }
     }
 
-    if policy.max_per_order == 0 {
-        return Err(AccountError::BadPolicy);
-    }
     // Until 2.3b the only settlement identity a lock can name is this account
     // (F5): the escrow does not bind `ad_creator` to `ad.maker` on Stellar, so
     // a foreign signer here would pin locks the relayer never built.
@@ -270,7 +294,7 @@ pub fn validate(env: &Env, policy: &AgentPolicy) -> Result<(), AccountError> {
     }
     for t in tokens.iter() {
         match policy.limits.get(t.clone()) {
-            Some(l) => validate_limit(&l)?,
+            Some(l) => validate_token_limit(&l)?,
             None => return Err(AccountError::BadPolicy),
         }
         // And the account-wide ceiling has to exist too, or this policy installs cleanly and then

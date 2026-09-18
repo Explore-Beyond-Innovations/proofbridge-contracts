@@ -6,7 +6,6 @@ pub struct PolicySet {
     pub agent_id: BytesN<32>,
     pub settlement_signer: BytesN<32>,
     pub valid_until: u64,
-    pub max_per_order: u128,
 }
 
 /// 2.1e wires the runtime to fire the owner's pre-signed registry

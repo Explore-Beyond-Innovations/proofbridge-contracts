@@ -32,6 +32,7 @@ use soroban_sdk::{
     vec, Address, BytesN, ContractExecutable, Env, IntoVal, Map, String, Symbol, Vec,
 };
 
+use policy::TokenLimit;
 use proofbridge_core::rate_limit::{self, Bucket, Limit};
 
 pub use auth::{AccountSig, Ed25519Sig, SecpSig};
@@ -82,11 +83,10 @@ impl AgentAccount {
         agent_id: BytesN<32>,
         allowed_actions: Vec<Symbol>,
         token_whitelist: Vec<BytesN<32>>,
-        max_per_order: u128,
         valid_until: u64,
         settlement_signer: BytesN<32>,
         ad_scope: Option<Vec<String>>,
-        limits: Map<BytesN<32>, Limit>,
+        limits: Map<BytesN<32>, TokenLimit>,
     ) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
@@ -100,7 +100,6 @@ impl AgentAccount {
         let p = AgentPolicy {
             allowed_actions,
             token_whitelist,
-            max_per_order,
             valid_until,
             revoked: false,
             settlement_signer: settlement_signer.clone(),
@@ -114,7 +113,6 @@ impl AgentAccount {
             agent_id,
             settlement_signer,
             valid_until,
-            max_per_order,
         }
         .publish(&env);
         Ok(())
