@@ -40,10 +40,14 @@ pub fn get_chain(env: &Env, chain_id: u128) -> Option<ChainInfo> {
     env.storage().persistent().get(&key)
 }
 
-/// Set chain info for a given chain ID
+/// Which peer chains this escrow accepts, and their counterpart contract. Settlement-bearing, so
+/// its TTL is extended (2.3h D2): written once at wiring and then only read, and an archived entry
+/// reads as *unsupported* — every lock and every route write on that peer fails until it is
+/// restored.
 pub fn set_chain(env: &Env, chain_id: u128, info: &ChainInfo) {
     let key = (KEY_CHAINS, chain_id);
     env.storage().persistent().set(&key, info);
+    proofbridge_core::ttl::extend_persistent(env, &key);
 }
 
 /// Remove chain configuration
@@ -76,10 +80,12 @@ pub fn is_ad_id_used(env: &Env, ad_id: &String) -> bool {
     env.storage().persistent().get(&key).unwrap_or(false)
 }
 
-/// Mark ad ID as used
+/// The ad-id uniqueness guard. Extended for the same reason as the nullifier ledger: an archived
+/// entry reads as absent, absence reads as *unused*, so an aged-out row lets an ad id be taken twice.
 pub fn set_ad_id_used(env: &Env, ad_id: &String) {
     let key = (KEY_AD_IDS, ad_id.clone());
     env.storage().persistent().set(&key, &true);
+    proofbridge_core::ttl::extend_persistent(env, &key);
 }
 
 // ── the key registry (2.3c) ──────────────────────────────────────────────

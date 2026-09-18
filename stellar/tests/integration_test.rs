@@ -2309,6 +2309,77 @@ fn test_2_3h_settlement_bearing_entries_get_their_ttl_extended() {
     }
 }
 
+/// T-57, the per-contract writers the shared-storage sweep did not reach. `set_chain` and
+/// `set_ad_id_used` live in each escrow's own storage module rather than in `escrow_storage.rs`,
+/// which is why an audit of that one file missed them. Both are written once and then only read,
+/// and both fail *open* when archived: a missing chain row reads as unsupported, a missing ad-id
+/// row reads as unused.
+#[test]
+fn test_2_3h_per_contract_config_entries_get_their_ttl_extended() {
+    use proofbridge_core::ttl::PERSISTENT_LIFETIME_THRESHOLD;
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let s = setup();
+    let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
+
+    let keys: [(&str, soroban_sdk::Val); 2] = s.env.as_contract(&s.ad_manager.address, || {
+        use soroban_sdk::IntoVal;
+        [
+            (
+                "chain support",
+                (soroban_sdk::symbol_short!("chains"), s.tp.order_chain_id).into_val(&s.env),
+            ),
+            (
+                "ad-id guard",
+                (soroban_sdk::symbol_short!("adids"), ad_id.clone()).into_val(&s.env),
+            ),
+        ]
+    });
+
+    for (what, key) in keys {
+        let ttl = s.env.as_contract(&s.ad_manager.address, || {
+            s.env.storage().persistent().get_ttl(&key)
+        });
+        assert!(
+            ttl > PERSISTENT_LIFETIME_THRESHOLD,
+            "the {what} entry was written without a TTL bump: {ttl}"
+        );
+    }
+
+    // The in-flight counter: an account with an open lock must keep its row, because a missing row
+    // reads as zero open positions and so lifts the cap.
+    let params = ad_manager_order_params(&s.env, &s.tp);
+    s.ad_manager.lock_for_order(&params);
+    let inflight_key: soroban_sdk::Val = s.env.as_contract(&s.ad_manager.address, || {
+        use soroban_sdk::IntoVal;
+        (
+            soroban_sdk::symbol_short!("inflt"),
+            bytes32_to_bytesn(&s.env, &s.tp.ad_settlement_signer),
+        )
+            .into_val(&s.env)
+    });
+    let ttl = s.env.as_contract(&s.ad_manager.address, || {
+        s.env.storage().persistent().get_ttl(&inflight_key)
+    });
+    assert!(
+        ttl > PERSISTENT_LIFETIME_THRESHOLD,
+        "the in-flight counter was written without a TTL bump: {ttl}"
+    );
+
+    // The order portal keeps its own copy of the same chain row.
+    let op_key: soroban_sdk::Val = s.env.as_contract(&s.order_portal.address, || {
+        use soroban_sdk::IntoVal;
+        (soroban_sdk::symbol_short!("chains"), s.tp.ad_chain_id).into_val(&s.env)
+    });
+    let ttl = s.env.as_contract(&s.order_portal.address, || {
+        s.env.storage().persistent().get_ttl(&op_key)
+    });
+    assert!(
+        ttl > PERSISTENT_LIFETIME_THRESHOLD,
+        "the order portal's chain support entry was written without a TTL bump: {ttl}"
+    );
+}
+
 /// T-57's other half: a credit drained to zero is deleted, not kept alive at zero. `get_claimable`
 /// reads a missing key as 0, so the two are the same value — but one keeps paying rent forever and
 /// would be bumped by every write, which is how a ledger fills with rows that owe nothing.

@@ -221,10 +221,18 @@ pub fn get_in_flight(env: &Env, account: &BytesN<32>) -> u64 {
         .unwrap_or(0)
 }
 
+/// An account's open-position count. Extended for the fail-open reason again: `get_in_flight` reads
+/// a missing key as 0, so an archived row does not park anything — it silently clears the account's
+/// position cap. A zero count is written as a removal instead, since a zero row owes nothing and
+/// reads identically.
 pub fn set_in_flight(env: &Env, account: &BytesN<32>, count: u64) {
-    env.storage()
-        .persistent()
-        .set(&(KEY_INFLT, account.clone()), &count);
+    let key = (KEY_INFLT, account.clone());
+    if count == 0 {
+        env.storage().persistent().remove(&key);
+        return;
+    }
+    env.storage().persistent().set(&key, &count);
+    extend_persistent(env, &key);
 }
 
 // ── pause clock and two-step admin ───────────────────────────────────────
