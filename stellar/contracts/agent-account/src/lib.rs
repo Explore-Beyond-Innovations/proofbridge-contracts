@@ -32,7 +32,7 @@ use soroban_sdk::{
     vec, Address, BytesN, ContractExecutable, Env, IntoVal, String, Symbol, Vec,
 };
 
-use policy::TokenLimit;
+use policy::{Guardrail, TokenLimit};
 use proofbridge_core::rate_limit::{self, Bucket, Limit};
 
 pub use auth::{AccountSig, Ed25519Sig, SecpSig};
@@ -159,6 +159,92 @@ impl AgentAccount {
         Ok(())
     }
 
+    /// Owner-only. Arm, change, or (with `None`) disarm this ad's guardrail — the owner's brake on
+    /// their own key (design 02 §2.8).
+    ///
+    /// Not timelocked, and deliberately: arming is protective, and disarming is the owner declining
+    /// a protection they chose. Putting a delay on disarming would look stronger and would not be —
+    /// an attacker with the owner key simply waits it out, while an honest maker who needs their
+    /// liquidity back is the only one actually slowed.
+    pub fn set_guardrail(
+        env: Env,
+        ad_id: String,
+        guardrail: Option<Guardrail>,
+    ) -> Result<(), AccountError> {
+        policy::get_owner(&env).require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        match guardrail {
+            Some(g) => {
+                // A zero delay is a guardrail that does nothing; a zero window is one that can
+                // never be used. Both read as a mis-set field rather than an intent.
+                if g.delay == 0 || g.window == 0 {
+                    return Err(AccountError::BadGuardrail);
+                }
+                policy::set_guardrail(&env, &ad_id, &g);
+            }
+            None => policy::remove_guardrail(&env, &ad_id),
+        }
+        events::GuardrailSet { ad_id }.publish(&env);
+        Ok(())
+    }
+
+    /// Owner-only. Announce an extractive call and start its clock.
+    ///
+    /// The account cannot delay a call — `__check_auth` answers yes or no — so the timelock is two
+    /// transactions: this one, then the call itself once the delay has elapsed. `amount` and `to`
+    /// are stored and later compared exactly, or a schedule for a small withdrawal would authorize
+    /// a large one, or one to a different address.
+    pub fn schedule_extractive(
+        env: Env,
+        ad_id: String,
+        action: Symbol,
+        amount: u128,
+        to: Address,
+    ) -> Result<(), AccountError> {
+        policy::get_owner(&env).require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        if action != policy::withdraw_from_ad(&env) && action != policy::close_ad(&env) {
+            return Err(AccountError::ActionNotAllowed);
+        }
+        let g = policy::get_guardrail(&env, &ad_id).ok_or(AccountError::NotScheduled)?;
+        let now = env.ledger().timestamp();
+        let s = policy::Schedule {
+            amount,
+            to: to.clone(),
+            ready_at: now + g.delay,
+            expires_at: now + g.delay + g.window,
+        };
+        policy::set_schedule(&env, &ad_id, &action, &s);
+        events::ExtractiveScheduled {
+            ad_id,
+            action,
+            amount,
+            to,
+            ready_at: s.ready_at,
+            expires_at: s.expires_at,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Owner-only. Stand a schedule down — the lever an owner reaches for when they see an
+    /// `ExtractiveScheduled` event they did not cause.
+    pub fn cancel_extractive(env: Env, ad_id: String, action: Symbol) -> Result<(), AccountError> {
+        policy::get_owner(&env).require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        policy::clear_schedule(&env, &ad_id, &action);
+        events::ExtractiveCancelled { ad_id, action }.publish(&env);
+        Ok(())
+    }
+
+    pub fn guardrail(env: Env, ad_id: String) -> Option<Guardrail> {
+        policy::get_guardrail(&env, &ad_id)
+    }
+
+    pub fn schedule(env: Env, ad_id: String, action: Symbol) -> Option<policy::Schedule> {
+        policy::get_schedule(&env, &ad_id, &action)
+    }
+
     /// Owner-only, instant, idempotent: the agent's next signed call fails.
     /// Orders already co-signed under the agent's BLS key still settle through
     /// the registry; retire the slot there (2.1e wires that off the event).
@@ -234,6 +320,17 @@ impl CustomAccountInterface for AgentAccount {
                 // inspection, so create_ad/fund_ad's token transfer sub-context passes.
                 let payload: BytesN<32> = signature_payload.to_bytes();
                 policy::get_owner(&env).require_auth_for_args(vec![&env, payload.into_val(&env)]);
+                // 2.1e: the owner path used to stop here. It still authorizes everything the owner
+                // could do before — only the two extractive escrow calls, and only on a guarded ad,
+                // now have to have been announced first.
+                let targets = policy::get_targets(&env);
+                for ctx in auth_contexts.iter() {
+                    if let Context::Contract(c) = ctx {
+                        if targets.contains(&c.contract) {
+                            escrow::check_owner_call(&env, &c)?;
+                        }
+                    }
+                }
                 return Ok(());
             }
             AccountSig::Agent(s) => auth::verify_ed25519(&env, &signature_payload, &s),

@@ -170,3 +170,67 @@ fn spend_volume(
     );
     Ok(())
 }
+
+/// The owner path's half of `check_contract_call` (2.1e).
+///
+/// Instant to protect, slow to extract. Only the two escrow calls that move the maker's money out
+/// are constrained, and only on an ad the owner has guarded; everything else the owner does —
+/// `set_settlement_signer`, funding, creating ads, and the token sub-contexts those spawn — passes
+/// exactly as before. Delaying a protective action would only help whoever stole the key.
+///
+/// Like the agent path, this **writes**: spending a schedule removes it, so one approval cannot
+/// authorize a second withdrawal.
+pub fn check_owner_call(env: &Env, c: &ContractContext) -> Result<(), AccountError> {
+    let withdraw = policy::withdraw_from_ad(env);
+    let close = policy::close_ad(env);
+    if c.fn_name != withdraw && c.fn_name != close {
+        return Ok(());
+    }
+
+    // `ad_id` is the first argument of both. Fail closed on anything that does not decode: an
+    // extractive call the account cannot read is one it cannot judge.
+    let ad_id: String = c
+        .args
+        .get(0)
+        .and_then(|v| String::try_from_val(env, &v).ok())
+        .ok_or(AccountError::BadArgs)?;
+
+    let Some(guard) = policy::get_guardrail(env, &ad_id) else {
+        // Unguarded: every ad today, and a per-maker choice (design 02 §2.8). Absence means
+        // unguarded here rather than refusing — see `Guardrail`.
+        return Ok(());
+    };
+
+    // `withdraw_from_ad(ad_id, amount, to)` — small ones pass straight through, which is what makes
+    // the guardrail livable. `close_ad(ad_id, to)` carries no amount and empties the ad, and the
+    // account cannot read the balance without re-entering the escrow that is calling it, so it is
+    // categorically extractive: always scheduled on a guarded ad.
+    let (amount, to_index) = if c.fn_name == withdraw {
+        let amount: u128 = c
+            .args
+            .get(1)
+            .and_then(|v| u128::try_from_val(env, &v).ok())
+            .ok_or(AccountError::BadArgs)?;
+        if amount <= guard.threshold {
+            return Ok(());
+        }
+        (amount, 2)
+    } else {
+        (0u128, 1)
+    };
+    let to: Address = c
+        .args
+        .get(to_index)
+        .and_then(|v| Address::try_from_val(env, &v).ok())
+        .ok_or(AccountError::BadArgs)?;
+
+    let s = policy::get_schedule(env, &ad_id, &c.fn_name).ok_or(AccountError::NotScheduled)?;
+    let now = env.ledger().timestamp();
+    // Exact on both, or a schedule for 100 to alice authorizes 101, or 100 to someone else.
+    if s.amount != amount || s.to != to || now < s.ready_at || now >= s.expires_at {
+        return Err(AccountError::NotScheduled);
+    }
+    // Single use. A spent row left in place is an authorization waiting to be replayed.
+    policy::clear_schedule(env, &ad_id, &c.fn_name);
+    Ok(())
+}

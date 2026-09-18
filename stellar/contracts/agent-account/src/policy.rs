@@ -152,6 +152,97 @@ pub enum DataKey {
     /// while the bucket survives — and then a live bucket with no limit either refuses a
     /// configured token or, worse, refills to full. One entry cannot half-disappear.
     AccountVolume(BytesN<32>),
+    /// The owner's guardrail for one ad. Absent = that ad is unguarded, which is every ad today —
+    /// see `Guardrail`.
+    Guardrail(String),
+    /// A scheduled extractive call, keyed by the ad and the function it authorizes. Single use.
+    Schedule(String, Symbol),
+}
+
+/// The owner's own brake on one ad (design 02 §2.8): instant to protect, slow to extract.
+///
+/// Per **ad**, not per token, and that is forced rather than chosen. `withdraw_from_ad` does not
+/// carry the token — it is a property of the ad — and reading it means calling back into the escrow
+/// that is currently calling this account, which Soroban refuses outright. `ad_id` is in the
+/// arguments, and an ad holds exactly one token, so per-ad is per-token by another name.
+///
+/// **Absence means unguarded**, which is the opposite of the rule `limits` follows. There, the maker
+/// had already opted in by installing a policy, so a missing limit was a half-written policy. Here
+/// an account with no guardrails is every account that exists today, and design 02 calls declining
+/// them a per-maker choice. Defaulting accounts into a delay would be a migration, not a guardrail.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Guardrail {
+    /// Withdrawals at or below this pass instantly. `close_ad` ignores it — see `Schedule`.
+    pub threshold: u128,
+    /// Seconds between scheduling an extractive call and being able to make it.
+    pub delay: u64,
+    /// Seconds the matured schedule stays usable. A schedule that never expires is a standing
+    /// authorization sitting in storage for whoever finds the key next.
+    pub window: u64,
+}
+
+/// One scheduled extractive call. The stored `amount` and `to` are compared exactly, so a schedule
+/// for 100 to alice does not authorize 101, or 100 to someone else.
+///
+/// `close_ad` carries no amount at all — it empties the ad, and the account cannot see by how much
+/// for the same re-entrancy reason as above — so it is categorically extractive on a guarded ad and
+/// stores `amount: 0`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Schedule {
+    pub amount: u128,
+    pub to: Address,
+    pub ready_at: u64,
+    pub expires_at: u64,
+}
+
+pub fn get_guardrail(env: &Env, ad_id: &String) -> Option<Guardrail> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Guardrail(ad_id.clone()))
+}
+
+pub fn set_guardrail(env: &Env, ad_id: &String, g: &Guardrail) {
+    let key = DataKey::Guardrail(ad_id.clone());
+    env.storage().persistent().set(&key, g);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+}
+
+pub fn remove_guardrail(env: &Env, ad_id: &String) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Guardrail(ad_id.clone()));
+}
+
+pub fn get_schedule(env: &Env, ad_id: &String, action: &Symbol) -> Option<Schedule> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Schedule(ad_id.clone(), action.clone()))
+}
+
+pub fn set_schedule(env: &Env, ad_id: &String, action: &Symbol, s: &Schedule) {
+    let key = DataKey::Schedule(ad_id.clone(), action.clone());
+    env.storage().persistent().set(&key, s);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+}
+
+/// Spent, or cancelled. Removing rather than flagging is what makes a schedule single-use: a spent
+/// row left behind is an authorization waiting to be replayed.
+pub fn clear_schedule(env: &Env, ad_id: &String, action: &Symbol) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Schedule(ad_id.clone(), action.clone()));
+}
+
+/// The two escrow calls that move the maker's money out. Named here so the owner path and the
+/// tests agree on one list.
+pub fn withdraw_from_ad(env: &Env) -> Symbol {
+    Symbol::new(env, "withdraw_from_ad")
+}
+
+pub fn close_ad(env: &Env) -> Symbol {
+    Symbol::new(env, "close_ad")
 }
 
 /// The account-wide row. Absence means *unconfigured* and refuses the lock; it never means

@@ -39,4 +39,8 @@ pub enum AccountError {
     /// The ad token is whitelisted but has no configured volume limit, on the policy or the
     /// account. Silence is not permission.
     NoVolumeLimit = 17,
+    /// An extractive owner call on a guarded ad with no matured schedule for exactly it (2.1e).
+    NotScheduled = 18,
+    /// `set_guardrail` input failed validation (zero delay, zero window).
+    BadGuardrail = 19,
 }

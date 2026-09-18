@@ -656,9 +656,21 @@ fn expired_policy_rejected_at_boundary() {
     expect_err(agent_check(&f, &ctxs), AccountError::PolicyExpired);
 }
 
-/// T-05, account half: revoke -> next signed call fails; sticky; idempotent.
+/// T-05, and the name is the point.
+///
+/// Revocation stops the agent **acting**. It does not stop orders that are already locked and
+/// co-signed from settling, because settlement authenticates against the BLS registry — a proof
+/// plus an aggregate checked against `registry.keyOf(...)` — and never calls this account's
+/// `__check_auth` or reads `policy.revoked` at all (risk 01 F1, CRITICAL).
+///
+/// So "instant kill verified mid-trade" is false as it is usually read, and a test called
+/// `revoke_agent_kills_the_agent` would invite exactly that reading. What stops co-signed orders is
+/// lever 2, `set_valid_until = now` on both registries — a different key (the settlement identity,
+/// not the custody owner) and a different contract. The escrow side of that is
+/// `test_t14_lock_after_key_retired_errors` in the integration suite; nothing here can assert it,
+/// because nothing here is consulted.
 #[test]
-fn revoked_agent_rejected_and_revocation_is_sticky() {
+fn revoke_stops_new_locks_but_not_settlement_of_co_signed_orders() {
     let f = fixture();
     let id = f.agent.id(&f.env);
     let ctxs = lock_ctx(&f.env, &f.target, vec![&f.env, params(&f).into_val(&f.env)]);
@@ -2100,4 +2112,257 @@ fn limit_rows_must_match_the_whitelist_exactly() {
     assert_eq!(install(extra), Err(Ok(AccountError::BadPolicy)));
 
     assert_eq!(install(wide(&f.env, &tokens)), Ok(Ok(())));
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 2.1e — the owner's guardrails
+// ─────────────────────────────────────────────────────────────────────────
+
+const AD: &str = "ad-1";
+
+fn ad(env: &Env) -> String {
+    String::from_str(env, AD)
+}
+
+fn guard(f: &Fixture, threshold: u128, delay: u64, window: u64) {
+    f.client.set_guardrail(
+        &ad(&f.env),
+        &Some(Guardrail {
+            threshold,
+            delay,
+            window,
+        }),
+    );
+}
+
+/// `withdraw_from_ad(ad_id, amount, to)` as the escrow receives it.
+fn withdraw_ctx(f: &Fixture, amount: u128, to: &Address) -> Vec<Context> {
+    vec![
+        &f.env,
+        Context::Contract(ContractContext {
+            contract: f.target.clone(),
+            fn_name: Symbol::new(&f.env, "withdraw_from_ad"),
+            args: vec![
+                &f.env,
+                ad(&f.env).into_val(&f.env),
+                amount.into_val(&f.env),
+                to.into_val(&f.env),
+            ],
+        }),
+    ]
+}
+
+/// `close_ad(ad_id, to)` — no amount, by design.
+fn close_ctx(f: &Fixture, to: &Address) -> Vec<Context> {
+    vec![
+        &f.env,
+        Context::Contract(ContractContext {
+            contract: f.target.clone(),
+            fn_name: Symbol::new(&f.env, "close_ad"),
+            args: vec![&f.env, ad(&f.env).into_val(&f.env), to.into_val(&f.env)],
+        }),
+    ]
+}
+
+fn owner_check(f: &Fixture, ctxs: &Vec<Context>) -> Result<(), Result<AccountError, InvokeError>> {
+    check(f, AccountSig::Owner, ctxs)
+}
+
+/// An unguarded ad behaves exactly as it did before 2.1e — which is every ad that exists today.
+#[test]
+fn t52_an_unguarded_ad_is_untouched() {
+    let f = fixture();
+    let to = Address::generate(&f.env);
+    owner_check(&f, &withdraw_ctx(&f, u128::MAX, &to)).expect("no guardrail, no delay");
+    owner_check(&f, &close_ctx(&f, &to)).expect("same for close_ad");
+}
+
+/// The delay, end to end: refused unannounced, refused early, allowed once matured, and refused a
+/// second time on the same schedule.
+#[test]
+fn t52_an_over_threshold_withdrawal_must_be_announced_and_waited_out() {
+    let f = fixture();
+    let to = Address::generate(&f.env);
+    guard(&f, 100, 3_600, 86_400);
+
+    // Under the threshold is instant — the guardrail has to be livable or it gets turned off.
+    owner_check(&f, &withdraw_ctx(&f, 100, &to)).expect("at the threshold");
+
+    expect_err(
+        owner_check(&f, &withdraw_ctx(&f, 101, &to)),
+        AccountError::NotScheduled,
+    );
+
+    f.client.schedule_extractive(
+        &ad(&f.env),
+        &Symbol::new(&f.env, "withdraw_from_ad"),
+        &101,
+        &to,
+    );
+    expect_err(
+        owner_check(&f, &withdraw_ctx(&f, 101, &to)),
+        AccountError::NotScheduled,
+    );
+
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    owner_check(&f, &withdraw_ctx(&f, 101, &to)).expect("matured");
+    expect_err(
+        owner_check(&f, &withdraw_ctx(&f, 101, &to)),
+        AccountError::NotScheduled,
+    );
+}
+
+/// A schedule is for one call, not a standing approval: the amount and the destination are both
+/// compared exactly.
+#[test]
+fn t52_a_schedule_authorizes_exactly_what_it_named() {
+    let f = fixture();
+    let alice = Address::generate(&f.env);
+    let mallory = Address::generate(&f.env);
+    guard(&f, 0, 3_600, 86_400);
+
+    f.client.schedule_extractive(
+        &ad(&f.env),
+        &Symbol::new(&f.env, "withdraw_from_ad"),
+        &100,
+        &alice,
+    );
+    f.env.ledger().set_timestamp(T0 + 3_600);
+
+    expect_err(
+        owner_check(&f, &withdraw_ctx(&f, 101, &alice)),
+        AccountError::NotScheduled,
+    );
+    expect_err(
+        owner_check(&f, &withdraw_ctx(&f, 100, &mallory)),
+        AccountError::NotScheduled,
+    );
+    owner_check(&f, &withdraw_ctx(&f, 100, &alice)).expect("exactly what was announced");
+}
+
+/// A matured schedule is usable for a window, not forever. One left sitting is an authorization
+/// waiting for whoever finds the key next.
+#[test]
+fn t52_a_schedule_expires() {
+    let f = fixture();
+    let to = Address::generate(&f.env);
+    guard(&f, 0, 3_600, 600);
+    f.client.schedule_extractive(
+        &ad(&f.env),
+        &Symbol::new(&f.env, "withdraw_from_ad"),
+        &1,
+        &to,
+    );
+
+    f.env.ledger().set_timestamp(T0 + 3_600 + 600);
+    expect_err(
+        owner_check(&f, &withdraw_ctx(&f, 1, &to)),
+        AccountError::NotScheduled,
+    );
+}
+
+/// `close_ad` carries no amount and empties the ad, and the account cannot read the balance without
+/// re-entering the escrow that is calling it. So no threshold can gate it: on a guarded ad it is
+/// always announced, whatever the balance and however high the threshold.
+#[test]
+fn t52_close_ad_is_extractive_whatever_the_threshold() {
+    let f = fixture();
+    let to = Address::generate(&f.env);
+    guard(&f, u128::MAX, 3_600, 86_400);
+
+    expect_err(
+        owner_check(&f, &close_ctx(&f, &to)),
+        AccountError::NotScheduled,
+    );
+    f.client
+        .schedule_extractive(&ad(&f.env), &Symbol::new(&f.env, "close_ad"), &0, &to);
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    owner_check(&f, &close_ctx(&f, &to)).expect("announced and matured");
+}
+
+/// The asymmetry, which is the whole point of the section: on the *same* guarded ad, the protective
+/// levers still fire instantly. A delay on these would only ever help whoever stole the key.
+#[test]
+fn t52_protective_actions_are_never_delayed_on_a_guarded_ad() {
+    let f = fixture();
+    guard(&f, 0, 86_400, 86_400);
+
+    // Lever 3: re-point the ad's settlement identity, through the escrow.
+    let repoint = vec![
+        &f.env,
+        Context::Contract(ContractContext {
+            contract: f.target.clone(),
+            fn_name: Symbol::new(&f.env, "set_settlement_signer"),
+            args: vec![
+                &f.env,
+                ad(&f.env).into_val(&f.env),
+                f.signer.into_val(&f.env),
+            ],
+        }),
+    ];
+    owner_check(&f, &repoint).expect("re-pointing is protective");
+
+    // Lever 1 and the policy writes are calls on the account itself, so they never reach
+    // __check_auth's context loop at all — but they must still work with a guardrail armed.
+    f.client.revoke_agent(&f.agent.id(&f.env));
+    assert!(f.client.is_revoked(&f.agent.id(&f.env)));
+    f.client.set_guardrail(&ad(&f.env), &None);
+    assert!(f.client.guardrail(&ad(&f.env)).is_none());
+}
+
+/// The lever an owner reaches for on seeing an `ExtractiveScheduled` they did not cause.
+#[test]
+fn t52_a_schedule_can_be_cancelled_before_it_matures() {
+    let f = fixture();
+    let to = Address::generate(&f.env);
+    guard(&f, 0, 3_600, 86_400);
+    let action = Symbol::new(&f.env, "withdraw_from_ad");
+    f.client.schedule_extractive(&ad(&f.env), &action, &5, &to);
+    f.client.cancel_extractive(&ad(&f.env), &action);
+
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    expect_err(
+        owner_check(&f, &withdraw_ctx(&f, 5, &to)),
+        AccountError::NotScheduled,
+    );
+}
+
+#[test]
+fn t52_guardrail_input_is_validated() {
+    let f = fixture();
+    for bad in [(0_u64, 1_u64), (1, 0)] {
+        assert_eq!(
+            f.client.try_set_guardrail(
+                &ad(&f.env),
+                &Some(Guardrail {
+                    threshold: 0,
+                    delay: bad.0,
+                    window: bad.1,
+                }),
+            ),
+            Err(Ok(AccountError::BadGuardrail)),
+            "a zero delay does nothing and a zero window can never be used",
+        );
+    }
+    // Scheduling against an ad with no guardrail is refused rather than silently stored.
+    assert_eq!(
+        f.client.try_schedule_extractive(
+            &ad(&f.env),
+            &Symbol::new(&f.env, "withdraw_from_ad"),
+            &1,
+            &Address::generate(&f.env),
+        ),
+        Err(Ok(AccountError::NotScheduled))
+    );
+    // And only the two extractive selectors can be scheduled at all.
+    guard(&f, 0, 1, 1);
+    assert_eq!(
+        f.client.try_schedule_extractive(
+            &ad(&f.env),
+            &Symbol::new(&f.env, "set_settlement_signer"),
+            &1,
+            &Address::generate(&f.env),
+        ),
+        Err(Ok(AccountError::ActionNotAllowed))
+    );
 }
