@@ -33,7 +33,7 @@ use soroban_sdk::{
 };
 
 use escrow::spend_schedule;
-use policy::{GuardedAd, TokenLimit};
+use policy::{Guardrail, TokenLimit};
 use proofbridge_core::rate_limit::{self, Bucket, Limit};
 
 pub use auth::{AccountSig, Ed25519Sig, SecpSig};
@@ -173,12 +173,12 @@ impl AgentAccount {
     pub fn set_guardrail(
         env: Env,
         ad_id: String,
-        guardrail: Option<GuardedAd>,
+        guardrail: Option<Guardrail>,
     ) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
         let now = env.ledger().timestamp();
-        let current = policy::get_guarded_ad(&env, &ad_id);
+        let current = policy::get_guardrail(&env, &ad_id);
 
         let loosening = match (&current, &guardrail) {
             // Arming from nothing only ever reduces what the key can do.
@@ -215,14 +215,14 @@ impl AgentAccount {
                     }
                     None => g.rate.capacity,
                 };
-                let armed = GuardedAd {
+                let armed = Guardrail {
                     bucket: Bucket {
                         level: settled,
                         last_ts: now,
                     },
                     ..g
                 };
-                policy::put_guarded_ad(&env, &ad_id, &armed)?;
+                policy::put_guardrail(&env, &ad_id, &armed)?;
                 // Settings the schedules were made under are gone, so the schedules go with them.
                 if loosening {
                     policy::clear_all_schedules(&env, &ad_id);
@@ -237,7 +237,7 @@ impl AgentAccount {
                 .publish(&env);
             }
             None => {
-                policy::remove_guarded_ad(&env, &ad_id);
+                policy::remove_guardrail(&env, &ad_id);
                 policy::clear_all_schedules(&env, &ad_id);
                 events::GuardrailSet {
                     ad_id,
@@ -278,7 +278,7 @@ impl AgentAccount {
         if action != withdraw && amount != 0 {
             return Err(AccountError::BadGuardrail);
         }
-        let g = policy::get_guarded_ad(&env, &ad_id).ok_or(AccountError::NoGuardrail)?;
+        let g = policy::get_guardrail(&env, &ad_id).ok_or(AccountError::NoGuardrail)?;
         let now = env.ledger().timestamp();
         // Checked: `overflow-checks` is on for the workspace, so an absurd delay would otherwise
         // panic with an opaque host error instead of one the owner can act on.
@@ -320,8 +320,8 @@ impl AgentAccount {
         Ok(())
     }
 
-    pub fn guardrail(env: Env, ad_id: String) -> Option<GuardedAd> {
-        policy::get_guarded_ad(&env, &ad_id)
+    pub fn guardrail(env: Env, ad_id: String) -> Option<Guardrail> {
+        policy::get_guardrail(&env, &ad_id)
     }
 
     pub fn guarded_ads(env: Env) -> Vec<String> {

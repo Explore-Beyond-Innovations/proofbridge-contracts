@@ -2139,7 +2139,7 @@ fn guard_rate(
 ) {
     f.client.set_guardrail(
         &ad(&f.env),
-        &Some(GuardedAd {
+        &Some(Guardrail {
             threshold,
             delay,
             window,
@@ -2356,7 +2356,7 @@ fn t52_loosening_and_disarming_go_through_the_delay() {
     assert_eq!(
         f.client.try_set_guardrail(
             &ad(&f.env),
-            &Some(GuardedAd {
+            &Some(Guardrail {
                 threshold: u128::MAX,
                 delay: 3_600,
                 window: 86_400,
@@ -2526,7 +2526,7 @@ fn t52_guardrail_input_is_validated() {
         assert_eq!(
             f.client.try_set_guardrail(
                 &ad(&f.env),
-                &Some(GuardedAd {
+                &Some(Guardrail {
                     threshold: 0,
                     delay: bad.0,
                     window: bad.1,

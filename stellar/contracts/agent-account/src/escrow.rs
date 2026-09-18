@@ -269,8 +269,8 @@ pub fn check_owner_call(env: &Env, c: &ContractContext) -> Result<(), AccountErr
     }
     // On the roster but no row: the entry archived. Refuse rather than read it as unguarded — the
     // failure contracts#25 fixed for the route and verifier rows, one feature over.
-    let mut g = policy::get_guarded_ad(env, &ad_id).ok_or(AccountError::GuardrailArchived)?;
-    policy::touch_guarded_ad(env, &ad_id);
+    let mut g = policy::get_guardrail(env, &ad_id).ok_or(AccountError::GuardrailArchived)?;
+    policy::touch_guardrail(env, &ad_id);
     let now = env.ledger().timestamp();
 
     // `close_ad` carries no amount and empties the ad, and the balance is unreadable without
@@ -291,6 +291,6 @@ pub fn check_owner_call(env: &Env, c: &ContractContext) -> Result<(), AccountErr
     let next = proofbridge_core::rate_limit::try_spend(&g.rate, &g.bucket, amount, now)
         .ok_or(AccountError::VolumeExceeded)?;
     g.bucket = next;
-    policy::put_guarded_ad(env, &ad_id, &g)?;
+    policy::put_guardrail(env, &ad_id, &g)?;
     Ok(())
 }

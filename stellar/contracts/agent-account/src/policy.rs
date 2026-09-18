@@ -176,7 +176,7 @@ pub enum DataKey {
 /// the ceiling can archive while the bucket survives.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct GuardedAd {
+pub struct Guardrail {
     /// A single withdrawal at or below this needs no announcement — but it still spends `bucket`,
     /// or "below the threshold" would mean "unlimited, one call at a time".
     pub threshold: u128,
@@ -207,7 +207,7 @@ pub struct Schedule {
     pub expires_at: u64,
 }
 
-/// Which ads the owner has ever guarded, in **instance** storage.
+/// Which ads carry a guardrail, in **instance** storage.
 ///
 /// This exists so that a missing per-ad row cannot read as "unguarded". The per-ad entry is
 /// persistent and archives after ~180 days of no writes; an ad left alone that long would otherwise
@@ -229,13 +229,13 @@ pub fn is_guarded(env: &Env, ad_id: &String) -> bool {
     guarded_ads(env).contains(ad_id)
 }
 
-pub fn get_guarded_ad(env: &Env, ad_id: &String) -> Option<GuardedAd> {
+pub fn get_guardrail(env: &Env, ad_id: &String) -> Option<Guardrail> {
     env.storage()
         .persistent()
         .get(&DataKey::Guardrail(ad_id.clone()))
 }
 
-pub fn put_guarded_ad(env: &Env, ad_id: &String, g: &GuardedAd) -> Result<(), AccountError> {
+pub fn put_guardrail(env: &Env, ad_id: &String, g: &Guardrail) -> Result<(), AccountError> {
     let key = DataKey::Guardrail(ad_id.clone());
     env.storage().persistent().set(&key, g);
     proofbridge_core::ttl::extend_persistent(env, &key);
@@ -250,7 +250,7 @@ pub fn put_guarded_ad(env: &Env, ad_id: &String, g: &GuardedAd) -> Result<(), Ac
     Ok(())
 }
 
-pub fn remove_guarded_ad(env: &Env, ad_id: &String) {
+pub fn remove_guardrail(env: &Env, ad_id: &String) {
     env.storage()
         .persistent()
         .remove(&DataKey::Guardrail(ad_id.clone()));
@@ -266,7 +266,7 @@ pub fn remove_guarded_ad(env: &Env, ad_id: &String) {
 
 /// Use-time re-extension, the convention `touch_policy` sets: an ad in active use never archives
 /// between owner writes. The roster covers the idle case; this keeps the common one off it.
-pub fn touch_guarded_ad(env: &Env, ad_id: &String) {
+pub fn touch_guardrail(env: &Env, ad_id: &String) {
     proofbridge_core::ttl::extend_persistent(env, &DataKey::Guardrail(ad_id.clone()));
 }
 
@@ -276,7 +276,7 @@ pub fn touch_guarded_ad(env: &Env, ad_id: &String) {
 /// increases it, so it goes through the delay — which is the whole feature. Design 02 §2.8's
 /// protective list is every action that *reduces* an attacker's power; relaxing a brake is not one,
 /// and treating it as one removes the delay rather than relocating it.
-pub fn is_tightening(cur: &GuardedAd, next: &GuardedAd) -> bool {
+pub fn is_tightening(cur: &Guardrail, next: &Guardrail) -> bool {
     next.threshold <= cur.threshold
         && next.delay >= cur.delay
         && next.window <= cur.window
