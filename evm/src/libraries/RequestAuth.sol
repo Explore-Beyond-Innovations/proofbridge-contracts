@@ -2,6 +2,7 @@
 pragma solidity ^0.8.34;
 
 import {MMRPoseidon2} from "@solidity-mmr/MMRPoseidon2.sol";
+import {FieldElement} from "./FieldElement.sol";
 
 /**
  * @title RequestAuth
@@ -31,6 +32,18 @@ library RequestAuth {
         pure
         returns (bytes32[] memory inputs)
     {
+        // Defence in depth, not a hole being closed: both shipped verifiers already reject a
+        // non-canonical public input, because the transcript hashes inputs as given. This fails
+        // earlier, locally, with a named error, and keeps holding if the verifier is ever ported to
+        // one that reduces — see `FieldElement`.
+        //
+        // The nullifier and only the nullifier. The root is validated *before* this runs on every
+        // path — `_requireRootValid` against the co-signed root, `_requireAnchored` against the
+        // notary's — and both compare against known-good stored data. The nullifier has no such
+        // comparison: it is a *write* key, which is why it is the one worth guarding. The order hash
+        // is reduced below; the side flag is a contract constant.
+        FieldElement.requireCanonical(nullifierHash);
+
         inputs = new bytes32[](4);
         inputs[0] = nullifierHash;
         inputs[1] = MMRPoseidon2._fieldMod(orderHash);
@@ -63,6 +76,8 @@ library RequestAuth {
         pure
         returns (bytes32[] memory inputs)
     {
+        // Nothing to check: the event path's nullifier slot is a literal zero, and its root is
+        // already anchored-checked by every caller before this runs. The subject is reduced below.
         inputs = new bytes32[](4);
         inputs[1] = MMRPoseidon2._fieldMod(subject);
         inputs[2] = targetRoot;

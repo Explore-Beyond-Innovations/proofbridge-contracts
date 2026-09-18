@@ -1485,6 +1485,140 @@ fn test_event_claims_verify_for_every_event_domain() {
     }
 }
 
+/// 2.3h / T-65 — residual 9. Defence in depth: the shipped verifiers hash public inputs as given, so
+/// they already reject `n + PRIME`. The escrow keys its nullifier ledger on the raw 32 bytes, so a
+/// verifier that *reduced* instead would turn one proof into many nullifiers — refusing at the
+/// builder, the choke point every public input passes through, makes that the escrow's own property.
+#[test]
+fn test_2_3h_non_canonical_public_inputs_are_refused() {
+    use proofbridge_core::cross_contract::is_canonical;
+    let s = event_setup();
+    let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
+    let root = event_root(&s, LEAF_DOMAIN_CANCEL);
+    let zero = BytesN::from_array(&s.env, &[0u8; 32]);
+
+    // BN254's scalar field modulus, big-endian. Not a second copy of the constant: it is asserted
+    // against the SDK's own reduction below, which is what `is_canonical` is defined in terms of.
+    let prime: [u8; 32] = [
+        0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58,
+        0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00,
+        0x00, 0x01,
+    ];
+    let at_prime = BytesN::from_array(&s.env, &prime);
+    assert!(
+        !is_canonical(&at_prime),
+        "the prime itself is not canonical"
+    );
+
+    // A root is a Poseidon2 output, so it is a field element by construction and always canonical.
+    // That is what makes this check safe to enforce: every legitimate nullifier and root is already
+    // below the prime, so only a caller doing something odd can trip it.
+    assert!(is_canonical(&root), "an MMR root is a field element");
+
+    // An order hash is *not* necessarily canonical — it is a raw EIP-712 digest uniform over 2^256,
+    // and the BN254 prime is about 0.19 of that, so roughly four in five are above it. That is
+    // precisely why the builders reduce the subject instead of checking it: enforcing canonicality
+    // there would reject most real orders. `test_2_3h_the_subject_is_reduced_not_rejected` pins it.
+
+    // The deposit path binds the nullifier and the root.
+    assert!(build_deposit_inputs(
+        &s.env,
+        &s.merkle,
+        &at_prime,
+        &root,
+        &order_hash,
+        LEAF_DOMAIN_AD as u8
+    )
+    .is_err());
+    // The root is deliberately *not* checked: every caller validates it before the builder runs,
+    // against the co-signed root here and the notary's anchored root on the event path. Both are
+    // equality checks against known-good data, so a non-canonical root is refused upstream.
+    assert!(build_deposit_inputs(
+        &s.env,
+        &s.merkle,
+        &zero,
+        &at_prime,
+        &order_hash,
+        LEAF_DOMAIN_AD as u8
+    )
+    .is_ok());
+
+    // The event builder checks nothing and cannot fail — its nullifier slot is a literal zero and
+    // its root is anchored-checked upstream — so it is infallible by type, not by convention.
+    let _ = build_event_public_inputs(&s.env, &at_prime, &order_hash, LEAF_DOMAIN_CANCEL);
+    let _ = build_event_public_inputs(&s.env, &root, &order_hash, LEAF_DOMAIN_CANCEL);
+}
+
+/// The same bytes the EVM suite asserts, read from the shared vector rather than restated. This is
+/// the file `parity-fixture` regenerates and diffs, so the cases cannot drift from their generator.
+#[test]
+fn test_2_3h_canonicality_matches_the_shared_vector() {
+    use proofbridge_core::cross_contract::is_canonical;
+    let s = event_setup();
+    let v: serde_json::Value = serde_json::from_str(VERIFIER_NEGATIVE_JSON).unwrap();
+    let rows = v["canonicality"].as_array().unwrap();
+    assert_eq!(
+        rows.len() as u64,
+        v["canonicalityCount"].as_u64().unwrap(),
+        "the case set was shortened without the count following"
+    );
+
+    let order_hash = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
+    let root = event_root(&s, LEAF_DOMAIN_CANCEL);
+    let mut rejected = 0;
+    for r in rows {
+        let hex = r["value"].as_str().unwrap().trim_start_matches("0x");
+        let value = bytes32_to_bytesn(&s.env, &hex_to_array(hex));
+        let expected = r["canonical"].as_bool().unwrap();
+        assert_eq!(
+            is_canonical(&value),
+            expected,
+            "canonicality disagrees with the shared vector on {}",
+            r["name"]
+        );
+        if !expected {
+            rejected += 1;
+            // ...and the builder actually refuses it, on both paths it can reach.
+            assert!(build_deposit_inputs(
+                &s.env,
+                &s.merkle,
+                &value,
+                &root,
+                &order_hash,
+                LEAF_DOMAIN_AD as u8
+            )
+            .is_err());
+        }
+    }
+    assert!(rejected >= 3, "the rejection cases shrank");
+}
+
+/// The order hash is exempt on purpose: it is reduced on the way in, so a non-canonical one is not
+/// an error, it is simply reduced. Pinned so nobody "fixes" it into a rejection later.
+#[test]
+fn test_2_3h_the_subject_is_reduced_not_rejected() {
+    let s = event_setup();
+    let root = event_root(&s, LEAF_DOMAIN_CANCEL);
+    let mut raw = [0u8; 32];
+    raw[31] = 7;
+    let small = BytesN::from_array(&s.env, &raw);
+
+    // 7 + PRIME, which reduces to 7.
+    let aliased: [u8; 32] = [
+        0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58,
+        0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00,
+        0x00, 0x08,
+    ];
+    let a = build_event_public_inputs(&s.env, &root, &small, LEAF_DOMAIN_CANCEL);
+    let b = build_event_public_inputs(
+        &s.env,
+        &root,
+        &BytesN::from_array(&s.env, &aliased),
+        LEAF_DOMAIN_CANCEL,
+    );
+    assert_eq!(a, b, "the reduction makes the two subjects one input");
+}
+
 #[test]
 fn test_event_claim_rejected_under_another_domain_or_as_a_deposit() {
     let s = event_setup();
@@ -1503,7 +1637,8 @@ fn test_event_claim_rejected_under_another_domain_or_as_a_deposit() {
         &root,
         &order_hash,
         LEAF_DOMAIN_AD as u8,
-    );
+    )
+    .unwrap();
     assert!(s.verifier.try_verify_proof(&as_deposit, &proof).is_err());
 }
 
@@ -2013,6 +2148,216 @@ fn test_t14_set_settlement_signer_while_paused_succeeds() {
     let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
     s.ad_manager.set_settlement_signer(&ad_id, &next);
     assert_eq!(s.ad_manager.get_ad(&ad_id).unwrap().settlement_signer, next);
+}
+
+/// T-58 (2.3h): `claim` is the one entry point a pause must not freeze. It moves no order state and
+/// creates no credit — it hands an already-credited balance to the account that already owns it.
+/// Freezing it would not contain an incident, only hold honest users' money while one is
+/// investigated. Asserted as an explicit success so the exception is pinned, not implied.
+#[test]
+fn test_2_3h_claim_succeeds_while_paused() {
+    let s = setup();
+    let params = ad_manager_order_params(&s.env, &s.tp);
+    s.ad_manager.lock_for_order(&params);
+
+    // Park a credit the way one really arises: the payout push fails, so the escrow credits instead.
+    let token_client = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    token_client.set_fail_transfers(&true);
+    let empty = Bytes::new(&s.env);
+    assert!(ad_unlock(&s, &params, &empty), "unlock still settles");
+    token_client.set_fail_transfers(&false);
+
+    let recipient = bytes32_to_bytesn(&s.env, &s.tp.order_recipient);
+    let token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+    let recipient_addr = account_addr(&s, &s.tp.order_recipient);
+    let before = token_client.balance(&recipient_addr);
+
+    // Now pause, and claim anyway.
+    s.ad_manager.pause();
+    s.ad_manager.claim(&recipient, &token);
+    assert!(
+        token_client.balance(&recipient_addr) > before,
+        "a credited balance must stay reachable while paused"
+    );
+}
+
+/// T-57 (2.3h): a credited balance must not archive. Its TTL is extended on every write, so the
+/// entry outlives the ~30-day persistent threshold without anyone touching it — an archived credit
+/// is money its owner cannot reach until somebody pays to restore the entry.
+///
+/// Asserted on the entry's actual TTL rather than by advancing the ledger and seeing whether a read
+/// still works. The test environment does not evict expired entries, so the read succeeds either
+/// way: the first version of this test passed with the bump removed, which is no test at all.
+#[test]
+fn test_2_3h_a_credited_balance_gets_its_ttl_extended() {
+    use proofbridge_core::ttl::{PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD};
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let s = setup();
+    let params = ad_manager_order_params(&s.env, &s.tp);
+    s.ad_manager.lock_for_order(&params);
+
+    // Park a credit the way one really arises: the payout push fails, so the escrow credits instead.
+    let token_client = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    token_client.set_fail_transfers(&true);
+    let empty = Bytes::new(&s.env);
+    assert!(ad_unlock(&s, &params, &empty), "unlock still settles");
+    token_client.set_fail_transfers(&false);
+
+    let recipient = bytes32_to_bytesn(&s.env, &s.tp.order_recipient);
+    let token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+
+    let ttl = s.env.as_contract(&s.ad_manager.address, || {
+        let key = (
+            soroban_sdk::symbol_short!("claim"),
+            recipient.clone(),
+            token.clone(),
+        );
+        s.env.storage().persistent().get_ttl(&key)
+    });
+    assert!(
+        ttl >= PERSISTENT_BUMP_AMOUNT,
+        "the credit was written without a TTL bump: {ttl} < {PERSISTENT_BUMP_AMOUNT}"
+    );
+    assert!(
+        ttl > PERSISTENT_LIFETIME_THRESHOLD,
+        "a credit must outlive the archival threshold"
+    );
+}
+
+/// T-57, the other fund-bearing write: an ad holds the maker's liquidity in `ad.balance`, so an
+/// idle ad that archives is money its owner cannot withdraw until the entry is restored.
+#[test]
+fn test_2_3h_an_ad_gets_its_ttl_extended() {
+    use proofbridge_core::ttl::{PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD};
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let s = setup();
+    let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
+    assert!(
+        s.ad_manager.get_ad(&ad_id).is_some(),
+        "the fixture's ad exists"
+    );
+
+    let ttl = s.env.as_contract(&s.ad_manager.address, || {
+        let key = (soroban_sdk::symbol_short!("ads"), ad_id.clone());
+        s.env.storage().persistent().get_ttl(&key)
+    });
+    assert!(
+        ttl >= PERSISTENT_BUMP_AMOUNT,
+        "the ad was written without a TTL bump: {ttl} < {PERSISTENT_BUMP_AMOUNT}"
+    );
+    assert!(
+        ttl > PERSISTENT_LIFETIME_THRESHOLD,
+        "an ad holding liquidity must outlive the archival threshold"
+    );
+}
+
+/// T-57, the writes that hold no money but still strand settlement. A token route or a root
+/// verifier that archives makes every order on that pair unsettleable until someone restores the
+/// entry; an archived nullifier is worse than stranded, because a missing entry reads as *unused*
+/// and so reopens a spent proof. All three are written once at wiring time and then only read, so
+/// nothing else would ever bump them.
+#[test]
+fn test_2_3h_settlement_bearing_entries_get_their_ttl_extended() {
+    use proofbridge_core::ttl::PERSISTENT_LIFETIME_THRESHOLD;
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let s = setup();
+    let params = ad_manager_order_params(&s.env, &s.tp);
+    s.ad_manager.lock_for_order(&params);
+    let empty = Bytes::new(&s.env);
+    assert!(
+        ad_unlock(&s, &params, &empty),
+        "the unlock burns a nullifier"
+    );
+
+    let nullifier = bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier);
+    let token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+
+    let keys: [(&str, soroban_sdk::Val); 3] = s.env.as_contract(&s.ad_manager.address, || {
+        use soroban_sdk::IntoVal;
+        [
+            (
+                "token route",
+                (
+                    soroban_sdk::symbol_short!("routes"),
+                    token.clone(),
+                    s.tp.order_chain_id,
+                )
+                    .into_val(&s.env),
+            ),
+            (
+                "root verifier",
+                (soroban_sdk::symbol_short!("rverif"), s.tp.order_chain_id).into_val(&s.env),
+            ),
+            (
+                "nullifier",
+                (soroban_sdk::symbol_short!("nulls"), nullifier.clone()).into_val(&s.env),
+            ),
+        ]
+    });
+
+    for (what, key) in keys {
+        let ttl = s.env.as_contract(&s.ad_manager.address, || {
+            s.env.storage().persistent().get_ttl(&key)
+        });
+        assert!(
+            ttl > PERSISTENT_LIFETIME_THRESHOLD,
+            "the {what} entry was written without a TTL bump: {ttl}"
+        );
+    }
+}
+
+/// T-57's other half: a credit drained to zero is deleted, not kept alive at zero. `get_claimable`
+/// reads a missing key as 0, so the two are the same value — but one keeps paying rent forever and
+/// would be bumped by every write, which is how a ledger fills with rows that owe nothing.
+#[test]
+fn test_2_3h_a_drained_credit_is_removed_not_kept_at_zero() {
+    let s = setup();
+    let params = ad_manager_order_params(&s.env, &s.tp);
+    s.ad_manager.lock_for_order(&params);
+
+    // Park a credit the way one really arises, then let the recipient take it.
+    let token_client = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    token_client.set_fail_transfers(&true);
+    let empty = Bytes::new(&s.env);
+    assert!(ad_unlock(&s, &params, &empty), "unlock still settles");
+    token_client.set_fail_transfers(&false);
+
+    let recipient = bytes32_to_bytesn(&s.env, &s.tp.order_recipient);
+    let token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+    let key = (
+        soroban_sdk::symbol_short!("claim"),
+        recipient.clone(),
+        token.clone(),
+    );
+
+    assert!(
+        s.env.as_contract(&s.ad_manager.address, || {
+            s.env.storage().persistent().has(&key)
+        }),
+        "the credit exists before the claim"
+    );
+
+    s.ad_manager.claim(&recipient, &token);
+    assert!(
+        !s.env.as_contract(&s.ad_manager.address, || {
+            s.env.storage().persistent().has(&key)
+        }),
+        "a drained credit was left behind as a zero row"
+    );
+}
+
+/// ...and the pause still holds for everything else, so the exception is exactly one call wide.
+#[test]
+fn test_2_3h_the_pause_still_holds_for_everything_else() {
+    let s = setup();
+    let params = ad_manager_order_params(&s.env, &s.tp);
+    s.ad_manager.pause();
+    assert!(s.ad_manager.try_lock_for_order(&params).is_err());
+    assert!(s.ad_manager.try_claim_cancel(&params).is_err());
+    assert!(s.ad_manager.try_finalize_cancel(&params).is_err());
 }
 
 #[test]

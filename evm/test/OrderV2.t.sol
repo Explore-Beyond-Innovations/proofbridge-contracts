@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
+import {TestField} from "test/utils/TestField.sol";
+
 import {AdManagerTest} from "./Admanager.t.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
 import {IOrderPortal} from "src/interfaces/IOrderPortal.sol";
@@ -47,7 +49,7 @@ contract AdManagerOrderV2Test is AdManagerTest {
         IAdManager.OrderParams memory p = _lock(SIGNER);
         assertTrue(p.adSettlementSigner != p.adCreator);
         _module(SIGNER);
-        adManager.unlock(p, bytes32("S1"), ROOT, hex"", hex"");
+        adManager.unlock(p, TestField.fe("S1"), ROOT, hex"", hex"");
         assertEq(uint256(adManager.orders(adManager.hashOrderPublic(p))), uint256(IEscrow.Status.Filled));
     }
 
@@ -55,7 +57,7 @@ contract AdManagerOrderV2Test is AdManagerTest {
         IAdManager.OrderParams memory p = _lock(SIGNER);
         _module(p.adCreator);
         vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, orderChainId, ROOT));
-        adManager.unlock(p, bytes32("S2"), ROOT, hex"", hex"");
+        adManager.unlock(p, TestField.fe("S2"), ROOT, hex"", hex"");
     }
 
     /// 2.3e D2: the primary's co-signed unlock is the presentation — valid through the window.
@@ -65,9 +67,9 @@ contract AdManagerOrderV2Test is AdManagerTest {
         uint256 cutoff = p.deadline + 30 minutes;
         vm.warp(cutoff + 1);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, cutoff));
-        adManager.unlock(p, bytes32("D1"), ROOT, hex"", hex"");
+        adManager.unlock(p, TestField.fe("D1"), ROOT, hex"", hex"");
         vm.warp(cutoff);
-        adManager.unlock(p, bytes32("D1"), ROOT, hex"", hex"");
+        adManager.unlock(p, TestField.fe("D1"), ROOT, hex"", hex"");
     }
 
     function test_deadlineIsHashed() public {
@@ -115,7 +117,7 @@ contract OrderPortalOrderV2Test is OrderPortalTest {
         IOrderPortal.OrderParams memory p = _create(SIGNER);
         assertTrue(p.adSettlementSigner != p.adCreator);
         _module(SIGNER);
-        portal.unlock(p, bytes32("S1"), ROOT, hex"", hex"");
+        portal.unlock(p, TestField.fe("S1"), ROOT, hex"", hex"");
         assertEq(uint256(portal.orders(portal.hashOrderPublic(p))), uint256(IEscrow.Status.Filled));
     }
 
@@ -123,7 +125,7 @@ contract OrderPortalOrderV2Test is OrderPortalTest {
         IOrderPortal.OrderParams memory p = _create(SIGNER);
         _module(p.adCreator);
         vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, ROOT));
-        portal.unlock(p, bytes32("S2"), ROOT, hex"", hex"");
+        portal.unlock(p, TestField.fe("S2"), ROOT, hex"", hex"");
     }
 
     function test_unlock_revertsAfterDeadline_andPassesAtIt() public {
@@ -131,9 +133,9 @@ contract OrderPortalOrderV2Test is OrderPortalTest {
         _module(SIGNER);
         vm.warp(p.deadline + 1);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, p.deadline));
-        portal.unlock(p, bytes32("D1"), ROOT, hex"", hex"");
+        portal.unlock(p, TestField.fe("D1"), ROOT, hex"", hex"");
         vm.warp(p.deadline);
-        portal.unlock(p, bytes32("D1"), ROOT, hex"", hex"");
+        portal.unlock(p, TestField.fe("D1"), ROOT, hex"", hex"");
     }
 
     function test_create_rejectsAWideDeadline() public {

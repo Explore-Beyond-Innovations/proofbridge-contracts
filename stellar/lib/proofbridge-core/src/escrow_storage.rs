@@ -71,6 +71,9 @@ pub fn set_token_route(
 ) {
     let key = (KEY_ROUTES, token.clone(), peer_chain_id);
     env.storage().persistent().set(&key, peer_token);
+    // Not fund-bearing, but settlement-bearing: a route that ages out makes every order on that
+    // pair unsettleable until someone restores it. Routes are set once and then only read.
+    extend_persistent(env, &key);
 }
 
 pub fn remove_token_route(env: &Env, token: &BytesN<32>, peer_chain_id: u128) {
@@ -186,17 +189,23 @@ pub fn is_nullifier_used(env: &Env, nullifier_hash: &BytesN<32>) -> bool {
     env.storage().persistent().get(&key).unwrap_or(false)
 }
 
+/// The replay guard. Extended for the opposite reason to a credit: an archived nullifier reads as
+/// absent, which reads as *unused*, so an aged-out entry does not park money — it reopens a spent
+/// proof.
 pub fn set_nullifier_used(env: &Env, nullifier_hash: &BytesN<32>) {
     let key = (KEY_NULLIFIERS, nullifier_hash.clone());
     env.storage().persistent().set(&key, &true);
+    extend_persistent(env, &key);
 }
 
 // ── root verifiers ───────────────────────────────────────────────────────
 
+/// Set once per peer chain and then only read, so nothing else would ever bump it — and an unlock
+/// cannot be root-verified without it.
 pub fn set_root_verifier(env: &Env, chain_id: u128, module: &Address) {
-    env.storage()
-        .persistent()
-        .set(&(KEY_RVERIF, chain_id), module);
+    let key = (KEY_RVERIF, chain_id);
+    env.storage().persistent().set(&key, module);
+    extend_persistent(env, &key);
 }
 
 pub fn get_root_verifier(env: &Env, chain_id: u128) -> Option<Address> {
@@ -265,8 +274,18 @@ pub fn get_claimable(env: &Env, recipient: &BytesN<32>, token: &BytesN<32>) -> u
         .unwrap_or(0)
 }
 
+/// A credited balance owed to `recipient`. Fund-bearing, so its TTL is extended on every write
+/// (2.3h D2): an archived credit is money the owner cannot reach until somebody pays to restore the
+/// entry. The dispute module has done this since it was written; these older escrow writes did not.
 pub fn set_claimable(env: &Env, recipient: &BytesN<32>, token: &BytesN<32>, amount: u128) {
-    env.storage()
-        .persistent()
-        .set(&(KEY_CLAIM, recipient.clone(), token.clone()), &amount);
+    let key = (KEY_CLAIM, recipient.clone(), token.clone());
+    if amount == 0 {
+        // A drained credit owes nothing. Removing it refunds the rent and keeps the ledger from
+        // accumulating zero rows that would each be paid to keep alive; `get_claimable` reads a
+        // missing key as 0, so the two are the same value.
+        env.storage().persistent().remove(&key);
+        return;
+    }
+    env.storage().persistent().set(&key, &amount);
+    extend_persistent(env, &key);
 }

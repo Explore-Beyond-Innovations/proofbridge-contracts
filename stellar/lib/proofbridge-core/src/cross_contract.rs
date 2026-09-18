@@ -3,6 +3,7 @@
 //! Defines typed `#[contractclient]` traits so contracts can call
 //! MerkleManager and Verifier without raw `env.invoke_contract`.
 
+use crate::escrow_ops::Fault;
 use soroban_sdk::{contractclient, crypto::bn254::Bn254Fr, Address, Bytes, BytesN, Env};
 
 use crate::errors::ProofBridgeError;
@@ -185,7 +186,15 @@ pub fn build_public_inputs(
     target_root: &BytesN<32>,
     order_hash: &BytesN<32>,
     chain_flag_value: u8,
-) -> Bytes {
+) -> Result<Bytes, Fault> {
+    // The nullifier and only the nullifier, checked here rather than at each of the seven call
+    // sites so a caller cannot forget. The root is validated before this runs on every path — the
+    // co-signed root here, the notary's anchored root on the event path — and both compare against
+    // known-good stored data. The nullifier has no such comparison: it is a *write* key in the
+    // replay ledger, which is why it is the one worth guarding.
+    if !is_canonical(nullifier_hash) {
+        return Err(Fault::NonCanonicalInput);
+    }
     let order_hash_mod = get_field_mod(env, merkle_manager, order_hash);
 
     // Chain flag as bytes32 (big-endian)
@@ -198,7 +207,7 @@ pub fn build_public_inputs(
     inputs.append(&Bytes::from_slice(env, &target_root.to_array()));
     inputs.append(&Bytes::from_slice(env, &chain_flag));
 
-    inputs
+    Ok(inputs)
 }
 
 /// What an MMR leaf records, and the proof's last public input. ORDER/AD are deposits (the side
@@ -220,6 +229,23 @@ pub fn field_mod(data: &BytesN<32>) -> BytesN<32> {
     Bn254Fr::from_bytes(data.clone()).to_bytes()
 }
 
+/// Whether `value` is the canonical representative of its field element (2.3h, residual 9).
+///
+/// Defined as "the reduction is a no-op", so the SDK's own arithmetic is the definition and there is
+/// no second copy of the prime anywhere on this side. The EVM twin re-exports the MMR library's
+/// constant for the same reason.
+///
+/// Defence in depth. Both shipped verifiers already reject a non-canonical public input — the
+/// transcript hashes inputs as given, so `n` and `n + r` produce different challenges, which
+/// `verifier-negative.json`'s `deposit/public-input-ge-r` vector pins on both chains.
+///
+/// It earns its place by not depending on verifier internals: the escrow's nullifier ledger keys on
+/// raw bytes, so a verifier that *reduced* instead of rejecting would turn one proof into
+/// unboundedly many nullifiers. Checking here makes that guarantee the escrow's own.
+pub fn is_canonical(value: &BytesN<32>) -> bool {
+    field_mod(value) == *value
+}
+
 /// Public inputs for an event claim: `[0, subject % p, target_root, domain]` (128 bytes). No secret,
 /// so the nullifier is zero; `domain` is a `LEAF_DOMAIN_*` event constant fixed by the caller.
 pub fn build_event_public_inputs(
@@ -228,6 +254,10 @@ pub fn build_event_public_inputs(
     subject: &BytesN<32>,
     domain: u32,
 ) -> Bytes {
+    // Infallible, and typed that way: the event path's nullifier slot is a literal zero, its root is
+    // anchored-checked by every caller before this runs, and the subject is reduced below. A
+    // `Result` here would be one no caller could ever take, which is how a catch-all arm ends up
+    // silently swallowing a fault added later.
     let subject_mod = field_mod(subject);
 
     let mut domain_word = [0u8; 32];

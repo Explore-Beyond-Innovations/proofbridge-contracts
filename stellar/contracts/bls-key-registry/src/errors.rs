@@ -42,3 +42,8 @@ pub enum RegistryError {
     /// Enabling proof registration with no source chains
     ProofRegistrationRefsUnset = 20,
 }
+
+// No `From<Fault>` here on purpose. The registry's only shared helper is the event public-input
+// builder, which is infallible, so the conversion would exist solely to carry a catch-all arm — and
+// a catch-all would map any fault added later to `InvalidLeafProof`, reporting the wrong cause. If a
+// fallible helper is ever consumed here, add the arm for it explicitly.

@@ -137,6 +137,9 @@ pub enum AdManagerError {
     DisputeNotResolved = 63,
     /// Only the order's two parties may file or respond to a dispute (D11).
     NotAParty = 64,
+    /// A public input at or above the field prime (2.3h, residual 9). Refused here as defence in
+    /// depth — both shipped verifiers already reject one.
+    NonCanonicalInput = 65,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for AdManagerError {
@@ -190,6 +193,7 @@ impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
             NotPendingAdmin => AdManagerError::NotPendingAdmin,
             NoDisputeManager => AdManagerError::NoDisputeManager,
             NotDisputable => AdManagerError::NotDisputable,
+            NonCanonicalInput => AdManagerError::NonCanonicalInput,
             DisputeNotResolved => AdManagerError::DisputeNotResolved,
         }
     }

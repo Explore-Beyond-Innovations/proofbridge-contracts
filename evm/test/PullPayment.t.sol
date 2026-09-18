@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
+import {TestField} from "test/utils/TestField.sol";
+
 import {AdManagerTest} from "./Admanager.t.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
 import {IEscrow} from "src/interfaces/IEscrow.sol";
@@ -42,7 +44,7 @@ contract PayoutFallbackTest is AdManagerTest {
 
     function test_happyPath_paysDirectly_nothingClaimable() public {
         receiver.setAccepting(true);
-        IAdManager.OrderParams memory p = _unlockNativeTo(address(receiver), bytes32("HP"));
+        IAdManager.OrderParams memory p = _unlockNativeTo(address(receiver), TestField.fe("HP"));
 
         assertEq(address(receiver).balance, p.amount, "not paid directly");
         assertEq(adManager.claimable(address(receiver), NATIVE_TOKEN_ADDRESS), 0);
@@ -50,7 +52,7 @@ contract PayoutFallbackTest is AdManagerTest {
 
     function test_failingRecipient_neverBlocksUnlock_creditsInstead() public {
         // receiver rejects payouts: unlock must still settle
-        IAdManager.OrderParams memory p = _unlockNativeTo(address(receiver), bytes32("FB"));
+        IAdManager.OrderParams memory p = _unlockNativeTo(address(receiver), TestField.fe("FB"));
 
         assertEq(address(receiver).balance, 0, "push should have failed");
         assertEq(adManager.claimable(address(receiver), NATIVE_TOKEN_ADDRESS), p.amount, "not credited");
@@ -67,6 +69,37 @@ contract PayoutFallbackTest is AdManagerTest {
 
         vm.expectRevert(IEscrow.Escrow__NothingToClaim.selector);
         adManager.claim(address(receiver), NATIVE_TOKEN_ADDRESS);
+    }
+
+    /// T-58 (2.3h): `claim` is the one entry point a pause must not freeze. It moves no order state
+    /// and creates no credit — it hands an already-credited balance to the account that already owns
+    /// it, so freezing it does not contain an incident, it only holds honest users' money while one
+    /// is investigated. Asserted as an explicit success so the exception is pinned, not implied.
+    function test_2_3h_claimSucceedsWhilePaused() public {
+        IAdManager.OrderParams memory p = _unlockNativeTo(address(receiver), TestField.fe("PZ"));
+        assertEq(adManager.claimable(address(receiver), NATIVE_TOKEN_ADDRESS), p.amount, "credited");
+
+        vm.prank(admin);
+        adManager.pause();
+
+        receiver.setAccepting(true);
+        adManager.claim(address(receiver), NATIVE_TOKEN_ADDRESS);
+        assertEq(address(receiver).balance, p.amount, "a credit stays reachable while paused");
+    }
+
+    /// ...and the pause still holds for everything else, so the exception is exactly one call wide.
+    function test_2_3h_thePauseStillHoldsForEverythingElse() public {
+        // Params need only be well-formed: the pause gate fires before any of them is read.
+        IAdManager.OrderParams memory p;
+        vm.prank(admin);
+        adManager.pause();
+
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        adManager.lockForOrder(p);
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        adManager.claimCancel(p);
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        adManager.finalizeCancel(p);
     }
 
     /// Escrow solvency across both payout paths: wrapped-native holdings always

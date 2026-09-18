@@ -61,9 +61,13 @@ pub fn get_ad(env: &Env, ad_id: &String) -> Option<Ad> {
 }
 
 /// Set ad
+/// An ad and its liquidity. Fund-bearing — `ad.balance` is the maker's money — so its TTL is
+/// extended on every write (2.3h D2). An idle ad that archives is liquidity its owner cannot
+/// withdraw until the entry is restored.
 pub fn set_ad(env: &Env, ad_id: &String, ad: &Ad) {
     let key = (KEY_ADS, ad_id.clone());
     env.storage().persistent().set(&key, ad);
+    proofbridge_core::ttl::extend_persistent(env, &key);
 }
 
 /// Check if ad ID has been used

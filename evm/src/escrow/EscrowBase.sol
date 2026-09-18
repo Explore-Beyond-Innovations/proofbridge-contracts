@@ -183,8 +183,18 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
                                 PAYOUTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @inheritdoc IEscrow
-    function claim(address recipient, address token) external nonReentrant whenNotPaused {
+    /**
+     * @inheritdoc IEscrow
+     * @dev Deliberately not `whenNotPaused`, and the only entry point here that is not.
+     *
+     *      A pause is the mass-incident brake: it stops orders moving while something is wrong. This
+     *      call moves no order state and creates no credit — it hands an already-credited balance to
+     *      the account that already owns it. Freezing it does not contain an incident, it only holds
+     *      honest users' money hostage while one is investigated (2.3h D1, 03 F9).
+     *
+     *      `nonReentrant` stays, because this one does move funds.
+     */
+    function claim(address recipient, address token) external nonReentrant {
         uint256 amount = claimable[recipient][token];
         if (amount == 0) revert Escrow__NothingToClaim();
         claimable[recipient][token] = 0;

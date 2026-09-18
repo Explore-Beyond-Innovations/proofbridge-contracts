@@ -40,6 +40,10 @@ pub enum Fault {
     NotDisputable,
     /// The module's window has not closed, so there is nothing to apply yet.
     DisputeNotResolved,
+    /// A public input at or above the field prime (2.3h, residual 9). Defence in depth: both shipped
+    /// verifiers already reject one, but the escrow's nullifier ledger keys on raw bytes, so a
+    /// verifier that reduced instead would turn one proof into many nullifiers.
+    NonCanonicalInput,
 }
 
 // =============================================================================

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
+import {TestField} from "test/utils/TestField.sol";
+
 import {IEscrow} from "src/interfaces/IEscrow.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
 import {IOrderPortal} from "src/interfaces/IOrderPortal.sol";
@@ -184,7 +186,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.expectRevert(IEscrow.Escrow__NoRootAnchor.selector);
         adManager.presentSettled(p, bytes32(uint256(1)), hex"");
         // The co-signed unlock does not care.
-        adManager.unlock(p, bytes32("A1"), bytes32(uint256(1)), hex"", hex"");
+        adManager.unlock(p, TestField.fe("A1"), bytes32(uint256(1)), hex"", hex"");
     }
 
     /*//////////////////////////// T-45: the window bound + never-locked ////////////////////////////*/
@@ -329,7 +331,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, h, IEscrow.Status.Cancelled));
         adManager.claimCancel(p);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderNotOpen.selector, h));
-        adManager.unlock(p, bytes32("C1"), bytes32(0), hex"", hex"");
+        adManager.unlock(p, TestField.fe("C1"), bytes32(0), hex"", hex"");
         _wireAnchor();
         _anchorRoot(bytes32(uint256(9)));
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, h, IEscrow.Status.Cancelled));
@@ -347,7 +349,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.warp(p.deadline + 15 minutes);
         vm.expectEmit(true, true, true, true);
         emit IEscrow.OrderSettled(h, false);
-        adManager.unlock(p, bytes32("R1"), bytes32(uint256(1)), hex"", hex"");
+        adManager.unlock(p, TestField.fe("R1"), bytes32(uint256(1)), hex"", hex"");
 
         assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Filled));
         assertEq(adManager.getMerkleLeafCount(), leaves, "the fill itself appends nothing");
@@ -369,10 +371,10 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
 
         vm.warp(cutoff + 1);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, cutoff));
-        adManager.unlock(p, bytes32("M1"), bytes32(0), hex"", hex"");
+        adManager.unlock(p, TestField.fe("M1"), bytes32(0), hex"", hex"");
 
         vm.warp(cutoff);
-        adManager.unlock(p, bytes32("M1"), bytes32(0), hex"", hex"");
+        adManager.unlock(p, TestField.fe("M1"), bytes32(0), hex"", hex"");
     }
 
     /*//////////////////////////// T-54 / D3: presentSettled ////////////////////////////*/
@@ -446,7 +448,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
 
     function test_T41_filledPrimary_noCancelLeafIsReachable() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lock(13);
-        adManager.unlock(p, bytes32("F1"), bytes32(0), hex"", hex"");
+        adManager.unlock(p, TestField.fe("F1"), bytes32(0), hex"", hex"");
         adManager.recordSettled(p);
         uint256 leaves = adManager.getMerkleLeafCount();
         assertEq(leaves, 2, "ORDER + SETTLED");
@@ -488,7 +490,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotFilled.selector, h));
         adManager.recordSettled(p);
 
-        adManager.unlock(p, bytes32("R2"), bytes32(0), hex"", hex"");
+        adManager.unlock(p, TestField.fe("R2"), bytes32(0), hex"", hex"");
         assertFalse(adManager.settledRecorded(h));
         vm.expectEmit(true, true, true, true);
         emit IEscrow.SettledRecorded(h);
@@ -531,7 +533,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, reopened));
         adManager.finalizeCancel(p);
         // The bridger's co-signed unlock is valid through the reopened window.
-        adManager.unlock(p, bytes32("P1"), bytes32(0), hex"", hex"");
+        adManager.unlock(p, TestField.fe("P1"), bytes32(0), hex"", hex"");
         assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Filled));
     }
 
@@ -554,7 +556,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         adManager.finalizeCancel(p);
         vm.warp(reopened + 1);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, reopened));
-        adManager.unlock(p, bytes32("P2"), bytes32(0), hex"", hex"");
+        adManager.unlock(p, TestField.fe("P2"), bytes32(0), hex"", hex"");
         adManager.finalizeCancel(p);
         assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Cancelled));
     }
@@ -574,7 +576,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.expectRevert(
             abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, p.deadline + 30 minutes + 1 hours)
         );
-        adManager.unlock(p, bytes32("P3"), bytes32(0), hex"", hex"");
+        adManager.unlock(p, TestField.fe("P3"), bytes32(0), hex"", hex"");
         adManager.finalizeCancel(p);
 
         // Never claimed, closed ten days ago: the claim lands and finalizes at once.
@@ -589,7 +591,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.expectRevert(
             abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, q.deadline + 30 minutes + 1 hours)
         );
-        adManager.unlock(q, bytes32("P4"), bytes32(0), hex"", hex"");
+        adManager.unlock(q, TestField.fe("P4"), bytes32(0), hex"", hex"");
         adManager.claimCancel(q);
         (, uint64 finalizeAt,,) = adManager.claims(hq);
         assertEq(finalizeAt, q.deadline + 30 minutes + 1 hours);
@@ -607,9 +609,9 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.expectRevert(
             abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, r.deadline + 30 minutes + 1 hours)
         );
-        adManager.unlock(r, bytes32("P5"), bytes32(0), hex"", hex"");
+        adManager.unlock(r, TestField.fe("P5"), bytes32(0), hex"", hex"");
         vm.warp(r.deadline + 30 minutes + 1 hours);
-        adManager.unlock(r, bytes32("P5"), bytes32(0), hex"", hex"");
+        adManager.unlock(r, TestField.fe("P5"), bytes32(0), hex"", hex"");
     }
 
     /// Two pauses on one still-unclaimed lock, a long one then a short one, both count: the window
@@ -633,7 +635,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
 
         vm.warp(end + 1);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, end));
-        adManager.unlock(p, bytes32("H1"), bytes32(0), hex"", hex"");
+        adManager.unlock(p, TestField.fe("H1"), bytes32(0), hex"", hex"");
         adManager.claimCancel(p);
         (, uint64 finalizeAt,,) = adManager.claims(h);
         assertEq(finalizeAt, end, "the claim materializes every pause");
@@ -648,7 +650,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         assertEq(adManager.orderPausedAtOpen(hq), 15 minutes);
         vm.warp(q.deadline + 30 minutes + 1);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, q.deadline + 30 minutes));
-        adManager.unlock(q, bytes32("H2"), bytes32(0), hex"", hex"");
+        adManager.unlock(q, TestField.fe("H2"), bytes32(0), hex"", hex"");
     }
 
     /// G3: once claimed, the cutoff is the claim's frozen end; an admin retiming cannot move it.
@@ -658,7 +660,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         _setTiming(RouteTiming.Timing(0, 2 hours, 0, 1 days, 0));
         vm.warp(p.deadline + 30 minutes + 1);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, p.deadline + 30 minutes));
-        adManager.unlock(p, bytes32("G3"), bytes32(0), hex"", hex"");
+        adManager.unlock(p, TestField.fe("G3"), bytes32(0), hex"", hex"");
         adManager.finalizeCancel(p);
 
         // And lowered: the window stays open as long as the claim said.
@@ -669,7 +671,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.warp(q.deadline + 1 hours);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, q.deadline + 2 hours));
         adManager.finalizeCancel(q);
-        adManager.unlock(q, bytes32("G3b"), bytes32(0), hex"", hex"");
+        adManager.unlock(q, TestField.fe("G3b"), bytes32(0), hex"", hex"");
     }
 
     /*//////////////////////////// T-59 with the real verifier ////////////////////////////*/
@@ -789,18 +791,18 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
 
         vm.warp(cutoff + 1);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, cutoff));
-        portal.unlock(p, bytes32("S1"), bytes32(0), hex"", hex"");
+        portal.unlock(p, TestField.fe("S1"), bytes32(0), hex"", hex"");
         vm.warp(cutoff);
-        portal.unlock(p, bytes32("S1"), bytes32(0), hex"", hex"");
+        portal.unlock(p, TestField.fe("S1"), bytes32(0), hex"", hex"");
     }
 
     function test_T45b_zeroStagger_restoresThePlainDeadline() public {
         (IOrderPortal.OrderParams memory p,) = _create(2);
         vm.warp(p.deadline + 1);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, p.deadline));
-        portal.unlock(p, bytes32("S2"), bytes32(0), hex"", hex"");
+        portal.unlock(p, TestField.fe("S2"), bytes32(0), hex"", hex"");
         vm.warp(p.deadline);
-        portal.unlock(p, bytes32("S2"), bytes32(0), hex"", hex"");
+        portal.unlock(p, TestField.fe("S2"), bytes32(0), hex"", hex"");
     }
 
     /*//////////////////////////// T-40 / T-41 / T-44: refund by cancel proof ////////////////////////////*/
@@ -833,7 +835,7 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, ha, IEscrow.Status.Cancelled));
         portal.refundByCancel(a, root, hex"");
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderNotOpen.selector, ha));
-        portal.unlock(a, bytes32("X"), bytes32(0), hex"", hex"");
+        portal.unlock(a, TestField.fe("X"), bytes32(0), hex"", hex"");
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, ha, IEscrow.Status.Cancelled));
         portal.presentSettled(a, root, hex"");
         assertEq(portal.getMerkleLeafCount(), 2, "the follower appends no leaf of its own on cancel");
@@ -958,7 +960,7 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         portal.claimBackstop(p);
 
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderNotOpen.selector, h));
-        portal.unlock(p, bytes32("B1"), bytes32(0), hex"", hex"");
+        portal.unlock(p, TestField.fe("B1"), bytes32(0), hex"", hex"");
         assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Claimed));
         // A settled-leaf proof does settle it.
         _anchorRoot(bytes32(uint256(10)));
@@ -974,7 +976,7 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         assertEq(portal.getMerkleLeafCount(), 1, "the AD leaf");
         vm.expectEmit(true, true, true, true);
         emit IEscrow.OrderSettled(h, false);
-        portal.unlock(p, bytes32("U1"), bytes32(0), hex"", hex"");
+        portal.unlock(p, TestField.fe("U1"), bytes32(0), hex"", hex"");
         assertEq(portal.getMerkleLeafCount(), 1, "the fill itself appends nothing");
         portal.recordSettled(p);
         assertEq(portal.getMerkleLeafCount(), 2, "AD + SETTLED");
@@ -1066,7 +1068,7 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         portal.unpause();
         _anchorRoot(bytes32(uint256(20)));
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderNotOpen.selector, hr));
-        portal.unlock(r, bytes32("PC"), bytes32(0), hex"", hex"");
+        portal.unlock(r, TestField.fe("PC"), bytes32(0), hex"", hex"");
         portal.finalizeBackstop(r);
     }
 

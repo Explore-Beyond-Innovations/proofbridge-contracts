@@ -675,7 +675,7 @@ impl AdManagerContract {
             &nullifier_hash,
             &target_root,
             &order_hash,
-        );
+        )?;
         cross_contract::verify_proof(&env, &config.verifier, &public_inputs, &proof)?;
 
         storage::set_nullifier_used(&env, &nullifier_hash);
@@ -966,10 +966,14 @@ impl AdManagerContract {
         ops::pay_or_credit(env, w_native, recipient, token, amount)
     }
 
-    /// Pay out a credited unlock. Permissionless: funds can only go to the
-    /// credited recipient.
+    /// Withdraw a credited balance. Permissionless: funds can only go to the credited recipient.
+    ///
+    /// Deliberately not pause-gated, and the only entry point here that is not. A pause is the
+    /// mass-incident brake: it stops orders moving while something is wrong. This call moves no
+    /// order state and creates no credit — it hands an already-credited balance to the account that
+    /// already owns it. Freezing it does not contain an incident, it only holds honest users' money
+    /// hostage while one is investigated (2.3h D1, 03 F9).
     pub fn claim(env: Env, recipient: BytesN<32>, token: BytesN<32>) -> Result<(), AdManagerError> {
-        Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         ops::claim(&env, &config, recipient, token)
     }

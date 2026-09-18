@@ -131,6 +131,9 @@ pub enum OrderPortalError {
     DisputeNotResolved = 87,
     /// Only the order's two parties may file or respond to a dispute (D11).
     NotAParty = 88,
+    /// A public input at or above the field prime (2.3h, residual 9). Refused here as defence in
+    /// depth — both shipped verifiers already reject one.
+    NonCanonicalInput = 89,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
@@ -184,6 +187,7 @@ impl From<proofbridge_core::escrow_ops::Fault> for OrderPortalError {
             NotPendingAdmin => OrderPortalError::NotPendingAdmin,
             NoDisputeManager => OrderPortalError::NoDisputeManager,
             NotDisputable => OrderPortalError::NotDisputable,
+            NonCanonicalInput => OrderPortalError::NonCanonicalInput,
             DisputeNotResolved => OrderPortalError::DisputeNotResolved,
         }
     }

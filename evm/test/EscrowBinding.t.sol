@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
+import {TestField} from "test/utils/TestField.sol";
+
 import {AdManagerTest, MockAdManager} from "./Admanager.t.sol";
 import {IOrderPortal} from "src/interfaces/IOrderPortal.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
@@ -77,7 +79,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         _assertNoPositions(p.bridger);
 
         vm.prank(bridger);
-        adManager.unlock(p, bytes32("EB11"), bytes32(uint256(3)), hex"", hex"");
+        adManager.unlock(p, TestField.fe("EB11"), bytes32(uint256(3)), hex"", hex"");
         _assertNoPositions(other32);
         _assertNoPositions(p.adCreator);
     }
@@ -97,7 +99,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         (IAdManager.OrderParams memory p,) = _openOrder(lastAdId, address(adToken), 60 ether, 3, bridger, recipient);
 
         vm.prank(bridger);
-        adManager.unlock(p, bytes32("EB1"), bytes32(uint256(3)), hex"", hex"");
+        adManager.unlock(p, TestField.fe("EB1"), bytes32(uint256(3)), hex"", hex"");
 
         _assertNoPositions(p.adSettlementSigner);
         _assertNoPositions(p.bridger);
@@ -200,7 +202,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
 
         // The order settles against the signer frozen in its hash, never the ad's current field.
         vm.prank(bridger);
-        adManager.unlock(p, bytes32("EB5"), bytes32(uint256(3)), hex"", hex"");
+        adManager.unlock(p, TestField.fe("EB5"), bytes32(uint256(3)), hex"", hex"");
         _assertNoPositions(p.adCreator);
     }
 
@@ -291,7 +293,7 @@ contract EscrowBindingOrderPortalTest is OrderPortalTest {
         vm.prank(admin);
         portal.setRootVerifier(adChainId, module);
 
-        portal.unlock(p, bytes32("EB9"), bytes32(uint256(3)), hex"", hex"");
+        portal.unlock(p, TestField.fe("EB9"), bytes32(uint256(3)), hex"", hex"");
 
         assertEq(portal.inFlightOf(p.bridger), 0);
         assertFalse(portal.hasOpenPositions(p.bridger));
