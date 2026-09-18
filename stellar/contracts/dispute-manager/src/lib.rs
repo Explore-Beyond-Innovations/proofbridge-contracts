@@ -250,6 +250,9 @@ impl DisputeManagerContract {
         evidence: BytesN<32>,
     ) -> Result<(), Error> {
         escrow.require_auth();
+        // The escrow proves the named responder is a party; only this proves the caller is them.
+        // The slot is single-write, so an unsigned bystander could otherwise burn the real defence.
+        responder.require_auth();
         let mut d = storage::get_dispute(&env, &order_hash).ok_or(Error::NotDisputed)?;
         if d.escrow != escrow {
             return Err(Error::WrongEscrow);
