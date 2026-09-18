@@ -2124,13 +2124,33 @@ fn ad(env: &Env) -> String {
     String::from_str(env, AD)
 }
 
+/// Arm with a bucket wide enough that a test which is not about the flow rate never trips it.
 fn guard(f: &Fixture, threshold: u128, delay: u64, window: u64) {
+    guard_rate(f, threshold, delay, window, u128::MAX / 2, 1);
+}
+
+fn guard_rate(
+    f: &Fixture,
+    threshold: u128,
+    delay: u64,
+    window: u64,
+    capacity: u128,
+    refill_per_second: u128,
+) {
     f.client.set_guardrail(
         &ad(&f.env),
-        &Some(Guardrail {
+        &Some(GuardedAd {
             threshold,
             delay,
             window,
+            rate: Limit {
+                capacity,
+                refill_per_second,
+            },
+            bucket: Bucket {
+                level: 0,
+                last_ts: 0,
+            },
         }),
     );
 }
@@ -2280,8 +2300,9 @@ fn t52_close_ad_is_extractive_whatever_the_threshold() {
     owner_check(&f, &close_ctx(&f, &to)).expect("announced and matured");
 }
 
-/// The asymmetry, which is the whole point of the section: on the *same* guarded ad, the protective
-/// levers still fire instantly. A delay on these would only ever help whoever stole the key.
+/// The asymmetry, which is the whole point of the section: on the *same* guarded ad, the actions
+/// that **reduce** what a stolen key can do still fire instantly. A delay on those would only ever
+/// help whoever stole it.
 #[test]
 fn t52_protective_actions_are_never_delayed_on_a_guarded_ad() {
     let f = fixture();
@@ -2302,15 +2323,186 @@ fn t52_protective_actions_are_never_delayed_on_a_guarded_ad() {
     ];
     owner_check(&f, &repoint).expect("re-pointing is protective");
 
-    // Lever 1 and the policy writes are calls on the account itself, so they never reach
-    // __check_auth's context loop at all — but they must still work with a guardrail armed.
+    // Lever 1 is a call on the account itself, so it never reaches the context loop — but it must
+    // still work with a guardrail armed.
     f.client.revoke_agent(&f.agent.id(&f.env));
     assert!(f.client.is_revoked(&f.agent.id(&f.env)));
-    f.client.set_guardrail(&ad(&f.env), &None);
-    assert!(f.client.guardrail(&ad(&f.env)).is_none());
+
+    // And tightening is protective too: a lower threshold, a longer delay, a smaller bucket.
+    guard_rate(&f, 0, 172_800, 3_600, 1, 1);
+    assert_eq!(f.client.guardrail(&ad(&f.env)).unwrap().delay, 172_800);
 }
 
-/// The lever an owner reaches for on seeing an `ExtractiveScheduled` they did not cause.
+/// J1. Disarming is **not** protective, and an earlier version of this had it instant.
+///
+/// Design 02 §2.8's protective list is every action that reduces an attacker's power — which is
+/// why delaying them "only helps an attacker". Relaxing a brake does the opposite, and the
+/// arithmetic settles it: with a delay on both, a thief waits `delay` whichever route they take;
+/// with disarm instant, they disarm and withdraw and wait nothing. The delay was not relocated, it
+/// was removed.
+#[test]
+fn t52_loosening_and_disarming_go_through_the_delay() {
+    let f = fixture();
+    let to = Address::generate(&f.env);
+    guard(&f, 0, 3_600, 86_400);
+    let change = Symbol::new(&f.env, "set_guardrail");
+
+    // Disarm: refused outright.
+    assert_eq!(
+        f.client.try_set_guardrail(&ad(&f.env), &None),
+        Err(Ok(AccountError::NotScheduled))
+    );
+    // Loosening — a higher threshold — is the same thing by another route.
+    assert_eq!(
+        f.client.try_set_guardrail(
+            &ad(&f.env),
+            &Some(GuardedAd {
+                threshold: u128::MAX,
+                delay: 3_600,
+                window: 86_400,
+                rate: Limit {
+                    capacity: u128::MAX / 2,
+                    refill_per_second: 1
+                },
+                bucket: Bucket {
+                    level: 0,
+                    last_ts: 0
+                },
+            }),
+        ),
+        Err(Ok(AccountError::NotScheduled))
+    );
+
+    // Announced and waited out, it goes through — and the thief has paid the same delay they would
+    // have paid to withdraw.
+    f.client.schedule_extractive(&ad(&f.env), &change, &0, &to);
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    f.client.set_guardrail(&ad(&f.env), &None);
+    assert!(f.client.guardrail(&ad(&f.env)).is_none());
+    assert!(f.client.guarded_ads().is_empty(), "off the roster too");
+}
+
+/// K1. The guard used to run only for contexts whose contract was a pinned target, and
+/// `set_targets` is owner-only and instant — so pointing targets elsewhere removed the guard
+/// without touching it. The selector and the ad are what matter now.
+#[test]
+fn t52_repointing_targets_does_not_remove_the_guard() {
+    let f = fixture();
+    let to = Address::generate(&f.env);
+    guard(&f, 0, 3_600, 86_400);
+
+    let elsewhere = Address::generate(&f.env);
+    f.client.set_targets(&vec![&f.env, elsewhere.clone()]);
+
+    let ctx = vec![
+        &f.env,
+        Context::Contract(ContractContext {
+            contract: f.target.clone(),
+            fn_name: Symbol::new(&f.env, "withdraw_from_ad"),
+            args: vec![
+                &f.env,
+                ad(&f.env).into_val(&f.env),
+                1_u128.into_val(&f.env),
+                to.into_val(&f.env),
+            ],
+        }),
+    ];
+    expect_err(owner_check(&f, &ctx), AccountError::NotScheduled);
+}
+
+/// K2. The settings entry is persistent and archives after ~180 days of no writes. An ad left that
+/// long would otherwise silently lose its brake — absence reading as permission, the failure
+/// contracts#25 fixed for the route and verifier rows. The roster lives in the instance, which
+/// every entry point re-extends, so an armed ad whose row is gone refuses instead.
+#[test]
+fn t52_an_archived_guardrail_refuses_rather_than_reading_as_unguarded() {
+    let f = fixture();
+    let to = Address::generate(&f.env);
+    guard(&f, u128::MAX, 3_600, 86_400);
+    owner_check(&f, &withdraw_ctx(&f, 1, &to)).expect("guarded but under the threshold");
+
+    f.env.as_contract(&f.account, || {
+        f.env
+            .storage()
+            .persistent()
+            .remove(&policy::DataKey::Guardrail(ad(&f.env)));
+    });
+    assert!(
+        f.client.guarded_ads().contains(ad(&f.env)),
+        "still on the roster"
+    );
+    expect_err(
+        owner_check(&f, &withdraw_ctx(&f, 1, &to)),
+        AccountError::GuardrailArchived,
+    );
+}
+
+/// J2. A threshold bounds one call; nothing bounded N of them, and one auth entry can carry
+/// several. Design 02 §2.8's residual is a *flow rate* — "the sub-threshold flow rate until
+/// detected, not the balance" — so the sub-threshold path spends a refilling bucket.
+#[test]
+fn t52_sub_threshold_withdrawals_are_bounded_by_a_flow_rate() {
+    let f = fixture();
+    let to = Address::generate(&f.env);
+    // Anything at or under 100 needs no announcement, but only 250 may leave per 250 seconds.
+    guard_rate(&f, 100, 3_600, 86_400, 250, 1);
+
+    owner_check(&f, &withdraw_ctx(&f, 100, &to)).unwrap();
+    owner_check(&f, &withdraw_ctx(&f, 100, &to)).unwrap();
+    expect_err(
+        owner_check(&f, &withdraw_ctx(&f, 100, &to)),
+        AccountError::VolumeExceeded,
+    );
+    owner_check(&f, &withdraw_ctx(&f, 50, &to)).expect("the last of the bucket");
+
+    f.env.ledger().set_timestamp(T0 + 10);
+    owner_check(&f, &withdraw_ctx(&f, 10, &to)).expect("ten seconds of refill");
+    expect_err(
+        owner_check(&f, &withdraw_ctx(&f, 1, &to)),
+        AccountError::VolumeExceeded,
+    );
+}
+
+/// K3. `lock_for_order` moves the ad's free balance into escrow. It is bounded for the agent by
+/// `limits`; leaving it unbounded for the owner would be a hole in a feature whose subject is
+/// bounding the owner, so on a guarded ad it spends the same bucket.
+#[test]
+fn t52_the_owner_path_bounds_lock_for_order_too() {
+    let f = fixture();
+    guard_rate(&f, u128::MAX, 3_600, 86_400, 600_000, 1);
+
+    let ctxs = lock_ctx(&f.env, &f.target, vec![&f.env, params(&f).into_val(&f.env)]);
+    owner_check(&f, &ctxs).expect("500_000 fits");
+    expect_err(owner_check(&f, &ctxs), AccountError::VolumeExceeded);
+}
+
+/// K6. Settings the schedules were made under are gone when the guardrail changes, so the
+/// schedules go with them — or a matured row outlives its settings and the next arming is bypassed
+/// by an announcement nobody remembers.
+#[test]
+fn t52_changing_the_guardrail_clears_its_schedules() {
+    let f = fixture();
+    let to = Address::generate(&f.env);
+    guard(&f, 0, 3_600, 86_400);
+    let withdraw = Symbol::new(&f.env, "withdraw_from_ad");
+    let change = Symbol::new(&f.env, "set_guardrail");
+
+    f.client
+        .schedule_extractive(&ad(&f.env), &withdraw, &100, &to);
+    f.client.schedule_extractive(&ad(&f.env), &change, &0, &to);
+    f.env.ledger().set_timestamp(T0 + 3_600);
+
+    // Disarm, then re-arm: the old matured withdrawal must not survive the round trip.
+    f.client.set_guardrail(&ad(&f.env), &None);
+    guard(&f, 0, 3_600, 86_400);
+    assert!(f.client.schedule(&ad(&f.env), &withdraw).is_none());
+    expect_err(
+        owner_check(&f, &withdraw_ctx(&f, 100, &to)),
+        AccountError::NotScheduled,
+    );
+}
+
+/// The lever an owner reaches for on seeing an `ExtractiveScheduled`/// The lever an owner reaches for on seeing an `ExtractiveScheduled` they did not cause.
 #[test]
 fn t52_a_schedule_can_be_cancelled_before_it_matures() {
     let f = fixture();
@@ -2334,17 +2526,27 @@ fn t52_guardrail_input_is_validated() {
         assert_eq!(
             f.client.try_set_guardrail(
                 &ad(&f.env),
-                &Some(Guardrail {
+                &Some(GuardedAd {
                     threshold: 0,
                     delay: bad.0,
                     window: bad.1,
+                    rate: Limit {
+                        capacity: 1,
+                        refill_per_second: 1,
+                    },
+                    bucket: Bucket {
+                        level: 0,
+                        last_ts: 0,
+                    },
                 }),
             ),
             Err(Ok(AccountError::BadGuardrail)),
             "a zero delay does nothing and a zero window can never be used",
         );
     }
-    // Scheduling against an ad with no guardrail is refused rather than silently stored.
+    // Scheduling against an ad with no guardrail is refused, and with its own code: NotScheduled
+    // means "no matured schedule" everywhere else, and overloading it made the two
+    // indistinguishable to anyone reading the error.
     assert_eq!(
         f.client.try_schedule_extractive(
             &ad(&f.env),
@@ -2352,7 +2554,7 @@ fn t52_guardrail_input_is_validated() {
             &1,
             &Address::generate(&f.env),
         ),
-        Err(Ok(AccountError::NotScheduled))
+        Err(Ok(AccountError::NoGuardrail))
     );
     // And only the two extractive selectors can be scheduled at all.
     guard(&f, 0, 1, 1);

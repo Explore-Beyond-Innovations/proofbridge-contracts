@@ -24,12 +24,19 @@ pub struct AccountLimitSet {
     pub token: BytesN<32>,
 }
 
-/// The owner armed or changed an ad's guardrail (2.1e). The numbers stay off the event; an
-/// indexer that wants them reads the row.
-#[contractevent(topics = ["guard_set"], data_format = "single-value")]
+/// The owner armed, tightened, loosened or disarmed an ad's guardrail (2.1e).
+#[contractevent(topics = ["guard_set"], data_format = "vec")]
 pub struct GuardrailSet {
     #[topic]
     pub ad_id: String,
+    /// Arming, tightening and disarming all publish here, so the stream has to say which. Without
+    /// it a disarm is indistinguishable from a re-arm, and the row a reader would fall back on is
+    /// gone — which is the one alert this feature must be able to raise, since disarming is an
+    /// attacker's first move.
+    pub armed: bool,
+    pub threshold: u128,
+    pub delay: u64,
+    pub window: u64,
 }
 
 /// An extractive call was scheduled. **This is the point of the delay** — a window nobody can see

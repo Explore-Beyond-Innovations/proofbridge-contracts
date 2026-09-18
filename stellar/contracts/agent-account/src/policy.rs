@@ -17,6 +17,9 @@ pub const MAX_TARGETS: u32 = 2;
 /// Ads a scoped agent may name. Sized like the token whitelist: enough for a real book, small
 /// enough that the linear scan in the auth path stays cheap.
 pub const MAX_AD_SCOPE: u32 = 16;
+/// Guarded ads per account. The roster lives in the instance, which is loaded on every call, so it
+/// is bounded for the same reason the whitelist is.
+pub const MAX_GUARDED_ADS: u32 = 16;
 /// Bumped by an `upgrade` whose wasm changes the storage shape; a new wasm
 /// migrates or refuses old state deliberately instead of misreading it.
 /// 2 = 2.1d's `ad_scope` / `limits` / `buckets`.
@@ -152,11 +155,14 @@ pub enum DataKey {
     /// while the bucket survives — and then a live bucket with no limit either refuses a
     /// configured token or, worse, refills to full. One entry cannot half-disappear.
     AccountVolume(BytesN<32>),
-    /// The owner's guardrail for one ad. Absent = that ad is unguarded, which is every ad today —
-    /// see `Guardrail`.
+    /// One guarded ad's settings and live bucket. Absent **and not on the roster** = unguarded,
+    /// which is every ad today; absent *while on the roster* refuses — see `guarded_ads`.
     Guardrail(String),
     /// A scheduled extractive call, keyed by the ad and the function it authorizes. Single use.
     Schedule(String, Symbol),
+    /// Instance-stored roster of ads the owner has guarded, so an archived row cannot read as
+    /// "never guarded".
+    GuardedAds,
 }
 
 /// The owner's own brake on one ad (design 02 §2.8): instant to protect, slow to extract.
@@ -166,28 +172,32 @@ pub enum DataKey {
 /// that is currently calling this account, which Soroban refuses outright. `ad_id` is in the
 /// arguments, and an ad holds exactly one token, so per-ad is per-token by another name.
 ///
-/// **Absence means unguarded**, which is the opposite of the rule `limits` follows. There, the maker
-/// had already opted in by installing a policy, so a missing limit was a half-written policy. Here
-/// an account with no guardrails is every account that exists today, and design 02 calls declining
-/// them a per-maker choice. Defaulting accounts into a delay would be a migration, not a guardrail.
+/// Limit and live bucket share **one** entry, for the reason `AccountVolume` does: split them and
+/// the ceiling can archive while the bucket survives.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct Guardrail {
-    /// Withdrawals at or below this pass instantly. `close_ad` ignores it — see `Schedule`.
+pub struct GuardedAd {
+    /// A single withdrawal at or below this needs no announcement — but it still spends `bucket`,
+    /// or "below the threshold" would mean "unlimited, one call at a time".
     pub threshold: u128,
-    /// Seconds between scheduling an extractive call and being able to make it.
+    /// Seconds between announcing an extractive call and being able to make it.
     pub delay: u64,
-    /// Seconds the matured schedule stays usable. A schedule that never expires is a standing
-    /// authorization sitting in storage for whoever finds the key next.
+    /// Seconds a matured schedule stays usable. One that never expires is a standing authorization
+    /// sitting in storage for whoever finds the key next.
     pub window: u64,
+    /// The flow the ad may lose without announcing anything, refilling continuously. This is what
+    /// design 02 §2.8's residual is denominated in — "the sub-threshold flow rate until detected,
+    /// **not the balance**" — and without it a threshold bounds one call and nothing bounds N.
+    pub rate: Limit,
+    pub bucket: Bucket,
 }
 
 /// One scheduled extractive call. The stored `amount` and `to` are compared exactly, so a schedule
 /// for 100 to alice does not authorize 101, or 100 to someone else.
 ///
 /// `close_ad` carries no amount at all — it empties the ad, and the account cannot see by how much
-/// for the same re-entrancy reason as above — so it is categorically extractive on a guarded ad and
-/// stores `amount: 0`.
+/// for the same re-entrancy reason as above — so it is categorically extractive and stores
+/// `amount: 0`. `set_guardrail` (loosening or disarming) stores the same.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Schedule {
@@ -197,22 +207,81 @@ pub struct Schedule {
     pub expires_at: u64,
 }
 
-pub fn get_guardrail(env: &Env, ad_id: &String) -> Option<Guardrail> {
+/// Which ads the owner has ever guarded, in **instance** storage.
+///
+/// This exists so that a missing per-ad row cannot read as "unguarded". The per-ad entry is
+/// persistent and archives after ~180 days of no writes; an ad left alone that long would otherwise
+/// silently lose its brake, which is absence reading as permission — the failure contracts#25 fixed
+/// for the route and verifier rows. The instance is re-extended by every entry point, so the roster
+/// does not archive, and an ad on it whose row is gone **refuses** instead.
+pub fn guarded_ads(env: &Env) -> Vec<String> {
+    env.storage()
+        .instance()
+        .get(&DataKey::GuardedAds)
+        .unwrap_or(Vec::new(env))
+}
+
+fn set_guarded_ads(env: &Env, ads: &Vec<String>) {
+    env.storage().instance().set(&DataKey::GuardedAds, ads);
+}
+
+pub fn is_guarded(env: &Env, ad_id: &String) -> bool {
+    guarded_ads(env).contains(ad_id)
+}
+
+pub fn get_guarded_ad(env: &Env, ad_id: &String) -> Option<GuardedAd> {
     env.storage()
         .persistent()
         .get(&DataKey::Guardrail(ad_id.clone()))
 }
 
-pub fn set_guardrail(env: &Env, ad_id: &String, g: &Guardrail) {
+pub fn put_guarded_ad(env: &Env, ad_id: &String, g: &GuardedAd) -> Result<(), AccountError> {
     let key = DataKey::Guardrail(ad_id.clone());
     env.storage().persistent().set(&key, g);
     proofbridge_core::ttl::extend_persistent(env, &key);
+    let mut roster = guarded_ads(env);
+    if !roster.contains(ad_id) {
+        if roster.len() >= MAX_GUARDED_ADS {
+            return Err(AccountError::BadGuardrail);
+        }
+        roster.push_back(ad_id.clone());
+        set_guarded_ads(env, &roster);
+    }
+    Ok(())
 }
 
-pub fn remove_guardrail(env: &Env, ad_id: &String) {
+pub fn remove_guarded_ad(env: &Env, ad_id: &String) {
     env.storage()
         .persistent()
         .remove(&DataKey::Guardrail(ad_id.clone()));
+    let roster = guarded_ads(env);
+    let mut next = Vec::new(env);
+    for a in roster.iter() {
+        if &a != ad_id {
+            next.push_back(a);
+        }
+    }
+    set_guarded_ads(env, &next);
+}
+
+/// Use-time re-extension, the convention `touch_policy` sets: an ad in active use never archives
+/// between owner writes. The roster covers the idle case; this keeps the common one off it.
+pub fn touch_guarded_ad(env: &Env, ad_id: &String) {
+    proofbridge_core::ttl::extend_persistent(env, &DataKey::Guardrail(ad_id.clone()));
+}
+
+/// Is `next` at least as strict as `cur` on every axis?
+///
+/// Tightening reduces what a stolen owner key can do, so it is protective and instant. Loosening
+/// increases it, so it goes through the delay — which is the whole feature. Design 02 §2.8's
+/// protective list is every action that *reduces* an attacker's power; relaxing a brake is not one,
+/// and treating it as one removes the delay rather than relocating it.
+pub fn is_tightening(cur: &GuardedAd, next: &GuardedAd) -> bool {
+    next.threshold <= cur.threshold
+        && next.delay >= cur.delay
+        && next.window <= cur.window
+        && next.rate.capacity <= cur.rate.capacity
+        && next.rate.refill_per_second <= cur.rate.refill_per_second
 }
 
 pub fn get_schedule(env: &Env, ad_id: &String, action: &Symbol) -> Option<Schedule> {
@@ -235,14 +304,30 @@ pub fn clear_schedule(env: &Env, ad_id: &String, action: &Symbol) {
         .remove(&DataKey::Schedule(ad_id.clone(), action.clone()));
 }
 
-/// The two escrow calls that move the maker's money out. Named here so the owner path and the
-/// tests agree on one list.
+/// Every schedule for one ad. Called when a guardrail is disarmed or loosened: a matured row that
+/// outlives the settings it was made under would let the next arming be bypassed by an
+/// announcement nobody remembers.
+pub fn clear_all_schedules(env: &Env, ad_id: &String) {
+    for a in [withdraw_from_ad(env), close_ad(env), set_guardrail(env)] {
+        clear_schedule(env, ad_id, &a);
+    }
+}
+
+/// The calls that move the maker's money out of reach, named here so the owner path, the schedule
+/// entry point and the tests agree on one list. `lock_for_order` is included because it moves the
+/// ad's free balance into escrow — it is bounded for the agent by `limits`, and leaving it unbounded
+/// for the owner would be a hole in a feature whose subject is bounding the owner.
 pub fn withdraw_from_ad(env: &Env) -> Symbol {
     Symbol::new(env, "withdraw_from_ad")
 }
 
 pub fn close_ad(env: &Env) -> Symbol {
     Symbol::new(env, "close_ad")
+}
+
+/// Loosening or disarming a guardrail: extractive, because it increases what the key can take.
+pub fn set_guardrail(env: &Env) -> Symbol {
+    Symbol::new(env, "set_guardrail")
 }
 
 /// The account-wide row. Absence means *unconfigured* and refuses the lock; it never means

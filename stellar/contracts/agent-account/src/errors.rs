@@ -41,6 +41,13 @@ pub enum AccountError {
     NoVolumeLimit = 17,
     /// An extractive owner call on a guarded ad with no matured schedule for exactly it (2.1e).
     NotScheduled = 18,
-    /// `set_guardrail` input failed validation (zero delay, zero window).
+    /// `set_guardrail` / `schedule_extractive` input failed validation (a zero delay, window,
+    /// capacity or refill; an amount on an action that has none; too many guarded ads; an overflow).
     BadGuardrail = 19,
+    /// Scheduling against an ad that has no guardrail. Distinct from `NotScheduled`, which
+    /// everywhere else means "no matured schedule" — overloading it made the two indistinguishable.
+    NoGuardrail = 20,
+    /// The ad is on the guarded roster but its settings entry has archived. Refused rather than
+    /// read as unguarded (2.3h: absence must not be permission).
+    GuardrailArchived = 21,
 }
