@@ -320,9 +320,10 @@ pub fn validate(env: &Env, policy: &AgentPolicy) -> Result<(), AccountError> {
         if proofbridge_core::auth::is_zero_bytes32(&t) {
             return Err(AccountError::BadPolicy);
         }
-        // Duplicates, like `allowed_actions` and `ad_scope`. Containment of `limits` is checked by
-        // length below, and a repeated token would make that length lie: `[A, A]` with limits
-        // `{A, B}` would balance, and `B` — never whitelisted — would carry a limit.
+        // Duplicates, like `allowed_actions` and `ad_scope`. **`limits`' containment argument
+        // below depends on this**: it concludes one row per token from a count plus a lookup, and
+        // that only follows if the whitelist itself holds N distinct tokens. Removing this check
+        // on the grounds that a repeated token looks harmless would silently break that.
         for j in 0..i {
             if tokens.get(j as u32) == Some(t.clone()) {
                 return Err(AccountError::BadPolicy);
@@ -349,6 +350,9 @@ pub fn validate(env: &Env, policy: &AgentPolicy) -> Result<(), AccountError> {
     // is no room left for a duplicate or for a row naming a token that is not on the list. An
     // explicit "every row is whitelisted, and no row repeats" pass was written here first and could
     // not be made to fail — the length plus the forward lookup already cover it.
+    //
+    // **This rests on the duplicate check twenty-five lines above**: "N distinct rows" only follows
+    // if `token_whitelist` itself holds N distinct tokens. The two travel together.
     if policy.limits.len() != tokens.len() {
         return Err(AccountError::BadPolicy);
     }
