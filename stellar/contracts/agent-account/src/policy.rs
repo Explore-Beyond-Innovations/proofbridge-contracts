@@ -5,16 +5,22 @@
 //! persistent, keyed by agent id, re-extended on every write and at use time.
 //! A revoked policy stays in place as the tombstone: `revoked: true` is sticky.
 
-use soroban_sdk::{contracttype, Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Env, String, Symbol, TryFromVal, Val, Vec};
+
+use proofbridge_core::rate_limit::{Bucket, Limit};
 
 use crate::errors::AccountError;
 
 pub const MAX_ALLOWED_ACTIONS: u32 = 4;
 pub const MAX_WHITELIST_TOKENS: u32 = 16;
 pub const MAX_TARGETS: u32 = 2;
+/// Ads a scoped agent may name. Sized like the token whitelist: enough for a real book, small
+/// enough that the linear scan in the auth path stays cheap.
+pub const MAX_AD_SCOPE: u32 = 16;
 /// Bumped by an `upgrade` whose wasm changes the storage shape; a new wasm
 /// migrates or refuses old state deliberately instead of misreading it.
-pub const SCHEMA_VERSION: u32 = 1;
+/// 2 = 2.1d's `ad_scope` / `limits` / `buckets`.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Agent id: ed25519 pubkey as-is; secp256k1 agents use their 20-byte EVM
 /// address left-padded to 32 (`proofbridge_core::secp::evm_address_to_bytes32`).
@@ -27,13 +33,110 @@ pub struct AgentPolicy {
     pub allowed_actions: Vec<Symbol>,
     /// Both `ad_chain_token` and `order_chain_token` of a lock must be listed.
     pub token_whitelist: Vec<BytesN<32>>,
-    /// Cap on one lock, in ad-token units (what the escrow actually locks).
-    pub max_per_order: u128,
     /// Ledger timestamp; 0 = no expiry; usable while `now < valid_until`.
     pub valid_until: u64,
     /// Sticky tombstone: set by `revoke_agent`, never cleared, blocks re-install.
     pub revoked: bool,
     /// Settlement identity every lock must name (D5).
+    pub settlement_signer: BytesN<32>,
+    /// Which ads this agent may serve. `None` = every ad this account owns, which is the 2.1c
+    /// behaviour and stays the default; `Some(list)` = exactly those. Deliberately not "empty
+    /// means all": `validate` already rejects an empty `token_whitelist`, so an empty list means
+    /// *invalid* in this struct and must not mean the opposite one field down.
+    pub ad_scope: Option<Vec<String>>,
+    /// Per-token size and rate for this agent, in that token's own units. Every whitelisted token
+    /// needs one: one number cannot be right for tokens that are not worth the same, which is the
+    /// whole reason this is a map and not a scalar.
+    pub limits: Vec<TokenLimit>,
+    /// Live bucket state, one row per token spent from. Lives inside the policy rather than beside
+    /// it so there is no second entry that can archive on its own and read back as a full bucket
+    /// (2.3h).
+    pub buckets: Vec<TokenBucket>,
+}
+
+/// What an agent may do with one token: how big a single lock may be, and how fast it may keep
+/// making them.
+///
+/// The two belong together because the per-order cap is only meaningful *relative to* the bucket:
+/// above `capacity` it can never bind, and below it, it is what forces a stolen key to make ten
+/// locks instead of one — ten chances for the watchtower to notice before the allowance is gone.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenLimit {
+    /// Which token this row is for.
+    pub token: BytesN<32>,
+    /// Cap on one lock, in this token's own units (what the escrow actually locks).
+    pub max_per_order: u128,
+    /// The refill bucket for this token.
+    pub rate: Limit,
+}
+
+/// Live bucket state for one token, carried the same way and for the same reason.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenBucket {
+    pub token: BytesN<32>,
+    pub bucket: Bucket,
+}
+
+/// A `Vec` of rows carrying their own key, not a `Map<BytesN<32>, _>`.
+///
+/// The map is the obvious shape and it is unreadable off chain: `scValToNative` turns an `ScMap`
+/// into a JS object, and a 32-byte key becomes `String(Buffer)` — decoded as UTF-8, so any byte
+/// that is not valid UTF-8 lands on U+FFFD and the token id does not round-trip. Every off-chain
+/// mirror reads `policy()` through that path, so a map here would hand all of them limits they
+/// cannot attribute to a token. A vec of structs decodes losslessly: symbol keys for the fields,
+/// the token as a byte value rather than a key.
+///
+/// The cost on chain is a linear scan bounded by `MAX_WHITELIST_TOKENS` (16), which is what
+/// `token_whitelist.contains()` already does beside it.
+pub fn limit_for(policy: &AgentPolicy, token: &BytesN<32>) -> Option<TokenLimit> {
+    policy.limits.iter().find(|l| &l.token == token)
+}
+
+pub fn bucket_for(policy: &AgentPolicy, token: &BytesN<32>) -> Option<Bucket> {
+    policy
+        .buckets
+        .iter()
+        .find(|b| &b.token == token)
+        .map(|b| b.bucket)
+}
+
+/// Replace this token's bucket, or append it the first time it is spent from.
+pub fn put_bucket(policy: &mut AgentPolicy, token: &BytesN<32>, bucket: Bucket) {
+    for (i, b) in policy.buckets.iter().enumerate() {
+        if &b.token == token {
+            policy.buckets.set(
+                i as u32,
+                TokenBucket {
+                    token: token.clone(),
+                    bucket,
+                },
+            );
+            return;
+        }
+    }
+    policy.buckets.push_back(TokenBucket {
+        token: token.clone(),
+        bucket,
+    });
+}
+
+/// The 2.1c shape, kept so an account upgraded in place can still read what it wrote.
+///
+/// A `#[contracttype]` struct is an `ScMap` keyed by field name, and the derived conversion wants
+/// the exact key set — so a v1 entry read straight into `AgentPolicy` does not return `None`, it
+/// traps. Without this, upgrading an account with policies installed would leave every one of its
+/// agent ids unusable *and* unrepairable: `__check_auth`, `policy`, `revoke_agent` and `set_policy`
+/// all read the entry first, so the owner could not even revoke.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AgentPolicyV1 {
+    pub allowed_actions: Vec<Symbol>,
+    pub token_whitelist: Vec<BytesN<32>>,
+    pub max_per_order: u128,
+    pub valid_until: u64,
+    pub revoked: bool,
     pub settlement_signer: BytesN<32>,
 }
 
@@ -44,6 +147,20 @@ pub enum DataKey {
     Targets,
     SchemaVersion,
     Policy(AgentId),
+    /// The account-wide volume row for one token: the limit every agent shares (F7's N-agent
+    /// half) and its live bucket, in **one** entry. Splitting them would let the limit archive
+    /// while the bucket survives — and then a live bucket with no limit either refuses a
+    /// configured token or, worse, refills to full. One entry cannot half-disappear.
+    AccountVolume(BytesN<32>),
+}
+
+/// The account-wide row. Absence means *unconfigured* and refuses the lock; it never means
+/// unlimited (2.3h: absence must not read as permission).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AccountVolume {
+    pub limit: Limit,
+    pub bucket: Bucket,
 }
 
 /// The only selector an agent may hold today. `register`, `revoke`,
@@ -95,10 +212,40 @@ pub fn set_targets(env: &Env, targets: &Vec<Address>) -> Result<(), AccountError
     Ok(())
 }
 
+/// Read a policy, migrating a 2.1c entry on the way through.
+///
+/// Lazy migration rather than a sweep: Soroban cannot enumerate keys, so there is no upgrade-time
+/// pass that could find every agent id. A v1 entry surfaces as a v2 policy with **no limits**,
+/// which makes it useless rather than dangerous — `spend_volume` refuses a token with no limit, so
+/// the agent cannot lock — while leaving the owner every repair: `policy` reads it, `revoke_agent`
+/// tombstones it, `set_policy` replaces it with a metered one. The `revoked` flag is carried across
+/// so the tombstone survives the upgrade; losing it would let a revoked id be re-installed. The v1
+/// `max_per_order` is dropped rather than carried: it was one scalar for the whole whitelist, and
+/// there is no per-token row to put it in without inventing rates the owner never chose.
+///
+/// The migration is read-only. Writing it back here would mean `__check_auth` persisting on a path
+/// that may go on to reject, and the owner has to re-install anyway to supply limits.
 pub fn get_policy(env: &Env, agent: &AgentId) -> Option<AgentPolicy> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::Policy(agent.clone()))
+    let key = DataKey::Policy(agent.clone());
+    let raw: Val = env.storage().persistent().get(&key)?;
+    if let Ok(p) = AgentPolicy::try_from_val(env, &raw) {
+        return Some(p);
+    }
+    if let Ok(v1) = AgentPolicyV1::try_from_val(env, &raw) {
+        return Some(AgentPolicy {
+            allowed_actions: v1.allowed_actions,
+            token_whitelist: v1.token_whitelist,
+            valid_until: v1.valid_until,
+            revoked: v1.revoked,
+            settlement_signer: v1.settlement_signer,
+            ad_scope: None,
+            limits: Vec::new(env),
+            buckets: Vec::new(env),
+        });
+    }
+    // Neither shape. Unreachable today — v1 and v2 are the only ones that have existed — and a
+    // strict read traps, which is what happened before this function knew about v1 at all.
+    env.storage().persistent().get(&key)
 }
 
 pub fn set_policy(env: &Env, agent: &AgentId, policy: &AgentPolicy) {
@@ -110,6 +257,40 @@ pub fn set_policy(env: &Env, agent: &AgentId, policy: &AgentPolicy) {
 /// Use-time re-extension: an active policy never archives between owner writes.
 pub fn touch_policy(env: &Env, agent: &AgentId) {
     proofbridge_core::ttl::extend_persistent(env, &DataKey::Policy(agent.clone()));
+}
+
+pub fn get_account_volume(env: &Env, token: &BytesN<32>) -> Option<AccountVolume> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::AccountVolume(token.clone()))
+}
+
+pub fn set_account_volume(env: &Env, token: &BytesN<32>, v: &AccountVolume) {
+    let key = DataKey::AccountVolume(token.clone());
+    env.storage().persistent().set(&key, v);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+}
+
+/// A limit is well formed when it admits something and eventually refills. A zero `capacity`
+/// blocks the agent outright and a zero `refill_per_second` makes the bucket one-shot; both are
+/// almost certainly a mis-set field rather than an intent, and both are better refused at install
+/// than discovered when locks stop.
+pub fn validate_limit(limit: &Limit) -> Result<(), AccountError> {
+    if limit.capacity == 0 || limit.refill_per_second == 0 {
+        return Err(AccountError::BadPolicy);
+    }
+    Ok(())
+}
+
+/// ...and a per-token row adds the size cap. Above `capacity` the cap can never bind, so a larger
+/// one is inert — refused rather than silently ignored, because an owner who wrote it meant
+/// something by it.
+pub fn validate_token_limit(tl: &TokenLimit) -> Result<(), AccountError> {
+    validate_limit(&tl.rate)?;
+    if tl.max_per_order == 0 || tl.max_per_order > tl.rate.capacity {
+        return Err(AccountError::BadPolicy);
+    }
+    Ok(())
 }
 
 /// Install-time validation; the auth path never re-checks these.
@@ -135,15 +316,20 @@ pub fn validate(env: &Env, policy: &AgentPolicy) -> Result<(), AccountError> {
     if tokens.is_empty() || tokens.len() > MAX_WHITELIST_TOKENS {
         return Err(AccountError::BadPolicy);
     }
-    for t in tokens.iter() {
+    for (i, t) in tokens.iter().enumerate() {
         if proofbridge_core::auth::is_zero_bytes32(&t) {
             return Err(AccountError::BadPolicy);
         }
+        // Duplicates, like `allowed_actions` and `ad_scope`. Containment of `limits` is checked by
+        // length below, and a repeated token would make that length lie: `[A, A]` with limits
+        // `{A, B}` would balance, and `B` — never whitelisted — would carry a limit.
+        for j in 0..i {
+            if tokens.get(j as u32) == Some(t.clone()) {
+                return Err(AccountError::BadPolicy);
+            }
+        }
     }
 
-    if policy.max_per_order == 0 {
-        return Err(AccountError::BadPolicy);
-    }
     // Until 2.3b the only settlement identity a lock can name is this account
     // (F5): the escrow does not bind `ad_creator` to `ad.maker` on Stellar, so
     // a foreign signer here would pin locks the relayer never built.
@@ -153,5 +339,55 @@ pub fn validate(env: &Env, policy: &AgentPolicy) -> Result<(), AccountError> {
     if policy.valid_until != 0 && policy.valid_until <= env.ledger().timestamp() {
         return Err(AccountError::BadPolicy);
     }
+
+    // Every whitelisted token needs exactly one limit, and nothing outside the whitelist may carry
+    // one. The whitelist says which tokens are permitted at all; `limits` says how much, and a
+    // token in one and not the other is a half-written policy rather than a default.
+    //
+    // Two checks are enough, and a third would be unreachable. The loop below finds a row for every
+    // whitelisted token, which is ≥ N distinct rows for N tokens; with the count pinned to N there
+    // is no room left for a duplicate or for a row naming a token that is not on the list. An
+    // explicit "every row is whitelisted, and no row repeats" pass was written here first and could
+    // not be made to fail — the length plus the forward lookup already cover it.
+    if policy.limits.len() != tokens.len() {
+        return Err(AccountError::BadPolicy);
+    }
+    for t in tokens.iter() {
+        match limit_for(policy, &t) {
+            Some(l) => validate_token_limit(&l)?,
+            None => return Err(AccountError::BadPolicy),
+        }
+        // And the account-wide ceiling has to exist too, or this policy installs cleanly and then
+        // fails on its first lock with `NoVolumeLimit`. Fail-closed either way, but the owner
+        // deserves the answer at install rather than from an agent that mysteriously cannot work,
+        // and `set_account_limit` before `set_policy` is an ordering nothing else states.
+        if get_account_volume(env, &t).is_none() {
+            return Err(AccountError::NoVolumeLimit);
+        }
+    }
+
+    if let Some(ads) = &policy.ad_scope {
+        if ads.is_empty() || ads.len() > MAX_AD_SCOPE {
+            return Err(AccountError::BadPolicy);
+        }
+        for (i, a) in ads.iter().enumerate() {
+            if a.is_empty() {
+                return Err(AccountError::BadPolicy);
+            }
+            for j in 0..i {
+                if ads.get(j as u32) == Some(a.clone()) {
+                    return Err(AccountError::BadPolicy);
+                }
+            }
+        }
+    }
     Ok(())
+}
+
+/// Does this policy let the agent serve `ad_id`? `None` scope is every ad this account owns.
+pub fn ad_in_scope(policy: &AgentPolicy, ad_id: &String) -> bool {
+    match &policy.ad_scope {
+        None => true,
+        Some(ads) => ads.contains(ad_id),
+    }
 }

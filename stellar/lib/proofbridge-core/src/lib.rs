@@ -17,6 +17,7 @@ pub mod errors;
 pub mod escrow_events;
 pub mod escrow_ops;
 pub mod escrow_storage;
+pub mod rate_limit;
 pub mod secp;
 pub mod timing;
 pub mod token;

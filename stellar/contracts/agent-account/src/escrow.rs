@@ -5,10 +5,14 @@
 //! 17-field order decodes the same way. A missing key or a wrong type is
 //! `BadArgs` (fail closed).
 
-use soroban_sdk::{auth::ContractContext, Address, BytesN, Env, Map, Symbol, TryFromVal, Val, Vec};
+use soroban_sdk::{
+    auth::ContractContext, Address, BytesN, Env, Map, String, Symbol, TryFromVal, Val, Vec,
+};
+
+use proofbridge_core::rate_limit::{self, Bucket};
 
 use crate::errors::AccountError;
-use crate::policy::{self, AgentPolicy};
+use crate::policy::{self, AccountVolume, AgentPolicy};
 
 /// The settlement identity a policy may name today: this account. 2.3b (the
 /// 17-field order with `ad_settlement_signer`) relaxes this to the owner's
@@ -38,10 +42,18 @@ fn field<T: TryFromVal<Env, Val>>(
 
 /// Target ∈ pinned escrows, selector ∈ allowed_actions, then the lock's args
 /// against the policy. Fails closed on anything it cannot decode.
+///
+/// **This writes.** Since 2.1d the last thing it does is debit two volume buckets, so the name
+/// undersells it: a passing check has consumed allowance. That is deliberate — the auth frame is
+/// the only place that sees every authorized lock.
+///
+/// Two consequences worth knowing. Simulation consumes nothing while apply does. And the buckets
+/// are charged for locks that actually *happen*: any later failure — a rejected context, the
+/// escrow itself reverting — discards the frame and the debit with it.
 pub fn check_contract_call(
     env: &Env,
     targets: &Vec<Address>,
-    policy: &AgentPolicy,
+    policy: &mut AgentPolicy,
     c: &ContractContext,
 ) -> Result<(), AccountError> {
     if !targets.contains(&c.contract) {
@@ -71,14 +83,19 @@ pub fn check_contract_call(
         return Err(AccountError::TokenNotAllowed);
     }
 
-    // The escrow locks `scale(amount, order_decimals, ad_decimals)` of the ad
-    // token; the cap is denominated in the same units.
+    // The escrow locks `scale(amount, order_decimals, ad_decimals)` of the ad token; the cap is
+    // denominated in the same units. Per token, because the whitelist can hold sixteen of them and
+    // one number cannot be right for two assets of different value — 1,000,000 units is a few
+    // cents of XLM and a few hundred dollars of wETH. Decimal scaling cannot fix that: it converts
+    // units, and what differs here is worth, which nothing on chain knows.
     let amount: u128 = field(env, &lock, "amount")?;
     let order_decimals: u32 = field(env, &lock, "order_decimals")?;
     let ad_decimals: u32 = field(env, &lock, "ad_decimals")?;
     let ad_amount = proofbridge_core::decimal_scaling::scale(amount, order_decimals, ad_decimals)
         .map_err(|_| AccountError::BadArgs)?;
-    if ad_amount > policy.max_per_order {
+    let token_limit =
+        policy::limit_for(policy, &ad_chain_token).ok_or(AccountError::NoVolumeLimit)?;
+    if ad_amount > token_limit.max_per_order {
         return Err(AccountError::CapExceeded);
     }
 
@@ -91,5 +108,65 @@ pub fn check_contract_call(
     if settlement_signer_of(env, &lock)? != policy.settlement_signer {
         return Err(AccountError::SettlementSignerMismatch);
     }
+
+    // Reach, then rate. The ordering is for cost and legibility, not safety: a rejected
+    // `__check_auth` takes the whole frame with it, so a refused lock cannot spend allowance
+    // whichever way round these go. Checked by moving the scope test below the debit — every test
+    // still passed, which is the honest measure of what the ordering buys.
+    let ad_id: String = field(env, &lock, "ad_id")?;
+    if !policy::ad_in_scope(policy, &ad_id) {
+        return Err(AccountError::AdNotAllowed);
+    }
+
+    spend_volume(env, policy, &ad_chain_token, ad_amount)
+}
+
+/// Debit the agent's bucket and the account's, in ad-token units.
+///
+/// Both are refilled and checked **before either is written**, so a lock that clears the agent but
+/// not the account leaves neither drained. Getting that order wrong would let a rejected lock still
+/// cost the agent its allowance.
+fn spend_volume(
+    env: &Env,
+    policy: &mut AgentPolicy,
+    token: &BytesN<32>,
+    amount: u128,
+) -> Result<(), AccountError> {
+    let now = env.ledger().timestamp();
+
+    // A whitelisted token with no limit is refused, not waved through: the whitelist says which
+    // tokens are permitted at all, `limits` says how much, and silence in the second is not
+    // permission. `validate` already makes the two agree at install; this is the read-side half of
+    // that, and it is what a policy written by an older wasm would trip on.
+    let agent_limit = policy::limit_for(policy, token)
+        .ok_or(AccountError::NoVolumeLimit)?
+        .rate;
+    // No stored bucket means never spent — the policy entry holds the buckets, so this cannot be
+    // an entry that quietly archived and read back as full.
+    let agent_bucket =
+        policy::bucket_for(policy, token).unwrap_or_else(|| Bucket::full(&agent_limit, now));
+
+    // Absence here means *unconfigured*, and refuses. The limit and the bucket share one entry
+    // precisely so this read cannot see a live bucket with a vanished ceiling.
+    let account = policy::get_account_volume(env, token).ok_or(AccountError::NoVolumeLimit)?;
+
+    let next_agent = rate_limit::try_spend(&agent_limit, &agent_bucket, amount, now)
+        .ok_or(AccountError::VolumeExceeded)?;
+    let next_account = rate_limit::try_spend(&account.limit, &account.bucket, amount, now)
+        .ok_or(AccountError::VolumeExceeded)?;
+
+    // The agent's bucket is updated in the caller's copy and persisted once after every context
+    // has run. Writing it here would be wrong as well as wasteful: an auth entry carrying two
+    // locks hands each context the same policy, so a per-context write would have the second
+    // overwrite the first's debit and make the second lock free.
+    policy::put_bucket(policy, token, next_agent);
+    policy::set_account_volume(
+        env,
+        token,
+        &AccountVolume {
+            limit: account.limit,
+            bucket: next_account,
+        },
+    );
     Ok(())
 }

@@ -29,15 +29,18 @@ use soroban_sdk::{
     auth::{Context, CustomAccountInterface},
     contract, contractimpl,
     crypto::Hash,
-    vec, Address, BytesN, ContractExecutable, Env, IntoVal, Symbol, Vec,
+    vec, Address, BytesN, ContractExecutable, Env, IntoVal, String, Symbol, Vec,
 };
+
+use policy::TokenLimit;
+use proofbridge_core::rate_limit::{self, Bucket, Limit};
 
 pub use auth::{AccountSig, Ed25519Sig, SecpSig};
 pub use errors::AccountError;
 pub use escrow::{required_settlement_signer, settlement_signer_of};
 pub use policy::{
-    lock_for_order, AgentId, AgentPolicy, MAX_ALLOWED_ACTIONS, MAX_TARGETS, MAX_WHITELIST_TOKENS,
-    SCHEMA_VERSION,
+    lock_for_order, AccountVolume, AgentId, AgentPolicy, MAX_AD_SCOPE, MAX_ALLOWED_ACTIONS,
+    MAX_TARGETS, MAX_WHITELIST_TOKENS, SCHEMA_VERSION,
 };
 
 #[contract]
@@ -80,22 +83,29 @@ impl AgentAccount {
         agent_id: BytesN<32>,
         allowed_actions: Vec<Symbol>,
         token_whitelist: Vec<BytesN<32>>,
-        max_per_order: u128,
         valid_until: u64,
         settlement_signer: BytesN<32>,
+        ad_scope: Option<Vec<String>>,
+        limits: Vec<TokenLimit>,
     ) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
         if policy::get_policy(&env, &agent_id).is_some_and(|p| p.revoked) {
             return Err(AccountError::AgentRevoked);
         }
+        // Re-installing resets the agent's spend. That is the owner's call by construction: a
+        // policy write is the owner saying what the agent may do from now on, and carrying a
+        // half-drained bucket across a deliberate re-configure would make the new limits a lie.
+        // The account-wide bucket is untouched, so the aggregate still binds across the reset.
         let p = AgentPolicy {
             allowed_actions,
             token_whitelist,
-            max_per_order,
             valid_until,
             revoked: false,
             settlement_signer: settlement_signer.clone(),
+            ad_scope,
+            limits,
+            buckets: Vec::new(&env),
         };
         policy::validate(&env, &p)?;
         policy::set_policy(&env, &agent_id, &p);
@@ -103,9 +113,49 @@ impl AgentAccount {
             agent_id,
             settlement_signer,
             valid_until,
-            max_per_order,
         }
         .publish(&env);
+        Ok(())
+    }
+
+    /// Owner-only. The account-wide volume limit for one token — the ceiling every agent shares,
+    /// so N agents drain one pool instead of getting N private ones (risk 01 F7).
+    ///
+    /// Re-configuring keeps the live bucket where it is rather than refilling it. An owner who
+    /// could reset the aggregate by re-setting the limit would have a cap that resets on demand,
+    /// which is the fixed window this replaced.
+    pub fn set_account_limit(
+        env: Env,
+        token: BytesN<32>,
+        limit: Limit,
+    ) -> Result<(), AccountError> {
+        policy::get_owner(&env).require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        policy::validate_limit(&limit)?;
+        let now = env.ledger().timestamp();
+        let bucket = match policy::get_account_volume(&env, &token) {
+            Some(v) => {
+                // Settle at the OLD rate first, then re-stamp. Carrying the old `last_ts` into a
+                // new limit would re-price the whole idle interval at the new `refill_per_second`:
+                // drain the bucket, wait, raise the rate, and the next lock sees a full bucket —
+                // the cap-that-resets-on-demand this method exists to prevent, reached through the
+                // rate instead of the level. Then clamp, so a lowered capacity applies at once and
+                // never tops up.
+                let settled = rate_limit::available(&v.limit, &v.bucket, now);
+                let level = if settled > limit.capacity {
+                    limit.capacity
+                } else {
+                    settled
+                };
+                Bucket {
+                    level,
+                    last_ts: now,
+                }
+            }
+            None => Bucket::full(&limit, now),
+        };
+        policy::set_account_volume(&env, &token, &policy::AccountVolume { limit, bucket });
+        events::AccountLimitSet { token }.publish(&env);
         Ok(())
     }
 
@@ -133,6 +183,10 @@ impl AgentAccount {
         proofbridge_core::ttl::extend_instance(&env);
         env.deployer()
             .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
+        // The marker has to move with the code, or `schema_version()` reports whatever the
+        // constructor wrote years ago and nothing can branch on it. Policies migrate lazily on
+        // read (`policy::get_policy`); this is the part that says which shape new writes take.
+        policy::set_schema_version(&env);
         events::Upgraded { new_wasm_hash }.publish(&env);
         Ok(())
     }
@@ -186,7 +240,7 @@ impl CustomAccountInterface for AgentAccount {
             AccountSig::AgentSecp(s) => auth::verify_secp(&env, &signature_payload, &s)?,
         };
 
-        let p = policy::get_policy(&env, &agent_id).ok_or(AccountError::NoPolicyForAgent)?;
+        let mut p = policy::get_policy(&env, &agent_id).ok_or(AccountError::NoPolicyForAgent)?;
         if p.revoked {
             return Err(AccountError::AgentRevoked);
         }
@@ -201,12 +255,16 @@ impl CustomAccountInterface for AgentAccount {
         let targets = policy::get_targets(&env);
         for ctx in auth_contexts.iter() {
             match ctx {
-                Context::Contract(c) => escrow::check_contract_call(&env, &targets, &p, &c)?,
+                Context::Contract(c) => escrow::check_contract_call(&env, &targets, &mut p, &c)?,
                 // An agent never creates contracts or moves funds directly.
                 // 2.1f revisits CAP-85 variants; today anything else fails closed.
                 _ => return Err(AccountError::UnsupportedContext),
             }
         }
+        // Once, after every context: `p` carries the volume debited by all of them. A failure
+        // anywhere above returns Err and the host discards the whole frame, so there is no
+        // half-applied state to undo here.
+        policy::set_policy(&env, &agent_id, &p);
         Ok(())
     }
 }
