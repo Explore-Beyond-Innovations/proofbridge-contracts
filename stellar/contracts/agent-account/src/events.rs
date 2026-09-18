@@ -1,4 +1,4 @@
-use soroban_sdk::{contractevent, Address, BytesN, Vec};
+use soroban_sdk::{contractevent, Address, BytesN, String, Symbol, Vec};
 
 #[contractevent(topics = ["pol_set"], data_format = "vec")]
 pub struct PolicySet {
@@ -22,6 +22,45 @@ pub struct AgentRevoked {
 pub struct AccountLimitSet {
     #[topic]
     pub token: BytesN<32>,
+}
+
+/// The owner armed, tightened, loosened or disarmed an ad's guardrail (2.1e).
+#[contractevent(topics = ["guard_set"], data_format = "vec")]
+pub struct GuardRailSet {
+    #[topic]
+    pub ad_id: String,
+    /// Arming, tightening and disarming all publish here, so the stream has to say which. Without
+    /// it a disarm is indistinguishable from a re-arm, and the row a reader would fall back on is
+    /// gone — which is the one alert this feature must be able to raise, since disarming is an
+    /// attacker's first move.
+    pub armed: bool,
+    pub threshold: u128,
+    pub delay: u64,
+    pub window: u64,
+}
+
+/// An extractive call was scheduled. **This is the point of the delay** — a window nobody can see
+/// start is not a warning, so the amount and the destination ride on the event rather than being
+/// left to a storage read.
+#[contractevent(topics = ["extr_sched"], data_format = "vec")]
+pub struct ExtractiveScheduled {
+    #[topic]
+    pub ad_id: String,
+    #[topic]
+    pub action: Symbol,
+    pub amount: u128,
+    pub to: Address,
+    pub ready_at: u64,
+    pub expires_at: u64,
+}
+
+/// The owner stood a schedule down before it was spent.
+#[contractevent(topics = ["extr_cancel"], data_format = "vec")]
+pub struct ExtractiveCancelled {
+    #[topic]
+    pub ad_id: String,
+    #[topic]
+    pub action: Symbol,
 }
 
 /// Emitted by the constructor and by `set_targets`, so an event-only indexer

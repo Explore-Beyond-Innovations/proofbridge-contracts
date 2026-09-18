@@ -39,4 +39,15 @@ pub enum AccountError {
     /// The ad token is whitelisted but has no configured volume limit, on the policy or the
     /// account. Silence is not permission.
     NoVolumeLimit = 17,
+    /// An extractive owner call on a guarded ad with no matured schedule for exactly it (2.1e).
+    NotScheduled = 18,
+    /// `set_guard_rail` / `schedule_extractive` input failed validation (a zero delay, window,
+    /// capacity or refill; an amount on an action that has none; too many guarded ads; an overflow).
+    BadGuardRail = 19,
+    /// Scheduling against an ad that has no guardrail. Distinct from `NotScheduled`, which
+    /// everywhere else means "no matured schedule" — overloading it made the two indistinguishable.
+    NoGuardRail = 20,
+    /// The ad is on the guarded roster but its settings entry has archived. Refused rather than
+    /// read as unguarded (2.3h: absence must not be permission).
+    GuardRailArchived = 21,
 }

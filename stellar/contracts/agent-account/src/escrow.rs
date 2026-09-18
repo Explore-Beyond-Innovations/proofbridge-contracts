@@ -170,3 +170,127 @@ fn spend_volume(
     );
     Ok(())
 }
+
+/// Spend a matured schedule for exactly this call, or refuse.
+///
+/// Shared by the owner's escrow path and by `set_guard_rail`'s loosening branch, so "announced,
+/// matured, unexpired, exact, single-use" means one thing in both places. `to` is `None` where the
+/// call has no destination to pin (loosening a guardrail).
+pub fn spend_schedule(
+    env: &Env,
+    ad_id: &String,
+    action: &Symbol,
+    amount: u128,
+    to: Option<Address>,
+    now: u64,
+) -> Result<(), AccountError> {
+    let s = policy::get_schedule(env, ad_id, action).ok_or(AccountError::NotScheduled)?;
+    // Exact on both, or a schedule for 100 to alice authorizes 101, or 100 to someone else.
+    if s.amount != amount || now < s.ready_at || now >= s.expires_at {
+        return Err(AccountError::NotScheduled);
+    }
+    if let Some(dest) = to {
+        if s.to != dest {
+            return Err(AccountError::NotScheduled);
+        }
+    }
+    // Single use. A spent row left in place is an authorization waiting to be replayed.
+    policy::clear_schedule(env, ad_id, action);
+    Ok(())
+}
+
+/// The owner path's half of `check_contract_call` (2.1e).
+/// Instant to protect, slow to extract. Three calls move the maker's money out of reach and are
+/// constrained on a guarded ad; everything else the owner does — `set_settlement_signer`, funding,
+/// creating ads, and the token sub-contexts those spawn — passes exactly as before, because
+/// delaying a protective action only helps whoever stole the key.
+///
+/// **Not gated on `targets`.** An earlier version only ran this when the called contract was a
+/// pinned escrow, which `set_targets` — owner-only and instant — could simply point elsewhere,
+/// removing the guard without touching it. The selector and the ad are what matter; an unrelated
+/// contract that happens to share a name is only ever refused for an ad this owner guarded.
+///
+/// Like the agent path, this **writes**: spending a schedule removes it, and a sub-threshold
+/// withdrawal spends the bucket.
+pub fn check_owner_call(env: &Env, c: &ContractContext) -> Result<(), AccountError> {
+    let withdraw = policy::withdraw_from_ad(env);
+    let close = policy::close_ad(env);
+    let lock = policy::lock_for_order(env);
+    if c.fn_name != withdraw && c.fn_name != close && c.fn_name != lock {
+        return Ok(());
+    }
+
+    // `lock_for_order` carries the order struct; the other two take `ad_id` first. Fail closed on
+    // anything that does not decode: an extractive call the account cannot read is one it cannot
+    // judge.
+    let (ad_id, amount, to) = if c.fn_name == lock {
+        let raw = c.args.get(0).ok_or(AccountError::BadArgs)?;
+        let m: Map<Symbol, Val> =
+            Map::try_from_val(env, &raw).map_err(|_| AccountError::BadArgs)?;
+        let amount: u128 = field(env, &m, "amount")?;
+        let order_decimals: u32 = field(env, &m, "order_decimals")?;
+        let ad_decimals: u32 = field(env, &m, "ad_decimals")?;
+        let ad_amount =
+            proofbridge_core::decimal_scaling::scale(amount, order_decimals, ad_decimals)
+                .map_err(|_| AccountError::BadArgs)?;
+        (field::<String>(env, &m, "ad_id")?, ad_amount, None)
+    } else {
+        let ad_id: String = c
+            .args
+            .get(0)
+            .and_then(|v| String::try_from_val(env, &v).ok())
+            .ok_or(AccountError::BadArgs)?;
+        if c.fn_name == withdraw {
+            let amount: u128 = c
+                .args
+                .get(1)
+                .and_then(|v| u128::try_from_val(env, &v).ok())
+                .ok_or(AccountError::BadArgs)?;
+            let to: Address = c
+                .args
+                .get(2)
+                .and_then(|v| Address::try_from_val(env, &v).ok())
+                .ok_or(AccountError::BadArgs)?;
+            (ad_id, amount, Some(to))
+        } else {
+            let to: Address = c
+                .args
+                .get(1)
+                .and_then(|v| Address::try_from_val(env, &v).ok())
+                .ok_or(AccountError::BadArgs)?;
+            (ad_id, 0u128, Some(to))
+        }
+    };
+
+    if !policy::is_guarded(env, &ad_id) {
+        // Unguarded: every ad today, and a per-maker choice (design 02 §2.8). Absence means
+        // unguarded only because the roster says this ad was never armed.
+        return Ok(());
+    }
+    // On the roster but no row: the entry archived. Refuse rather than read it as unguarded — the
+    // failure contracts#25 fixed for the route and verifier rows, one feature over.
+    let mut g = policy::get_guard_rail(env, &ad_id).ok_or(AccountError::GuardRailArchived)?;
+    policy::touch_guard_rail(env, &ad_id);
+    let now = env.ledger().timestamp();
+
+    // `close_ad` carries no amount and empties the ad, and the balance is unreadable without
+    // re-entering the escrow that is calling us, so no threshold can gate it: always announced.
+    let announced = if c.fn_name == close {
+        true
+    } else {
+        amount > g.threshold
+    };
+
+    if announced {
+        return spend_schedule(env, &ad_id, &c.fn_name, amount, to, now);
+    }
+
+    // Under the threshold, and still bounded: the bucket is what makes design 02 §2.8's residual a
+    // *flow rate* rather than the balance. Without it, N calls of threshold size drain the ad as
+    // fast as transactions land, and one auth entry can carry several.
+    let next = proofbridge_core::rate_limit::try_spend(&g.rate, &g.bucket, amount, now)
+        .ok_or(AccountError::VolumeExceeded)?;
+    g.bucket = next;
+    policy::put_guard_rail(env, &ad_id, &g)?;
+    Ok(())
+}

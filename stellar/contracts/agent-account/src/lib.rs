@@ -32,7 +32,8 @@ use soroban_sdk::{
     vec, Address, BytesN, ContractExecutable, Env, IntoVal, String, Symbol, Vec,
 };
 
-use policy::TokenLimit;
+use escrow::spend_schedule;
+use policy::{GuardRail, TokenLimit};
 use proofbridge_core::rate_limit::{self, Bucket, Limit};
 
 pub use auth::{AccountSig, Ed25519Sig, SecpSig};
@@ -159,6 +160,178 @@ impl AgentAccount {
         Ok(())
     }
 
+    /// Owner-only. Arm, tighten, loosen or (with `None`) disarm this ad's guardrail.
+    ///
+    /// **Arming and tightening are instant; loosening and disarming go through the delay.** Design
+    /// 02 §2.8's protective list is every action that *reduces* an attacker's power — that is why
+    /// delaying them "only helps an attacker". Relaxing a brake does the opposite. An earlier
+    /// version of this made disarming instant on the argument that a thief "waits out" a delay
+    /// anyway; that argument defeats the withdrawal timelock it was defending, and the arithmetic
+    /// runs the other way. Delay on both: the attacker waits `delay` whichever route they take.
+    /// Disarm instant: disarm, then withdraw, and the wait is zero. The delay is not relocated, it
+    /// is removed.
+    pub fn set_guard_rail(
+        env: Env,
+        ad_id: String,
+        guard_rail: Option<GuardRail>,
+    ) -> Result<(), AccountError> {
+        policy::get_owner(&env).require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        let now = env.ledger().timestamp();
+        let current = policy::get_guard_rail(&env, &ad_id);
+
+        let loosening = match (&current, &guard_rail) {
+            // Arming from nothing only ever reduces what the key can do.
+            (None, _) => false,
+            (Some(_), None) => true,
+            (Some(cur), Some(next)) => !policy::is_tightening(cur, next),
+        };
+        if loosening {
+            spend_schedule(&env, &ad_id, &policy::set_guard_rail(&env), 0, None, now)?;
+        }
+
+        match guard_rail {
+            Some(g) => {
+                // A zero delay is a guardrail that does nothing and a zero window one that can
+                // never be used; a zero-capacity or zero-refill bucket blocks every sub-threshold
+                // withdrawal, which is a brake nobody would leave on. All read as a mis-set field.
+                if g.delay == 0 || g.window == 0 {
+                    return Err(AccountError::BadGuardRail);
+                }
+                if g.rate.capacity == 0 || g.rate.refill_per_second == 0 {
+                    return Err(AccountError::BadGuardRail);
+                }
+                // Changing the settings settles the old bucket first, then clamps — the same rule
+                // `set_account_limit` follows, and for the same reason: carrying the idle interval
+                // into a new rate would re-price it and hand back a full bucket.
+                let settled = match &current {
+                    Some(cur) => {
+                        let level = rate_limit::available(&cur.rate, &cur.bucket, now);
+                        if level > g.rate.capacity {
+                            g.rate.capacity
+                        } else {
+                            level
+                        }
+                    }
+                    None => g.rate.capacity,
+                };
+                let armed = GuardRail {
+                    bucket: Bucket {
+                        level: settled,
+                        last_ts: now,
+                    },
+                    ..g
+                };
+                policy::put_guard_rail(&env, &ad_id, &armed)?;
+                // Settings the schedules were made under are gone, so the schedules go with them.
+                if loosening {
+                    policy::clear_all_schedules(&env, &ad_id);
+                }
+                events::GuardRailSet {
+                    ad_id,
+                    armed: true,
+                    threshold: armed.threshold,
+                    delay: armed.delay,
+                    window: armed.window,
+                }
+                .publish(&env);
+            }
+            None => {
+                policy::remove_guard_rail(&env, &ad_id);
+                policy::clear_all_schedules(&env, &ad_id);
+                events::GuardRailSet {
+                    ad_id,
+                    armed: false,
+                    threshold: 0,
+                    delay: 0,
+                    window: 0,
+                }
+                .publish(&env);
+            }
+        }
+        Ok(())
+    }
+
+    /// Owner-only. Announce an extractive call and start its clock.
+    ///
+    /// The account cannot delay a call — `__check_auth` answers yes or no — so the timelock is two
+    /// transactions: this one, then the call itself once the delay has elapsed. `amount` and `to`
+    /// are stored and later compared exactly, or a schedule for a small withdrawal would authorize
+    /// a large one, or one to a different address.
+    pub fn schedule_extractive(
+        env: Env,
+        ad_id: String,
+        action: Symbol,
+        amount: u128,
+        to: Address,
+    ) -> Result<(), AccountError> {
+        policy::get_owner(&env).require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        let withdraw = policy::withdraw_from_ad(&env);
+        let close = policy::close_ad(&env);
+        let guard_change = policy::set_guard_rail(&env);
+        if action != withdraw && action != close && action != guard_change {
+            return Err(AccountError::ActionNotAllowed);
+        }
+        // Only `withdraw_from_ad` has an amount to match. Accepting one for the others would store
+        // a row that can never be spent, while the event published it as though it meant something.
+        if action != withdraw && amount != 0 {
+            return Err(AccountError::BadGuardRail);
+        }
+        let g = policy::get_guard_rail(&env, &ad_id).ok_or(AccountError::NoGuardRail)?;
+        let now = env.ledger().timestamp();
+        // Checked: `overflow-checks` is on for the workspace, so an absurd delay would otherwise
+        // panic with an opaque host error instead of one the owner can act on.
+        let ready_at = now.checked_add(g.delay).ok_or(AccountError::BadGuardRail)?;
+        let expires_at = ready_at
+            .checked_add(g.window)
+            .ok_or(AccountError::BadGuardRail)?;
+        let s = policy::Schedule {
+            amount,
+            to: to.clone(),
+            ready_at,
+            expires_at,
+        };
+        policy::set_schedule(&env, &ad_id, &action, &s);
+        events::ExtractiveScheduled {
+            ad_id,
+            action,
+            amount,
+            to,
+            ready_at,
+            expires_at,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Owner-only. Stand a schedule down — the lever an owner reaches for on seeing an
+    /// `ExtractiveScheduled` event they did not cause.
+    pub fn cancel_extractive(env: Env, ad_id: String, action: Symbol) -> Result<(), AccountError> {
+        policy::get_owner(&env).require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        // Existence checked, so the audit trail this event exists for does not fill with
+        // cancellations of schedules that were never made.
+        if policy::get_schedule(&env, &ad_id, &action).is_none() {
+            return Err(AccountError::NotScheduled);
+        }
+        policy::clear_schedule(&env, &ad_id, &action);
+        events::ExtractiveCancelled { ad_id, action }.publish(&env);
+        Ok(())
+    }
+
+    pub fn guard_rail(env: Env, ad_id: String) -> Option<GuardRail> {
+        policy::get_guard_rail(&env, &ad_id)
+    }
+
+    pub fn guarded_ads(env: Env) -> Vec<String> {
+        policy::guarded_ads(&env)
+    }
+
+    pub fn schedule(env: Env, ad_id: String, action: Symbol) -> Option<policy::Schedule> {
+        policy::get_schedule(&env, &ad_id, &action)
+    }
+
     /// Owner-only, instant, idempotent: the agent's next signed call fails.
     /// Orders already co-signed under the agent's BLS key still settle through
     /// the registry; retire the slot there (2.1e wires that off the event).
@@ -234,6 +407,18 @@ impl CustomAccountInterface for AgentAccount {
                 // inspection, so create_ad/fund_ad's token transfer sub-context passes.
                 let payload: BytesN<32> = signature_payload.to_bytes();
                 policy::get_owner(&env).require_auth_for_args(vec![&env, payload.into_val(&env)]);
+                // 2.1e: the owner path used to stop here. It still authorizes everything the owner
+                // could do before — only the two extractive escrow calls, and only on a guarded ad,
+                // now have to have been announced first.
+                // Every contract context, not just the pinned escrows. Filtering on `targets` here
+                // meant `set_targets` — owner-only and instant — could point them elsewhere and
+                // remove the guard without touching it. `check_owner_call` keys on the selector and
+                // the ad, so an unrelated contract is only ever refused for an ad this owner armed.
+                for ctx in auth_contexts.iter() {
+                    if let Context::Contract(c) = ctx {
+                        escrow::check_owner_call(&env, &c)?;
+                    }
+                }
                 return Ok(());
             }
             AccountSig::Agent(s) => auth::verify_ed25519(&env, &signature_payload, &s),
