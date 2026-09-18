@@ -11,6 +11,11 @@ on:
   workflow_call:
   workflow_dispatch:
 
+# Both jobs only read: checkout, install toolchains, build, test. Nothing here writes to the repo,
+# so the token is scoped down to that rather than left at the default.
+permissions:
+  contents: read
+
 env:
   FOUNDRY_PROFILE: ci
 
