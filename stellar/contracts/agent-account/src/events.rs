@@ -26,7 +26,7 @@ pub struct AccountLimitSet {
 
 /// The owner armed, tightened, loosened or disarmed an ad's guardrail (2.1e).
 #[contractevent(topics = ["guard_set"], data_format = "vec")]
-pub struct GuardrailSet {
+pub struct GuardRailSet {
     #[topic]
     pub ad_id: String,
     /// Arming, tightening and disarming all publish here, so the stream has to say which. Without

@@ -157,7 +157,7 @@ pub enum DataKey {
     AccountVolume(BytesN<32>),
     /// One guarded ad's settings and live bucket. Absent **and not on the roster** = unguarded,
     /// which is every ad today; absent *while on the roster* refuses — see `guarded_ads`.
-    Guardrail(String),
+    GuardRail(String),
     /// A scheduled extractive call, keyed by the ad and the function it authorizes. Single use.
     Schedule(String, Symbol),
     /// Instance-stored roster of ads the owner has guarded, so an archived row cannot read as
@@ -176,7 +176,7 @@ pub enum DataKey {
 /// the ceiling can archive while the bucket survives.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct Guardrail {
+pub struct GuardRail {
     /// A single withdrawal at or below this needs no announcement — but it still spends `bucket`,
     /// or "below the threshold" would mean "unlimited, one call at a time".
     pub threshold: u128,
@@ -197,7 +197,7 @@ pub struct Guardrail {
 ///
 /// `close_ad` carries no amount at all — it empties the ad, and the account cannot see by how much
 /// for the same re-entrancy reason as above — so it is categorically extractive and stores
-/// `amount: 0`. `set_guardrail` (loosening or disarming) stores the same.
+/// `amount: 0`. `set_guard_rail` (loosening or disarming) stores the same.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Schedule {
@@ -229,20 +229,20 @@ pub fn is_guarded(env: &Env, ad_id: &String) -> bool {
     guarded_ads(env).contains(ad_id)
 }
 
-pub fn get_guardrail(env: &Env, ad_id: &String) -> Option<Guardrail> {
+pub fn get_guard_rail(env: &Env, ad_id: &String) -> Option<GuardRail> {
     env.storage()
         .persistent()
-        .get(&DataKey::Guardrail(ad_id.clone()))
+        .get(&DataKey::GuardRail(ad_id.clone()))
 }
 
-pub fn put_guardrail(env: &Env, ad_id: &String, g: &Guardrail) -> Result<(), AccountError> {
-    let key = DataKey::Guardrail(ad_id.clone());
+pub fn put_guard_rail(env: &Env, ad_id: &String, g: &GuardRail) -> Result<(), AccountError> {
+    let key = DataKey::GuardRail(ad_id.clone());
     env.storage().persistent().set(&key, g);
     proofbridge_core::ttl::extend_persistent(env, &key);
     let mut roster = guarded_ads(env);
     if !roster.contains(ad_id) {
         if roster.len() >= MAX_GUARDED_ADS {
-            return Err(AccountError::BadGuardrail);
+            return Err(AccountError::BadGuardRail);
         }
         roster.push_back(ad_id.clone());
         set_guarded_ads(env, &roster);
@@ -250,10 +250,10 @@ pub fn put_guardrail(env: &Env, ad_id: &String, g: &Guardrail) -> Result<(), Acc
     Ok(())
 }
 
-pub fn remove_guardrail(env: &Env, ad_id: &String) {
+pub fn remove_guard_rail(env: &Env, ad_id: &String) {
     env.storage()
         .persistent()
-        .remove(&DataKey::Guardrail(ad_id.clone()));
+        .remove(&DataKey::GuardRail(ad_id.clone()));
     let roster = guarded_ads(env);
     let mut next = Vec::new(env);
     for a in roster.iter() {
@@ -266,8 +266,8 @@ pub fn remove_guardrail(env: &Env, ad_id: &String) {
 
 /// Use-time re-extension, the convention `touch_policy` sets: an ad in active use never archives
 /// between owner writes. The roster covers the idle case; this keeps the common one off it.
-pub fn touch_guardrail(env: &Env, ad_id: &String) {
-    proofbridge_core::ttl::extend_persistent(env, &DataKey::Guardrail(ad_id.clone()));
+pub fn touch_guard_rail(env: &Env, ad_id: &String) {
+    proofbridge_core::ttl::extend_persistent(env, &DataKey::GuardRail(ad_id.clone()));
 }
 
 /// Is `next` at least as strict as `cur` on every axis?
@@ -276,7 +276,7 @@ pub fn touch_guardrail(env: &Env, ad_id: &String) {
 /// increases it, so it goes through the delay — which is the whole feature. Design 02 §2.8's
 /// protective list is every action that *reduces* an attacker's power; relaxing a brake is not one,
 /// and treating it as one removes the delay rather than relocating it.
-pub fn is_tightening(cur: &Guardrail, next: &Guardrail) -> bool {
+pub fn is_tightening(cur: &GuardRail, next: &GuardRail) -> bool {
     next.threshold <= cur.threshold
         && next.delay >= cur.delay
         && next.window <= cur.window
@@ -308,7 +308,7 @@ pub fn clear_schedule(env: &Env, ad_id: &String, action: &Symbol) {
 /// outlives the settings it was made under would let the next arming be bypassed by an
 /// announcement nobody remembers.
 pub fn clear_all_schedules(env: &Env, ad_id: &String) {
-    for a in [withdraw_from_ad(env), close_ad(env), set_guardrail(env)] {
+    for a in [withdraw_from_ad(env), close_ad(env), set_guard_rail(env)] {
         clear_schedule(env, ad_id, &a);
     }
 }
@@ -325,9 +325,9 @@ pub fn close_ad(env: &Env) -> Symbol {
     Symbol::new(env, "close_ad")
 }
 
-/// Loosening or disarming a guardrail: extractive, because it increases what the key can take.
-pub fn set_guardrail(env: &Env) -> Symbol {
-    Symbol::new(env, "set_guardrail")
+/// Loosening or disarming a guard_rail: extractive, because it increases what the key can take.
+pub fn set_guard_rail(env: &Env) -> Symbol {
+    Symbol::new(env, "set_guard_rail")
 }
 
 /// The account-wide row. Absence means *unconfigured* and refuses the lock; it never means

@@ -33,7 +33,7 @@ use soroban_sdk::{
 };
 
 use escrow::spend_schedule;
-use policy::{Guardrail, TokenLimit};
+use policy::{GuardRail, TokenLimit};
 use proofbridge_core::rate_limit::{self, Bucket, Limit};
 
 pub use auth::{AccountSig, Ed25519Sig, SecpSig};
@@ -170,36 +170,36 @@ impl AgentAccount {
     /// runs the other way. Delay on both: the attacker waits `delay` whichever route they take.
     /// Disarm instant: disarm, then withdraw, and the wait is zero. The delay is not relocated, it
     /// is removed.
-    pub fn set_guardrail(
+    pub fn set_guard_rail(
         env: Env,
         ad_id: String,
-        guardrail: Option<Guardrail>,
+        guard_rail: Option<GuardRail>,
     ) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
         let now = env.ledger().timestamp();
-        let current = policy::get_guardrail(&env, &ad_id);
+        let current = policy::get_guard_rail(&env, &ad_id);
 
-        let loosening = match (&current, &guardrail) {
+        let loosening = match (&current, &guard_rail) {
             // Arming from nothing only ever reduces what the key can do.
             (None, _) => false,
             (Some(_), None) => true,
             (Some(cur), Some(next)) => !policy::is_tightening(cur, next),
         };
         if loosening {
-            spend_schedule(&env, &ad_id, &policy::set_guardrail(&env), 0, None, now)?;
+            spend_schedule(&env, &ad_id, &policy::set_guard_rail(&env), 0, None, now)?;
         }
 
-        match guardrail {
+        match guard_rail {
             Some(g) => {
                 // A zero delay is a guardrail that does nothing and a zero window one that can
                 // never be used; a zero-capacity or zero-refill bucket blocks every sub-threshold
                 // withdrawal, which is a brake nobody would leave on. All read as a mis-set field.
                 if g.delay == 0 || g.window == 0 {
-                    return Err(AccountError::BadGuardrail);
+                    return Err(AccountError::BadGuardRail);
                 }
                 if g.rate.capacity == 0 || g.rate.refill_per_second == 0 {
-                    return Err(AccountError::BadGuardrail);
+                    return Err(AccountError::BadGuardRail);
                 }
                 // Changing the settings settles the old bucket first, then clamps — the same rule
                 // `set_account_limit` follows, and for the same reason: carrying the idle interval
@@ -215,19 +215,19 @@ impl AgentAccount {
                     }
                     None => g.rate.capacity,
                 };
-                let armed = Guardrail {
+                let armed = GuardRail {
                     bucket: Bucket {
                         level: settled,
                         last_ts: now,
                     },
                     ..g
                 };
-                policy::put_guardrail(&env, &ad_id, &armed)?;
+                policy::put_guard_rail(&env, &ad_id, &armed)?;
                 // Settings the schedules were made under are gone, so the schedules go with them.
                 if loosening {
                     policy::clear_all_schedules(&env, &ad_id);
                 }
-                events::GuardrailSet {
+                events::GuardRailSet {
                     ad_id,
                     armed: true,
                     threshold: armed.threshold,
@@ -237,9 +237,9 @@ impl AgentAccount {
                 .publish(&env);
             }
             None => {
-                policy::remove_guardrail(&env, &ad_id);
+                policy::remove_guard_rail(&env, &ad_id);
                 policy::clear_all_schedules(&env, &ad_id);
-                events::GuardrailSet {
+                events::GuardRailSet {
                     ad_id,
                     armed: false,
                     threshold: 0,
@@ -269,23 +269,23 @@ impl AgentAccount {
         proofbridge_core::ttl::extend_instance(&env);
         let withdraw = policy::withdraw_from_ad(&env);
         let close = policy::close_ad(&env);
-        let guard_change = policy::set_guardrail(&env);
+        let guard_change = policy::set_guard_rail(&env);
         if action != withdraw && action != close && action != guard_change {
             return Err(AccountError::ActionNotAllowed);
         }
         // Only `withdraw_from_ad` has an amount to match. Accepting one for the others would store
         // a row that can never be spent, while the event published it as though it meant something.
         if action != withdraw && amount != 0 {
-            return Err(AccountError::BadGuardrail);
+            return Err(AccountError::BadGuardRail);
         }
-        let g = policy::get_guardrail(&env, &ad_id).ok_or(AccountError::NoGuardrail)?;
+        let g = policy::get_guard_rail(&env, &ad_id).ok_or(AccountError::NoGuardRail)?;
         let now = env.ledger().timestamp();
         // Checked: `overflow-checks` is on for the workspace, so an absurd delay would otherwise
         // panic with an opaque host error instead of one the owner can act on.
-        let ready_at = now.checked_add(g.delay).ok_or(AccountError::BadGuardrail)?;
+        let ready_at = now.checked_add(g.delay).ok_or(AccountError::BadGuardRail)?;
         let expires_at = ready_at
             .checked_add(g.window)
-            .ok_or(AccountError::BadGuardrail)?;
+            .ok_or(AccountError::BadGuardRail)?;
         let s = policy::Schedule {
             amount,
             to: to.clone(),
@@ -320,8 +320,8 @@ impl AgentAccount {
         Ok(())
     }
 
-    pub fn guardrail(env: Env, ad_id: String) -> Option<Guardrail> {
-        policy::get_guardrail(&env, &ad_id)
+    pub fn guard_rail(env: Env, ad_id: String) -> Option<GuardRail> {
+        policy::get_guard_rail(&env, &ad_id)
     }
 
     pub fn guarded_ads(env: Env) -> Vec<String> {

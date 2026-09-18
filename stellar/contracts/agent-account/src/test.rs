@@ -2137,9 +2137,9 @@ fn guard_rate(
     capacity: u128,
     refill_per_second: u128,
 ) {
-    f.client.set_guardrail(
+    f.client.set_guard_rail(
         &ad(&f.env),
-        &Some(Guardrail {
+        &Some(GuardRail {
             threshold,
             delay,
             window,
@@ -2330,7 +2330,7 @@ fn t52_protective_actions_are_never_delayed_on_a_guarded_ad() {
 
     // And tightening is protective too: a lower threshold, a longer delay, a smaller bucket.
     guard_rate(&f, 0, 172_800, 3_600, 1, 1);
-    assert_eq!(f.client.guardrail(&ad(&f.env)).unwrap().delay, 172_800);
+    assert_eq!(f.client.guard_rail(&ad(&f.env)).unwrap().delay, 172_800);
 }
 
 /// J1. Disarming is **not** protective, and an earlier version of this had it instant.
@@ -2345,18 +2345,18 @@ fn t52_loosening_and_disarming_go_through_the_delay() {
     let f = fixture();
     let to = Address::generate(&f.env);
     guard(&f, 0, 3_600, 86_400);
-    let change = Symbol::new(&f.env, "set_guardrail");
+    let change = Symbol::new(&f.env, "set_guard_rail");
 
     // Disarm: refused outright.
     assert_eq!(
-        f.client.try_set_guardrail(&ad(&f.env), &None),
+        f.client.try_set_guard_rail(&ad(&f.env), &None),
         Err(Ok(AccountError::NotScheduled))
     );
     // Loosening — a higher threshold — is the same thing by another route.
     assert_eq!(
-        f.client.try_set_guardrail(
+        f.client.try_set_guard_rail(
             &ad(&f.env),
-            &Some(Guardrail {
+            &Some(GuardRail {
                 threshold: u128::MAX,
                 delay: 3_600,
                 window: 86_400,
@@ -2377,8 +2377,8 @@ fn t52_loosening_and_disarming_go_through_the_delay() {
     // have paid to withdraw.
     f.client.schedule_extractive(&ad(&f.env), &change, &0, &to);
     f.env.ledger().set_timestamp(T0 + 3_600);
-    f.client.set_guardrail(&ad(&f.env), &None);
-    assert!(f.client.guardrail(&ad(&f.env)).is_none());
+    f.client.set_guard_rail(&ad(&f.env), &None);
+    assert!(f.client.guard_rail(&ad(&f.env)).is_none());
     assert!(f.client.guarded_ads().is_empty(), "off the roster too");
 }
 
@@ -2425,7 +2425,7 @@ fn t52_an_archived_guardrail_refuses_rather_than_reading_as_unguarded() {
         f.env
             .storage()
             .persistent()
-            .remove(&policy::DataKey::Guardrail(ad(&f.env)));
+            .remove(&policy::DataKey::GuardRail(ad(&f.env)));
     });
     assert!(
         f.client.guarded_ads().contains(ad(&f.env)),
@@ -2433,7 +2433,7 @@ fn t52_an_archived_guardrail_refuses_rather_than_reading_as_unguarded() {
     );
     expect_err(
         owner_check(&f, &withdraw_ctx(&f, 1, &to)),
-        AccountError::GuardrailArchived,
+        AccountError::GuardRailArchived,
     );
 }
 
@@ -2485,7 +2485,7 @@ fn t52_changing_the_guardrail_clears_its_schedules() {
     let to = Address::generate(&f.env);
     guard(&f, 0, 3_600, 86_400);
     let withdraw = Symbol::new(&f.env, "withdraw_from_ad");
-    let change = Symbol::new(&f.env, "set_guardrail");
+    let change = Symbol::new(&f.env, "set_guard_rail");
 
     f.client
         .schedule_extractive(&ad(&f.env), &withdraw, &100, &to);
@@ -2493,7 +2493,7 @@ fn t52_changing_the_guardrail_clears_its_schedules() {
     f.env.ledger().set_timestamp(T0 + 3_600);
 
     // Disarm, then re-arm: the old matured withdrawal must not survive the round trip.
-    f.client.set_guardrail(&ad(&f.env), &None);
+    f.client.set_guard_rail(&ad(&f.env), &None);
     guard(&f, 0, 3_600, 86_400);
     assert!(f.client.schedule(&ad(&f.env), &withdraw).is_none());
     expect_err(
@@ -2524,9 +2524,9 @@ fn t52_guardrail_input_is_validated() {
     let f = fixture();
     for bad in [(0_u64, 1_u64), (1, 0)] {
         assert_eq!(
-            f.client.try_set_guardrail(
+            f.client.try_set_guard_rail(
                 &ad(&f.env),
-                &Some(Guardrail {
+                &Some(GuardRail {
                     threshold: 0,
                     delay: bad.0,
                     window: bad.1,
@@ -2540,7 +2540,7 @@ fn t52_guardrail_input_is_validated() {
                     },
                 }),
             ),
-            Err(Ok(AccountError::BadGuardrail)),
+            Err(Ok(AccountError::BadGuardRail)),
             "a zero delay does nothing and a zero window can never be used",
         );
     }
@@ -2554,7 +2554,7 @@ fn t52_guardrail_input_is_validated() {
             &1,
             &Address::generate(&f.env),
         ),
-        Err(Ok(AccountError::NoGuardrail))
+        Err(Ok(AccountError::NoGuardRail))
     );
     // And only the two extractive selectors can be scheduled at all.
     guard(&f, 0, 1, 1);
