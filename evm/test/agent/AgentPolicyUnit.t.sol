@@ -89,10 +89,9 @@ contract AgentPolicyUnitTest is Test {
         AgentRateLimit.Bucket memory b = AgentRateLimit.Bucket({level: 1, lastTs: 0});
         assertEq(AgentRateLimit.available(limit, b, type(uint64).max), 1000);
 
-        AgentRateLimit.Limit memory wide =
-            AgentRateLimit.Limit({capacity: type(uint128).max, refillPerSecond: type(uint128).max});
+        AgentRateLimit.Limit memory wide = AgentRateLimit.Limit({capacity: type(uint128).max, refillPerSecond: 5});
         AgentRateLimit.Bucket memory nearlyFull = AgentRateLimit.Bucket({level: type(uint128).max - 1, lastTs: 0});
-        assertEq(AgentRateLimit.available(wide, nearlyFull, 2), type(uint128).max, "the add overflows u128 too");
+        assertEq(AgentRateLimit.available(wide, nearlyFull, 1), type(uint128).max, "past u128 is past capacity");
     }
 
     /*//////////////////////////////////////////////////////////////

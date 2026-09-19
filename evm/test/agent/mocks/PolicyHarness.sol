@@ -11,9 +11,17 @@ contract PolicyHarness is ProofBridgeAgentPolicy {
         return _adAmount(params);
     }
 
-    function decodeCalls(bytes calldata callData) external pure returns (bool ok, uint256 count) {
+    function decodeCalls(bytes calldata callData) external view returns (bool ok, uint256 count) {
         Call[] memory calls;
         (ok, calls) = _decodeCalls(callData);
         count = calls.length;
+    }
+
+    function orderParamsDecode(bytes calldata data) external view returns (bool) {
+        try this.decodeLock(data) returns (IAdManager.OrderParams memory) {
+            return true;
+        } catch {
+            return false;
+        }
     }
 }

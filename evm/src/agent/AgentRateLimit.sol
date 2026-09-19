@@ -47,7 +47,9 @@ library AgentRateLimit {
         uint256 refill = limit.refillPerSecond * elapsed;
         if (refill > U128_MAX) return limit.capacity;
         uint256 sum = bucket.level + refill;
-        if (sum > U128_MAX || sum > limit.capacity) return limit.capacity;
+        // Rust's `checked_add` overflowing `u128` needs no arm of its own here: `capacity` is bounded
+        // to `u128` wherever a limit is written, so a sum past `u128` is already a sum past it.
+        if (sum > limit.capacity) return limit.capacity;
         return sum;
     }
 

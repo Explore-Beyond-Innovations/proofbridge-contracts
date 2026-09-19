@@ -169,6 +169,7 @@ contract AgentPolicyEnforcementTest is AgentPolicyBase {
         // and together they are stopped by the account's.
         (address agent2, uint256 key2) = makeAddrAndKey("agent-two");
         _asAccount(abi.encodeCall(module.setAgentPolicy, (bytes32(uint256(uint160(agent2))), defaultPolicy())));
+        _asAccount(abi.encodeCall(module.setAgentGasBudget, (bytes32(uint256(uint160(agent2))), GAS_BUDGET)));
 
         for (uint256 i = 0; i < 5; ++i) {
             _agentOp(lockCall(MAX_PER_ORDER)).execUserOps();

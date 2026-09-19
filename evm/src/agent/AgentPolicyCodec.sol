@@ -50,6 +50,7 @@ library AgentPolicyCodec {
     error AgentPolicyCodec__NotAscending();
     error AgentPolicyCodec__TrailingBytes(uint256 got, uint256 want);
     error AgentPolicyCodec__LimitTooWide();
+    error AgentPolicyCodec__UnknownAction(uint8 id);
 
     struct TokenRow {
         bytes32 token;
@@ -87,8 +88,12 @@ library AgentPolicyCodec {
             revert AgentPolicyCodec__BadActionCount(v.actionCount);
         }
         v.actionsAt = at;
-        for (uint256 i = 1; i < v.actionCount; ++i) {
-            if (uint8(policy[at + i]) <= uint8(policy[at + i - 1])) revert AgentPolicyCodec__NotAscending();
+        for (uint256 i = 0; i < v.actionCount; ++i) {
+            uint8 id = uint8(policy[at + i]);
+            // An id this language does not know installs a row nothing can ever match — a policy that
+            // authorizes nothing, which Soroban refuses as `BadPolicy`.
+            if (id != ACTION_LOCK_FOR_ORDER) revert AgentPolicyCodec__UnknownAction(id);
+            if (i > 0 && id <= uint8(policy[at + i - 1])) revert AgentPolicyCodec__NotAscending();
         }
         at += v.actionCount;
 
@@ -127,18 +132,23 @@ library AgentPolicyCodec {
             revert AgentPolicyCodec__BadAdScope();
         }
         v.adScopeAt = at;
-        bytes32 prevAd;
+        uint256 prevAt;
+        uint256 prevLen;
         for (uint256 i = 0; i < v.adScopeCount; ++i) {
             uint16 len = uint16(bytes2(policy[at:at + 2]));
             at += 2;
             // 1024 is what Soroban's encoder can hash; a longer id would be a policy one chain
             // accepts and the other cannot fingerprint.
             if (len == 0 || len > MAX_AD_ID_BYTES) revert AgentPolicyCodec__BadAdScope();
-            bytes32 cur = keccak256(policy[at:at + len]);
-            // Hashes, not the strings themselves: the encoder sorts by raw UTF-8 bytes and this
-            // only needs "no two are the same", which a hash answers in one word.
-            if (i > 0 && cur == prevAd) revert AgentPolicyCodec__BadAdScope();
-            prevAd = cur;
+            // Strictly ascending by raw bytes, the rule actions and tokens already follow. The first
+            // version compared adjacent *hashes*, which catches neither an unsorted scope nor a
+            // non-adjacent repeat — and Soroban always sorts, so such bytes carried a fingerprint
+            // the other chain could never produce for what the owner thinks is the same policy.
+            if (i > 0 && !_lessThan(policy[prevAt:prevAt + prevLen], policy[at:at + len])) {
+                revert AgentPolicyCodec__NotAscending();
+            }
+            prevAt = at;
+            prevLen = len;
             at += len;
         }
 
@@ -150,6 +160,19 @@ library AgentPolicyCodec {
         // A parse that stopped early would call two different byte strings the same policy, which
         // is the one thing a fingerprint must not permit.
         if (at != policy.length) revert AgentPolicyCodec__TrailingBytes(policy.length, at);
+    }
+
+    /// @dev Lexicographic by byte, a proper prefix sorting first — the order the TypeScript and Rust
+    ///      encoders produce. A short final word is zero-padded by the conversion; a real zero byte
+    ///      there only ties, and ties fall through to the length.
+    function _lessThan(bytes calldata a, bytes calldata b) private pure returns (bool) {
+        uint256 n = a.length < b.length ? a.length : b.length;
+        for (uint256 i = 0; i < n; i += 32) {
+            bytes32 wa = bytes32(a[i:i + 32 > a.length ? a.length : i + 32]);
+            bytes32 wb = bytes32(b[i:i + 32 > b.length ? b.length : i + 32]);
+            if (wa != wb) return uint256(wa) < uint256(wb);
+        }
+        return a.length < b.length;
     }
 
     function actionAt(bytes calldata policy, View memory v, uint256 i) internal pure returns (uint8) {

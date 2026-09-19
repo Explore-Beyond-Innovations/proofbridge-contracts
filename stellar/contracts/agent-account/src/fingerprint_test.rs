@@ -189,3 +189,41 @@ fn live_buckets_are_not_part_of_the_policy() {
         "a policy would otherwise need a new fingerprint after every trade"
     );
 }
+
+/// D5 (review pass 1): the EVM's `fingerprintOf` answers zero for a revoked or absent agent. The
+/// view has to agree, or a consumer comparing the chains reads "policy still installed" on one and
+/// "no agent" on the other.
+#[test]
+fn the_view_answers_zero_for_a_revoked_or_absent_agent() {
+    use soroban_sdk::testutils::Address as _;
+    let env = Env::default();
+    env.mock_all_auths();
+    let owner = soroban_sdk::Address::generate(&env);
+    let target = soroban_sdk::Address::generate(&env);
+    let mut targets = Vec::new(&env);
+    targets.push_back(target);
+    let id = env.register(crate::AgentAccount, (owner, targets));
+    let client = crate::AgentAccountClient::new(&env, &id);
+    let agent = bytes32(&env, 0xa9);
+    let zero = bytes32(&env, 0);
+
+    assert_eq!(client.policy_fingerprint(&agent), zero, "no policy");
+
+    let mut limits = Vec::new(&env);
+    limits.push_back(limit(&env, 0x11, 7, 7, 1));
+    let mut revoked = policy(&env, limits, None, 0);
+    env.as_contract(&id, || crate::policy::set_policy(&env, &agent, &revoked));
+    assert_ne!(
+        client.policy_fingerprint(&agent),
+        zero,
+        "a live policy has one"
+    );
+
+    revoked.revoked = true;
+    env.as_contract(&id, || crate::policy::set_policy(&env, &agent, &revoked));
+    assert_eq!(
+        client.policy_fingerprint(&agent),
+        zero,
+        "revoked reads as no agent, as on the EVM"
+    );
+}

@@ -43,7 +43,7 @@ import {
  *      means **the account address must be the last mapping key applied**. Every mapping here is
  *      `key => account => value` for that reason and not by accident; flipping one to
  *      `account => key` produces a module whose operations no bundler will carry, and nothing at
- *      compile time or in a normal test will say so. `test/agent/StorageRules.t.sol` is what says so.
+ *      compile time or in a normal test will say so. `test/agent/ValidationRules.t.sol` is what says so.
  *
  *      For the same reason no policy field is stored as an array, a string or `bytes`: their
  *      contents live at `keccak(slot)`, outside the window, however the struct is keyed. Lists
@@ -128,8 +128,17 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     /// @notice The policy's identity, and its liveness switch: zero means no agent here. Revoking
     ///         is overwriting this one slot, which invalidates the whole policy at once.
     mapping(bytes32 agentKey => mapping(address account => bytes32)) private _fingerprint;
-    /// @notice Sticky, as on Soroban: a revoked agent id cannot be re-installed on this account.
-    mapping(bytes32 agentKey => mapping(address account => bool)) private _revoked;
+    /// @notice Sticky and permanent, as on Soroban: a revoked agent id cannot be installed on this
+    ///         account again. Keyed by the agent alone and **not** by the epoch, or uninstalling and
+    ///         reinstalling the module would lift it.
+    mapping(bytes32 agentId => mapping(address account => bool)) private _revoked;
+
+    /// @notice Wei this agent may still cost the account in gas. Gas is a second way to spend the
+    ///         maker's money and the volume buckets never see it: an agent that bundles its own
+    ///         operation and names itself beneficiary turns `maxFeePerGas` into a withdrawal. Keyed
+    ///         by the epoch and the agent, not the policy version, so re-writing a policy is not a
+    ///         refill. Zero means no budget, and no budget means refused.
+    mapping(bytes32 agentKey => mapping(address account => uint256)) private _gasBudget;
     /// @notice Bumped by every policy write so the previous policy's rows become unreachable —
     ///         otherwise dropping a token from the whitelist would leave its limit row behind.
     mapping(bytes32 agentKey => mapping(address account => uint256)) private _version;
@@ -163,6 +172,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         address indexed account, bytes32 indexed agentId, uint256 version, bytes32 fingerprint, bytes policy
     );
     event AgentRevoked(address indexed account, bytes32 indexed agentId);
+    event AgentGasBudgetSet(address indexed account, bytes32 indexed agentId, uint256 weiBudget);
 
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -177,6 +187,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     error AgentPolicy__ZeroAgent();
     error AgentPolicy__AgentIdNotAnAddress();
     error AgentPolicy__InstallDataTooShort();
+    error AgentPolicy__BadExpiry();
+    error AgentPolicy__RevokedBeforeExecution();
 
     /*//////////////////////////////////////////////////////////////
                              MODULE PLUMBING
@@ -216,15 +228,34 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         emit Installed(msg.sender, moduleTypeId, _epoch[msg.sender]);
     }
 
-    /// @notice Remove one type. The epoch bumps once the last one goes, orphaning every row.
+    /**
+     * @notice Remove one type, or both. **This cannot fail.**
+     * @dev Safe7579 and Nexus catch a reverting `onUninstall` and remove the module anyway, and an
+     *      empty `0x` is what most uninstall flows send. A module that insisted on knowing which
+     *      type was meant kept its own bits set while the account dropped the hook — a validator
+     *      approving with nothing debiting, the one state this module must never be in. So when the
+     *      data does not name an installed type, **both** bits clear: the worst a routine uninstall
+     *      can do is turn the agent off. The epoch bumps once nothing is left.
+     */
     function onUninstall(bytes calldata data) external {
-        (uint256 moduleTypeId,) = _installArgs(data);
-        uint256 bit = _typeBit(moduleTypeId);
         uint256 types = _installedTypes[msg.sender];
-        if (types & bit == 0) revert AgentPolicy__NotInstalled();
-        types &= ~bit;
+        if (types == 0) return;
+
+        uint256 moduleTypeId = data.length >= 32 ? uint256(bytes32(data[0:32])) : 0;
+        uint256 bit = moduleTypeId == MODULE_TYPE_VALIDATOR
+            ? TYPE_BIT_VALIDATOR
+            : moduleTypeId == MODULE_TYPE_HOOK ? TYPE_BIT_HOOK : 0;
+        if (bit == 0 || types & bit == 0) {
+            moduleTypeId = 0;
+            types = 0;
+        } else {
+            types &= ~bit;
+        }
         _installedTypes[msg.sender] = types;
-        if (types == 0) _epoch[msg.sender] += 1;
+        if (types == 0) {
+            _epoch[msg.sender] += 1;
+            delete trustedForwarder[msg.sender];
+        }
         emit Uninstalled(msg.sender, moduleTypeId, _epoch[msg.sender]);
     }
 
@@ -268,6 +299,14 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         emit AccountLimitSet(msg.sender, token, capacity, refillPerSecond);
     }
 
+    /// @notice What this agent may cost the account in gas, in wei. Replaces the remaining budget
+    ///         rather than adding to it, so the owner always knows the number.
+    function setAgentGasBudget(bytes32 agentId, uint256 weiBudget) external {
+        _requireInstalled();
+        _gasBudget[_agentKey(_epoch[msg.sender], agentId)][msg.sender] = weiBudget;
+        emit AgentGasBudgetSet(msg.sender, agentId, weiBudget);
+    }
+
     /**
      * @notice Install a policy for one agent, from its canonical bytes.
      * @dev The rows and the fingerprint are both derived from `policy` in this one call, so they
@@ -282,9 +321,15 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         if (uint256(agentId) >> 160 != 0) revert AgentPolicy__AgentIdNotAnAddress();
         uint256 e = _epoch[msg.sender];
         bytes32 aKey = _agentKey(e, agentId);
-        if (_revoked[aKey][msg.sender]) revert AgentPolicy__AgentRevoked();
+        if (_revoked[agentId][msg.sender]) revert AgentPolicy__AgentRevoked();
 
         AgentPolicyCodec.View memory v = AgentPolicyCodec.parse(policy);
+        // Already expired, or past what the EntryPoint's 48-bit field can carry: an installed policy
+        // that authorizes nothing, or one silently read as "forever". Soroban refuses the first at
+        // install too. This is a configuration call, so it may read the clock.
+        if (v.validUntil != 0 && (v.validUntil <= block.timestamp || v.validUntil - 1 > type(uint48).max)) {
+            revert AgentPolicy__BadExpiry();
+        }
         uint256 version = _version[aKey][msg.sender] + 1;
         _version[aKey][msg.sender] = version;
         bytes32 vKey = _versionKey(aKey, version);
@@ -325,12 +370,13 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     }
 
     /// @notice Kill one agent. Overwriting the fingerprint invalidates the whole policy at once,
-    ///         and the tombstone is sticky: this agent id cannot be installed again on this epoch.
+    ///         and the tombstone is permanent: this agent id cannot be installed on this account
+    ///         again, in this epoch or any later one.
     function revokeAgent(bytes32 agentId) external {
         _requireInstalled();
         bytes32 aKey = _agentKey(_epoch[msg.sender], agentId);
         _fingerprint[aKey][msg.sender] = bytes32(0);
-        _revoked[aKey][msg.sender] = true;
+        _revoked[agentId][msg.sender] = true;
         emit AgentRevoked(msg.sender, agentId);
     }
 
@@ -363,15 +409,19 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         bytes32 vKey = _versionKey(aKey, _version[aKey][account]);
 
         if (!_walk(account, e, vKey, meta, userOp.callData, false)) return VALIDATION_FAILED;
+        if (!_chargeGas(account, aKey, userOp)) return VALIDATION_FAILED;
         if (!_pushMarker(account, userOp.callData, agentId)) return VALIDATION_FAILED;
 
         // Expiry is the bundler's job once it is in the return value, so there is no comparison
         // against `block.timestamp` here to get wrong. Soroban's rule is `now < valid_until` and
         // the EntryPoint's is `now <= validUntil`, so the second before is what gets packed — or
         // the two chains would disagree for one second per policy.
-        if (meta.validUntil == 1) return VALIDATION_FAILED;
-        uint48 validUntil =
-            meta.validUntil == 0 || meta.validUntil - 1 > type(uint48).max ? 0 : uint48(meta.validUntil - 1);
+        // `setAgentPolicy` refuses a `validUntil` of 1 or one past 48 bits, so neither arm below can
+        // turn an expiry into "forever"; the guard stays because a wrong answer here is silent.
+        if (meta.validUntil == 1 || (meta.validUntil != 0 && meta.validUntil - 1 > type(uint48).max)) {
+            return VALIDATION_FAILED;
+        }
+        uint48 validUntil = meta.validUntil == 0 ? 0 : uint48(meta.validUntil - 1);
         return uint256(validUntil) << 160 | VALIDATION_SUCCESS;
     }
 
@@ -396,6 +446,9 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
 
         uint256 e = _epoch[account];
         bytes32 aKey = _agentKey(e, agentId);
+        // Every validation in a bundle runs before any execution, so this operation may have been
+        // validated while the policy was live and reach here after a revoke bundled ahead of it.
+        if (_fingerprint[aKey][account] == bytes32(0)) revert AgentPolicy__RevokedBeforeExecution();
         PolicyMeta memory meta = _meta[aKey][account];
         bytes32 vKey = _versionKey(aKey, _version[aKey][account]);
         // The same walk the validator ran, with `commit` on. A disagreement between the two is
@@ -413,9 +466,12 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
 
     /// @notice Route this account's hook calls through a multiplexer. `msg.sender` is the account.
     function setTrustedForwarder(address forwarder) external {
+        _requireInstalled();
         trustedForwarder[msg.sender] = forwarder;
     }
 
+    /// @dev No install check, unlike the setter: Kernel's uninstall flow calls this *after*
+    ///      `onUninstall`, and clearing one's own entry can harm nobody.
     function clearTrustedForwarder() external {
         trustedForwarder[msg.sender] = address(0);
     }
@@ -428,6 +484,11 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     ///      the calldata when a multiplexer the account itself nominated made the call.
     function _getAccount() internal view returns (address account) {
         account = msg.sender;
+        // A caller with this module installed *is* an account, and the bytes after its calldata are
+        // the agent's to choose. Believing them let anyone who had nominated the maker's account as
+        // their own "forwarder" have the hook look for the marker under their address, find none,
+        // and debit nothing. A multiplexer has nothing installed, so its path is unchanged.
+        if (_installedTypes[msg.sender] != 0) return account;
         if (msg.data.length >= 40) {
             address appended;
             address forwarder;
@@ -452,7 +513,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     }
 
     function isRevoked(address account, bytes32 agentId) external view returns (bool) {
-        return _revoked[_agentKey(_epoch[account], agentId)][account];
+        return _revoked[agentId][account];
     }
 
     function agentLimit(address account, bytes32 agentId, bytes32 token) external view returns (TokenLimitRow memory) {
@@ -471,6 +532,10 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
 
     function accountBucket(address account, bytes32 token) external view returns (AgentRateLimit.Bucket memory) {
         return _accountBucket[_ceilKey(_epoch[account], token)][account];
+    }
+
+    function gasBudgetOf(address account, bytes32 agentId) external view returns (uint256) {
+        return _gasBudget[_agentKey(_epoch[account], agentId)][account];
     }
 
     function isTargetPinned(address account, address target) external view returns (bool) {
@@ -519,12 +584,28 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         return (true, mode, body[at + 32:at + 32 + len]);
     }
 
-    function _decodeCalls(bytes calldata cd) internal pure returns (bool ok, Call[] memory calls) {
+    /// @dev External only so `_decodeCalls` can `try` it: `abi.decode` reverts on malformed input,
+    ///      the input is the agent's, and a revert during validation throttles the *maker's*
+    ///      account. "This agent may not do that" is an answer, not an exception.
+    function decodeBatch(bytes calldata executionCalldata) external pure returns (Execution[] memory) {
+        return abi.decode(executionCalldata, (Execution[]));
+    }
+
+    /// @dev As `decodeBatch`, for a lock's arguments. Slicing calldata also replaces a byte-by-byte
+    ///      copy that ran in both the validator and the hook, per call, on the maker's gas.
+    function decodeLock(bytes calldata data) external pure returns (IAdManager.OrderParams memory) {
+        return abi.decode(data[4:], (IAdManager.OrderParams));
+    }
+
+    function _decodeCalls(bytes calldata cd) internal view returns (bool ok, Call[] memory calls) {
         bytes32 mode;
         bytes calldata ec;
         (ok, mode, ec) = _executeArgs(cd);
         if (!ok) return (false, calls);
         uint8 callType = uint8(mode[0]);
+        // ExecType 0x01 is "try": the account swallows a failing call, so the hook's debit would
+        // stick although no trade happened — and the agent is the one who picks the mode.
+        if (uint8(mode[1]) != 0) return (false, calls);
 
         if (callType == CALLTYPE_SINGLE) {
             if (ec.length < 52) return (false, calls);
@@ -533,7 +614,12 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
             return (true, calls);
         }
         if (callType == CALLTYPE_BATCH) {
-            Execution[] memory execs = abi.decode(ec, (Execution[]));
+            Execution[] memory execs;
+            try this.decodeBatch(ec) returns (Execution[] memory decoded) {
+                execs = decoded;
+            } catch {
+                return (false, calls);
+            }
             if (execs.length == 0 || execs.length > MAX_BATCH) return (false, calls);
             calls = new Call[](execs.length);
             for (uint256 i = 0; i < execs.length; ++i) {
@@ -558,7 +644,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
      *      `DecimalScaling.scale` reverts on the cases this returns false for. A revert during
      *      validation is what gets a module dropped from the mempool, so the arithmetic is repeated
      *      here as an answer rather than an exception —
-     *      `test_scaleMatchesDecimalScaling` fuzzes the two against each other.
+     *      `testFuzz_scalingMatchesTheEscrowsOrRefuses` fuzzes the two against each other.
      */
     function _adAmount(IAdManager.OrderParams memory p) internal pure returns (bool ok, uint256 out) {
         uint8 from = p.orderDecimals;
@@ -652,7 +738,12 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         uint8 actionId = _actionIdOf(bytes4(c.data));
         if (actionId == 0 || !_flag[_actionKey(ctx.vKey, actionId)][ctx.account]) return false;
 
-        IAdManager.OrderParams memory params = _decodeOrderParams(c.data);
+        IAdManager.OrderParams memory params;
+        try this.decodeLock(c.data) returns (IAdManager.OrderParams memory decoded) {
+            params = decoded;
+        } catch {
+            return false;
+        }
         if (params.adSettlementSigner != ctx.settlementSigner) return false;
         if (!ctx.adScopeAll && !_flag[_adKey(ctx.vKey, keccak256(bytes(params.adId)))][ctx.account]) return false;
 
@@ -759,14 +850,6 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         }
     }
 
-    function _decodeOrderParams(bytes memory data) internal pure returns (IAdManager.OrderParams memory params) {
-        bytes memory args = new bytes(data.length - 4);
-        for (uint256 i = 0; i < args.length; ++i) {
-            args[i] = data[i + 4];
-        }
-        params = abi.decode(args, (IAdManager.OrderParams));
-    }
-
     function _readBucket(AgentRateLimit.Bucket memory stored, AgentRateLimit.Limit memory limit, uint64 nowTs)
         internal
         pure
@@ -871,6 +954,29 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
             tstore(add(slot, 1), sub(count, 1))
             if eq(count, 1) { tstore(slot, 0) }
         }
+    }
+
+    /**
+     * @dev Debit the most this operation could cost the account, or refuse it.
+     *
+     *      During validation, unlike the volume buckets: gas is charged whether or not the trade
+     *      happens, and the debit needs no clock, so the validator can and must do it. The maximum
+     *      over-counts what the EntryPoint finally takes; the only party that hurts is an agent
+     *      overstating its own limits. A paymaster is refused: with one attached the account is not
+     *      the payer and this would be the wrong ledger.
+     */
+    function _chargeGas(address account, bytes32 aKey, PackedUserOperation calldata userOp) internal returns (bool) {
+        if (userOp.paymasterAndData.length != 0) return false;
+        uint256 gasLimit =
+            uint256(uint128(bytes16(userOp.accountGasLimits))) + uint256(uint128(uint256(userOp.accountGasLimits)));
+        if (userOp.preVerificationGas > type(uint128).max) return false;
+        gasLimit += userOp.preVerificationGas;
+        // maxFeePerGas is the low half; both factors fit 130 and 128 bits, so this cannot overflow.
+        uint256 maxCost = gasLimit * uint256(uint128(uint256(userOp.gasFees)));
+        uint256 budget = _gasBudget[aKey][account];
+        if (maxCost > budget) return false;
+        _gasBudget[aKey][account] = budget - maxCost;
+        return true;
     }
 
     function _installArgs(bytes calldata data) internal pure returns (uint256 moduleTypeId, bytes memory extra) {

@@ -99,10 +99,10 @@ jobs:
           grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/parity.log
 
       # Invariants are excluded here and run in the `invariants` job below: they are 596s of this
-      # suite's 647s, so leaving them in makes every other signal wait on them. ValidationRules is
-      # excluded because it needs its own gas limit — see the step after this one.
+      # suite's 647s, so leaving them in makes every other signal wait on them. ValidationRules skips
+      # itself here (it needs a tracer and its own gas limit) and runs in the step after this one.
       - name: Run Forge tests
-        run: forge test -vvv --no-match-contract 'Invariant|ValidationRules'
+        run: forge test -vvv --no-match-contract Invariant
         id: test
 
       # The agent module's storage layout is load-bearing and invisible: an account-first mapping
@@ -115,7 +115,7 @@ jobs:
       - name: ERC-4337 validation rules (2.1g)
         run: |
           set -o pipefail
-          forge test --match-contract ValidationRules --gas-limit 900000000000 -vvv | tee /tmp/rules.log
+          AGENT_RULES=1 forge test --match-contract ValidationRules --gas-limit 900000000000 -vvv | tee /tmp/rules.log
           grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/rules.log
         id: validation-rules
 
@@ -128,9 +128,13 @@ jobs:
           set -o pipefail
           for account in DEFAULT SAFE KERNEL NEXUS; do
             echo "::group::$account"
-            ACCOUNT_TYPE=$account forge test --match-path 'test/agent/*' \
-              --no-match-contract ValidationRules -vvv | tee /tmp/agent.log
-            grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/agent.log
+            # One suite per run and one grep per suite: a glob over the directory would keep the
+            # step green on four suites while a fifth quietly stopped matching.
+            for suite in ModuleKitSmokeTest AgentPolicyCodecTest AgentPolicyUnitTest \
+                         AgentPolicyEnforcementTest AgentPolicyReviewTest AgentPolicyReviewPass1Test; do
+              ACCOUNT_TYPE=$account forge test --match-contract "^${suite}\$" -vvv | tee /tmp/agent.log
+              grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/agent.log
+            done
             echo "::endgroup::"
           done
         id: agent-accounts

@@ -28,6 +28,7 @@ abstract contract AgentPolicyBase is RhinestoneModuleKit, Test {
     uint256 internal constant REFILL = 10;
     uint256 internal constant ACCOUNT_CAPACITY = 8_000_000;
     uint256 internal constant ACCOUNT_REFILL = 20;
+    uint256 internal constant GAS_BUDGET = 1 ether;
 
     AccountInstance internal instance;
     ProofBridgeAgentPolicy internal module;
@@ -58,6 +59,8 @@ abstract contract AgentPolicyBase is RhinestoneModuleKit, Test {
         _asAccount(abi.encodeCall(module.setAccountLimit, (AD_TOKEN, ACCOUNT_CAPACITY, ACCOUNT_REFILL)));
         _asAccount(abi.encodeCall(module.setAccountLimit, (ORDER_TOKEN, ACCOUNT_CAPACITY, ACCOUNT_REFILL)));
         _asAccount(abi.encodeCall(module.setAgentPolicy, (agentId, defaultPolicy())));
+        // Generous: these suites are about the policy, and AgentPolicyReviewPass1 is about the budget.
+        _asAccount(abi.encodeCall(module.setAgentGasBudget, (agentId, GAS_BUDGET)));
     }
 
     /*//////////////////////////////////////////////////////////////

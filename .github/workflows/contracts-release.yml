@@ -103,7 +103,9 @@ jobs:
         working-directory: evm
         env:
           FOUNDRY_PROFILE: default
-        run: forge build --silent
+        # --skip test: the test tree imports ModuleKit from node_modules, this job installs none, and
+        # a bundle has no use for test artifacts anyway.
+        run: forge build --silent --skip test
 
       - name: Build event circuit VK
         run: scripts/build_circuits.sh proof_circuits/events

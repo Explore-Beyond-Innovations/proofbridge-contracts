@@ -14,6 +14,21 @@ import {BadLayoutValidator} from "./mocks/BadLayoutValidator.sol";
 contract ValidationRulesTest is AgentPolicyBase {
     using ModuleKitHelpers for *;
 
+    /// @dev Opt-in. The simulator needs forge's debug tracer (`-vvv`) and a gas limit far above the
+    ///      default, because the trace itself is metered — so under the repo's documented
+    ///      `forge test -vvv` these would fail for reasons that have nothing to do with the module.
+    ///      And turning the simulation on is a process-wide switch while forge runs suites in
+    ///      parallel, so it must never share a run. CI sets the flag in a step of its own:
+    ///
+    ///        AGENT_RULES=1 forge test --match-contract ValidationRules --gas-limit 900000000000 -vvv
+    function setUp() public override {
+        if (!vm.envOr("AGENT_RULES", false)) {
+            vm.skip(true);
+            return;
+        }
+        super.setUp();
+    }
+
     /// @dev `simulateUserOp` sets a process-wide env var, so every test here puts it back. Left on,
     ///      it leaks into whatever suite forge runs next in the same process and simulates
     ///      operations that were never meant to be simulated.
