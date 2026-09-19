@@ -97,10 +97,41 @@ jobs:
           grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/parity.log
 
       # Invariants are excluded here and run in the `invariants` job below: they are 596s of this
-      # suite's 647s, so leaving them in makes every other signal wait on them.
+      # suite's 647s, so leaving them in makes every other signal wait on them. ValidationRules is
+      # excluded because it needs its own gas limit — see the step after this one.
       - name: Run Forge tests
-        run: forge test -vvv --no-match-contract Invariant
+        run: forge test -vvv --no-match-contract 'Invariant|ValidationRules'
         id: test
+
+      # The agent module's storage layout is load-bearing and invisible: an account-first mapping
+      # compiles, passes every functional test, and produces a module no bundler will carry. This
+      # runs the real ERC-4337 validation rules over it.
+      #
+      # `-vvv` is required, not cosmetic: the simulator reads the debug tracer, which forge only
+      # initialises at that verbosity. The gas limit is raised because the trace itself is metered
+      # and the default 2^30 runs out part-way through parsing it.
+      - name: ERC-4337 validation rules (2.1g)
+        run: |
+          set -o pipefail
+          forge test --match-contract ValidationRules --gas-limit 900000000000 -vvv | tee /tmp/rules.log
+          grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/rules.log
+        id: validation-rules
+
+      # The same module against every account implementation people actually use. A policy that
+      # holds on one and not another is the failure this catches. ValidationRules is left out: its
+      # simulation is about the module's own storage rather than the account's, and turning it on
+      # is a process-wide switch.
+      - name: Agent module on every 7579 account (2.1g)
+        run: |
+          set -o pipefail
+          for account in DEFAULT SAFE KERNEL NEXUS; do
+            echo "::group::$account"
+            ACCOUNT_TYPE=$account forge test --match-path 'test/agent/*' \
+              --no-match-contract ValidationRules -vvv | tee /tmp/agent.log
+            grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/agent.log
+            echo "::endgroup::"
+          done
+        id: agent-accounts
 
       - name: Unlock gas baseline gate (1.6c)
         run: |

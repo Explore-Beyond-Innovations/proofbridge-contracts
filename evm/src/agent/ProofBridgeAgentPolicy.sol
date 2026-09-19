@@ -117,6 +117,12 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     mapping(address account => uint256) private _epoch;
     mapping(address account => uint256) private _installedTypes;
 
+    /// @notice The hook multiplexer an account routes its single hook slot through, if it uses one.
+    ///         ERC-7579 gives an account one hook, so a maker who already runs one mounts ours
+    ///         behind a multiplexer and the account arrives appended to the calldata instead of as
+    ///         `msg.sender`. Read only during execution, never during validation.
+    mapping(address account => address forwarder) public trustedForwarder;
+
     /// @notice The policy's identity, and its liveness switch: zero means no agent here. Revoking
     ///         is overwriting this one slot, which invalidates the whole policy at once.
     mapping(bytes32 agentKey => mapping(address account => bytes32)) private _fingerprint;
@@ -370,7 +376,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
      *      another validator's work — and passes through untouched.
      */
     function preCheck(address, uint256, bytes calldata msgData) external returns (bytes memory) {
-        address account = msg.sender;
+        address account = _getAccount();
         bytes32 agentId = _marker(account);
         if (agentId == bytes32(0)) return "";
 
@@ -387,7 +393,39 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     /// @notice Clear the marker, so a second call in the same transaction cannot ride the first
     ///         operation's authorization.
     function postCheck(bytes calldata) external {
-        _clearMarker(msg.sender);
+        _clearMarker(_getAccount());
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           HOOK MULTIPLEXING
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Route this account's hook calls through a multiplexer. `msg.sender` is the account.
+    function setTrustedForwarder(address forwarder) external {
+        trustedForwarder[msg.sender] = forwarder;
+    }
+
+    function clearTrustedForwarder() external {
+        trustedForwarder[msg.sender] = address(0);
+    }
+
+    function isTrustedForwarder(address forwarder, address account) public view returns (bool) {
+        return forwarder != address(0) && forwarder == trustedForwarder[account];
+    }
+
+    /// @dev The account this hook call is about: `msg.sender` normally, or the address appended to
+    ///      the calldata when a multiplexer the account itself nominated made the call.
+    function _getAccount() internal view returns (address account) {
+        account = msg.sender;
+        if (msg.data.length >= 40) {
+            address appended;
+            address forwarder;
+            assembly ("memory-safe") {
+                appended := shr(96, calldataload(sub(calldatasize(), 20)))
+                forwarder := shr(96, calldataload(sub(calldatasize(), 40)))
+            }
+            if (forwarder == msg.sender && isTrustedForwarder(forwarder, appended)) account = appended;
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -543,7 +581,10 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         bytes32 vKey;
         bytes32 settlementSigner;
         bool adScopeAll;
+        /// @dev Zero on the validator's pass: ERC-7562 [OP-011] bans TIMESTAMP during validation,
+        ///      so the clock only exists on the hook's.
         uint64 nowTs;
+        bool commit;
         Running[] running;
         uint256 used;
     }
@@ -565,7 +606,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
             vKey: vKey,
             settlementSigner: meta.settlementSigner,
             adScopeAll: meta.adScopeAll,
-            nowTs: uint64(block.timestamp),
+            nowTs: commit ? uint64(block.timestamp) : 0,
+            commit: commit,
             // Two running buckets per call at worst: the agent's and the account's.
             running: new Running[](calls.length * 2),
             used: 0
@@ -574,7 +616,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         for (uint256 i = 0; i < calls.length; ++i) {
             if (!_checkOne(ctx, calls[i])) return false;
         }
-        if (commit) _commit(ctx);
+        if (ctx.commit) _commit(ctx);
         return true;
     }
 
@@ -599,6 +641,13 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         (bool scaled, uint256 amount) = _adAmount(params);
         if (!scaled || amount == 0 || amount > row.maxPerOrder) return false;
 
+        // The volume bucket is the hook's alone. Refilling it needs the elapsed time and
+        // ERC-7562 [OP-011] bans TIMESTAMP during validation, so a validator that priced the
+        // bucket would be a validator no bundler carries — which
+        // `ValidationRulesTest` catches by simulating the real rules rather than reasoning about
+        // them. The per-order cap above is time-independent and still refuses an oversized call
+        // for free; the aggregate is refused at execution, where the maker pays the gas.
+        if (!ctx.commit) return true;
         return _spend(ctx, params.adChainToken, row, amount);
     }
 
