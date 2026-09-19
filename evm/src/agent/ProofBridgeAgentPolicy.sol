@@ -101,6 +101,24 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     ///         running-bucket bookkeeping below is linear in it.
     uint256 internal constant MAX_BATCH = 8;
 
+    /**
+     * @notice Approved-but-uncounted operations after which the agent is refused until the owner
+     *         resets the tally.
+     * @dev The module keeps a note of which halves are installed (`_installedTypes`), and three
+     *      review passes found three ways for that note to be wrong — leaving a validator that
+     *      approves with no hook debiting. This does not depend on the note: the hook has to *prove*
+     *      it is running. With the hook missing, however it went missing, nothing zeroes the tally
+     *      and the agent stops after this many capped trades, in total — not per transaction.
+     *
+     *      Two costs, stated rather than discovered. An approved operation that does not end up
+     *      counted looks the same as a missing hook, because a reverted execution rolls the hook's
+     *      reset back with it: that covers a trade the escrow refuses *and* one the hook refuses for
+     *      being over the allowance, so three such in a row pause the agent. And since every
+     *      validation in a bundle runs before any hook, one bundle carries at most this many
+     *      operations per agent.
+     */
+    uint256 internal constant MAX_UNCOUNTED = 3;
+
     uint256 internal constant TYPE_BIT_VALIDATOR = 1;
     uint256 internal constant TYPE_BIT_HOOK = 2;
 
@@ -140,6 +158,11 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     ///         by the epoch and the agent, not the policy version, so re-writing a policy is not a
     ///         refill. Zero means no budget, and no budget means refused.
     mapping(bytes32 agentKey => mapping(address account => uint256)) private _gasBudget;
+
+    /// @notice Operations the validator has approved for this agent that the hook has not yet
+    ///         counted. Up by one on every approval, back to zero whenever the hook debits — so in a
+    ///         healthy mount it reads 1, 0, 1, 0. See `MAX_UNCOUNTED`.
+    mapping(bytes32 agentKey => mapping(address account => uint256)) private _uncounted;
     /// @notice Bumped by every policy write so the previous policy's rows become unreachable —
     ///         otherwise dropping a token from the whitelist would leave its limit row behind.
     mapping(bytes32 agentKey => mapping(address account => uint256)) private _version;
@@ -174,6 +197,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     );
     event AgentRevoked(address indexed account, bytes32 indexed agentId);
     event AgentGasBudgetSet(address indexed account, bytes32 indexed agentId, uint256 weiBudget);
+    event AgentTallyReset(address indexed account, bytes32 indexed agentId);
 
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -236,8 +260,9 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
      *      empty `0x` is what most uninstall flows send. A module that insisted on knowing which
      *      type was meant kept its own bits set while the account dropped the hook — a validator
      *      approving with nothing debiting, the one state this module must never be in. So when the
-     *      data names no type at all, **both** bits clear: the worst a routine uninstall can do is
-     *      turn the agent off. The epoch bumps once nothing is left.
+     *      data does not name an installed type, **both** bits clear: the worst a routine uninstall
+     *      can do is turn the agent off. The epoch bumps once nothing is left. `MAX_UNCOUNTED` is
+     *      the backstop for the cases where this note is wrong anyway.
      *
      *      **Runbook: revoke first, in its own transaction, then uninstall.** Every validation in a
      *      bundle runs before any execution, so an agent operation bundled *behind* an uninstall of
@@ -253,13 +278,13 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         uint256 bit = moduleTypeId == MODULE_TYPE_VALIDATOR
             ? TYPE_BIT_VALIDATOR
             : moduleTypeId == MODULE_TYPE_HOOK ? TYPE_BIT_HOOK : 0;
-        if (bit == 0) {
+        if (bit == 0 || types & bit == 0) {
+            // Anything that does not name an *installed* type clears both. Pass 2 made "valid but
+            // not installed" a no-op so a half-installed module could be repaired one half at a
+            // time, and that let an owner who named the wrong half keep a hook bit for a hook the
+            // account no longer had. Fail shut wins: **repair = uninstall both, install both.**
             moduleTypeId = 0;
             types = 0;
-        } else if (types & bit == 0) {
-            // Named, valid, and not installed: nothing to remove. Wiping the *other* half here made a
-            // half-installed module impossible to repair one half at a time.
-            return;
         } else {
             types &= ~bit;
         }
@@ -317,6 +342,14 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         _requireInstalled();
         _gasBudget[_agentKey(_epoch[msg.sender], agentId)][msg.sender] = weiBudget;
         emit AgentGasBudgetSet(msg.sender, agentId, weiBudget);
+    }
+
+    /// @notice Un-pause an agent stopped by `MAX_UNCOUNTED`. The owner calling this is the owner
+    ///         having looked, which is the point of the pause.
+    function resetAgentTally(bytes32 agentId) external {
+        _requireInstalled();
+        _uncounted[_agentKey(_epoch[msg.sender], agentId)][msg.sender] = 0;
+        emit AgentTallyReset(msg.sender, agentId);
     }
 
     /**
@@ -378,6 +411,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
 
         bytes32 fingerprint = keccak256(policy);
         _fingerprint[aKey][msg.sender] = fingerprint;
+        _uncounted[aKey][msg.sender] = 0;
         emit AgentPolicySet(msg.sender, agentId, version, fingerprint, policy);
     }
 
@@ -429,6 +463,11 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         if (!_chargeGas(account, aKey, userOp)) return VALIDATION_FAILED;
         if (!_pushMarker(account, userOp.callData, agentId)) return VALIDATION_FAILED;
 
+        // Approved. The hook owes a count for it; see `MAX_UNCOUNTED`.
+        uint256 uncounted = _uncounted[aKey][account];
+        if (uncounted >= MAX_UNCOUNTED) return VALIDATION_FAILED;
+        _uncounted[aKey][account] = uncounted + 1;
+
         // Expiry is the bundler's job once it is in the return value, so there is no comparison
         // against `block.timestamp` here to get wrong. Soroban's rule is `now < valid_until` and
         // the EntryPoint's is `now <= validUntil`, so the second before is what gets packed — or
@@ -471,6 +510,9 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         // The same walk the validator ran, with `commit` on. A disagreement between the two is
         // impossible rather than unlikely: it is one function.
         require(_walk(account, e, vKey, meta, msgData, true), "AgentPolicy: refused at execution");
+        // Counted. If the trade reverts after this, so does this line — which is why a failed trade
+        // and a missing hook look alike to the validator.
+        _uncounted[aKey][account] = 0;
         return "";
     }
 
@@ -549,6 +591,10 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
 
     function accountBucket(address account, bytes32 token) external view returns (AgentRateLimit.Bucket memory) {
         return _accountBucket[_ceilKey(_epoch[account], token)][account];
+    }
+
+    function uncountedOf(address account, bytes32 agentId) external view returns (uint256) {
+        return _uncounted[_agentKey(_epoch[account], agentId)][account];
     }
 
     function gasBudgetOf(address account, bytes32 agentId) external view returns (uint256) {
@@ -808,12 +854,18 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
      *      while the transaction's requests still fit that floor. The first request against a bucket
      *      is always admitted: a bucket drained long ago stores zero while being full again, and a
      *      validator that believed the zero would refuse everything forever, with nothing able to
-     *      execute and let the hook refresh it. So with the hook gone the bound is the stored level,
-     *      or one operation — instead of everything the ad holds.
+     *      execute and let the hook refresh it. So with the hook gone the bound is the stored level
+     *      or one operation **per token, per transaction** — a policy with T tokens has T buckets and
+     *      so T first requests. `MAX_UNCOUNTED` is what bounds it across transactions.
+     *
+     *      A refusal here fails the whole bundle, not just the operation: against a stale-low
+     *      *shared* ceiling, a second agent's perfectly valid operation can be dropped alongside the
+     *      first's. Each passes simulation alone, and one landing refreshes the level.
      *
      *      The total is "asked for and not yet debited": the hook subtracts what it debits. Transient,
-     *      so a reverted execution cannot strand a reservation beyond its transaction, and
-     *      account-associated, as [OP-070] requires. Both buckets are checked before either total is
+     *      so nothing outlives the transaction; *within* one, a reverted execution rolls back the
+     *      hook's subtraction and leaves the total inflated, which only ever refuses more.
+     *      Account-associated, as [OP-070] requires. Both buckets are checked before either total is
      *      written.
      */
     function _reserve(WalkCtx memory ctx, bytes32 token, TokenLimitRow memory row, uint256 amount)
@@ -825,40 +877,36 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         AgentRateLimit.Limit memory ceiling = _accountLimit[ceilingKey][ctx.account];
         if (ceiling.capacity == 0) return false;
 
+        bytes32 agentSlot = _pendingSlot(ctx.account, agentRowKey);
+        bytes32 ceilingSlot = _pendingSlot(ctx.account, ceilingKey);
         AgentRateLimit.Bucket memory stored = _agentBucket[agentRowKey][ctx.account];
-        (bool okAgent, uint256 agentTotal) =
-            _fits(ctx.account, agentRowKey, amount, stored.lastTs == 0 ? row.capacity : stored.level);
+        (bool okAgent, uint256 agentTotal) = _fits(agentSlot, amount, stored.lastTs == 0 ? row.capacity : stored.level);
         stored = _accountBucket[ceilingKey][ctx.account];
         (bool okCeiling, uint256 ceilingTotal) =
-            _fits(ctx.account, ceilingKey, amount, stored.lastTs == 0 ? ceiling.capacity : stored.level);
+            _fits(ceilingSlot, amount, stored.lastTs == 0 ? ceiling.capacity : stored.level);
         if (!okAgent || !okCeiling) return false;
 
-        _setPending(ctx.account, agentRowKey, agentTotal);
-        _setPending(ctx.account, ceilingKey, ceilingTotal);
+        _tstore(agentSlot, agentTotal);
+        _tstore(ceilingSlot, ceilingTotal);
         return true;
     }
 
     function _release(WalkCtx memory ctx, bytes32 token, uint256 amount) internal {
-        bytes32[2] memory keys = [_tokenKey(ctx.vKey, token), _ceilKey(ctx.epoch, token)];
+        bytes32[2] memory slots = [
+            _pendingSlot(ctx.account, _tokenKey(ctx.vKey, token)), _pendingSlot(ctx.account, _ceilKey(ctx.epoch, token))
+        ];
         for (uint256 i = 0; i < 2; ++i) {
-            bytes32 slot = _pendingSlot(ctx.account, keys[i]);
+            bytes32 slot = slots[i];
             uint256 pending;
             assembly ("memory-safe") {
                 pending := tload(slot)
             }
-            pending = pending > amount ? pending - amount : 0;
-            assembly ("memory-safe") {
-                tstore(slot, pending)
-            }
+            if (pending == 0) continue;
+            _tstore(slot, pending > amount ? pending - amount : 0);
         }
     }
 
-    function _fits(address account, bytes32 key, uint256 amount, uint256 floor)
-        internal
-        view
-        returns (bool ok, uint256 total)
-    {
-        bytes32 slot = _pendingSlot(account, key);
+    function _fits(bytes32 slot, uint256 amount, uint256 floor) internal view returns (bool ok, uint256 total) {
         uint256 pending;
         assembly ("memory-safe") {
             pending := tload(slot)
@@ -867,10 +915,9 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         ok = pending == 0 || total <= floor;
     }
 
-    function _setPending(address account, bytes32 key, uint256 total) internal {
-        bytes32 slot = _pendingSlot(account, key);
+    function _tstore(bytes32 slot, uint256 value) internal {
         assembly ("memory-safe") {
-            tstore(slot, total)
+            tstore(slot, value)
         }
     }
 

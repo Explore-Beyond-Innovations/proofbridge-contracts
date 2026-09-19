@@ -94,18 +94,22 @@ contract AgentPolicyReviewPass2Test is AgentPolicyBase {
         assertEq(escrow.locks(), 0, "an owner who zeroes the budget to pause an agent has paused it");
     }
 
-    /// E2. A named, valid type that is not installed is a no-op — not a wipe of the other half, or a
-    /// half-installed module can never be repaired one half at a time.
-    function test_E2_uninstallingAHalfThatIsNotThereLeavesTheOtherAlone() public {
+    /// E2, as revised by pass 3 (G2). Pass 2 made "valid but not installed" a no-op so a
+    /// half-installed module could be repaired one half at a time — and that let an owner who named
+    /// the wrong half keep a hook bit for a hook the account no longer had. Fail shut wins: any
+    /// uninstall that does not name an installed type clears both, and the repair is
+    /// *uninstall both, install both*.
+    function test_E2_anUninstallThatMatchesNothingClearsBoth() public {
         vm.startPrank(instance.account);
         module.onUninstall(bytes.concat(bytes32(TYPE_HOOK)));
-        module.onUninstall(bytes.concat(bytes32(TYPE_HOOK))); // again: not installed now
+        assertTrue(module.isInitialized(instance.account), "one half named and removed: the other stays");
+        module.onUninstall(bytes.concat(bytes32(TYPE_HOOK))); // named again, not installed now
         vm.stopPrank();
-        assertTrue(module.isInitialized(instance.account), "the validator half is still mounted");
+        assertFalse(module.isInitialized(instance.account), "matches nothing installed: both go");
 
+        // and it still cannot fail, which is what Safe and Nexus need of it
         vm.prank(instance.account);
-        module.onUninstall(""); // names nothing: fail closed, both go
-        assertFalse(module.isInitialized(instance.account));
+        module.onUninstall("");
     }
 
     /// E5. The tombstone is permanent, so revoking an id that was never installed would burn it on
