@@ -126,15 +126,18 @@ jobs:
       - name: Agent module on every 7579 account (2.1g)
         run: |
           set -o pipefail
+          # The suites are counted off the disk, not listed by hand. A glob alone would stay green
+          # while a suite quietly stopped matching, and a hand-written list silently leaves the next
+          # suite on DEFAULT only — and every finding in this module's review differed by mount.
+          expected=$(grep -lE '^contract [A-Za-z0-9_]+Test\b' test/agent/*.t.sol | wc -l)
+          optin=$(grep -l 'AGENT_RULES' test/agent/*.t.sol | wc -l)
           for account in DEFAULT SAFE KERNEL NEXUS; do
             echo "::group::$account"
-            # One suite per run and one grep per suite: a glob over the directory would keep the
-            # step green on four suites while a fifth quietly stopped matching.
-            for suite in ModuleKitSmokeTest AgentPolicyCodecTest AgentPolicyUnitTest \
-                         AgentPolicyEnforcementTest AgentPolicyReviewTest AgentPolicyReviewPass1Test; do
-              ACCOUNT_TYPE=$account forge test --match-contract "^${suite}\$" -vvv | tee /tmp/agent.log
-              grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/agent.log
-            done
+            ACCOUNT_TYPE=$account forge test --match-path 'test/agent/*' -vvv | tee /tmp/agent.log
+            ran=$(grep -cE 'Suite result: ok\.' /tmp/agent.log)
+            passed=$(grep -cE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/agent.log)
+            echo "$account: $ran suites ran, $passed with passing tests; $expected on disk, $optin opt-in"
+            [ "$ran" -eq "$expected" ] && [ "$passed" -eq $((expected - optin)) ]
             echo "::endgroup::"
           done
         id: agent-accounts

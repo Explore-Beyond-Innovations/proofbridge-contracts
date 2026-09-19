@@ -52,6 +52,8 @@ contract AgentPolicyEnforcementTest is AgentPolicyBase {
         // And a stranger who installs the module on themselves cannot touch this account's rows.
         vm.startPrank(stranger);
         module.onInstall(bytes.concat(bytes32(TYPE_VALIDATOR)));
+        // Their "account" holds no such policy, so there is nothing of theirs to revoke either.
+        vm.expectRevert(ProofBridgeAgentPolicy.AgentPolicy__NoPolicyForAgent.selector);
         module.revokeAgent(agentId);
         vm.stopPrank();
         assertTrue(module.fingerprintOf(instance.account, agentId) != bytes32(0), "our policy is untouched");
