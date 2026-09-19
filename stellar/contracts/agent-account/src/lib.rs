@@ -23,6 +23,7 @@ mod auth;
 mod errors;
 mod escrow;
 mod events;
+mod fingerprint;
 mod policy;
 
 use soroban_sdk::{
@@ -335,6 +336,14 @@ impl AgentAccount {
     /// Owner-only, instant, idempotent: the agent's next signed call fails.
     /// Orders already co-signed under the agent's BLS key still settle through
     /// the registry; retire the slot there (2.1e wires that off the event).
+    /// The canonical fingerprint of an installed policy — the value the EVM module stores for the
+    /// same agent. Both chains hash the same bytes, so 2.1h has one policy encoding to drive them
+    /// rather than two kept in step by hand.
+    pub fn policy_fingerprint(env: Env, agent_id: BytesN<32>) -> Result<BytesN<32>, AccountError> {
+        let p = policy::get_policy(&env, &agent_id).ok_or(AccountError::NoPolicyForAgent)?;
+        fingerprint::fingerprint(&env, &p)
+    }
+
     pub fn revoke_agent(env: Env, agent_id: BytesN<32>) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
@@ -456,3 +465,6 @@ impl CustomAccountInterface for AgentAccount {
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod fingerprint_test;

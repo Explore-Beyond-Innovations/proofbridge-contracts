@@ -21,6 +21,8 @@ dependencies = [
  "k256",
  "merkle-manager",
  "proofbridge-core",
+ "serde",
+ "serde_json",
  "soroban-sdk",
  "test-token",
 ]
