@@ -18,7 +18,9 @@ contract MockEscrow {
         failNext = value;
     }
 
-    function lockForOrder(IAdManager.OrderParams calldata params) external returns (bytes32 orderHash) {
+    /// @dev Payable on purpose: a non-payable escrow would refuse ETH by itself and the test that
+    ///      the *policy* refuses it would pass for the wrong reason.
+    function lockForOrder(IAdManager.OrderParams calldata params) external payable returns (bytes32 orderHash) {
         if (failNext) revert MockEscrow__Refused();
         locks += 1;
         orderHash = keccak256(abi.encode(params.adId, params.salt));

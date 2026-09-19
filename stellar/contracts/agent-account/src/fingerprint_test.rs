@@ -49,7 +49,12 @@ fn limit(env: &Env, token: u8, max: u128, capacity: u128, refill: u128) -> Token
     }
 }
 
-fn policy(env: &Env, limits: Vec<TokenLimit>, ad_scope: Option<Vec<String>>, valid_until: u64) -> AgentPolicy {
+fn policy(
+    env: &Env,
+    limits: Vec<TokenLimit>,
+    ad_scope: Option<Vec<String>>,
+    valid_until: u64,
+) -> AgentPolicy {
     let mut actions = Vec::new(env);
     actions.push_back(Symbol::new(env, "lock_for_order"));
     let mut whitelist = Vec::new(env);
@@ -94,7 +99,11 @@ fn the_default_shape_matches_the_typescript_encoder() {
     let p = policy(&env, limits, None, 1_800_000_000);
 
     let (encoded, expected) = vector("every-ad");
-    assert_eq!(encoded_hex(&env, &p), encoded, "byte-for-byte, not just the same hash");
+    assert_eq!(
+        encoded_hex(&env, &p),
+        encoded,
+        "byte-for-byte, not just the same hash"
+    );
     assert_eq!(hex(&fingerprint::fingerprint(&env, &p).unwrap()), expected);
 }
 
@@ -168,7 +177,10 @@ fn live_buckets_are_not_part_of_the_policy() {
     let mut buckets = Vec::new(&env);
     buckets.push_back(crate::policy::TokenBucket {
         token: bytes32(&env, 0x11),
-        bucket: Bucket { level: 3, last_ts: 99 },
+        bucket: Bucket {
+            level: 3,
+            last_ts: 99,
+        },
     });
     spent.buckets = buckets;
     assert_eq!(

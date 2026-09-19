@@ -71,6 +71,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     /// @dev One call pulled out of an `execute`, whatever shape it arrived in.
     struct Call {
         address target;
+        uint256 value;
         bytes data;
     }
 
@@ -80,6 +81,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         bytes32 key;
         AgentRateLimit.Bucket bucket;
         bool dirty;
+        bool ceiling;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -173,6 +175,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     error AgentPolicy__BadLimit();
     error AgentPolicy__NoAccountCeiling(bytes32 token);
     error AgentPolicy__ZeroAgent();
+    error AgentPolicy__AgentIdNotAnAddress();
+    error AgentPolicy__InstallDataTooShort();
 
     /*//////////////////////////////////////////////////////////////
                              MODULE PLUMBING
@@ -249,15 +253,18 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         }
         bytes32 key = _ceilKey(_epoch[msg.sender], token);
         AgentRateLimit.Limit memory limit = AgentRateLimit.Limit({capacity: capacity, refillPerSecond: refillPerSecond});
-        _accountLimit[key][msg.sender] = limit;
-        // Settle at the old rate before the new one applies, then clamp: leaving `lastTs` alone
-        // would re-price the idle interval at whatever rate was just written.
+        uint64 nowTs = uint64(block.timestamp);
         AgentRateLimit.Bucket memory b = _accountBucket[key][msg.sender];
         if (b.lastTs == 0) {
-            _accountBucket[key][msg.sender] = AgentRateLimit.full(limit, uint64(block.timestamp));
-        } else if (b.level > capacity) {
-            _accountBucket[key][msg.sender] = AgentRateLimit.Bucket({level: capacity, lastTs: uint64(block.timestamp)});
+            _accountBucket[key][msg.sender] = AgentRateLimit.full(limit, nowTs);
+        } else {
+            // Settle the idle time at the rate it was earned under, then clamp and restart the
+            // clock. Writing the new rate over an old stamp would re-price the whole interval.
+            uint256 level = AgentRateLimit.available(_accountLimit[key][msg.sender], b, nowTs);
+            _accountBucket[key][msg.sender] =
+                AgentRateLimit.Bucket({level: level > capacity ? capacity : level, lastTs: nowTs});
         }
+        _accountLimit[key][msg.sender] = limit;
         emit AccountLimitSet(msg.sender, token, capacity, refillPerSecond);
     }
 
@@ -270,6 +277,9 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     function setAgentPolicy(bytes32 agentId, bytes calldata policy) external {
         _requireInstalled();
         if (agentId == bytes32(0)) revert AgentPolicy__ZeroAgent();
+        // An agent is whoever `ecrecover` returns, left-padded. Anything else can never match a
+        // signature, and an owner who installed it would believe they had an agent.
+        if (uint256(agentId) >> 160 != 0) revert AgentPolicy__AgentIdNotAnAddress();
         uint256 e = _epoch[msg.sender];
         bytes32 aKey = _agentKey(e, agentId);
         if (_revoked[aKey][msg.sender]) revert AgentPolicy__AgentRevoked();
@@ -353,11 +363,15 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         bytes32 vKey = _versionKey(aKey, _version[aKey][account]);
 
         if (!_walk(account, e, vKey, meta, userOp.callData, false)) return VALIDATION_FAILED;
+        if (!_pushMarker(account, userOp.callData, agentId)) return VALIDATION_FAILED;
 
-        _setMarker(account, agentId);
         // Expiry is the bundler's job once it is in the return value, so there is no comparison
-        // against `block.timestamp` here to get wrong.
-        uint48 validUntil = meta.validUntil > type(uint48).max ? 0 : uint48(meta.validUntil);
+        // against `block.timestamp` here to get wrong. Soroban's rule is `now < valid_until` and
+        // the EntryPoint's is `now <= validUntil`, so the second before is what gets packed — or
+        // the two chains would disagree for one second per policy.
+        if (meta.validUntil == 1) return VALIDATION_FAILED;
+        uint48 validUntil =
+            meta.validUntil == 0 || meta.validUntil - 1 > type(uint48).max ? 0 : uint48(meta.validUntil - 1);
         return uint256(validUntil) << 160 | VALIDATION_SUCCESS;
     }
 
@@ -377,7 +391,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
      */
     function preCheck(address, uint256, bytes calldata msgData) external returns (bytes memory) {
         address account = _getAccount();
-        bytes32 agentId = _marker(account);
+        bytes32 agentId = _popMarker(account, msgData);
         if (agentId == bytes32(0)) return "";
 
         uint256 e = _epoch[account];
@@ -390,11 +404,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         return "";
     }
 
-    /// @notice Clear the marker, so a second call in the same transaction cannot ride the first
-    ///         operation's authorization.
-    function postCheck(bytes calldata) external {
-        _clearMarker(_getAccount());
-    }
+    /// @notice Nothing to do: `preCheck` consumed the marker it acted on.
+    function postCheck(bytes calldata) external {}
 
     /*//////////////////////////////////////////////////////////////
                            HOOK MULTIPLEXING
@@ -486,28 +497,39 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
      *      outright: a policy that reasons about a target and a selector says nothing useful about
      *      code running in the account's own context.
      */
-    function _decodeCalls(bytes calldata cd) internal pure returns (bool ok, Call[] memory calls) {
-        if (cd.length < 4) return (false, calls);
+    /// @dev `mode` and `executionCalldata` out of an `execute`, with Kernel's `executeUserOp`
+    ///      wrapper stripped. The validator and the hook both come through here, so they agree on
+    ///      what an operation *is* however the account chose to wrap or pad it.
+    function _executeArgs(bytes calldata cd) internal pure returns (bool ok, bytes32 mode, bytes calldata ec) {
+        ec = cd[0:0];
+        if (cd.length < 4) return (false, mode, ec);
         bytes calldata body = cd;
         if (bytes4(body[0:4]) == EXECUTE_USER_OP_SELECTOR) {
-            if (body.length < 8) return (false, calls);
+            if (body.length < 8) return (false, mode, ec);
             body = body[4:];
         }
-        if (body.length < 68 || bytes4(body[0:4]) != EXECUTE_SELECTOR) return (false, calls);
-
-        bytes32 mode = bytes32(body[4:36]);
-        uint8 callType = uint8(mode[0]);
-
-        uint256 at = 4 + uint256(bytes32(body[36:68]));
-        if (at + 32 > body.length) return (false, calls);
+        if (body.length < 68 || bytes4(body[0:4]) != EXECUTE_SELECTOR) return (false, mode, ec);
+        mode = bytes32(body[4:36]);
+        uint256 offset = uint256(bytes32(body[36:68]));
+        if (offset > body.length) return (false, mode, ec);
+        uint256 at = 4 + offset;
+        if (at + 32 > body.length) return (false, mode, ec);
         uint256 len = uint256(bytes32(body[at:at + 32]));
-        if (at + 32 + len > body.length) return (false, calls);
-        bytes calldata ec = body[at + 32:at + 32 + len];
+        if (len > body.length || at + 32 + len > body.length) return (false, mode, ec);
+        return (true, mode, body[at + 32:at + 32 + len]);
+    }
+
+    function _decodeCalls(bytes calldata cd) internal pure returns (bool ok, Call[] memory calls) {
+        bytes32 mode;
+        bytes calldata ec;
+        (ok, mode, ec) = _executeArgs(cd);
+        if (!ok) return (false, calls);
+        uint8 callType = uint8(mode[0]);
 
         if (callType == CALLTYPE_SINGLE) {
             if (ec.length < 52) return (false, calls);
             calls = new Call[](1);
-            calls[0] = Call({target: address(bytes20(ec[0:20])), data: ec[52:]});
+            calls[0] = Call({target: address(bytes20(ec[0:20])), value: uint256(bytes32(ec[20:52])), data: ec[52:]});
             return (true, calls);
         }
         if (callType == CALLTYPE_BATCH) {
@@ -515,7 +537,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
             if (execs.length == 0 || execs.length > MAX_BATCH) return (false, calls);
             calls = new Call[](execs.length);
             for (uint256 i = 0; i < execs.length; ++i) {
-                calls[i] = Call({target: execs[i].target, data: execs[i].callData});
+                calls[i] = Call({target: execs[i].target, value: execs[i].value, data: execs[i].callData});
             }
             return (true, calls);
         }
@@ -622,6 +644,9 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
 
     function _checkOne(WalkCtx memory ctx, Call memory c) internal view returns (bool) {
         if (!_flag[_targetKey(ctx.epoch, c.target)][ctx.account]) return false;
+        // The policy speaks about a target, a selector and the trade. ETH riding on the call is
+        // outside all three, so the only amount it can vouch for is none.
+        if (c.value != 0) return false;
         if (c.data.length < 4) return false;
 
         uint8 actionId = _actionIdOf(bytes4(c.data));
@@ -696,7 +721,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
                 AgentRateLimit.Limit({capacity: row.capacity, refillPerSecond: row.refillPerSecond}),
                 ctx.nowTs
             ),
-            dirty: false
+            dirty: false,
+            ceiling: false
         });
         return i;
     }
@@ -711,8 +737,12 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         uint256 i = _slotFor(ctx.running, ctx.used, key);
         if (i != type(uint256).max) return i;
         i = ctx.used++;
-        ctx.running[i] =
-            Running({key: key, bucket: _readBucket(_accountBucket[key][ctx.account], rate, ctx.nowTs), dirty: false});
+        ctx.running[i] = Running({
+            key: key,
+            bucket: _readBucket(_accountBucket[key][ctx.account], rate, ctx.nowTs),
+            dirty: false,
+            ceiling: true
+        });
         return i;
     }
 
@@ -721,9 +751,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     function _commit(WalkCtx memory ctx) internal {
         for (uint256 i = 0; i < ctx.used; ++i) {
             if (!ctx.running[i].dirty) continue;
-            // The agent rows are keyed by the policy version and the ceilings by the epoch, so the
-            // two key spaces cannot collide and this cannot write the wrong mapping.
-            if (_accountLimit[ctx.running[i].key][ctx.account].capacity != 0) {
+            if (ctx.running[i].ceiling) {
                 _accountBucket[ctx.running[i].key][ctx.account] = ctx.running[i].bucket;
             } else {
                 _agentBucket[ctx.running[i].key][ctx.account] = ctx.running[i].bucket;
@@ -790,35 +818,65 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         return keccak256(abi.encode(e, "ceiling", token));
     }
 
-    /// @dev Derived the way Solidity derives a `mapping(address => bytes32)` slot, so the transient
-    ///      write lands inside the account-associated window ERC-7562 [OP-070] requires.
-    function _markerSlot(address account) internal pure returns (bytes32) {
-        return keccak256(abi.encode(account, MARKER_NAMESPACE));
+    /**
+     * @dev The marker's slot, keyed by the account **and by what the operation does**.
+     *
+     *      Keyed by the account alone it would be wrong in a way no single-operation test shows:
+     *      every validation in a bundle runs before any execution, so one slot per account is set
+     *      once, consumed by the first execution, and every later operation in the bundle runs with
+     *      the hook asleep. An agent can build that bundle itself by calling `handleOps`.
+     *
+     *      Keyed by the decoded `(mode, executionCalldata)` rather than raw bytes, so a wrapper or
+     *      trailing padding the account adds between validation and execution cannot make the hook
+     *      miss. Shaped `keccak(account ‖ x)` so the transient write lands inside the
+     *      account-associated window ERC-7562 [OP-070] requires; the count lives at `+1`.
+     */
+    function _markerSlot(address account, bytes32 mode, bytes calldata ec) internal pure returns (bytes32) {
+        return keccak256(abi.encode(account, keccak256(abi.encode(MARKER_NAMESPACE, mode, keccak256(ec)))));
     }
 
-    function _setMarker(address account, bytes32 agentId) internal {
-        bytes32 slot = _markerSlot(account);
+    /// @return false when another agent already queued the identical operation in this
+    ///         transaction; the hook could not tell the two apart, so the second is refused.
+    function _pushMarker(address account, bytes calldata callData, bytes32 agentId) internal returns (bool) {
+        (bool ok, bytes32 mode, bytes calldata ec) = _executeArgs(callData);
+        if (!ok) return false;
+        bytes32 slot = _markerSlot(account, mode, ec);
+        bytes32 queued;
+        uint256 count;
+        assembly ("memory-safe") {
+            queued := tload(slot)
+            count := tload(add(slot, 1))
+        }
+        if (count != 0 && queued != agentId) return false;
         assembly ("memory-safe") {
             tstore(slot, agentId)
+            tstore(add(slot, 1), add(count, 1))
         }
+        return true;
     }
 
-    function _marker(address account) internal view returns (bytes32 agentId) {
-        bytes32 slot = _markerSlot(account);
+    /// @return agentId zero when this execution was not queued by the validator — the owner acting
+    ///         directly, or another validator's work.
+    function _popMarker(address account, bytes calldata msgData) internal returns (bytes32 agentId) {
+        (bool ok, bytes32 mode, bytes calldata ec) = _executeArgs(msgData);
+        if (!ok) return bytes32(0);
+        bytes32 slot = _markerSlot(account, mode, ec);
+        uint256 count;
         assembly ("memory-safe") {
             agentId := tload(slot)
+            count := tload(add(slot, 1))
         }
-    }
-
-    function _clearMarker(address account) internal {
-        bytes32 slot = _markerSlot(account);
+        if (count == 0) return bytes32(0);
         assembly ("memory-safe") {
-            tstore(slot, 0)
+            tstore(add(slot, 1), sub(count, 1))
+            if eq(count, 1) { tstore(slot, 0) }
         }
     }
 
     function _installArgs(bytes calldata data) internal pure returns (uint256 moduleTypeId, bytes memory extra) {
-        if (data.length < 32) return (MODULE_TYPE_VALIDATOR, extra);
+        // This module is two types and `onInstall` does not say which one is meant. Guessing would
+        // register the hook as a second validator, so the caller has to say.
+        if (data.length < 32) revert AgentPolicy__InstallDataTooShort();
         moduleTypeId = uint256(bytes32(data[0:32]));
         if (data.length > 32) extra = data[32:];
     }

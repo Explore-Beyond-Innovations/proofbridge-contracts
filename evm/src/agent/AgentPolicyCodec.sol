@@ -39,6 +39,7 @@ library AgentPolicyCodec {
     uint8 internal constant MAX_ALLOWED_ACTIONS = 4;
     uint8 internal constant MAX_WHITELIST_TOKENS = 16;
     uint8 internal constant MAX_AD_SCOPE = 16;
+    uint16 internal constant MAX_AD_ID_BYTES = 1024;
 
     uint256 private constant ROW_BYTES = 128;
 
@@ -130,7 +131,9 @@ library AgentPolicyCodec {
         for (uint256 i = 0; i < v.adScopeCount; ++i) {
             uint16 len = uint16(bytes2(policy[at:at + 2]));
             at += 2;
-            if (len == 0) revert AgentPolicyCodec__BadAdScope();
+            // 1024 is what Soroban's encoder can hash; a longer id would be a policy one chain
+            // accepts and the other cannot fingerprint.
+            if (len == 0 || len > MAX_AD_ID_BYTES) revert AgentPolicyCodec__BadAdScope();
             bytes32 cur = keccak256(policy[at:at + len]);
             // Hashes, not the strings themselves: the encoder sorts by raw UTF-8 bytes and this
             // only needs "no two are the same", which a hash answers in one word.

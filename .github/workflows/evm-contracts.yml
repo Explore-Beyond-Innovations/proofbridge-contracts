@@ -75,8 +75,10 @@ jobs:
         run: forge fmt --check
         id: fmt
 
+      # Sizes are checked for what ships. The test tree pulls in ModuleKit's account factories,
+      # which are far over EIP-170 and were never going on chain; the test step compiles them.
       - name: Run Forge build
-        run: forge build --sizes
+        run: forge build --sizes --skip test
         id: build
 
       - name: Build event circuit
@@ -157,6 +159,21 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: v1.7.1
+
+      # forge compiles the whole test tree even for a filtered run, and the agent tests import
+      # ModuleKit from node_modules — so this job needs the install too or nothing compiles.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: .
 
       # The full campaign, on pull requests as well as on main: 256 runs x 500 calls per invariant.
       # Splitting this into its own job does not make it faster — it is the critical path, and

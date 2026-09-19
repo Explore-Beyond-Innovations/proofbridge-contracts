@@ -16,8 +16,4 @@ contract PolicyHarness is ProofBridgeAgentPolicy {
         (ok, calls) = _decodeCalls(callData);
         count = calls.length;
     }
-
-    function marker(address account) external view returns (bytes32) {
-        return _marker(account);
-    }
 }
