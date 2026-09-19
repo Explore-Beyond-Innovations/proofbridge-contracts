@@ -4646,6 +4646,28 @@ fn test_2_3g_only_the_other_party_may_respond() {
     );
 }
 
+/// S3, but with the caller unsigned: `require_party` proves the *named* responder is a party,
+/// nothing proves the caller is that party.
+#[test]
+fn test_2_3g_a_bystander_cannot_respond_as_the_counterparty() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let params = locked_ad_order(&s);
+    let bridger = account_addr(&s, &s.tp.order_recipient);
+
+    s.ad_manager
+        .dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+
+    // Nobody signs: a bystander holds no key of the bridger's.
+    s.env.set_auths(&[]);
+    assert!(
+        s.ad_manager
+            .try_respond_to_dispute(&params, &bridger, &bytes32_to_bytesn(&s.env, &[0x11; 32]))
+            .is_err(),
+        "an unsigned call must not write the bridger's evidence slot"
+    );
+}
+
 /// `in_flight` returns to zero on `Resolved`, as on every other terminal (T-13).
 #[test]
 fn test_2_3g_in_flight_clears_on_resolved() {
