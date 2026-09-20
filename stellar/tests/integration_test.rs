@@ -4742,11 +4742,15 @@ fn t24_last_leaf_domain(s: &TestSetup, order_hash: &BytesN<32>) -> Option<u32> {
     let mut found: Option<u32> = None;
     for ev in s.env.events().all().events() {
         let ContractEventBody::V0(body) = &ev.body;
-        let Some(ScVal::Symbol(sym)) = body.topics.first() else { continue };
+        let Some(ScVal::Symbol(sym)) = body.topics.first() else {
+            continue;
+        };
         if sym.to_utf8_string_lossy() != "mmr_add" {
             continue;
         }
-        let ScVal::Vec(Some(vec)) = &body.data else { continue };
+        let ScVal::Vec(Some(vec)) = &body.data else {
+            continue;
+        };
         if vec.len() < 2 {
             continue;
         }
@@ -4767,8 +4771,12 @@ fn test_t24_differential_scenarios() {
     let header = &v["header"];
     let scale: i128 = 10i128.pow(header["sorobanScaleExp"].as_u64().unwrap() as u32);
     let challenge = header["challengePeriodS"].as_u64().unwrap();
-    let floor: u128 =
-        header["bondFloorUnits"].as_str().unwrap().parse::<u128>().unwrap() * scale as u128;
+    let floor: u128 = header["bondFloorUnits"]
+        .as_str()
+        .unwrap()
+        .parse::<u128>()
+        .unwrap()
+        * scale as u128;
     assert_eq!(header["bondBps"].as_u64().unwrap(), 0, "T-24 pins bps=0");
     let bond_units: i128 = header["bondUnits"].as_str().unwrap().parse().unwrap();
 
@@ -4786,7 +4794,11 @@ fn t24_run_scenario(
 ) {
     use soroban_sdk::testutils::Ledger;
     let name = sc["name"].as_str().unwrap();
-    assert_eq!(sc["filer"].as_str().unwrap(), "MAKER", "{name}: the fixture pins the filer");
+    assert_eq!(
+        sc["filer"].as_str().unwrap(),
+        "MAKER",
+        "{name}: the fixture pins the filer"
+    );
 
     // fresh env per scenario — six scenarios, six isolated worlds
     let s = setup();
@@ -4800,10 +4812,16 @@ fn t24_run_scenario(
     let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
 
     // file, then take baselines (the bond has left the filer, nothing paid)
-    let bond =
-        s.ad_manager
-            .dispute(&params, &s.maker_addr, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
-    assert_eq!(bond as i128, (floor as i128), "{name}: bond = floor exactly (bps=0)");
+    let bond = s.ad_manager.dispute(
+        &params,
+        &s.maker_addr,
+        &bytes32_to_bytesn(&s.env, &[0xEE; 32]),
+    );
+    assert_eq!(
+        bond as i128,
+        (floor as i128),
+        "{name}: bond = floor exactly (bps=0)"
+    );
     // the mock records auths: the filer authorized this filing (D2's
     // env.auths() check — mock_all_auths must not hide a missing require_auth)
     assert!(
@@ -4833,7 +4851,9 @@ fn t24_run_scenario(
             }
             "claimDispute" => dm.claim_dispute(&order_hash),
             "finalize" => s.ad_manager.finalize_dispute(&params),
-            "present" => s.ad_manager.present_settled(&params, &settled_root, &settled),
+            "present" => s
+                .ad_manager
+                .present_settled(&params, &settled_root, &settled),
             "recordSettled" => s.ad_manager.record_settled(&params),
             other => panic!("unknown step {other}"),
         }
@@ -4857,9 +4877,15 @@ fn t24_run_scenario(
         "Resolved" => status == ad_manager_contract::Status::Resolved,
         other => panic!("unknown status {other}"),
     };
-    assert!(status_ok, "{name}: escrow status (got {status:?}, want {expected_status})");
-    let want_domain: u32 =
-        sc["expect"]["primaryLeafDomain"].as_str().unwrap().parse().unwrap();
+    assert!(
+        status_ok,
+        "{name}: escrow status (got {status:?}, want {expected_status})"
+    );
+    let want_domain: u32 = sc["expect"]["primaryLeafDomain"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
     assert_eq!(leaf_domain, Some(want_domain), "{name}: leaf domain");
     let to_filer_units = (token.balance(&s.maker_addr) - filer_base) / scale;
     let to_pool_units = (token.balance(&fee_pool) - pool_base) / scale;
