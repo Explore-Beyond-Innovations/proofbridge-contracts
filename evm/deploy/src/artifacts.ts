@@ -14,6 +14,9 @@ interface Artifact {
     object: string;
     linkReferences?: Record<string, Record<string, LinkReference[]>>;
   };
+  deployedBytecode?: {
+    linkReferences?: Record<string, Record<string, LinkReference[]>>;
+  };
 }
 
 function loadArtifact(contractFile: string, contractName: string): Artifact {
@@ -92,4 +95,25 @@ export function attachContract(
   signer: ethers.Wallet,
 ): ethers.Contract {
   return new ethers.Contract(address, getAbi(contractFile, contractName), signer);
+}
+
+/**
+ * The library address a deployed contract was linked with, read out of its on-chain code at the
+ * offset the artifact records for the runtime bytecode. Null when the artifact has no such
+ * reference or the code is too short to hold it (a different build, or not this contract).
+ */
+export function linkedLibraryIn(
+  contractFile: string,
+  contractName: string,
+  libName: string,
+  runtimeCode: string,
+): string | null {
+  const refs = loadArtifact(contractFile, contractName).deployedBytecode?.linkReferences ?? {};
+  for (const libs of Object.values(refs)) {
+    const spot = libs[libName]?.[0];
+    if (!spot) continue;
+    const hex = runtimeCode.slice(2 + spot.start * 2, 2 + (spot.start + spot.length) * 2);
+    return hex.length === spot.length * 2 ? ethers.getAddress("0x" + hex) : null;
+  }
+  return null;
 }

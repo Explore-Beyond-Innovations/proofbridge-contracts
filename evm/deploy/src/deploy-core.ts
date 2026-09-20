@@ -1,8 +1,10 @@
+import * as fs from "fs";
 import { ethers } from "ethers";
 import { MANAGER_ROLE, connect, envOrDefault, requireEnv } from "./common.js";
 import {
   contractFactory,
   contractFactoryLinked,
+  linkedLibraryIn,
   attachContract,
 } from "./artifacts.js";
 import {
@@ -50,11 +52,45 @@ export interface DeployCoreResult {
     rootAnchor: string;
     registrar: string;
     disputeManager: string;
+    agentPolicyCodec: string;
+    agentPolicy: string;
   };
+}
+
+/** What a run has put on chain so far, kept so that a failure after the first deploy is not a loss. */
+interface RunLog {
+  outPath?: string;
+  deployed: { label: string; address: string }[];
 }
 
 export async function deployCore(
   opts: DeployCoreOptions = {},
+): Promise<DeployCoreResult> {
+  const run: RunLog = { deployed: [] };
+  try {
+    return await deployCoreRun(opts, run);
+  } catch (err) {
+    // The manifest is written once, at the end. What can be refused before sending is (see the
+    // top of the run); a transaction can still revert in the middle, and these would be orphans.
+    if (run.deployed.length > 0) {
+      const lines = run.deployed.map((d) => `${d.label} ${d.address}`);
+      console.error(
+        `[evm-deploy] FAILED after deploying ${lines.length} contract(s) that are in no manifest:\n    ${lines.join("\n    ")}`,
+      );
+      if (run.outPath) {
+        // Not *.json: deploy-contracts.sh takes the newest .json in this directory as the manifest.
+        const side = run.outPath.replace(/\.json$/, "") + ".deployed-this-run.txt";
+        fs.writeFileSync(side, lines.join("\n") + "\n");
+        console.error(`[evm-deploy] also written to ${side}; add them to the manifest rather than deploying again`);
+      }
+    }
+    throw err;
+  }
+}
+
+async function deployCoreRun(
+  opts: DeployCoreOptions,
+  run: RunLog,
 ): Promise<DeployCoreResult> {
   const rpcUrl = opts.rpcUrl ?? requireEnv("EVM_RPC_URL");
   const privateKey = opts.privateKey ?? requireEnv("EVM_ADMIN_PRIVATE_KEY");
@@ -79,6 +115,7 @@ export async function deployCore(
     opts.wNative?.decimals ?? Number(envOrDefault("WNATIVE_DECIMALS", "18"));
 
   const outPath = opts.manifestOut ?? manifestPath(chainId);
+  run.outPath = outPath;
   const reuse = opts.reuseExisting ?? true;
   const existing = reuse ? await loadOrNull(outPath) : null;
 
@@ -86,6 +123,119 @@ export async function deployCore(
   console.log(`[evm-deploy] deployer=${deployer} admin=${admin}`);
   if (existing) {
     console.log(`[evm-deploy] reusing addresses from ${outPath}`);
+  }
+
+  // ── everything that can be refused before sending, is ─────────────
+  // The manifest is written once, at the end, so a run that stops after a contract has gone out
+  // leaves it in no manifest. What depends only on the environment is settled here.
+  if (!Number.isInteger(wDec) || wDec < 0 || wDec > 255) {
+    throw new Error(`deploy-core: WNATIVE_DECIMALS must be an integer 0..255, got ${wDec}`);
+  }
+  const anchorSigners = envOrDefault("ANCHOR_PUBLISHER", admin)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const anchorThreshold = Number(envOrDefault("ANCHOR_THRESHOLD", "1"));
+  for (const a of [admin, ...anchorSigners]) {
+    if (!ethers.isAddress(a)) throw new Error(`deploy-core: not an address: ${a} (ADMIN / ANCHOR_PUBLISHER)`);
+  }
+  if (!Number.isInteger(anchorThreshold) || anchorThreshold < 1 || anchorThreshold > anchorSigners.length) {
+    throw new Error(
+      `deploy-core: ANCHOR_THRESHOLD must be 1..${anchorSigners.length} (the number of ANCHOR_PUBLISHER signers), got ${anchorThreshold}`,
+    );
+  }
+  // The arbiter must not be the admin (2.3g D6): its whole containment is that it cannot pause an
+  // escrow, re-route tokens or re-point the anchor. Outside a local deploy both roles are explicit.
+  const arbiterAddr = disputeRole("DISPUTE_ARBITER", env, admin);
+  const feePoolAddr = disputeRole("DISPUTE_FEE_POOL", env, admin);
+  for (const a of [arbiterAddr, feePoolAddr]) {
+    if (!ethers.isAddress(a)) throw new Error(`deploy-core: not an address: ${a} (DISPUTE_ARBITER / DISPUTE_FEE_POOL)`);
+  }
+  if (env !== "local" && arbiterAddr.toLowerCase() === admin.toLowerCase()) {
+    throw new Error(
+      "deploy-core: DISPUTE_ARBITER must not be the admin — the arbiter's containment is that it holds no escrow powers",
+    );
+  }
+
+  // ...and so is what depends on the chain. The manifest is a claim; the chain is the fact.
+  const reusedAgentPolicy = existing?.contracts.agentPolicy?.address;
+  let reusedAgentCodec = existing?.contracts.agentPolicyCodec?.address;
+  if (existing) {
+    const provider = signer.provider!;
+    const entries = Object.entries(existing.contracts)
+      .map(([name, entry]) => ({ name, address: (entry as { address?: string } | undefined)?.address }))
+      .filter((e): e is { name: string; address: string } => !!e.address)
+      // Never taken on the manifest's word: with a module recorded, the module's code names its
+      // library (below); without one, the entry is not used at all.
+      .filter((e) => e.name !== "agentPolicyCodec");
+    const codeless: string[] = [];
+    for (const e of entries) {
+      if ((await provider.getCode(e.address)) === "0x") codeless.push(`${e.name} ${e.address}`);
+    }
+    if (codeless.length > 0) {
+      const advice =
+        codeless.length === entries.length
+          ? `None of them has code: the wrong chain, or a devnet that was reset. Delete the manifest (deploy-contracts.sh --fresh does) to deploy afresh.`
+          : `The other ${entries.length - codeless.length} are live, so this is a bad entry, not a bad manifest: correct the address. ` +
+            `Removing an entry instead deploys a new contract there, and whatever was wired to the old address stays wired to it.`;
+      throw new Error(
+        `${outPath} names ${codeless.length} of ${entries.length} contract(s) with no code on chain ${chainId}:\n    ${codeless.join("\n    ")}\n  ${advice}`,
+      );
+    }
+
+    // A reused pre-2.3c AdManager has no `keyRegistry()`, and the wiring below cannot do without it.
+    try {
+      await attachContract(existing.contracts.adManager.address, "AdManager", "AdManager", signer).getFunction("keyRegistry")();
+    } catch (err) {
+      throw new Error(
+        `AdManager at ${existing.contracts.adManager.address} has no keyRegistry() (pre-2.3c bytecode?); redeploy it instead of reusing: ${err}`,
+      );
+    }
+
+    if (reusedAgentCodec && !reusedAgentPolicy) {
+      console.warn(
+        `  [ignore] manifest records AgentPolicyCodec ${reusedAgentCodec} and no module; a module is only ever linked to the library deployed with it, so a new pair is deployed`,
+      );
+    }
+
+    // The agent module is the one contract makers install, so its address never moves because the
+    // *library's* entry is wrong. Identity, not presence: the module has to answer as the module,
+    // and a library has to decode.
+    if (reusedAgentPolicy) {
+      if (!(await isAgentPolicyModule(reusedAgentPolicy, signer))) {
+        throw new Error(
+          `${reusedAgentPolicy} is recorded as ProofBridgeAgentPolicy and does not answer as one (isModuleType). Correct the entry.\n` +
+            `  Removing it deploys a new module at a new address; every maker who installed the old one stays on it, so that is a migration, not a repair.`,
+        );
+      }
+      const moduleCode = (await provider.getCode(reusedAgentPolicy)).toLowerCase();
+      // At the offset this build's artifact records; or, for a module from a build that laid its
+      // code out differently, the manifest's own entry, if the module's code carries it.
+      const candidates = [
+        linkedLibraryIn("ProofBridgeAgentPolicy", "ProofBridgeAgentPolicy", "AgentPolicyCodec", moduleCode),
+        reusedAgentCodec && moduleCode.includes(reusedAgentCodec.slice(2).toLowerCase()) ? reusedAgentCodec : null,
+      ];
+      let linked: string | null = null;
+      for (const c of candidates) {
+        if (c && (await isAgentPolicyCodec(c, signer))) {
+          linked = c;
+          break;
+        }
+      }
+      if (!linked) {
+        throw new Error(
+          `ProofBridgeAgentPolicy at ${reusedAgentPolicy} cannot be tied to a working AgentPolicyCodec: nothing that decodes at this build's link offset, ` +
+            `and the manifest's library (${reusedAgentCodec ?? "absent"}) is not both in the module's code and able to decode. Correct the library entry.\n` +
+            `  Removing both entries deploys a new pair at a new address; every maker who installed the old module stays on it, so that is a migration, not a repair.`,
+        );
+      }
+      if (linked.toLowerCase() !== reusedAgentCodec?.toLowerCase()) {
+        console.warn(
+          `  [repair] manifest says AgentPolicyCodec is ${reusedAgentCodec ?? "absent"}; the module's code is linked to ${linked}. Recording ${linked}; the module is untouched.`,
+        );
+        reusedAgentCodec = linked;
+      }
+    }
   }
 
   async function deployIfMissing(
@@ -100,6 +250,7 @@ export async function deployCore(
     console.log(`  [deploy] ${label}...`);
     const c = await deployFn();
     const addr = await c.getAddress();
+    run.deployed.push({ label, address: addr });
     console.log(`  [deploy] ${label}: ${addr}`);
     return addr;
   }
@@ -231,11 +382,6 @@ export async function deployCore(
   // T2 notary: the publisher key(s) in ANCHOR_PUBLISHER (comma-separated, default
   // admin) at ANCHOR_THRESHOLD (default 1); the ladder later swaps the set with
   // setSigners. Per-route delays are set at link time (ANCHOR_DELAY_S).
-  const anchorSigners = envOrDefault("ANCHOR_PUBLISHER", admin)
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const anchorThreshold = Number(envOrDefault("ANCHOR_THRESHOLD", "1"));
   const rootAnchorAddr = await deployIfMissing(
     "RootAnchor",
     existing?.contracts.rootAnchor?.address,
@@ -280,17 +426,9 @@ export async function deployCore(
   // every forfeited bond to the filer. Both are set here rather than left to a follow-up, because a
   // half-wired dispute module is indistinguishable from a working one until someone files.
   //
-  // The arbiter must not be the admin (2.3g D6): its whole containment is that it cannot pause an
-  // escrow, re-route tokens or re-point the anchor. Outside a local deploy both are explicit.
+  // Who they are, and that the arbiter is not the admin, was settled before anything was sent.
   {
     const dm = attachContract(disputeManagerAddr, "DisputeManager", "DisputeManager", signer);
-    const arbiterAddr = disputeRole("DISPUTE_ARBITER", env, admin);
-    const feePoolAddr = disputeRole("DISPUTE_FEE_POOL", env, admin);
-    if (env !== "local" && arbiterAddr.toLowerCase() === admin.toLowerCase()) {
-      throw new Error(
-        "deploy-core: DISPUTE_ARBITER must not be the admin — the arbiter's containment is that it holds no escrow powers",
-      );
-    }
     for (const [name, fn, value] of [
       ["arbiter", "setArbiter", arbiterAddr],
       ["protocolFeePool", "setProtocolFeePool", feePoolAddr],
@@ -305,6 +443,33 @@ export async function deployCore(
       console.log(`  [deploy] DisputeManager.${fn}(${value})`);
     }
   }
+
+  // ── agent policy module (2.1g): the parser library, then the module linked to it ──
+  // One shared, ownerless contract per chain that every maker's account installs. Reused only as
+  // a pair: a reused module still points at the library it was linked with.
+  // Whether, and with which library, the recorded module is reused was settled up front.
+  const agentPolicyCodecAddr = await deployIfMissing(
+    "AgentPolicyCodec",
+    reusedAgentPolicy ? reusedAgentCodec : undefined,
+    async () => {
+      const f = contractFactory("AgentPolicyCodec", "AgentPolicyCodec", signer);
+      const c = await f.deploy({ nonce: nonces.next() });
+      await c.deploymentTransaction()?.wait();
+      return c as ethers.Contract;
+    },
+  );
+  const agentPolicyAddr = await deployIfMissing(
+    "ProofBridgeAgentPolicy",
+    reusedAgentPolicy,
+    async () => {
+      const f = contractFactoryLinked("ProofBridgeAgentPolicy", "ProofBridgeAgentPolicy", signer, {
+        AgentPolicyCodec: agentPolicyCodecAddr,
+      });
+      const c = await f.deploy({ nonce: nonces.next() });
+      await c.deploymentTransaction()?.wait();
+      return c as ethers.Contract;
+    },
+  );
 
   // ── wire the escrows as the registry's revoke guards ──────────────
   // Re-set every run (idempotent); guards only gate key revocation/rotation.
@@ -410,6 +575,8 @@ export async function deployCore(
       rootAnchor: rootAnchorAddr,
       registrar: registrarAddr,
       disputeManager: disputeManagerAddr,
+      agentPolicyCodec: agentPolicyCodecAddr,
+      agentPolicy: agentPolicyAddr,
     },
     // Preserve tokens already in the manifest (added by deploy-test-tokens / hand-curation).
     tokens: (existing?.tokens ?? []) as BuildManifestInput["tokens"],
@@ -442,6 +609,8 @@ export async function deployCore(
       rootAnchor: rootAnchorAddr,
       registrar: registrarAddr,
       disputeManager: disputeManagerAddr,
+      agentPolicyCodec: agentPolicyCodecAddr,
+      agentPolicy: agentPolicyAddr,
     },
   };
 }
@@ -455,4 +624,36 @@ function disputeRole(name: string, env: string, fallback: string): string {
   throw new Error(
     `deploy-core: ${name} is unset for env=${env}; set it or deploy with DEPLOY_ENV=local`,
   );
+}
+
+/// Does this address answer as the agent policy module: validator and hook, and not an executor?
+async function isAgentPolicyModule(address: string, signer: ethers.Wallet): Promise<boolean> {
+  try {
+    const isType = attachContract(address, "ProofBridgeAgentPolicy", "ProofBridgeAgentPolicy", signer).getFunction("isModuleType");
+    const [validator, executor, hook] = await Promise.all([isType(1), isType(2), isType(4)]);
+    return validator === true && hook === true && executor === false;
+  } catch {
+    return false;
+  }
+}
+
+/// Does this address decode a policy? `decode` is pure, so the library can be called directly: a
+/// minimal policy goes in, and the signer that went in has to come back out.
+async function isAgentPolicyCodec(address: string, signer: ethers.Wallet): Promise<boolean> {
+  const signerField = ethers.zeroPadValue("0xc0dec0de", 32);
+  const word = (n: bigint) => ethers.zeroPadValue(ethers.toBeHex(n), 32);
+  const policy = ethers.concat([
+    ethers.keccak256(ethers.toUtf8Bytes("ProofBridge.AgentPolicy.v1")),
+    "0x01", "0x01", // one action: lock for order
+    "0x01", word(1n), word(1n), word(1n), word(1n), // one token row: token, maxPerOrder, capacity, refill
+    "0x00", "0x00", // every ad
+    ethers.zeroPadValue("0x00", 8), // no expiry
+    signerField,
+  ]);
+  try {
+    const decoded = await attachContract(address, "AgentPolicyCodec", "AgentPolicyCodec", signer).getFunction("decode").staticCall(policy);
+    return (decoded.settlementSigner as string).toLowerCase() === signerField.toLowerCase();
+  } catch {
+    return false;
+  }
 }

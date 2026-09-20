@@ -103,7 +103,9 @@ jobs:
         working-directory: evm
         env:
           FOUNDRY_PROFILE: default
-        run: forge build --silent
+        # --skip test: the test tree imports ModuleKit from node_modules, this job installs none, and
+        # a bundle has no use for test artifacts anyway.
+        run: forge build --silent --skip test
 
       - name: Build event circuit VK
         run: scripts/build_circuits.sh proof_circuits/events
@@ -131,7 +133,7 @@ jobs:
           done
 
           # Copy only the artifacts the deployer actually loads.
-          EVM_ARTIFACTS="OrderPortal AdManager MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20 BLSKeyRegistry CounterpartyVerifier libSCL_EIP6565 RootAnchor Registrar DisputeManager"
+          EVM_ARTIFACTS="OrderPortal AdManager MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20 BLSKeyRegistry CounterpartyVerifier libSCL_EIP6565 RootAnchor Registrar DisputeManager AgentPolicyCodec ProofBridgeAgentPolicy"
           for c in $EVM_ARTIFACTS; do
             mkdir -p "$EVM_OUT/${c}.sol"
             cp evm/out/${c}.sol/*.json "$EVM_OUT/${c}.sol/"
@@ -142,9 +144,11 @@ jobs:
           # reviewable, and this only ever *adds* a failure — if the scan under-matches, the bundle
           # is still correct, it is merely less well guarded. DisputeManager shipped missing because
           # nothing connected the two.
+          # A grep cannot count brackets, so this reads to the end of the statement and may pick up
+          # a name it should not: that can only add a failure. The exact scan is the repo-check.
           MISSING=""
           for c in $(cat evm/deploy/src/*.ts | tr '\n' ' ' \
-                     | grep -oE '(contractFactoryLinked|contractFactory|attachContract)\([^)]*' \
+                     | grep -oE '(contractFactoryLinked|contractFactory|attachContract|linkedLibraryIn|getAbi)\([^;]*' \
                      | grep -oE '"[A-Za-z0-9_]+" *, *"[A-Za-z0-9_]+"' \
                      | sed -E 's/"([A-Za-z0-9_]+)".*/\1/' | sort -u); do
             case " $EVM_ARTIFACTS " in *" $c "*) ;; *) MISSING="$MISSING $c" ;; esac

@@ -73,6 +73,8 @@ export interface BuildManifestInput {
     rootAnchor?: string;
     registrar?: string;
     disputeManager?: string;
+    agentPolicyCodec?: string;
+    agentPolicy?: string;
   };
   tokens: EvmTokenInput[];
   rootAnchorConfig?: RootAnchorConfig;
@@ -125,6 +127,12 @@ export function buildManifest(
         : {}),
       ...(input.contracts.disputeManager
         ? { disputeManager: evmContractEntry(input.contracts.disputeManager) }
+        : {}),
+      ...(input.contracts.agentPolicyCodec
+        ? { agentPolicyCodec: evmContractEntry(input.contracts.agentPolicyCodec) }
+        : {}),
+      ...(input.contracts.agentPolicy
+        ? { agentPolicy: evmContractEntry(input.contracts.agentPolicy) }
         : {}),
     },
     tokens: input.tokens.map(tokenEntry),

@@ -10,13 +10,29 @@ remappings = [
   'solady=lib/solady/src/',
   '@solidity-mmr=lib/solidity-mmr/src/',
   '@scl/=lib/crypto-lib/src/',
+  # ModuleKit (test-only, 2.1g). It ships as an npm package rather than a foundry submodule, so its
+  # dependencies are declared in evm/package.json to land beside it in node_modules; a path that
+  # hopped out of the package with `..` resolves above the project root and solc refuses it.
+  'modulekit/=node_modules/@rhinestone/modulekit/src/',
+  # ModuleKit has one self-referential import (`src/external/ERC4337.sol`); the prefix is longer
+  # than our own `src/`, so it cannot shadow `src/interfaces/...` in this repo's tests.
+  'src/external/=node_modules/@rhinestone/modulekit/src/external/',
+  '@ERC4337/=node_modules/@ERC4337/',
+  'account-abstraction/=node_modules/@ERC4337/account-abstraction/contracts/',
+  'account-abstraction-v0.6/=node_modules/@ERC4337/account-abstraction-v0.6/contracts/',
+  'erc4337-validation/=node_modules/@rhinestone/erc4337-validation/src/',
+  '@rhinestone/sentinellist/=node_modules/@rhinestone/sentinellist/src/',
+  'solarray/=node_modules/solarray/src/',
+  '@prb/math/=node_modules/@prb/math/src/',
+  'ExcessivelySafeCall/=node_modules/excessively-safe-call/src/',
+  'ds-test/=node_modules/ds-test/src/',
 ]
 optimizer = true
 optimizer_runs = 1
 bytecode_hash = "none"
 solc_version = "0.8.34"
 evm_version = "prague"
-fs_permissions = [{ access = "read", path = "../test-vectors" }, { access = "read", path = "./test/fixtures" }]
+fs_permissions = [{ access = "read", path = "../test-vectors" }, { access = "read", path = "./test/fixtures" }, { access = "read", path = "./out" }]
 
 # Pinned, not left to forge's defaults: the CI comment below and the campaign's meaning both depend
 # on the size, so a change to a forge default must not quietly change what "the full campaign" is.

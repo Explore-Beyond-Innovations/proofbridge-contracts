@@ -75,8 +75,10 @@ jobs:
         run: forge fmt --check
         id: fmt
 
+      # Sizes are checked for what ships. The test tree pulls in ModuleKit's account factories,
+      # which are far over EIP-170 and were never going on chain; the test step compiles them.
       - name: Run Forge build
-        run: forge build --sizes
+        run: forge build --sizes --skip test
         id: build
 
       - name: Build event circuit
@@ -97,10 +99,54 @@ jobs:
           grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/parity.log
 
       # Invariants are excluded here and run in the `invariants` job below: they are 596s of this
-      # suite's 647s, so leaving them in makes every other signal wait on them.
+      # suite's 647s, so leaving them in makes every other signal wait on them. ValidationRules skips
+      # itself here (it needs a tracer and its own gas limit) and runs in the step after this one.
       - name: Run Forge tests
         run: forge test -vvv --no-match-contract Invariant
         id: test
+
+      # The agent module's storage layout is load-bearing and invisible: an account-first mapping
+      # compiles, passes every functional test, and produces a module no bundler will carry. This
+      # runs the real ERC-4337 validation rules over it.
+      #
+      # `-vvv` is required, not cosmetic: the simulator reads the debug tracer, which forge only
+      # initialises at that verbosity. The gas limit is raised because the trace itself is metered
+      # and the default 2^30 runs out part-way through parsing it.
+      - name: ERC-4337 validation rules (2.1g)
+        run: |
+          set -o pipefail
+          AGENT_RULES=1 forge test --match-contract ValidationRules --gas-limit 900000000000 -vvv | tee /tmp/rules.log
+          grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/rules.log
+        id: validation-rules
+
+      # The same module against every account implementation people actually use. A policy that
+      # holds on one and not another is the failure this catches. ValidationRules is in the run and
+      # skips itself: it is opt-in (AGENT_RULES=1), and the step above is where it is asked for.
+      - name: Agent module on every 7579 account (2.1g)
+        run: |
+          set -o pipefail
+          # The suites are counted off the disk, not listed by hand. A glob alone would stay green
+          # while a suite quietly stopped matching, and a hand-written list silently leaves the next
+          # suite on DEFAULT only — and every finding in this module's review differed by mount.
+          # `find`, not a shell glob, so a suite in a subdirectory is counted as well as run.
+          # Test *contracts*, not files: forge reports one suite per contract, so two in one file
+          # would turn a healthy run red. The opt-in ones are found by the call that makes them so,
+          # not by the word, so a comment mentioning it changes nothing.
+          expected=$(find test/agent -name '*.t.sol' -exec grep -hE '^contract [A-Za-z0-9_]+Test\b' {} + | wc -l)
+          optin=$(find test/agent -name '*.t.sol' -exec grep -l 'vm.envOr("AGENT_RULES"' {} + | xargs -r grep -hE '^contract [A-Za-z0-9_]+Test\b' | wc -l)
+          for account in DEFAULT SAFE KERNEL NEXUS; do
+            echo "::group::$account"
+            ACCOUNT_TYPE=$account forge test --match-path 'test/agent/**' -vvv | tee /tmp/agent.log
+            ran=$(grep -cE 'Suite result: ok\.' /tmp/agent.log)
+            passed=$(grep -cE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/agent.log)
+            echo "$account: $ran suites ran, $passed with passing tests; $expected on disk, $optin opt-in"
+            # Two separate checks, each with its own exit. As `[ a ] && [ b ]` the first could never
+            # fail the step: under `bash -e` a failing non-final command of an && list is exempt.
+            if [ "$ran" -ne "$expected" ]; then echo "::error::$account ran $ran suites, $expected on disk"; exit 1; fi
+            if [ "$passed" -ne $((expected - optin)) ]; then echo "::error::$account: $passed suites passed tests, want $((expected - optin))"; exit 1; fi
+            echo "::endgroup::"
+          done
+        id: agent-accounts
 
       - name: Unlock gas baseline gate (1.6c)
         run: |
@@ -126,6 +172,21 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: v1.7.1
+
+      # forge compiles the whole test tree even for a filtered run, and the agent tests import
+      # ModuleKit from node_modules — so this job needs the install too or nothing compiles.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: .
 
       # The full campaign, on pull requests as well as on main: 256 runs x 500 calls per invariant.
       # Splitting this into its own job does not make it faster — it is the critical path, and
