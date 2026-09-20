@@ -59,6 +59,46 @@ library AgentPolicyCodec {
         uint256 refillPerSecond;
     }
 
+    /// @notice A policy, decoded whole: what `setAgentPolicy` writes its rows from.
+    struct Decoded {
+        bytes32 settlementSigner;
+        uint64 validUntil;
+        bool adScopeAll;
+        uint8[] actions;
+        TokenRow[] tokens;
+        bytes32[] adScopeHashes;
+    }
+
+    /**
+     * @notice Parse a policy and return every part of it, in one call.
+     * @dev **The one `external` function here, and the reason this library is deployed rather than
+     *      inlined.** An internal library's code is copied into whatever calls it, so it counts
+     *      against the caller's EIP-170 limit; an external one is its own contract, reached by
+     *      DELEGATECALL, and does not. The agent module was at 22.5 of 24.5 KB.
+     *
+     *      It is the right thing to move because it runs only in the owner's `setAgentPolicy` —
+     *      never while an agent's operation is validated or executed — so ERC-7562's rules never
+     *      reach it and no trade pays for the call. It is pure: bytes in, a struct out.
+     *
+     *      One call rather than four: each external library call re-sends the policy and
+     *      ABI-encodes its answer, and the call sites are what the caller pays for in bytes.
+     */
+    function decode(bytes calldata policy) external pure returns (Decoded memory d) {
+        View memory v = parse(policy);
+        d.settlementSigner = v.settlementSigner;
+        d.validUntil = v.validUntil;
+        d.adScopeAll = v.adScopeAll;
+        d.actions = new uint8[](v.actionCount);
+        for (uint256 i = 0; i < v.actionCount; ++i) {
+            d.actions[i] = actionAt(policy, v, i);
+        }
+        d.tokens = new TokenRow[](v.tokenCount);
+        for (uint256 i = 0; i < v.tokenCount; ++i) {
+            d.tokens[i] = tokenRowAt(policy, v, i);
+        }
+        d.adScopeHashes = adScopeHashes(policy, v);
+    }
+
     /// @notice Where each section starts, so callers walk the bytes once.
     struct View {
         uint256 actionsAt;

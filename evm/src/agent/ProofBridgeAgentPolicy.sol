@@ -448,11 +448,13 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         bytes32 aKey = _agentKey(e, agentId);
         if (_revoked[agentId][msg.sender]) revert AgentPolicy__AgentRevoked();
 
-        AgentPolicyCodec.View memory v = AgentPolicyCodec.parse(policy);
+        // A deployed library, reached by DELEGATECALL: the parser's code does not count against this
+        // contract's size, and this configuration call is the only place it is ever needed.
+        AgentPolicyCodec.Decoded memory d = AgentPolicyCodec.decode(policy);
         // Already expired, or past what the EntryPoint's 48-bit field can carry: an installed policy
         // that authorizes nothing, or one silently read as "forever". Soroban refuses the first at
         // install too. This is a configuration call, so it may read the clock.
-        if (v.validUntil != 0 && (v.validUntil <= block.timestamp || v.validUntil - 1 > type(uint48).max)) {
+        if (d.validUntil != 0 && (d.validUntil <= block.timestamp || d.validUntil - 1 > type(uint48).max)) {
             revert AgentPolicy__BadExpiry();
         }
         uint256 version = _version[aKey][msg.sender] + 1;
@@ -460,14 +462,14 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         bytes32 vKey = _versionKey(aKey, version);
 
         _meta[aKey][msg.sender] =
-            PolicyMeta({settlementSigner: v.settlementSigner, validUntil: v.validUntil, adScopeAll: v.adScopeAll});
+            PolicyMeta({settlementSigner: d.settlementSigner, validUntil: d.validUntil, adScopeAll: d.adScopeAll});
 
-        for (uint256 i = 0; i < v.actionCount; ++i) {
-            _flag[_actionKey(vKey, AgentPolicyCodec.actionAt(policy, v, i))][msg.sender] = true;
+        for (uint256 i = 0; i < d.actions.length; ++i) {
+            _flag[_actionKey(vKey, d.actions[i])][msg.sender] = true;
         }
 
-        for (uint256 i = 0; i < v.tokenCount; ++i) {
-            AgentPolicyCodec.TokenRow memory row = AgentPolicyCodec.tokenRowAt(policy, v, i);
+        for (uint256 i = 0; i < d.tokens.length; ++i) {
+            AgentPolicyCodec.TokenRow memory row = d.tokens[i];
             // Above `capacity` the per-order cap can never bind, so a larger one is inert; refused
             // rather than ignored, because an owner who wrote it meant something by it.
             if (row.capacity == 0 || row.refillPerSecond == 0 || row.maxPerOrder == 0 || row.maxPerOrder > row.capacity)
@@ -484,9 +486,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
             });
         }
 
-        bytes32[] memory ads = AgentPolicyCodec.adScopeHashes(policy, v);
-        for (uint256 i = 0; i < ads.length; ++i) {
-            _flag[_adKey(vKey, ads[i])][msg.sender] = true;
+        for (uint256 i = 0; i < d.adScopeHashes.length; ++i) {
+            _flag[_adKey(vKey, d.adScopeHashes[i])][msg.sender] = true;
         }
 
         bytes32 fingerprint = keccak256(policy);

@@ -23,6 +23,10 @@ contract CodecHarness {
         return AgentPolicyCodec.adScopeHashes(policy, AgentPolicyCodec.parse(policy));
     }
 
+    function decode(bytes calldata policy) external pure returns (AgentPolicyCodec.Decoded memory) {
+        return AgentPolicyCodec.decode(policy);
+    }
+
     function fingerprint(bytes calldata policy) external pure returns (bytes32) {
         return keccak256(policy);
     }
@@ -90,6 +94,36 @@ contract AgentPolicyCodecTest is Test {
         bytes32[] memory ads = codec.adHashes(encoded);
         assertEq(ads[0], keccak256("ad-alpha"), "sorted by bytes, not by the order the owner typed");
         assertEq(ads[1], keccak256("ad-zulu"));
+    }
+
+    /// `decode` is what the module calls; the piecewise readers are what the rest of this file
+    /// tests. They have to be the same parser, on every vector.
+    function test_decodeAgreesWithThePiecewiseReaders() public view {
+        string[4] memory names = ["every-ad", "scoped", "unsorted-tokens", "u128-ceiling"];
+        for (uint256 n = 0; n < names.length; ++n) {
+            (bytes memory encoded,) = _case(names[n]);
+            AgentPolicyCodec.View memory v = codec.parse(encoded);
+            AgentPolicyCodec.Decoded memory d = codec.decode(encoded);
+
+            assertEq(d.settlementSigner, v.settlementSigner, names[n]);
+            assertEq(d.validUntil, v.validUntil, names[n]);
+            assertEq(d.adScopeAll, v.adScopeAll, names[n]);
+            assertEq(d.actions.length, v.actionCount, names[n]);
+            for (uint256 i = 0; i < d.actions.length; ++i) {
+                assertEq(d.actions[i], codec.action(encoded, i), names[n]);
+            }
+            assertEq(d.tokens.length, v.tokenCount, names[n]);
+            for (uint256 i = 0; i < d.tokens.length; ++i) {
+                assertEq(keccak256(abi.encode(d.tokens[i])), keccak256(abi.encode(codec.row(encoded, i))), names[n]);
+            }
+            assertEq(keccak256(abi.encode(d.adScopeHashes)), keccak256(abi.encode(codec.adHashes(encoded))), names[n]);
+        }
+    }
+
+    function test_decodeRefusesWhatParseRefuses() public {
+        (bytes memory encoded,) = _case("every-ad");
+        vm.expectRevert();
+        codec.decode(bytes.concat(encoded, hex"00"));
     }
 
     function test_theWidestLimitBothChainsCanHold() public view {
