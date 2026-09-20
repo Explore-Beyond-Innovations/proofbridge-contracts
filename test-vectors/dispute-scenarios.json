@@ -1,0 +1,177 @@
+{
+  "_meta": {
+    "purpose": "T-24: identical dispute scenarios driven through both chains' implementations, asserting identical normalized terminal records. Two hand-written fund-moving paths, one expected answer.",
+    "generator": "scripts/bls-vectors/src/gen-dispute-scenarios.ts",
+    "spec": "docs/engineering/t2/2.3-build/13-dispute-integration.md"
+  },
+  "header": {
+    "note": "amounts are fixture units; 1 unit = 10^evmScaleExp wei = 10^sorobanScaleExp stroops; drivers scale at the boundary and compare deltas in fixture units; every amount is a multiple of 10^4 so the bond's bps division is exact",
+    "evmScaleExp": 12,
+    "sorobanScaleExp": 1,
+    "orderAmountUnits": "1000000",
+    "challengePeriodS": 7200,
+    "bondFloorUnits": "10000",
+    "bondBps": 0,
+    "bondUnits": "10000",
+    "filerIsBridger": false
+  },
+  "counts": {
+    "scenarios": 6
+  },
+  "scenarios": [
+    {
+      "name": "mutual-refund",
+      "filer": "MAKER",
+      "steps": [
+        {
+          "action": "file"
+        },
+        {
+          "action": "rule",
+          "outcome": "MutualRefund"
+        },
+        {
+          "action": "warpPastWindow"
+        },
+        {
+          "action": "finalize"
+        }
+      ],
+      "expect": {
+        "disputed": false,
+        "escrowStatus": "Resolved",
+        "primaryLeafDomain": "2",
+        "bondToFilerUnits": "10000",
+        "bondToPoolUnits": "0"
+      }
+    },
+    {
+      "name": "bridger-forfeit",
+      "filer": "MAKER",
+      "steps": [
+        {
+          "action": "file"
+        },
+        {
+          "action": "rule",
+          "outcome": "BridgerForfeit"
+        },
+        {
+          "action": "warpPastWindow"
+        },
+        {
+          "action": "finalize"
+        }
+      ],
+      "expect": {
+        "disputed": false,
+        "escrowStatus": "Resolved",
+        "primaryLeafDomain": "5",
+        "bondToFilerUnits": "10000",
+        "bondToPoolUnits": "0"
+      }
+    },
+    {
+      "name": "maker-forfeit",
+      "filer": "MAKER",
+      "steps": [
+        {
+          "action": "file"
+        },
+        {
+          "action": "rule",
+          "outcome": "MakerForfeit"
+        },
+        {
+          "action": "warpPastWindow"
+        },
+        {
+          "action": "finalize"
+        }
+      ],
+      "expect": {
+        "disputed": false,
+        "escrowStatus": "Resolved",
+        "primaryLeafDomain": "2",
+        "bondToFilerUnits": "0",
+        "bondToPoolUnits": "10000"
+      }
+    },
+    {
+      "name": "timeout-fallback",
+      "filer": "MAKER",
+      "steps": [
+        {
+          "action": "file"
+        },
+        {
+          "action": "warpPastChallenge"
+        },
+        {
+          "action": "claimDispute"
+        },
+        {
+          "action": "warpPastWindow"
+        },
+        {
+          "action": "finalize"
+        }
+      ],
+      "expect": {
+        "disputed": false,
+        "escrowStatus": "Resolved",
+        "primaryLeafDomain": "2",
+        "bondToFilerUnits": "10000",
+        "bondToPoolUnits": "0"
+      }
+    },
+    {
+      "name": "evidence-termination",
+      "filer": "MAKER",
+      "steps": [
+        {
+          "action": "file"
+        },
+        {
+          "action": "present"
+        },
+        {
+          "action": "recordSettled"
+        }
+      ],
+      "expect": {
+        "disputed": false,
+        "escrowStatus": "Filled",
+        "primaryLeafDomain": "3",
+        "bondToFilerUnits": "0",
+        "bondToPoolUnits": "10000"
+      }
+    },
+    {
+      "name": "evidence-overrides-ruling",
+      "filer": "MAKER",
+      "steps": [
+        {
+          "action": "file"
+        },
+        {
+          "action": "rule",
+          "outcome": "MakerForfeit"
+        },
+        {
+          "action": "present"
+        },
+        {
+          "action": "recordSettled"
+        }
+      ],
+      "expect": {
+        "disputed": false,
+        "escrowStatus": "Filled",
+        "primaryLeafDomain": "3",
+        "bondToFilerUnits": "0",
+        "bondToPoolUnits": "10000"
+      }
+    }
+  ]
+}

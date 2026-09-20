@@ -4686,3 +4686,191 @@ fn test_2_3g_in_flight_clears_on_resolved() {
 
     assert!(!s.ad_manager.has_open_positions(&signer));
 }
+
+// --- T-24 (2.3j): the Soroban half of the differential harness --------------------------------
+//
+// Interprets the SAME scenario fixture the EVM driver (evm/test/DisputeDifferential.t.sol)
+// interprets, and asserts this implementation's normalized terminal record equals the fixture's:
+// terminal status, the appended leaf's domain, and the bond's destination measured in fixture
+// units. Two hand-written fund-moving implementations, one expected record — the test 02 F6's
+// spec contradictions existed to motivate.
+//
+// The driver CONFIGURES the dispute params from the fixture header (13-dispute-integration.md:
+// drivers configure, never inherit) and wires its own module so the fee pool is observable.
+// Amounts convert at the boundary: 1 fixture unit = 10^sorobanScaleExp stroops. The fixture's
+// sha256 is pinned below; scripts/repo-checks compares it so neither driver can drift alone.
+
+const DISPUTE_SCENARIOS_JSON: &str = include_str!("../../test-vectors/dispute-scenarios.json");
+#[allow(dead_code)]
+const DISPUTE_SCENARIOS_SHA256: &str =
+    "54fcf9f016c1b1754127950a6773d5526e02815263f70046458cdaae4f7c6792";
+
+fn t24_wire(
+    s: &TestSetup,
+    challenge: u64,
+    floor: u128,
+) -> (dispute_manager_contract::Client<'static>, Address, Address) {
+    let dm_addr = Address::generate(&s.env);
+    s.env.register_at(&dm_addr, DISPUTE_MANAGER_WASM, ());
+    let dm = dispute_manager_contract::Client::new(&s.env, &dm_addr);
+    let arbiter = Address::generate(&s.env);
+    let fee_pool = Address::generate(&s.env);
+    dm.initialize(&s.admin_addr, &s.ad_token_addr);
+    dm.set_escrow(&s.ad_manager.address, &true);
+    dm.set_arbiter(&arbiter);
+    dm.set_protocol_fee_pool(&fee_pool);
+    dm.set_dispute_params(
+        &s.tp.order_chain_id,
+        &dispute_manager_contract::DisputeParams {
+            challenge_period: challenge,
+            bond_floor: floor,
+            bond_bps: 0, // the fixture pins bps=0: the bond decouples from the order amount
+        },
+    );
+    s.ad_manager.set_dispute_manager(&dm_addr);
+    TokenContractClient::new(&s.env, &s.ad_token_addr).mint(&s.maker_addr, &1_000_000);
+    (dm, arbiter, fee_pool)
+}
+
+/// The LAST MmrAppend for this order across the env's recorded events: data_format = "vec",
+/// topics [Symbol("mmr_add"), leaf_index], value [order_hash, side, root]. Filtering by topic +
+/// order hash avoids needing the merkle manager's address.
+fn t24_last_leaf_domain(s: &TestSetup, order_hash: &BytesN<32>) -> Option<u32> {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::xdr::{ContractEventBody, ScVal};
+    let want = order_hash.to_array();
+    let mut found: Option<u32> = None;
+    for ev in s.env.events().all().events() {
+        let ContractEventBody::V0(body) = &ev.body;
+        let Some(ScVal::Symbol(sym)) = body.topics.first() else { continue };
+        if sym.to_utf8_string_lossy() != "mmr_add" {
+            continue;
+        }
+        let ScVal::Vec(Some(vec)) = &body.data else { continue };
+        if vec.len() < 2 {
+            continue;
+        }
+        let ScVal::Bytes(h) = &vec[0] else { continue };
+        if h.as_slice() != want.as_slice() {
+            continue;
+        }
+        if let ScVal::U32(side) = &vec[1] {
+            found = Some(*side);
+        }
+    }
+    found
+}
+
+#[test]
+fn test_t24_differential_scenarios() {
+    let v: serde_json::Value = serde_json::from_str(DISPUTE_SCENARIOS_JSON).unwrap();
+    let header = &v["header"];
+    let scale: i128 = 10i128.pow(header["sorobanScaleExp"].as_u64().unwrap() as u32);
+    let challenge = header["challengePeriodS"].as_u64().unwrap();
+    let floor: u128 =
+        header["bondFloorUnits"].as_str().unwrap().parse::<u128>().unwrap() * scale as u128;
+    assert_eq!(header["bondBps"].as_u64().unwrap(), 0, "T-24 pins bps=0");
+    let bond_units: i128 = header["bondUnits"].as_str().unwrap().parse().unwrap();
+
+    for sc in v["scenarios"].as_array().unwrap() {
+        t24_run_scenario(sc, challenge, floor, scale, bond_units);
+    }
+}
+
+fn t24_run_scenario(
+    sc: &serde_json::Value,
+    challenge: u64,
+    floor: u128,
+    scale: i128,
+    _bond_units: i128,
+) {
+    use soroban_sdk::testutils::Ledger;
+    let name = sc["name"].as_str().unwrap();
+    assert_eq!(sc["filer"].as_str().unwrap(), "MAKER", "{name}: the fixture pins the filer");
+
+    // fresh env per scenario — six scenarios, six isolated worlds
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let (dm, _arbiter, fee_pool) = t24_wire(&s, challenge, floor);
+    let (settled_root, settled) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &settled_root);
+
+    let params = locked_ad_order(&s);
+    let order_hash = s.ad_manager.hash_order(&params);
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+
+    // file, then take baselines (the bond has left the filer, nothing paid)
+    let bond =
+        s.ad_manager
+            .dispute(&params, &s.maker_addr, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    assert_eq!(bond as i128, (floor as i128), "{name}: bond = floor exactly (bps=0)");
+    // the mock records auths: the filer authorized this filing (D2's
+    // env.auths() check — mock_all_auths must not hide a missing require_auth)
+    assert!(
+        s.env.auths().iter().any(|(addr, _)| *addr == s.maker_addr),
+        "{name}: the filing must carry the filer's authorization"
+    );
+    let filer_base = token.balance(&s.maker_addr);
+    let pool_base = token.balance(&fee_pool);
+
+    let steps = sc["steps"].as_array().unwrap();
+    for step in steps.iter().skip(1) {
+        match step["action"].as_str().unwrap() {
+            "rule" => {
+                let outcome = match step["outcome"].as_str().unwrap() {
+                    "MutualRefund" => dispute_manager_contract::DisputeOutcome::MutualRefund,
+                    "BridgerForfeit" => dispute_manager_contract::DisputeOutcome::BridgerForfeit,
+                    "MakerForfeit" => dispute_manager_contract::DisputeOutcome::MakerForfeit,
+                    other => panic!("unknown outcome {other}"),
+                };
+                dm.resolve_dispute(&order_hash, &outcome);
+            }
+            "warpPastChallenge" | "warpPastWindow" => {
+                // identical to the EVM driver: past the window the module
+                // actually enforces NOW (it moves when a fallback opens)
+                let until = dm.effective_challenge_deadline(&order_hash);
+                s.env.ledger().set_timestamp(until + 1);
+            }
+            "claimDispute" => dm.claim_dispute(&order_hash),
+            "finalize" => s.ad_manager.finalize_dispute(&params),
+            "present" => s.ad_manager.present_settled(&params, &settled_root, &settled),
+            "recordSettled" => s.ad_manager.record_settled(&params),
+            other => panic!("unknown step {other}"),
+        }
+    }
+
+    // --- the normalized terminal record ---------------------------------
+    // events() holds the LAST invocation's events only — read the leaf
+    // domain first, before any view call resets the buffer. Every scenario's
+    // final step is the one that appends its terminal leaf.
+    let leaf_domain = t24_last_leaf_domain(&s, &order_hash);
+    assert_eq!(
+        dm.is_disputed(&order_hash),
+        sc["expect"]["disputed"].as_bool().unwrap(),
+        "{name}: disputed"
+    );
+    let status = s.ad_manager.get_order_status(&order_hash);
+    let expected_status = sc["expect"]["escrowStatus"].as_str().unwrap();
+    let status_ok = match expected_status {
+        "Filled" => status == ad_manager_contract::Status::Filled,
+        "Cancelled" => status == ad_manager_contract::Status::Cancelled,
+        "Resolved" => status == ad_manager_contract::Status::Resolved,
+        other => panic!("unknown status {other}"),
+    };
+    assert!(status_ok, "{name}: escrow status (got {status:?}, want {expected_status})");
+    let want_domain: u32 =
+        sc["expect"]["primaryLeafDomain"].as_str().unwrap().parse().unwrap();
+    assert_eq!(leaf_domain, Some(want_domain), "{name}: leaf domain");
+    let to_filer_units = (token.balance(&s.maker_addr) - filer_base) / scale;
+    let to_pool_units = (token.balance(&fee_pool) - pool_base) / scale;
+    assert_eq!(
+        to_filer_units.to_string(),
+        sc["expect"]["bondToFilerUnits"].as_str().unwrap(),
+        "{name}: bond to filer (units)"
+    );
+    assert_eq!(
+        to_pool_units.to_string(),
+        sc["expect"]["bondToPoolUnits"].as_str().unwrap(),
+        "{name}: bond to pool (units)"
+    );
+}
