@@ -65,6 +65,7 @@ contract AgentPolicyParityTest is AgentPolicyBase {
     /// next. That is an artefact of the harness, and it looks exactly like a policy bug.
     struct Loaded {
         bool revoke;
+        bool reinstall;
         uint256 warp;
         bool pinned;
         bytes callData;
@@ -90,11 +91,61 @@ contract AgentPolicyParityTest is AgentPolicyBase {
         bytes4 installError;
     }
 
-    function test_theModuleMatchesTheSharedPolicyFixture() public {
-        uint256 ranCases;
-        uint256 ranSteps;
+    /// The cases are run in four slices, one test each. A test is one call frame, memory in it is
+    /// never freed, and its cost grows with the square of its size: every operation here leaves a
+    /// user operation, its logs and a loaded step behind, and the whole table in one frame passes
+    /// forge's per-test gas ceiling. Slicing by index keeps each frame small however the table grows.
+    uint256 internal constant SLICES = 4;
 
-        for (uint256 c = 0; this.exists(_case(c, "")); ++c) {
+    function test_theModuleMatchesTheSharedPolicyFixture_slice0() public {
+        _runSlice(0);
+    }
+
+    function test_theModuleMatchesTheSharedPolicyFixture_slice1() public {
+        _runSlice(1);
+    }
+
+    function test_theModuleMatchesTheSharedPolicyFixture_slice2() public {
+        _runSlice(2);
+    }
+
+    function test_theModuleMatchesTheSharedPolicyFixture_slice3() public {
+        _runSlice(3);
+    }
+
+    /// Zero cases is a failure, and so is some: a reader that stopped half way down the file would
+    /// pass every slice. This walks the table with the same `exists` / `loadSetup` the slices use,
+    /// executes nothing, and holds what it finds to the fixture's own counts — and to the slices
+    /// between them covering every index.
+    function test_theSlicesSeeEveryCaseAndStep() public view {
+        uint256 cases;
+        uint256 steps;
+        uint256[] memory perSlice = new uint256[](SLICES);
+        uint256 total = vectors.readUint(".counts.total.cases");
+        // The count is the table's real length, not a number the fixture could understate.
+        assertTrue(this.exists(_case(total - 1, "")) && !this.exists(_case(total, "")), "counts.total.cases");
+        for (uint256 c = 0; c < total; ++c) {
+            Setup memory setup = this.loadSetup(_case(c, ""), false);
+            if (!setup.mine) continue;
+            ++cases;
+            steps += setup.steps;
+            ++perSlice[c % SLICES];
+        }
+        assertGt(cases, 0, "no case is this reader's");
+        assertEq(cases, vectors.readUint(".counts.evm.cases"), "cases seen");
+        assertEq(steps, vectors.readUint(".counts.evm.steps"), "steps seen");
+        for (uint256 i = 0; i < SLICES; ++i) {
+            assertGt(perSlice[i], 0, "a slice with nothing in it proves nothing by passing");
+        }
+    }
+
+    function _runSlice(uint256 slice) internal {
+        uint256 ranCases;
+        uint256 total = vectors.readUint(".counts.total.cases");
+
+        // By stride, so a slice reads only its own cases: every read of the fixture copies the whole
+        // file out of storage, and that, not the operations, is most of what this test costs.
+        for (uint256 c = slice; c < total; c += SLICES) {
             Setup memory setup = this.loadSetup(_case(c, ""), false);
             if (!setup.mine) continue;
 
@@ -112,11 +163,17 @@ contract AgentPolicyParityTest is AgentPolicyBase {
                 Loaded memory step = this.loadStep(c, s, setup.name);
                 nowTs += step.warp;
                 vm.warp(nowTs);
-                ++ranSteps;
 
                 if (step.revoke) {
                     vm.prank(instance.account);
                     module.revokeAgent(agentId);
+                    continue;
+                }
+                if (step.reinstall) {
+                    // The owner installs the same policy again: a new version, so a fresh bucket for
+                    // the agent, while the account's ceiling keeps what was spent.
+                    (bool again,) = _install(setup.policy);
+                    assertTrue(again, string.concat(step.at, ": did not reinstall"));
                     continue;
                 }
                 _judge(step);
@@ -125,16 +182,17 @@ contract AgentPolicyParityTest is AgentPolicyBase {
             vm.revertToState(snapshot);
             ++ranCases;
         }
-
-        // Zero cases is a failure, and so is some: a reader that skipped half the file would pass.
-        assertGt(ranCases, 0, "no case ran");
-        assertEq(ranCases, vectors.readUint(".counts.evm.cases"), "cases ran");
-        assertEq(ranSteps, vectors.readUint(".counts.evm.steps"), "steps ran");
+        assertGt(ranCases, 0, "this slice ran nothing");
     }
 
     function test_installingAPolicyMatchesTheSharedFixture() public {
         uint256 ran;
-        for (uint256 i = 0; this.exists(_install(i, "")); ++i) {
+        uint256 totalInstalls = vectors.readUint(".counts.total.installs");
+        assertTrue(
+            this.exists(_install(totalInstalls - 1, "")) && !this.exists(_install(totalInstalls, "")),
+            "counts.total.installs"
+        );
+        for (uint256 i = 0; i < totalInstalls; ++i) {
             Setup memory setup = this.loadSetup(_install(i, ""), true);
             if (!setup.mine) continue;
 
@@ -168,9 +226,30 @@ contract AgentPolicyParityTest is AgentPolicyBase {
         (ProofBridgeAgentPolicy.Refusal why,) = module.preflight(instance.account, agentId, op.userOp.callData);
         assertEq(uint8(why), uint8(step.refusal), step.at);
 
-        // ...and the enforcing path, which `preflight` only describes.
+        // ...and the enforcing path, which `preflight` only describes. What a refusal proves depends
+        // on which half refuses. The *validator's* no is the EntryPoint's, and is the same on every
+        // account type, so it is held to the exact answer: AA24 for a policy refusal, AA22 for an
+        // expired one. Anything else reverting (prefund, the gas budget, the pause) would not match.
+        // A *volume* refusal is the hook's, which surfaces differently per account type, so there
+        // the claim is only what it can be: `preflight` named the reason, and the lock did not land.
         uint256 before = target.locks();
-        if (!step.accept) instance.expect4337Revert();
+        if (!step.accept) {
+            ProofBridgeAgentPolicy.Refusal r = step.refusal;
+            if (
+                r == ProofBridgeAgentPolicy.Refusal.AgentAllowanceExceeded
+                    || r == ProofBridgeAgentPolicy.Refusal.AccountCeilingExceeded
+            ) {
+                instance.expect4337Revert();
+            } else {
+                vm.expectRevert(
+                    abi.encodeWithSelector(
+                        FailedOp.selector,
+                        0,
+                        r == ProofBridgeAgentPolicy.Refusal.Expired ? "AA22 expired or not due" : "AA24 signature error"
+                    )
+                );
+            }
+        }
         op.execUserOps();
         assertEq(target.locks(), before + (step.accept ? 1 : 0), string.concat(step.at, ": through the EntryPoint"));
     }
@@ -217,8 +296,11 @@ contract AgentPolicyParityTest is AgentPolicyBase {
     function loadStep(uint256 c, uint256 s, string calldata name) external view returns (Loaded memory step) {
         step.at = string.concat(name, " [step ", vm.toString(s), "]");
         step.warp = vectors.readUint(_step(c, s, ".warp"));
-        step.revoke = _eq(vectors.readString(_step(c, s, ".op")), "revoke");
-        if (step.revoke) return step;
+        string memory op = vectors.readString(_step(c, s, ".op"));
+        step.revoke = _eq(op, "revoke");
+        step.reinstall = _eq(op, "reinstall");
+        if (step.revoke || step.reinstall) return step;
+        require(_eq(op, "lock"), string.concat("an op this reader does not know: ", op));
 
         string memory lock = _step(c, s, ".lock");
         step.pinned = _eq(vectors.readString(string.concat(lock, ".target")), "pinned");

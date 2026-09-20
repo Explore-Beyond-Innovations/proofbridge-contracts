@@ -125,17 +125,20 @@ jobs:
           test "$(grep -cE 'test result: ok\. [1-9][0-9]* passed' /tmp/parity.log)" -eq 2
         working-directory: stellar
 
-      # T-60 (2.1h): the Rust readers of the two shared policy tables. Counts come from the reader
-      # files, as on the EVM side.
+      # T-60 (2.1h): the Rust readers of the two shared policy tables. The count of tests in each
+      # reader's file must all pass, and a floor notices one being deleted, as on the EVM side.
       - name: Agent-policy parity (Stellar)
         run: |
           set -o pipefail
-          for reader in proofbridge-core:parity_math:lib/proofbridge-core/src/parity_math_test.rs agent-account:parity_test:contracts/agent-account/src/parity_test.rs; do
-            IFS=: read -r package filter file <<< "$reader"
+          for reader in proofbridge-core:parity_math:lib/proofbridge-core/src/parity_math_test.rs:2 agent-account:parity_test:contracts/agent-account/src/parity_test.rs:2; do
+            IFS=: read -r package filter file floor <<< "$reader"
             expected=$(grep -cE '^#\[test\]' "$file")
-            test "$expected" -ge 1
+            echo "$package/$filter: $expected tests in the file, floor $floor"
+            if [ "$expected" -lt "$floor" ]; then echo "::error::$file has $expected tests, fewer than the floor of $floor: was one deleted?"; exit 1; fi
             cargo test -p "$package" "$filter" -- --nocapture | tee /tmp/policy-parity.log
-            grep -qE "test result: ok\\. $expected passed; 0 failed" /tmp/policy-parity.log
+            if ! grep -qE "test result: ok\\. $expected passed; 0 failed" /tmp/policy-parity.log; then
+              echo "::error::$package/$filter: wanted exactly $expected passed, 0 failed; got: $(grep -E 'test result' /tmp/policy-parity.log || echo 'no test ran')"; exit 1
+            fi
           done
         working-directory: stellar
 

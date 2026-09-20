@@ -281,6 +281,13 @@ fn check_contract_call_matches_the_shared_policy_fixture() {
                 r.client.revoke_agent(&r.agent_id);
                 continue;
             }
+            if step["op"] == "reinstall" {
+                // The owner installs the same policy again: a fresh bucket for the agent, while the
+                // account's ceiling keeps what was spent.
+                install(&r, &case["policy"])
+                    .unwrap_or_else(|e| panic!("{name}: did not reinstall: {e:?}"));
+                continue;
+            }
             let at = format!("{name} [step {i}]");
             let got = judge(&r, &step["lock"]);
             let want = expected(step);

@@ -99,18 +99,22 @@ jobs:
           grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/parity.log
 
       # T-60 (2.1h): the readers of the two shared policy tables (arithmetic, then decisions). Each
-      # asserts it ran every row, which guards a reader that runs. This guards one that was renamed
-      # or deleted: the expected count is the number of tests in the reader's own file, so the
-      # number lives in one place and a test that quietly goes missing fails here.
+      # asserts it ran every row, which guards a reader that runs. This guards one that was renamed,
+      # deleted or thinned. Two numbers per reader: the count of tests in its own file, which every
+      # one of must pass, so adding a test needs no edit here; and a floor, because that count
+      # follows a *deleted* test down, and only a number written here notices one going missing.
       - name: Agent-policy parity (EVM)
         run: |
           set -o pipefail
-          for reader in AgentPolicyMathParityTest:AgentPolicyMathParity AgentPolicyParityTest:AgentPolicyParity; do
-            contract=${reader%%:*}; file=test/agent/${reader##*:}.t.sol
-            expected=$(grep -cE '^ +function test_' "$file")
-            test "$expected" -ge 1
+          for reader in AgentPolicyMathParityTest:AgentPolicyMathParity:4 AgentPolicyParityTest:AgentPolicyParity:6; do
+            IFS=: read -r contract file floor <<< "$reader"
+            expected=$(grep -cE '^ +function test_' "test/agent/$file.t.sol")
+            echo "$contract: $expected tests in the file, floor $floor"
+            if [ "$expected" -lt "$floor" ]; then echo "::error::$contract has $expected tests, fewer than the floor of $floor: was one deleted?"; exit 1; fi
             forge test --match-contract "^${contract}\$" -vvv | tee /tmp/policy-parity.log
-            grep -qE "Suite result: ok\\. $expected passed; 0 failed; 0 skipped" /tmp/policy-parity.log
+            if ! grep -qE "Suite result: ok\\. $expected passed; 0 failed; 0 skipped" /tmp/policy-parity.log; then
+              echo "::error::$contract: wanted exactly $expected passed, 0 failed, 0 skipped; got: $(grep -E 'Suite result' /tmp/policy-parity.log || echo 'no suite ran')"; exit 1
+            fi
           done
 
       # Invariants are excluded here and run in the `invariants` job below: they are 596s of this
