@@ -3,7 +3,7 @@ pragma solidity ^0.8.34;
 
 import {Test} from "forge-std/Test.sol";
 import {stdJson} from "forge-std/StdJson.sol";
-import {AgentPolicyCodec} from "src/agent/AgentPolicyCodec.sol";
+import {AgentPolicyCodec, IAgentPolicyCodecErrors} from "src/agent/AgentPolicyCodec.sol";
 
 /// @dev `parse` reads `bytes calldata`, so the tests go through a real external call.
 contract CodecHarness {
@@ -122,8 +122,54 @@ contract AgentPolicyCodecTest is Test {
 
     function test_decodeRefusesWhatParseRefuses() public {
         (bytes memory encoded,) = _case("every-ad");
-        vm.expectRevert();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAgentPolicyCodecErrors.AgentPolicyCodec__TrailingBytes.selector, encoded.length + 1, encoded.length
+            )
+        );
         codec.decode(bytes.concat(encoded, hex"00"));
+
+        bytes memory foreign = bytes.concat(encoded);
+        foreign[0] = ~foreign[0];
+        vm.expectRevert(IAgentPolicyCodecErrors.AgentPolicyCodec__BadDomain.selector);
+        codec.decode(foreign);
+
+        vm.expectRevert(IAgentPolicyCodecErrors.AgentPolicyCodec__NotAscending.selector);
+        codec.decode(_twoRows(bytes32(uint256(2)), bytes32(uint256(1))));
+    }
+
+    /// The module reaches the parser by DELEGATECALL, so the parser's errors come back out of
+    /// `setAgentPolicy` — and a client decodes those with the *module's* ABI. Every error the
+    /// library can raise has to be in it; one declared in the library alone would not be.
+    function test_theModulesAbiCarriesEveryParserError() public view {
+        string memory lib = vm.readFile("out/AgentPolicyCodec.sol/AgentPolicyCodec.json");
+        string memory mod = vm.readFile("out/ProofBridgeAgentPolicy.sol/ProofBridgeAgentPolicy.json");
+        string[] memory raised = _errorNames(lib);
+        string[] memory known = _errorNames(mod);
+
+        assertGt(raised.length, 0, "the library raises errors; an empty list means the read is wrong");
+        for (uint256 i = 0; i < raised.length; ++i) {
+            bool found;
+            for (uint256 j = 0; j < known.length && !found; ++j) {
+                found = keccak256(bytes(known[j])) == keccak256(bytes(raised[i]));
+            }
+            assertTrue(found, string.concat(raised[i], " is not in the module's ABI"));
+        }
+    }
+
+    function _errorNames(string memory artifact) internal view returns (string[] memory names) {
+        string[] memory all = new string[](256);
+        uint256 n;
+        for (uint256 i = 0; vm.keyExistsJson(artifact, string.concat(".abi[", vm.toString(i), "]")); ++i) {
+            string memory at = string.concat(".abi[", vm.toString(i), "]");
+            if (keccak256(bytes(artifact.readString(string.concat(at, ".type")))) != keccak256("error")) continue;
+            all[n++] = artifact.readString(string.concat(at, ".name"));
+        }
+        names = new string[](n);
+        for (uint256 i = 0; i < n; ++i) {
+            names[i] = all[i];
+        }
     }
 
     function test_theWidestLimitBothChainsCanHold() public view {
@@ -140,7 +186,7 @@ contract AgentPolicyCodecTest is Test {
     function test_aForeignDomainIsNotAPolicy() public {
         (bytes memory encoded,) = _case("every-ad");
         encoded[0] = bytes1(uint8(encoded[0]) ^ 0xff);
-        vm.expectRevert(AgentPolicyCodec.AgentPolicyCodec__BadDomain.selector);
+        vm.expectRevert(IAgentPolicyCodecErrors.AgentPolicyCodec__BadDomain.selector);
         codec.parse(encoded);
     }
 
@@ -166,7 +212,7 @@ contract AgentPolicyCodecTest is Test {
             hex"1111111111111111111111111111111111111111111111111111111111111111",
             hex"1111111111111111111111111111111111111111111111111111111111111111"
         );
-        vm.expectRevert(AgentPolicyCodec.AgentPolicyCodec__NotAscending.selector);
+        vm.expectRevert(IAgentPolicyCodecErrors.AgentPolicyCodec__NotAscending.selector);
         codec.parse(policy);
 
         // Descending is the same failure by another name.
@@ -174,7 +220,7 @@ contract AgentPolicyCodecTest is Test {
             hex"2222222222222222222222222222222222222222222222222222222222222222",
             hex"1111111111111111111111111111111111111111111111111111111111111111"
         );
-        vm.expectRevert(AgentPolicyCodec.AgentPolicyCodec__NotAscending.selector);
+        vm.expectRevert(IAgentPolicyCodecErrors.AgentPolicyCodec__NotAscending.selector);
         codec.parse(policy);
     }
 
@@ -182,7 +228,7 @@ contract AgentPolicyCodecTest is Test {
         bytes memory policy = _oneRow(
             hex"1111111111111111111111111111111111111111111111111111111111111111", uint256(type(uint128).max) + 1, 1, 1
         );
-        vm.expectRevert(AgentPolicyCodec.AgentPolicyCodec__LimitTooWide.selector);
+        vm.expectRevert(IAgentPolicyCodecErrors.AgentPolicyCodec__LimitTooWide.selector);
         codec.parse(policy);
     }
 
@@ -200,7 +246,7 @@ contract AgentPolicyCodecTest is Test {
             bytes8(uint64(0)),
             bytes32(0)
         );
-        vm.expectRevert(AgentPolicyCodec.AgentPolicyCodec__BadAdScope.selector);
+        vm.expectRevert(IAgentPolicyCodecErrors.AgentPolicyCodec__BadAdScope.selector);
         codec.parse(policy);
     }
 

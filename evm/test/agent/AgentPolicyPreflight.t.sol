@@ -85,6 +85,33 @@ contract AgentPolicyPreflightTest is AgentPolicyBase {
         assertEq(escrow.locks(), before + 3);
     }
 
+    /// On chain the validator sees every call of a batch before the hook sees any, so when both
+    /// halves would refuse, it is the validator's refusal the agent meets. Here the hook would stop
+    /// call 0 (half a bucket refilled, a full one asked for) and the validator stops call 1.
+    function test_preflight_asksTheValidatorAboutEveryCallFirst() public {
+        for (uint256 i = 0; i < CAPACITY / MAX_PER_ORDER; ++i) {
+            _agentOp(lockCall(MAX_PER_ORDER)).execUserOps();
+        }
+        vm.warp(block.timestamp + (MAX_PER_ORDER / 2) / REFILL);
+
+        Execution[] memory calls = _batch(2, 1);
+        calls[0].callData = lockCall(MAX_PER_ORDER);
+        UserOpData memory batch = _agentBatch(calls);
+
+        (ProofBridgeAgentPolicy.Refusal why, uint256 at) = _why(batch.userOp.callData);
+        assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.OverStoredAllowance), "the validator's answer");
+        assertEq(at, 1, "and the validator's call");
+
+        // the chain agrees: refused in validation, not at execution
+        vm.expectRevert(abi.encodeWithSelector(FailedOp.selector, 0, "AA24 signature error"));
+        batch.execUserOps();
+
+        // alone, the big call gets past the validator, and then it is the hook's refusal
+        (why, at) = _why(_agentOp(lockCall(MAX_PER_ORDER)).userOp.callData);
+        assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.AgentAllowanceExceeded));
+        assertEq(at, 0);
+    }
+
     function test_preflight_reportsThePause() public {
         escrow.setFailNext(true);
         for (uint256 i = 0; i < 3; ++i) {

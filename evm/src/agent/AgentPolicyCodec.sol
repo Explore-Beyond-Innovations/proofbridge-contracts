@@ -1,6 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
+/// @notice What the parser reverts with.
+/// @dev An interface, so the module can inherit it. `setAgentPolicy` reaches the parser by
+///      DELEGATECALL and these bubble up through it, but a contract's ABI lists only its own
+///      errors: a client holding the module's ABI alone would see an unknown selector.
+interface IAgentPolicyCodecErrors {
+    error AgentPolicyCodec__BadDomain();
+    error AgentPolicyCodec__BadActionCount(uint8 count);
+    error AgentPolicyCodec__BadTokenCount(uint8 count);
+    error AgentPolicyCodec__BadAdScope();
+    error AgentPolicyCodec__NotAscending();
+    error AgentPolicyCodec__TrailingBytes(uint256 got, uint256 want);
+    error AgentPolicyCodec__LimitTooWide();
+    error AgentPolicyCodec__UnknownAction(uint8 id);
+}
+
 /**
  * @title AgentPolicyCodec
  * @author Proofbridge
@@ -42,15 +57,6 @@ library AgentPolicyCodec {
     uint16 internal constant MAX_AD_ID_BYTES = 1024;
 
     uint256 private constant ROW_BYTES = 128;
-
-    error AgentPolicyCodec__BadDomain();
-    error AgentPolicyCodec__BadActionCount(uint8 count);
-    error AgentPolicyCodec__BadTokenCount(uint8 count);
-    error AgentPolicyCodec__BadAdScope();
-    error AgentPolicyCodec__NotAscending();
-    error AgentPolicyCodec__TrailingBytes(uint256 got, uint256 want);
-    error AgentPolicyCodec__LimitTooWide();
-    error AgentPolicyCodec__UnknownAction(uint8 id);
 
     struct TokenRow {
         bytes32 token;
@@ -119,42 +125,46 @@ library AgentPolicyCodec {
      *      owner believing both took effect.
      */
     function parse(bytes calldata policy) internal pure returns (View memory v) {
-        if (policy.length < 32 || bytes32(policy[0:32]) != DOMAIN) revert AgentPolicyCodec__BadDomain();
+        if (policy.length < 32 || bytes32(policy[0:32]) != DOMAIN) {
+            revert IAgentPolicyCodecErrors.AgentPolicyCodec__BadDomain();
+        }
         uint256 at = 32;
 
         v.actionCount = uint8(policy[at]);
         at += 1;
         if (v.actionCount == 0 || v.actionCount > MAX_ALLOWED_ACTIONS) {
-            revert AgentPolicyCodec__BadActionCount(v.actionCount);
+            revert IAgentPolicyCodecErrors.AgentPolicyCodec__BadActionCount(v.actionCount);
         }
         v.actionsAt = at;
         for (uint256 i = 0; i < v.actionCount; ++i) {
             uint8 id = uint8(policy[at + i]);
             // An id this language does not know installs a row nothing can ever match — a policy that
             // authorizes nothing, which Soroban refuses as `BadPolicy`.
-            if (id != ACTION_LOCK_FOR_ORDER) revert AgentPolicyCodec__UnknownAction(id);
-            if (i > 0 && id <= uint8(policy[at + i - 1])) revert AgentPolicyCodec__NotAscending();
+            if (id != ACTION_LOCK_FOR_ORDER) revert IAgentPolicyCodecErrors.AgentPolicyCodec__UnknownAction(id);
+            if (i > 0 && id <= uint8(policy[at + i - 1])) {
+                revert IAgentPolicyCodecErrors.AgentPolicyCodec__NotAscending();
+            }
         }
         at += v.actionCount;
 
         v.tokenCount = uint8(policy[at]);
         at += 1;
         if (v.tokenCount == 0 || v.tokenCount > MAX_WHITELIST_TOKENS) {
-            revert AgentPolicyCodec__BadTokenCount(v.tokenCount);
+            revert IAgentPolicyCodecErrors.AgentPolicyCodec__BadTokenCount(v.tokenCount);
         }
         v.tokensAt = at;
         uint256 prevToken;
         for (uint256 i = 0; i < v.tokenCount; ++i) {
             uint256 rowAt = at + i * ROW_BYTES;
             uint256 token = uint256(bytes32(policy[rowAt:rowAt + 32]));
-            if (i > 0 && token <= prevToken) revert AgentPolicyCodec__NotAscending();
+            if (i > 0 && token <= prevToken) revert IAgentPolicyCodecErrors.AgentPolicyCodec__NotAscending();
             prevToken = token;
             // Soroban's limits are `u128`. The fields are 32 bytes for the EVM's convenience, but a
             // value the other chain cannot hold would make the same policy mean two things — and
             // the bucket's overflow clamp fires at the `u128` ceiling on both sides.
             for (uint256 f = 1; f < 4; ++f) {
                 if (uint256(bytes32(policy[rowAt + f * 32:rowAt + f * 32 + 32])) > type(uint128).max) {
-                    revert AgentPolicyCodec__LimitTooWide();
+                    revert IAgentPolicyCodecErrors.AgentPolicyCodec__LimitTooWide();
                 }
             }
         }
@@ -164,12 +174,14 @@ library AgentPolicyCodec {
         v.adScopeCount = uint8(policy[at + 1]);
         at += 2;
         if (kind == 0) {
-            if (v.adScopeCount != 0) revert AgentPolicyCodec__BadAdScope();
+            if (v.adScopeCount != 0) revert IAgentPolicyCodecErrors.AgentPolicyCodec__BadAdScope();
             v.adScopeAll = true;
         } else if (kind == 1) {
-            if (v.adScopeCount == 0 || v.adScopeCount > MAX_AD_SCOPE) revert AgentPolicyCodec__BadAdScope();
+            if (v.adScopeCount == 0 || v.adScopeCount > MAX_AD_SCOPE) {
+                revert IAgentPolicyCodecErrors.AgentPolicyCodec__BadAdScope();
+            }
         } else {
-            revert AgentPolicyCodec__BadAdScope();
+            revert IAgentPolicyCodecErrors.AgentPolicyCodec__BadAdScope();
         }
         v.adScopeAt = at;
         uint256 prevAt;
@@ -179,13 +191,13 @@ library AgentPolicyCodec {
             at += 2;
             // 1024 is what Soroban's encoder can hash; a longer id would be a policy one chain
             // accepts and the other cannot fingerprint.
-            if (len == 0 || len > MAX_AD_ID_BYTES) revert AgentPolicyCodec__BadAdScope();
+            if (len == 0 || len > MAX_AD_ID_BYTES) revert IAgentPolicyCodecErrors.AgentPolicyCodec__BadAdScope();
             // Strictly ascending by raw bytes, the rule actions and tokens already follow. The first
             // version compared adjacent *hashes*, which catches neither an unsorted scope nor a
             // non-adjacent repeat — and Soroban always sorts, so such bytes carried a fingerprint
             // the other chain could never produce for what the owner thinks is the same policy.
             if (i > 0 && !_lessThan(policy[prevAt:prevAt + prevLen], policy[at:at + len])) {
-                revert AgentPolicyCodec__NotAscending();
+                revert IAgentPolicyCodecErrors.AgentPolicyCodec__NotAscending();
             }
             prevAt = at;
             prevLen = len;
@@ -199,7 +211,7 @@ library AgentPolicyCodec {
 
         // A parse that stopped early would call two different byte strings the same policy, which
         // is the one thing a fingerprint must not permit.
-        if (at != policy.length) revert AgentPolicyCodec__TrailingBytes(policy.length, at);
+        if (at != policy.length) revert IAgentPolicyCodecErrors.AgentPolicyCodec__TrailingBytes(policy.length, at);
     }
 
     /// @dev Lexicographic by byte, a proper prefix sorting first — the order the TypeScript and Rust

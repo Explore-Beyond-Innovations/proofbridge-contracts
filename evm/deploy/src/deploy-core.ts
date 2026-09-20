@@ -311,8 +311,24 @@ export async function deployCore(
   // ── agent policy module (2.1g): the parser library, then the module linked to it ──
   // One shared, ownerless contract per chain that every maker's account installs. Reused only as
   // a pair: a reused module still points at the library it was linked with.
-  const reuseAgent =
-    existing?.contracts.agentPolicyCodec?.address && existing?.contracts.agentPolicy?.address;
+  // The manifest is a claim; the chain is the fact. A module linked to anything but the recorded
+  // library, or a library with no code, would print [reuse] and then revert on every setAgentPolicy.
+  let reuseAgent = false;
+  {
+    const codec = existing?.contracts.agentPolicyCodec?.address;
+    const mod = existing?.contracts.agentPolicy?.address;
+    if (codec && mod) {
+      const provider = signer.provider!;
+      const [codecCode, modCode] = await Promise.all([provider.getCode(codec), provider.getCode(mod)]);
+      reuseAgent =
+        codecCode !== "0x" && modCode.toLowerCase().includes(codec.slice(2).toLowerCase());
+      if (!reuseAgent) {
+        console.warn(
+          `  [redeploy] agent policy pair in the manifest does not hold on chain (codec ${codec}, module ${mod}); deploying both again`,
+        );
+      }
+    }
+  }
   const agentPolicyCodecAddr = await deployIfMissing(
     "AgentPolicyCodec",
     reuseAgent ? existing?.contracts.agentPolicyCodec?.address : undefined,

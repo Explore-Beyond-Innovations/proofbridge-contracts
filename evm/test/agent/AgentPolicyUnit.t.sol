@@ -6,6 +6,7 @@ import {Test} from "forge-std/Test.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
 import {DecimalScaling} from "src/libraries/DecimalScaling.sol";
 import {AgentRateLimit} from "src/agent/AgentRateLimit.sol";
+import {ProofBridgeAgentPolicy} from "src/agent/ProofBridgeAgentPolicy.sol";
 import {PolicyHarness} from "./mocks/PolicyHarness.sol";
 
 /// The pieces a UserOp cannot reach directly: the scaling that has to agree with the escrow's, the
@@ -124,5 +125,32 @@ contract AgentPolicyUnitTest is Test {
     function _execute(uint8 callType, bytes memory executionCalldata) internal pure returns (bytes memory) {
         bytes32 mode = bytes32(uint256(callType) << 248);
         return abi.encodeWithSelector(bytes4(0xe9ae5c53), mode, executionCalldata);
+    }
+
+    /// Agents decode these numbers from `preflight` and from the hook's revert. A new reason goes on
+    /// the end; one inserted in the middle renumbers everything after it, and fails here.
+    function test_theRefusalNumbersArePinned() public pure {
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.None), 0);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.NotMounted), 1);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.NoPolicy), 2);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.Paused), 3);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.SinglesOnly), 4);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.Expired), 5);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.MalformedRequest), 6);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.MalformedCall), 7);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.TargetNotPinned), 8);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.ValueAttached), 9);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.ActionNotAllowed), 10);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.BadArguments), 11);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.SettlementSignerMismatch), 12);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.AdNotInScope), 13);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.TokenNotAllowed), 14);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.AmountNotScalable), 15);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.OverPerOrderCap), 16);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.NoAccountCeiling), 17);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.OverStoredAllowance), 18);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.AgentAllowanceExceeded), 19);
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.AccountCeilingExceeded), 20);
+        assertEq(uint8(type(ProofBridgeAgentPolicy.Refusal).max), 20, "a new reason: pin it here");
     }
 }

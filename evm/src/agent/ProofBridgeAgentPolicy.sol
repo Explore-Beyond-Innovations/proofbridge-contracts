@@ -6,7 +6,7 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 
 import {IAdManager} from "../interfaces/IAdManager.sol";
 import {DecimalScaling} from "../libraries/DecimalScaling.sol";
-import {AgentPolicyCodec} from "./AgentPolicyCodec.sol";
+import {AgentPolicyCodec, IAgentPolicyCodecErrors} from "./AgentPolicyCodec.sol";
 import {AgentRateLimit} from "./AgentRateLimit.sol";
 import {
     IValidator,
@@ -49,7 +49,7 @@ import {
  *      contents live at `keccak(slot)`, outside the window, however the struct is keyed. Lists
  *      arrive as calldata on the owner's configuration call and are written out as one row each.
  */
-contract ProofBridgeAgentPolicy is IValidator, IHook {
+contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
     using AgentPolicyCodec for bytes;
 
     /*//////////////////////////////////////////////////////////////
@@ -73,8 +73,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
      * @dev The validator can only answer yes or no — ERC-4337 gives it nowhere to put a reason — so
      *      these surface in two places: the hook's `AgentPolicy__RefusedAtExecution(callIndex, reason)`
      *      and the free `preflight` read, which is how an agent finds out *which* call of a batch
-     *      the module would refuse, and why, before spending anything. Appended to, never reordered:
-     *      agents decode these numbers.
+     *      the module would refuse, and why, before spending anything. Agents decode these numbers, so
+     *      once released a new reason goes on the end; `test_theRefusalNumbersArePinned` holds them.
      */
     enum Refusal {
         None,
@@ -695,16 +695,19 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         WalkCtx memory ctx;
         (reason, calls, ctx) = _begin(account, gate, callData, Mode.Dry);
         if (reason != Refusal.None) return (reason, NO_CALL);
-        // The one Dry walk (`_walk` refuses the mode): the same per-call checks, then both halves'
-        // verdicts in the order the chain reaches them — the validator's clockless floor first,
-        // then the hook's real arithmetic — with nothing written.
+        // The one Dry walk (`_walk` refuses the mode), in the order the chain reaches things: every
+        // validation in a bundle runs before any execution, so the validator's clockless floor is
+        // asked about *every* call before the hook's real arithmetic is asked about any.
+        Checked[] memory checked = new Checked[](calls.length);
         Asked memory asked = Asked(new bytes32[](calls.length * 2), new uint256[](calls.length * 2), 0);
         for (uint256 i = 0; i < calls.length; ++i) {
-            Checked memory checked = _checkStatic(ctx, calls[i]);
-            if (checked.refusal != Refusal.None) return (checked.refusal, i);
-            reason = _reserveDry(ctx, checked, asked);
+            checked[i] = _checkStatic(ctx, calls[i]);
+            if (checked[i].refusal != Refusal.None) return (checked[i].refusal, i);
+            reason = _reserveDry(ctx, checked[i], asked);
             if (reason != Refusal.None) return (reason, i);
-            reason = _spend(ctx, checked.token, checked.row, checked.amount);
+        }
+        for (uint256 i = 0; i < calls.length; ++i) {
+            reason = _spend(ctx, checked[i].token, checked[i].row, checked[i].amount);
             if (reason != Refusal.None) return (reason, i);
         }
         return (Refusal.None, NO_CALL);
@@ -995,7 +998,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
             }
         }
         if (mode == Mode.Commit) _commit(ctx);
-        return (Refusal.None, 0);
+        return (Refusal.None, NO_CALL);
     }
 
     /// @dev The clock-free rules for one call: everything but the buckets. A `view`, so `preflight`

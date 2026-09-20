@@ -32,7 +32,7 @@ optimizer_runs = 1
 bytecode_hash = "none"
 solc_version = "0.8.34"
 evm_version = "prague"
-fs_permissions = [{ access = "read", path = "../test-vectors" }, { access = "read", path = "./test/fixtures" }]
+fs_permissions = [{ access = "read", path = "../test-vectors" }, { access = "read", path = "./test/fixtures" }, { access = "read", path = "./out" }]
 
 # Pinned, not left to forge's defaults: the CI comment below and the campaign's meaning both depend
 # on the size, so a change to a forge default must not quietly change what "the full campaign" is.

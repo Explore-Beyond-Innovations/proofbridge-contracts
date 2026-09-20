@@ -6,7 +6,7 @@ import {Execution} from "modulekit/accounts/erc7579/lib/ExecutionLib.sol";
 import {AgentRateLimit} from "src/agent/AgentRateLimit.sol";
 import {ProofBridgeAgentPolicy} from "src/agent/ProofBridgeAgentPolicy.sol";
 import {AgentPolicyBase} from "./AgentPolicyBase.t.sol";
-import {AgentPolicyCodec} from "src/agent/AgentPolicyCodec.sol";
+import {AgentPolicyCodec, IAgentPolicyCodecErrors} from "src/agent/AgentPolicyCodec.sol";
 import {CodecHarness} from "./AgentPolicyCodec.t.sol";
 import {PolicyHarness} from "./mocks/PolicyHarness.sol";
 
@@ -89,9 +89,9 @@ contract AgentPolicyInputsTest is AgentPolicyBase {
     /// always sorts — can never produce.
     function test_adScopeMustBeStrictlyAscendingLikeEverythingElse() public {
         CodecHarness codec = new CodecHarness();
-        vm.expectRevert(AgentPolicyCodec.AgentPolicyCodec__NotAscending.selector);
+        vm.expectRevert(IAgentPolicyCodecErrors.AgentPolicyCodec__NotAscending.selector);
         codec.parse(_scoped("ad-zulu", "ad-alpha"));
-        vm.expectRevert(AgentPolicyCodec.AgentPolicyCodec__NotAscending.selector);
+        vm.expectRevert(IAgentPolicyCodecErrors.AgentPolicyCodec__NotAscending.selector);
         codec.parse(_scoped("ad-alpha", "ad-alpha"));
         // a prefix sorts before the longer id, as the TypeScript and Rust encoders have it
         codec.parse(_scoped("ad", "ad-alpha"));
@@ -103,10 +103,14 @@ contract AgentPolicyInputsTest is AgentPolicyBase {
         CodecHarness codec = new CodecHarness();
         bytes memory policy = defaultPolicy();
         policy[33] = bytes1(uint8(7));
-        vm.expectRevert(abi.encodeWithSelector(AgentPolicyCodec.AgentPolicyCodec__UnknownAction.selector, uint8(7)));
+        vm.expectRevert(
+            abi.encodeWithSelector(IAgentPolicyCodecErrors.AgentPolicyCodec__UnknownAction.selector, uint8(7))
+        );
         codec.parse(policy);
         policy[33] = bytes1(uint8(0));
-        vm.expectRevert(abi.encodeWithSelector(AgentPolicyCodec.AgentPolicyCodec__UnknownAction.selector, uint8(0)));
+        vm.expectRevert(
+            abi.encodeWithSelector(IAgentPolicyCodecErrors.AgentPolicyCodec__UnknownAction.selector, uint8(0))
+        );
         codec.parse(policy);
     }
 
