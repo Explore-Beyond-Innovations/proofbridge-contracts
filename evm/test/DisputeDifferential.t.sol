@@ -21,11 +21,9 @@ import {IAdManager} from "../src/interfaces/IAdManager.sol";
 /// wei. The fixture's sha256 is pinned below; scripts/repo-checks compares
 /// it against the file so neither driver can drift alone.
 contract DisputeDifferentialTest is DisputeTest {
-    string internal constant FIXTURE_SHA256 =
-        "54fcf9f016c1b1754127950a6773d5526e02815263f70046458cdaae4f7c6792";
+    string internal constant FIXTURE_SHA256 = "54fcf9f016c1b1754127950a6773d5526e02815263f70046458cdaae4f7c6792";
 
-    bytes32 private constant LEAF_TOPIC =
-        keccak256("DepositHashAppended(uint256,bytes32,uint256,bytes32)");
+    bytes32 private constant LEAF_TOPIC = keccak256("DepositHashAppended(uint256,bytes32,uint256,bytes32)");
 
     function test_t24_differentialScenarios() public {
         string memory v = vm.readFile("../test-vectors/dispute-scenarios.json");
