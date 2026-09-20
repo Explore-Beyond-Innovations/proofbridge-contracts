@@ -100,6 +100,7 @@ contract AgentPolicyMathParityTest is Test {
             // a per-order cap cannot exceed u128, so an amount that large is over it.
             string memory wide = _at("scaling", ran, ".evmWide");
             if (vm.keyExistsJson(vectors, wide)) {
+                _assertIsAnOverflowRefusal(ran, label);
                 assertTrue(ok, label);
                 assertEq(value, vectors.readUint(string.concat(wide, ".value")), label);
                 assertGt(value, type(uint128).max, "evmWide rows are exactly the ones past u128");
@@ -127,6 +128,7 @@ contract AgentPolicyMathParityTest is Test {
 
             string memory wide = _at("scaling", ran, ".evmWide");
             if (vm.keyExistsJson(vectors, wide)) {
+                _assertIsAnOverflowRefusal(ran, label);
                 assertEq(escrowScaling.scale(amount, from, to), vectors.readUint(string.concat(wide, ".value")), label);
             } else if (vectors.readBool(_at("scaling", ran, ".ok"))) {
                 assertEq(escrowScaling.scale(amount, from, to), _uint("scaling", ran, ".value"), label);
@@ -151,6 +153,61 @@ contract AgentPolicyMathParityTest is Test {
         }
         assertGt(ran, 0, "no scaling rows ran");
         assertEq(ran, vectors.readUint(".counts.scaling"), "scaling rows ran");
+    }
+
+    /// Amounts only the EVM can carry. A lock's `amount` is 256 bits here and 128 on Soroban, so these
+    /// rows have no other reader. They pin one guard: the module multiplies `unchecked` and then
+    /// checks the product did not wrap, and without that check a wrapped product is a small number
+    /// the validator reads as under the cap.
+    ///
+    /// The two Solidity copies differ here on purpose. The module answers no, because a revert
+    /// during validation gets a module dropped from the mempool; the escrows' copy panics.
+    function test_amountsOnlyTheEvmCanCarry() public view {
+        uint256 ran;
+        uint256 wrapped;
+        for (; vm.keyExistsJson(vectors, _at("scalingEvmOnly", ran, "")); ++ran) {
+            string memory label = vectors.readString(_at("scalingEvmOnly", ran, ".label"));
+            IAdManager.OrderParams memory p;
+            p.amount = _uint("scalingEvmOnly", ran, ".amount");
+            p.orderDecimals = uint8(_uint("scalingEvmOnly", ran, ".fromDecimals"));
+            p.adDecimals = uint8(_uint("scalingEvmOnly", ran, ".toDecimals"));
+            assertGt(p.amount, type(uint128).max, "these rows are exactly the ones past u128");
+            (bool ok, uint256 value) = policy.adAmount(p);
+
+            if (vectors.readBool(_at("scalingEvmOnly", ran, ".wraps"))) {
+                ++wrapped;
+                assertFalse(ok, label);
+                // What an unguarded multiply would have answered, so the row is known to be one
+                // where the guard is the only thing between the agent and a small number.
+                uint256 unguarded;
+                unchecked {
+                    unguarded = p.amount * (10 ** uint256(p.adDecimals - p.orderDecimals));
+                }
+                assertEq(unguarded, _uint("scalingEvmOnly", ran, ".wrappedTo"), label);
+                assertLt(unguarded, p.amount, "a wrap is what makes the product smaller than the amount");
+
+                try escrowScaling.scale(p.amount, p.orderDecimals, p.adDecimals) returns (uint256) {
+                    revert(string.concat(label, ": the escrows' copy scaled a product that wraps"));
+                } catch (bytes memory err) {
+                    assertEq(err, abi.encodeWithSignature("Panic(uint256)", 0x11), label);
+                }
+            } else {
+                assertTrue(ok, label);
+                assertEq(value, _uint("scalingEvmOnly", ran, ".value"), label);
+                assertEq(escrowScaling.scale(p.amount, p.orderDecimals, p.adDecimals), value, label);
+            }
+        }
+        assertGt(ran, 0, "no evm-only rows ran");
+        assertGt(wrapped, 0, "no row wrapped, and the wrap is what these rows are for");
+        assertEq(ran, vectors.readUint(".counts.scalingEvmOnly"), "evm-only rows ran");
+    }
+
+    /// `evmWide` replaces a row's expectation, so its presence is not taken on trust: it belongs on
+    /// an `overflow` refusal and nowhere else, and a generator edit that moved it would swap what
+    /// this reader expects without a word.
+    function _assertIsAnOverflowRefusal(uint256 i, string memory label) internal view {
+        assertFalse(vectors.readBool(_at("scaling", i, ".ok")), label);
+        assertEq(vectors.readString(_at("scaling", i, ".reason")), "overflow", label);
     }
 
     function _at(string memory table, uint256 i, string memory field) internal pure returns (string memory) {

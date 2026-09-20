@@ -1,11 +1,12 @@
 {
   "_meta": {
-    "note": "T-60 layer 1. The arithmetic under an agent policy, computed in unbounded integers. Readers: proofbridge-core (Rust), AgentRateLimit + the agent module's scaling (Solidity), order-params (TypeScript, scaling only: it does not mirror the bucket). Every reader asserts it ran `counts` rows.",
+    "note": "T-60 layer 1. The arithmetic under an agent policy, computed in unbounded integers. Readers: proofbridge-core (Rust), AgentRateLimit + the agent module's scaling + the escrows' scaling (Solidity), order-params (TypeScript, scaling only: it does not mirror the bucket). `scalingEvmOnly` holds amounts past u128, which only the EVM can carry. Every reader asserts it ran `counts` rows.",
     "generator": "scripts/bls-vectors/src/gen-agent-policy-math.ts"
   },
   "counts": {
-    "bucket": 30,
-    "scaling": 25
+    "bucket": 32,
+    "scaling": 25,
+    "scalingEvmOnly": 6
   },
   "constants": {
     "u128Max": "340282366920938463463374607431768211455",
@@ -338,6 +339,32 @@
       "nextLastTs": "1700000010"
     },
     {
+      "label": "the product overflows under a small capacity",
+      "capacity": "1000",
+      "refillPerSecond": "340282366920938463463374607431768211455",
+      "level": "0",
+      "lastTs": "1700000000",
+      "spend": "1000",
+      "now": "1700000002",
+      "available": "1000",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000002"
+    },
+    {
+      "label": "the sum overflows under a small capacity",
+      "capacity": "1000",
+      "refillPerSecond": "1267650600228229401496703205376",
+      "level": "340282366920938463463374607431768211450",
+      "lastTs": "1700000000",
+      "spend": "1001",
+      "now": "1700000001",
+      "available": "1000",
+      "ok": false,
+      "nextLevel": "340282366920938463463374607431768211450",
+      "nextLastTs": "1700000000"
+    },
+    {
       "label": "a big product that still fits, under a smaller capacity",
       "capacity": "1237940039285380274899124224",
       "refillPerSecond": "1152921504606846976",
@@ -615,6 +642,56 @@
       "toDecimals": 18,
       "ok": false,
       "reason": "decimals-out-of-range"
+    }
+  ],
+  "scalingEvmOnly": [
+    {
+      "label": "past u128, and the upscale still fits 256 bits",
+      "amount": "1361129467683753853853498429727072845824",
+      "fromDecimals": 6,
+      "toDecimals": 18,
+      "wraps": false,
+      "value": "1361129467683753853853498429727072845824000000000000"
+    },
+    {
+      "label": "the largest amount whose 12-place upscale fits",
+      "amount": "115792089237316195423570985008687907853269984665640564039457584007",
+      "fromDecimals": 6,
+      "toDecimals": 18,
+      "wraps": false,
+      "value": "115792089237316195423570985008687907853269984665640564039457584007000000000000"
+    },
+    {
+      "label": "one more wraps 256 bits",
+      "amount": "115792089237316195423570985008687907853269984665640564039457584008",
+      "fromDecimals": 6,
+      "toDecimals": 18,
+      "wraps": true,
+      "wrappedTo": "86870360064"
+    },
+    {
+      "label": "a wrap that lands on a small, plausible number",
+      "amount": "57896044618658097711785492504343953926634992332820282019728792003956564819973",
+      "fromDecimals": 17,
+      "toDecimals": 18,
+      "wraps": true,
+      "wrappedTo": "50"
+    },
+    {
+      "label": "the widest amount, the widest step",
+      "amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+      "fromDecimals": 0,
+      "toDecimals": 30,
+      "wraps": true,
+      "wrappedTo": "115792089237316195423570985008687907853269984664640564039457584007913129639936"
+    },
+    {
+      "label": "the widest amount at equal decimals is just itself",
+      "amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+      "fromDecimals": 18,
+      "toDecimals": 18,
+      "wraps": false,
+      "value": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
     }
   ]
 }

@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - "stellar/**"
+      # the Rust readers include_str! files from here
+      - "test-vectors/**"
       - ".github/workflows/stellar-contracts.yml"
   pull_request:
   workflow_call:
@@ -121,6 +123,14 @@ jobs:
           set -o pipefail
           cargo test -p ad-manager -p order-portal order_hash_parity -- --nocapture | tee /tmp/parity.log
           test "$(grep -cE 'test result: ok\. [1-9][0-9]* passed' /tmp/parity.log)" -eq 2
+        working-directory: stellar
+
+      # T-60 (2.1h): the Rust reader of the shared arithmetic table. Exact count, as on the EVM side.
+      - name: Agent-policy arithmetic parity (Stellar)
+        run: |
+          set -o pipefail
+          cargo test -p proofbridge-core parity_math -- --nocapture | tee /tmp/policy-math.log
+          grep -qE 'test result: ok\. 2 passed; 0 failed' /tmp/policy-math.log
         working-directory: stellar
 
       # The order-hash fixture drift guard (@proofbridge/bls-vectors) runs in the
