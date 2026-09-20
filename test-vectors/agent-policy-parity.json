@@ -1,26 +1,26 @@
 {
   "_meta": {
-    "note": "T-60 layer 2. Policy + lock -> accept or reject. Every `expect` is written by hand from the policy as specified; nothing here is derived from an implementation. A refused lock has exactly one fault, except in the case marked `twoFaults`, which is about which one is named. `target` and `signer` are symbolic: each reader resolves them against its own rig. Each reader runs the cases that name it and asserts it ran `counts[reader]`.",
+    "note": "T-60 layer 2. Policy + lock -> accept or reject. Every `expect` is written by hand from the policy as specified; nothing here is derived from an implementation. A refused lock has exactly one fault, except in a step marked `twoFaults`, where every reader names the earlier one: all three check in one order. `target` and `signer` are symbolic: each reader resolves them against its own rig. Each reader runs the cases that name it and asserts it ran `counts[reader]`.",
     "generator": "scripts/bls-vectors/src/gen-agent-policy-parity.ts"
   },
   "counts": {
     "total": {
-      "cases": 24,
+      "cases": 29,
       "installs": 4
     },
     "soroban": {
-      "cases": 24,
-      "steps": 58,
+      "cases": 29,
+      "steps": 65,
       "installs": 4
     },
     "evm": {
-      "cases": 24,
-      "steps": 58,
+      "cases": 29,
+      "steps": 65,
       "installs": 4
     },
     "ts": {
-      "cases": 16,
-      "steps": 27,
+      "cases": 19,
+      "steps": 31,
       "installs": 0
     }
   },
@@ -1135,8 +1135,8 @@
       ]
     },
     {
-      "name": "a zero amount: the one place the verdicts differ",
-      "group": "declared difference",
+      "name": "a zero amount is refused",
+      "group": "decimal scaling",
       "readers": [
         "soroban",
         "evm",
@@ -1192,19 +1192,290 @@
             "adId": "ad-alpha",
             "signer": "policy"
           },
-          "expect": {
-            "soroban": "accept",
-            "ts": "accept",
-            "evm": "AmountNotScalable"
+          "expect": "AmountNotScalable",
+          "why": "Both escrows refuse a zero lock themselves, so the policy layer says so first, everywhere. Layer 2 first recorded Soroban and TypeScript allowing it."
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
           },
-          "why": "Zero scales, is under any cap, and any bucket covers it, so Soroban's account and the TypeScript check allow it. The EVM module refuses a zero ad amount outright. No zero lock can land on either chain: both escrows refuse one themselves (ZeroAmount). So the difference is which layer says no, and it is recorded rather than aligned."
+          "expect": "accept",
+          "why": "and one unit is fine"
         }
       ]
     },
     {
-      "name": "two faults at once: which one is named depends on who you ask",
-      "group": "declared difference",
-      "twoFaults": true,
+      "name": "target before action",
+      "group": "precedence",
+      "readers": [
+        "soroban",
+        "evm"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "unpinned",
+            "action": "other",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "TargetNotAllowed",
+          "why": "an unpinned contract AND a function no policy lists",
+          "twoFaults": true
+        }
+      ]
+    },
+    {
+      "name": "settlement signer before whitelist",
+      "group": "precedence",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x3333333333333333333333333333333333333333333333333333333333333333",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "other"
+          },
+          "expect": "SettlementSignerMismatch",
+          "why": "a foreign signer AND an ad-side token off the list",
+          "twoFaults": true
+        }
+      ]
+    },
+    {
+      "name": "whitelist before ad scope",
+      "group": "precedence",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": [
+          "ad-alpha"
+        ],
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a0101000861642d616c7068610000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x3333333333333333333333333333333333333333333333333333333333333333",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-zulu",
+            "signer": "policy"
+          },
+          "expect": "TokenNotAllowed",
+          "why": "an order-side token off the list AND an ad outside the scope",
+          "twoFaults": true
+        }
+      ]
+    },
+    {
+      "name": "ad scope before scaling",
+      "group": "precedence",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": [
+          "ad-alpha"
+        ],
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a0101000861642d616c7068610000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "100000000000000001",
+            "orderDecimals": 18,
+            "adDecimals": 6,
+            "adId": "ad-zulu",
+            "signer": "policy"
+          },
+          "expect": "AdNotInScope",
+          "why": "an ad outside the scope AND an amount that does not scale",
+          "twoFaults": true
+        }
+      ]
+    },
+    {
+      "name": "ad scope before the cap",
+      "group": "precedence",
       "readers": [
         "soroban",
         "evm",
@@ -1262,12 +1533,89 @@
             "adId": "ad-zulu",
             "signer": "policy"
           },
-          "expect": {
-            "soroban": "OverPerOrderCap",
-            "evm": "AdNotInScope",
-            "ts": "AdNotInScope"
+          "expect": "AdNotInScope",
+          "why": "an ad outside the scope AND over the cap: reach before size",
+          "twoFaults": true
+        }
+      ]
+    },
+    {
+      "name": "the cap before the bucket",
+      "group": "precedence",
+      "readers": [
+        "soroban",
+        "evm"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "1000000",
+            "refillPerSecond": "1"
           },
-          "why": "Over the cap AND outside the ad scope. Soroban checks size before scope; the EVM module and TypeScript check scope before size. Everyone refuses, which is the parity claim. But the relayer's pre-flight reason is not the one Stellar would give, and that is worth knowing."
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "1000000",
+            "refillPerSecond": "1"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000000f42400000000000000000000000000000000000000000000000000000000000000001222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000000f4240000000000000000000000000000000000000000000000000000000000000000100000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1000000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept",
+          "why": "the bucket is now empty"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1000001",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "OverPerOrderCap",
+          "why": "over the cap AND more than the empty bucket holds: size before rate",
+          "twoFaults": true
         }
       ]
     },

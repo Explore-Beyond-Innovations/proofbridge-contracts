@@ -1022,18 +1022,17 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         } catch {
             return _refuse(out, Refusal.BadArguments);
         }
+        // One order, shared with the Soroban account and the relayer's TypeScript check, and pinned by
+        // the shared fixture's precedence cases (T-60): **reach, then size, then rate**. Who and what
+        // the lock is for, before how much, before how much lately. A lock with two faults is
+        // refused for the earlier one on every implementation, so the relayer's pre-flight reason is
+        // the chain's.
+        //
+        // Reach: the settlement signer, the whitelist, the ad scope.
         if (params.adSettlementSigner != ctx.settlementSigner) return _refuse(out, Refusal.SettlementSignerMismatch);
-        if (!ctx.adScopeAll && !_flag[_adKey(ctx.vKey, keccak256(bytes(params.adId)))][ctx.account]) {
-            return _refuse(out, Refusal.AdNotInScope);
-        }
 
-        // Reach before size: a trade the agent may not serve at all is not a sizing question. Here
-        // that means signer, then ad scope, then the whitelist, then scaling and the cap. **Soroban's
-        // order differs** (whitelist, scaling and the cap come before the signer and the scope), so
-        // a lock with two faults is refused for a different one on each chain. It is refused on
-        // both, which is what matters; the shared fixture pins the difference in its two-fault case
-        // (T-60). Both tokens have to be on the whitelist, and a whitelisted token with no limit row
-        // is refused rather than waved through.
+        // Both tokens have to be on the whitelist, and a whitelisted token with no limit row is
+        // refused rather than waved through.
         out.token = params.adChainToken;
         out.row = _agentLimit[_tokenKey(ctx.vKey, out.token)][ctx.account];
         if (out.row.capacity == 0) return _refuse(out, Refusal.TokenNotAllowed);
@@ -1041,6 +1040,11 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
             return _refuse(out, Refusal.TokenNotAllowed);
         }
 
+        if (!ctx.adScopeAll && !_flag[_adKey(ctx.vKey, keccak256(bytes(params.adId)))][ctx.account]) {
+            return _refuse(out, Refusal.AdNotInScope);
+        }
+
+        // Size: the amount in ad units (never zero), then the cap. Rate, the buckets, is the caller's.
         bool scaled;
         (scaled, out.amount) = _adAmount(params);
         if (!scaled || out.amount == 0) return _refuse(out, Refusal.AmountNotScalable);

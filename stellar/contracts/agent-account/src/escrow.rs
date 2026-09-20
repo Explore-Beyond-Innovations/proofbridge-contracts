@@ -40,8 +40,9 @@ fn field<T: TryFromVal<Env, Val>>(
     T::try_from_val(env, &v).map_err(|_| AccountError::BadArgs)
 }
 
-/// Target ∈ pinned escrows, selector ∈ allowed_actions, then the lock's args
-/// against the policy. Fails closed on anything it cannot decode.
+/// Target ∈ pinned escrows, selector ∈ allowed_actions, then the lock's args against the policy:
+/// settlement signer, whitelist, ad scope (reach), scaling and the cap (size), the buckets (rate).
+/// Fails closed on anything it cannot decode.
 ///
 /// **This writes.** Since 2.1d the last thing it does is debit two volume buckets, so the name
 /// undersells it: a passing check has consumed allowance. That is deliberate — the auth frame is
@@ -75,30 +76,12 @@ pub fn check_contract_call(
     let raw = c.args.get(0).ok_or(AccountError::BadArgs)?;
     let lock: Map<Symbol, Val> = Map::try_from_val(env, &raw).map_err(|_| AccountError::BadArgs)?;
 
-    let ad_chain_token: BytesN<32> = field(env, &lock, "ad_chain_token")?;
-    let order_chain_token: BytesN<32> = field(env, &lock, "order_chain_token")?;
-    if !policy.token_whitelist.contains(&ad_chain_token)
-        || !policy.token_whitelist.contains(&order_chain_token)
-    {
-        return Err(AccountError::TokenNotAllowed);
-    }
-
-    // The escrow locks `scale(amount, order_decimals, ad_decimals)` of the ad token; the cap is
-    // denominated in the same units. Per token, because the whitelist can hold sixteen of them and
-    // one number cannot be right for two assets of different value — 1,000,000 units is a few
-    // cents of XLM and a few hundred dollars of wETH. Decimal scaling cannot fix that: it converts
-    // units, and what differs here is worth, which nothing on chain knows.
-    let amount: u128 = field(env, &lock, "amount")?;
-    let order_decimals: u32 = field(env, &lock, "order_decimals")?;
-    let ad_decimals: u32 = field(env, &lock, "ad_decimals")?;
-    let ad_amount = proofbridge_core::decimal_scaling::scale(amount, order_decimals, ad_decimals)
-        .map_err(|_| AccountError::BadArgs)?;
-    let token_limit =
-        policy::limit_for(policy, &ad_chain_token).ok_or(AccountError::NoVolumeLimit)?;
-    if ad_amount > token_limit.max_per_order {
-        return Err(AccountError::CapExceeded);
-    }
-
+    // One order, shared with the EVM module and the relayer's TypeScript check, and pinned by the
+    // shared fixture's precedence cases (T-60): **reach, then size, then rate**. Who and what the
+    // lock is for, before how much, before how much lately. A lock with two faults is refused for
+    // the earlier one on every implementation, so the relayer's pre-flight reason is the chain's.
+    //
+    // ---- reach ----
     // `ad_creator` is the ad's maker, i.e. this account, always (the EVM escrow
     // reverts NotMaker; the Stellar one does not check, so the account does).
     let ad_creator: BytesN<32> = field(env, &lock, "ad_creator")?;
@@ -109,15 +92,47 @@ pub fn check_contract_call(
         return Err(AccountError::SettlementSignerMismatch);
     }
 
-    // Reach, then rate. The ordering is for cost and legibility, not safety: a rejected
-    // `__check_auth` takes the whole frame with it, so a refused lock cannot spend allowance
-    // whichever way round these go. Checked by moving the scope test below the debit — every test
-    // still passed, which is the honest measure of what the ordering buys.
+    let ad_chain_token: BytesN<32> = field(env, &lock, "ad_chain_token")?;
+    let order_chain_token: BytesN<32> = field(env, &lock, "order_chain_token")?;
+    if !policy.token_whitelist.contains(&ad_chain_token)
+        || !policy.token_whitelist.contains(&order_chain_token)
+    {
+        return Err(AccountError::TokenNotAllowed);
+    }
+
     let ad_id: String = field(env, &lock, "ad_id")?;
     if !policy::ad_in_scope(policy, &ad_id) {
         return Err(AccountError::AdNotAllowed);
     }
 
+    // ---- size ----
+    // The escrow locks `scale(amount, order_decimals, ad_decimals)` of the ad token; the cap is
+    // denominated in the same units. Per token, because the whitelist can hold sixteen of them and
+    // one number cannot be right for two assets of different value — 1,000,000 units is a few
+    // cents of XLM and a few hundred dollars of wETH. Decimal scaling cannot fix that: it converts
+    // units, and what differs here is worth, which nothing on chain knows.
+    let amount: u128 = field(env, &lock, "amount")?;
+    let order_decimals: u32 = field(env, &lock, "order_decimals")?;
+    let ad_decimals: u32 = field(env, &lock, "ad_decimals")?;
+    let ad_amount = proofbridge_core::decimal_scaling::scale(amount, order_decimals, ad_decimals)
+        .map_err(|_| AccountError::BadArgs)?;
+    // A zero lock is refused here as it is by the EVM module and the relayer's check. The escrow
+    // refuses one itself (`ZeroAmount`), so allowing it was harmless and still wrong: a policy
+    // that says yes to what the chain is certain to refuse. `BadArgs` is this account's word for
+    // an amount it will not scale, which is the word the shared fixture already maps.
+    if ad_amount == 0 {
+        return Err(AccountError::BadArgs);
+    }
+    let token_limit =
+        policy::limit_for(policy, &ad_chain_token).ok_or(AccountError::NoVolumeLimit)?;
+    if ad_amount > token_limit.max_per_order {
+        return Err(AccountError::CapExceeded);
+    }
+
+    // ---- rate ----
+    // Last, and the only step that writes. A rejected `__check_auth` takes the whole frame with
+    // it, so a refused lock cannot spend allowance whichever way round these go; the order is for
+    // cost, for legibility, and so that all three implementations name the same fault.
     spend_volume(env, policy, &ad_chain_token, ad_amount)
 }
 
