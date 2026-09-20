@@ -28,22 +28,49 @@ contract AgentPolicyReviewPass2Test is AgentPolicyBase {
 
     /// E1. D4 put the revoke check in the hook — and an owner operation that *uninstalls the hook*,
     /// bundled ahead of the agent's, removes the thing that checks. Every validation had already
-    /// passed against the same untouched bucket, so six locks ran against a capacity of five.
+    /// passed against the same untouched bucket, so the locks ran uncounted.
+    ///
+    /// Rebuilt in pass 4 (H2). The first version sent six operations and asserted an upper bound
+    /// inside a try/catch; once the tally existed the *fourth* validation was refused by the tally,
+    /// the bundle reverted, nothing landed, and the bound held for the wrong reason — switching the
+    /// floor off left it green. Three operations stay under the tally, and their sum is what has to
+    /// trip the floor.
     function test_E1_uninstallingTheHookAheadOfTheAgentDoesNotUnboundIt() public {
+        for (uint256 i = 0; i < 3; ++i) {
+            _agentOp(lockCall(MAX_PER_ORDER)).execUserOps();
+        }
+        assertEq(module.agentBucket(instance.account, agentId, AD_TOKEN).level, 2 * MAX_PER_ORDER, "stored: two left");
+
+        PackedUserOperation[] memory ops = new PackedUserOperation[](4);
+        ops[0] = _uninstallHookOp();
+        for (uint256 i = 0; i < 3; ++i) {
+            ops[i + 1] = _agentOpAt(i, lockCall(MAX_PER_ORDER));
+        }
+        // the third asks for more than the stored level holds: refused in validation, by the floor
+        vm.expectRevert(abi.encodeWithSelector(FailedOp.selector, uint256(3), "AA24 signature error"));
+        instance.aux.entrypoint.handleOps(ops, payable(address(0x69)));
+        assertEq(escrow.locks(), 3, "nothing from that bundle landed");
+    }
+
+    /// The control: two fit the stored level, so the same bundle shape goes through — which is what
+    /// makes the refusal above a refusal by the floor and not by something else.
+    function test_E1_control_whatFitsTheStoredLevelRuns() public {
+        for (uint256 i = 0; i < 3; ++i) {
+            _agentOp(lockCall(MAX_PER_ORDER)).execUserOps();
+        }
+        PackedUserOperation[] memory ops = new PackedUserOperation[](3);
+        ops[0] = _uninstallHookOp();
+        ops[1] = _agentOpAt(0, lockCall(MAX_PER_ORDER));
+        ops[2] = _agentOpAt(1, lockCall(MAX_PER_ORDER));
+        instance.aux.entrypoint.handleOps(ops, payable(address(0x69)));
+        assertEq(escrow.locks(), 5, "the race is real; the floor is what contains it");
+    }
+
+    function _uninstallHookOp() internal returns (PackedUserOperation memory) {
         UserOpData memory uninstall = instance.getUninstallModuleOps(
             TYPE_HOOK, address(module), bytes.concat(bytes32(TYPE_HOOK)), address(instance.defaultValidator)
         );
-        uninstall = uninstall.signDefault();
-
-        uint256 n = CAPACITY / MAX_PER_ORDER + 1;
-        PackedUserOperation[] memory ops = new PackedUserOperation[](n + 1);
-        ops[0] = uninstall.userOp;
-        for (uint256 i = 0; i < n; ++i) {
-            ops[i + 1] = _agentOpAt(i, lockCall(MAX_PER_ORDER));
-        }
-        try instance.aux.entrypoint.handleOps(ops, payable(address(0x69))) {} catch {}
-
-        assertLe(escrow.locks() * MAX_PER_ORDER, CAPACITY, "with the hook gone, the stored allowance still bounds it");
+        return uninstall.signDefault().userOp;
     }
 
     /// ...and the floor must not deadlock. A bucket drained long ago stores zero while being full

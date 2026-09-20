@@ -68,6 +68,53 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         uint256 refillPerSecond;
     }
 
+    /**
+     * @notice Why a request was refused. `None` is "not refused".
+     * @dev The validator can only answer yes or no — ERC-4337 gives it nowhere to put a reason — so
+     *      these surface in two places: the hook's `AgentPolicy__RefusedAtExecution(callIndex, reason)`
+     *      and the free `preflight` read, which is how an agent finds out *which* call of a batch
+     *      the module would refuse, and why, before spending anything. Appended to, never reordered:
+     *      agents decode these numbers.
+     */
+    enum Refusal {
+        None,
+        NotMounted, // both halves have to be installed
+        NoPolicy, // no live fingerprint for this agent: never installed, or revoked
+        Paused, // MAX_UNCOUNTED reached; the owner resets
+        SinglesOnly, // a batch while an approved request is still uncounted
+        Expired, // preflight only: the validator leaves expiry to the EntryPoint
+        Malformed, // not an `execute` this module understands, or over MAX_BATCH
+        TargetNotPinned,
+        ValueAttached,
+        ActionNotAllowed,
+        BadArguments,
+        SettlementSignerMismatch,
+        AdNotInScope,
+        TokenNotAllowed,
+        AmountNotScalable,
+        OverPerOrderCap,
+        NoAccountCeiling,
+        OverStoredAllowance, // the validator's clockless floor (`_reserve`)
+        AgentAllowanceExceeded, // the hook, or preflight: the real, refilled number
+        AccountCeilingExceeded
+    }
+
+    /// @dev Validate: no clock, reserve against the stored floor. Commit: the hook — real refill,
+    ///      buckets written. Dry: `preflight` — the hook's arithmetic with nothing written.
+    enum Mode {
+        Validate,
+        Commit,
+        Dry
+    }
+
+    /// @dev What the clock-free half of the rules learned about one call.
+    struct Checked {
+        Refusal refusal;
+        bytes32 token;
+        TokenLimitRow row;
+        uint256 amount;
+    }
+
     /// @dev One call pulled out of an `execute`, whatever shape it arrived in.
     struct Call {
         address target;
@@ -110,12 +157,27 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
      *      it is running. With the hook missing, however it went missing, nothing zeroes the tally
      *      and the agent stops after this many capped trades, in total — not per transaction.
      *
-     *      Two costs, stated rather than discovered. An approved operation that does not end up
-     *      counted looks the same as a missing hook, because a reverted execution rolls the hook's
-     *      reset back with it: that covers a trade the escrow refuses *and* one the hook refuses for
-     *      being over the allowance, so three such in a row pause the agent. And since every
-     *      validation in a bundle runs before any hook, one bundle carries at most this many
-     *      operations per agent.
+     *      **It detects; it does not cap.** While the tally is zero everything approved so far has
+     *      been counted and the agent may batch up to `MAX_BATCH`. While it is above zero — an
+     *      approved request not yet counted, the warning sign — the agent may send single trades
+     *      only, until the hook proves itself again. So a maker with several orders batches them
+     *      freely, a failed batch is one strike like a failed single trade, and the hookless bound is
+     *      **one batch plus two single trades, per token**, where the batch can never exceed the
+     *      stored allowance (`_reserve`). The one batch is unavoidable in any design that allows
+     *      batches: when the hook first goes missing the tally still reads zero. An agent is expected
+     *      to read `uncountedOf` and, if it is not zero, lead with a single trade.
+     *
+     *      Costs, stated rather than discovered. An approved request that does not end up counted
+     *      looks the same as a missing hook, because a reverted execution rolls the hook's reset back
+     *      with it — and **not every such failure is the agent's doing**: a bridger's `deadline` at
+     *      the edge of the window that lands a block late, another agent of the same owner draining
+     *      the shared ceiling so the hook refuses, an escrow pause, a liquidity race. Three in a row
+     *      pause the agent until the owner resets it, and there is no decay — decay needs the clock
+     *      and the validator has none. The agent runtime is expected to read `uncountedOf` and alert
+     *      at one or two. And since every validation in a bundle runs before any hook, one bundle
+     *      carries at most `MAX_UNCOUNTED` minus the outstanding tally requests per agent, singles
+     *      after the first; one too many fails the **whole bundle**, other senders' operations
+     *      included.
      */
     uint256 internal constant MAX_UNCOUNTED = 3;
 
@@ -197,7 +259,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     );
     event AgentRevoked(address indexed account, bytes32 indexed agentId);
     event AgentGasBudgetSet(address indexed account, bytes32 indexed agentId, uint256 weiBudget);
-    event AgentTallyReset(address indexed account, bytes32 indexed agentId);
+    event AgentTallyReset(address indexed account, bytes32 indexed agentId, uint256 priorTally, uint256 epoch);
 
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -215,6 +277,12 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     error AgentPolicy__BadExpiry();
     error AgentPolicy__RevokedBeforeExecution();
     error AgentPolicy__NoPolicyForAgent();
+    /// @notice The hook refused call `callIndex` of the request, for `reason`.
+    /// @dev Whether this reaches the EntryPoint's `UserOperationRevertReason` is the account's
+    ///      choice: the reference account and Nexus pass it up, Safe's adapter and Kernel's
+    ///      multiplexer replace it with their own. `preflight` answers the same question on every
+    ///      account, before anything is sent.
+    error AgentPolicy__RefusedAtExecution(uint256 callIndex, Refusal reason);
 
     /*//////////////////////////////////////////////////////////////
                              MODULE PLUMBING
@@ -348,8 +416,12 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     ///         having looked, which is the point of the pause.
     function resetAgentTally(bytes32 agentId) external {
         _requireInstalled();
-        _uncounted[_agentKey(_epoch[msg.sender], agentId)][msg.sender] = 0;
-        emit AgentTallyReset(msg.sender, agentId);
+        uint256 e = _epoch[msg.sender];
+        bytes32 aKey = _agentKey(e, agentId);
+        // The typo guard `revokeAgent` has: an id with no policy here is a mistake, not a reset.
+        if (_fingerprint[aKey][msg.sender] == bytes32(0)) revert AgentPolicy__NoPolicyForAgent();
+        emit AgentTallyReset(msg.sender, agentId, _uncounted[aKey][msg.sender], e);
+        _uncounted[aKey][msg.sender] = 0;
     }
 
     /**
@@ -443,30 +515,23 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
      */
     function validateUserOp(PackedUserOperation calldata userOp, bytes32 userOpHash) external returns (uint256) {
         address account = msg.sender;
-        // Both halves have to be mounted. With the validator alone nothing would ever debit a
-        // bucket, and the limits would read as enforced while being enforced by nobody.
-        if (_installedTypes[account] != (TYPE_BIT_VALIDATOR | TYPE_BIT_HOOK)) return VALIDATION_FAILED;
-
         (address agent, ECDSA.RecoverError err,) =
             ECDSA.tryRecover(MessageHashUtils.toEthSignedMessageHash(userOpHash), userOp.signature);
         if (err != ECDSA.RecoverError.NoError || agent == address(0)) return VALIDATION_FAILED;
-
         bytes32 agentId = bytes32(uint256(uint160(agent)));
-        uint256 e = _epoch[account];
-        bytes32 aKey = _agentKey(e, agentId);
-        if (_fingerprint[aKey][account] == bytes32(0)) return VALIDATION_FAILED;
 
-        PolicyMeta memory meta = _meta[aKey][account];
-        bytes32 vKey = _versionKey(aKey, _version[aKey][account]);
+        // Mounted as both halves, a live policy, not paused — and how many calls this request may
+        // carry. The pause is checked before anything is decoded: it needs nothing decoded.
+        Gate memory gate = _gate(account, agentId, Mode.Validate);
+        if (gate.refusal != Refusal.None) return VALIDATION_FAILED;
 
-        if (!_walk(account, e, vKey, meta, userOp.callData, false)) return VALIDATION_FAILED;
-        if (!_chargeGas(account, aKey, userOp)) return VALIDATION_FAILED;
+        (Refusal refusal,) = _walk(account, gate, userOp.callData, Mode.Validate);
+        if (refusal != Refusal.None) return VALIDATION_FAILED;
+        if (!_chargeGas(account, gate.aKey, userOp)) return VALIDATION_FAILED;
         if (!_pushMarker(account, userOp.callData, agentId)) return VALIDATION_FAILED;
 
         // Approved. The hook owes a count for it; see `MAX_UNCOUNTED`.
-        uint256 uncounted = _uncounted[aKey][account];
-        if (uncounted >= MAX_UNCOUNTED) return VALIDATION_FAILED;
-        _uncounted[aKey][account] = uncounted + 1;
+        _uncounted[gate.aKey][account] += 1;
 
         // Expiry is the bundler's job once it is in the return value, so there is no comparison
         // against `block.timestamp` here to get wrong. Soroban's rule is `now < valid_until` and
@@ -474,11 +539,9 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         // the two chains would disagree for one second per policy.
         // `setAgentPolicy` refuses a `validUntil` of 1 or one past 48 bits, so neither arm below can
         // turn an expiry into "forever"; the guard stays because a wrong answer here is silent.
-        if (meta.validUntil == 1 || (meta.validUntil != 0 && meta.validUntil - 1 > type(uint48).max)) {
-            return VALIDATION_FAILED;
-        }
-        uint48 validUntil = meta.validUntil == 0 ? 0 : uint48(meta.validUntil - 1);
-        return uint256(validUntil) << 160 | VALIDATION_SUCCESS;
+        uint64 until = gate.meta.validUntil;
+        if (until == 1 || (until != 0 && until - 1 > type(uint48).max)) return VALIDATION_FAILED;
+        return uint256(until == 0 ? 0 : uint48(until - 1)) << 160 | VALIDATION_SUCCESS;
     }
 
     /// @notice Agents do not sign for the account off chain; only operations.
@@ -500,19 +563,20 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         bytes32 agentId = _popMarker(account, msgData);
         if (agentId == bytes32(0)) return "";
 
-        uint256 e = _epoch[account];
-        bytes32 aKey = _agentKey(e, agentId);
         // Every validation in a bundle runs before any execution, so this operation may have been
-        // validated while the policy was live and reach here after a revoke bundled ahead of it.
-        if (_fingerprint[aKey][account] == bytes32(0)) revert AgentPolicy__RevokedBeforeExecution();
-        PolicyMeta memory meta = _meta[aKey][account];
-        bytes32 vKey = _versionKey(aKey, _version[aKey][account]);
-        // The same walk the validator ran, with `commit` on. A disagreement between the two is
+        // validated while the policy was live and reach here after a revoke — or an uninstall of the
+        // other half — bundled ahead of it.
+        Gate memory gate = _gate(account, agentId, Mode.Commit);
+        if (gate.refusal == Refusal.NoPolicy) revert AgentPolicy__RevokedBeforeExecution();
+        if (gate.refusal != Refusal.None) revert AgentPolicy__RefusedAtExecution(0, gate.refusal);
+
+        // The same walk the validator ran, in `Mode.Commit`. A disagreement between the two is
         // impossible rather than unlikely: it is one function.
-        require(_walk(account, e, vKey, meta, msgData, true), "AgentPolicy: refused at execution");
+        (Refusal refusal, uint256 callIndex) = _walk(account, gate, msgData, Mode.Commit);
+        if (refusal != Refusal.None) revert AgentPolicy__RefusedAtExecution(callIndex, refusal);
         // Counted. If the trade reverts after this, so does this line — which is why a failed trade
         // and a missing hook look alike to the validator.
-        _uncounted[aKey][account] = 0;
+        _uncounted[gate.aKey][account] = 0;
         return "";
     }
 
@@ -591,6 +655,91 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
 
     function accountBucket(address account, bytes32 token) external view returns (AgentRateLimit.Bucket memory) {
         return _accountBucket[_ceilKey(_epoch[account], token)][account];
+    }
+
+    /**
+     * @notice Would the module carry this request — and if not, which call, and why?
+     * @param callData the account's `execute(mode, executionCalldata)`, i.e. what the operation's
+     *        `callData` would be.
+     * @dev For agents, before they spend anything. It walks the request exactly as the validator and
+     *      the hook do — the same functions — and being an `eth_call` rather than a validation it
+     *      **may read the clock**, so unlike the validator it judges the allowance against the real,
+     *      refilled number and answers `AgentAllowanceExceeded` where the validator could only let
+     *      the hook find out. It cannot see an operation's gas fields: read `gasBudgetOf` for that.
+     *      A `None` here is not a promise — another operation can land first — but a refusal is one.
+     */
+    function preflight(address account, bytes32 agentId, bytes calldata callData)
+        external
+        view
+        returns (Refusal reason, uint256 callIndex)
+    {
+        Gate memory gate = _gate(account, agentId, Mode.Dry);
+        if (gate.refusal != Refusal.None) return (gate.refusal, 0);
+
+        Call[] memory calls;
+        WalkCtx memory ctx;
+        (reason, calls, ctx) = _begin(account, gate, callData, Mode.Dry);
+        if (reason != Refusal.None) return (reason, 0);
+        // `_walk` in `Mode.Dry`: the hook's arithmetic, nothing written. Spelled out here only
+        // because a `view` cannot share a body with the modes that write.
+        for (uint256 i = 0; i < calls.length; ++i) {
+            Checked memory checked = _checkStatic(ctx, calls[i]);
+            if (checked.refusal != Refusal.None) return (checked.refusal, i);
+            reason = _spend(ctx, checked.token, checked.row, checked.amount);
+            if (reason != Refusal.None) return (reason, i);
+        }
+        return (Refusal.None, 0);
+    }
+
+    /// @dev The agent-level answers, before any call is looked at — one function for the validator,
+    ///      the hook and `preflight`, so the three cannot disagree about who the agent is.
+    struct Gate {
+        Refusal refusal;
+        uint256 epoch;
+        bytes32 aKey;
+        bytes32 vKey;
+        PolicyMeta meta;
+        uint256 maxCalls;
+    }
+
+    /**
+     * @dev What differs by mode, and why:
+     *      - **Validate** never reads the clock (ERC-7562 bans TIMESTAMP in validation; the
+     *        comparison below is not reached) and applies the tally: paused at `MAX_UNCOUNTED`,
+     *        single calls only while anything is uncounted.
+     *      - **Commit** is the hook, which runs *after* the validator has already counted this very
+     *        request — so the tally it sees is never zero, and applying the tally rules here would
+     *        refuse every batch the validator just approved.
+     *      - **Dry** is `preflight`: the validator's rules plus the clock.
+     */
+    function _gate(address account, bytes32 agentId, Mode mode) internal view returns (Gate memory gate) {
+        // Both halves have to be mounted. With the validator alone nothing would ever debit a
+        // bucket, and the limits would read as enforced while being enforced by nobody.
+        if (_installedTypes[account] != (TYPE_BIT_VALIDATOR | TYPE_BIT_HOOK)) {
+            gate.refusal = Refusal.NotMounted;
+            return gate;
+        }
+        gate.epoch = _epoch[account];
+        gate.aKey = _agentKey(gate.epoch, agentId);
+        if (_fingerprint[gate.aKey][account] == bytes32(0)) {
+            gate.refusal = Refusal.NoPolicy;
+            return gate;
+        }
+        gate.meta = _meta[gate.aKey][account];
+        gate.vKey = _versionKey(gate.aKey, _version[gate.aKey][account]);
+        gate.maxCalls = MAX_BATCH;
+        if (mode == Mode.Commit) return gate;
+
+        if (mode == Mode.Dry && gate.meta.validUntil != 0 && block.timestamp >= gate.meta.validUntil) {
+            gate.refusal = Refusal.Expired;
+            return gate;
+        }
+        uint256 uncounted = _uncounted[gate.aKey][account];
+        if (uncounted >= MAX_UNCOUNTED) {
+            gate.refusal = Refusal.Paused;
+            return gate;
+        }
+        if (uncounted != 0) gate.maxCalls = 1;
     }
 
     function uncountedOf(address account, bytes32 agentId) external view returns (uint256) {
@@ -760,84 +909,116 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         /// @dev Zero on the validator's pass: ERC-7562 [OP-011] bans TIMESTAMP during validation,
         ///      so the clock only exists on the hook's.
         uint64 nowTs;
-        bool commit;
+        Mode mode;
         Running[] running;
         uint256 used;
     }
 
-    function _walk(
-        address account,
-        uint256 e,
-        bytes32 vKey,
-        PolicyMeta memory meta,
-        bytes calldata callData,
-        bool commit
-    ) internal returns (bool) {
-        (bool decoded, Call[] memory calls) = _decodeCalls(callData);
-        if (!decoded || calls.length == 0 || calls.length > MAX_BATCH) return false;
+    /// @dev Decode the request and set up the walk. Shared by all three modes, so they cannot
+    ///      disagree about what a request *is* or how many calls it may carry.
+    function _begin(address account, Gate memory gate, bytes calldata callData, Mode mode)
+        internal
+        view
+        returns (Refusal refusal, Call[] memory calls, WalkCtx memory ctx)
+    {
+        bool decoded;
+        (decoded, calls) = _decodeCalls(callData);
+        if (!decoded || calls.length == 0 || calls.length > MAX_BATCH) return (Refusal.Malformed, calls, ctx);
+        // Batches only while the tally is zero: see `MAX_UNCOUNTED`.
+        if (calls.length > gate.maxCalls) return (Refusal.SinglesOnly, calls, ctx);
 
-        WalkCtx memory ctx = WalkCtx({
+        ctx = WalkCtx({
             account: account,
-            epoch: e,
-            vKey: vKey,
-            settlementSigner: meta.settlementSigner,
-            adScopeAll: meta.adScopeAll,
-            nowTs: commit ? uint64(block.timestamp) : 0,
-            commit: commit,
+            epoch: gate.epoch,
+            vKey: gate.vKey,
+            settlementSigner: gate.meta.settlementSigner,
+            adScopeAll: gate.meta.adScopeAll,
+            nowTs: mode == Mode.Validate ? 0 : uint64(block.timestamp),
+            mode: mode,
             // Two running buckets per call at worst: the agent's and the account's.
             running: new Running[](calls.length * 2),
             used: 0
         });
-
-        for (uint256 i = 0; i < calls.length; ++i) {
-            if (!_checkOne(ctx, calls[i])) return false;
-        }
-        if (ctx.commit) _commit(ctx);
-        return true;
     }
 
-    function _checkOne(WalkCtx memory ctx, Call memory c) internal returns (bool) {
-        if (!_flag[_targetKey(ctx.epoch, c.target)][ctx.account]) return false;
+    function _walk(address account, Gate memory gate, bytes calldata callData, Mode mode)
+        internal
+        returns (Refusal refusal, uint256 callIndex)
+    {
+        Call[] memory calls;
+        WalkCtx memory ctx;
+        (refusal, calls, ctx) = _begin(account, gate, callData, mode);
+        if (refusal != Refusal.None) return (refusal, 0);
+
+        for (uint256 i = 0; i < calls.length; ++i) {
+            Checked memory checked = _checkStatic(ctx, calls[i]);
+            if (checked.refusal != Refusal.None) return (checked.refusal, i);
+
+            if (mode == Mode.Validate) {
+                // The volume bucket is the hook's alone. Refilling it needs the elapsed time and
+                // ERC-7562 [OP-011] bans TIMESTAMP during validation, so a validator that priced the
+                // bucket would be one no bundler carries — which `ValidationRulesTest` catches by
+                // simulating the real rules rather than reasoning about them. What the validator
+                // can do without a clock is hold the request to the stored floor.
+                refusal = _reserve(ctx, checked.token, checked.row, checked.amount);
+                if (refusal != Refusal.None) return (refusal, i);
+            } else {
+                refusal = _spend(ctx, checked.token, checked.row, checked.amount);
+                if (refusal != Refusal.None) return (refusal, i);
+                // Debited for real now, so it is no longer "asked for and not yet counted". Without
+                // this the running total would double-count against a level the hook has already
+                // lowered whenever one transaction carries more than one `handleOps`.
+                _release(ctx, checked.token, checked.amount);
+            }
+        }
+        if (mode == Mode.Commit) _commit(ctx);
+        return (Refusal.None, 0);
+    }
+
+    /// @dev The clock-free rules for one call: everything but the buckets. A `view`, so `preflight`
+    ///      runs the very same checks the validator and the hook do.
+    function _checkStatic(WalkCtx memory ctx, Call memory c) internal view returns (Checked memory out) {
+        if (!_flag[_targetKey(ctx.epoch, c.target)][ctx.account]) return _refuse(out, Refusal.TargetNotPinned);
         // The policy speaks about a target, a selector and the trade. ETH riding on the call is
         // outside all three, so the only amount it can vouch for is none.
-        if (c.value != 0) return false;
-        if (c.data.length < 4) return false;
+        if (c.value != 0) return _refuse(out, Refusal.ValueAttached);
+        if (c.data.length < 4) return _refuse(out, Refusal.Malformed);
 
         uint8 actionId = _actionIdOf(bytes4(c.data));
-        if (actionId == 0 || !_flag[_actionKey(ctx.vKey, actionId)][ctx.account]) return false;
+        if (actionId == 0 || !_flag[_actionKey(ctx.vKey, actionId)][ctx.account]) {
+            return _refuse(out, Refusal.ActionNotAllowed);
+        }
 
         IAdManager.OrderParams memory params;
         try this.decodeLock(c.data) returns (IAdManager.OrderParams memory decoded) {
             params = decoded;
         } catch {
-            return false;
+            return _refuse(out, Refusal.BadArguments);
         }
-        if (params.adSettlementSigner != ctx.settlementSigner) return false;
-        if (!ctx.adScopeAll && !_flag[_adKey(ctx.vKey, keccak256(bytes(params.adId)))][ctx.account]) return false;
+        if (params.adSettlementSigner != ctx.settlementSigner) return _refuse(out, Refusal.SettlementSignerMismatch);
+        if (!ctx.adScopeAll && !_flag[_adKey(ctx.vKey, keccak256(bytes(params.adId)))][ctx.account]) {
+            return _refuse(out, Refusal.AdNotInScope);
+        }
 
         // Reach before size, as on Soroban: a trade the agent may not serve at all is not a sizing
         // question. Both tokens have to be on the whitelist, and a whitelisted token with no limit
         // row is refused rather than waved through.
-        TokenLimitRow memory row = _agentLimit[_tokenKey(ctx.vKey, params.adChainToken)][ctx.account];
-        if (row.capacity == 0) return false;
-        if (_agentLimit[_tokenKey(ctx.vKey, params.orderChainToken)][ctx.account].capacity == 0) return false;
+        out.token = params.adChainToken;
+        out.row = _agentLimit[_tokenKey(ctx.vKey, out.token)][ctx.account];
+        if (out.row.capacity == 0) return _refuse(out, Refusal.TokenNotAllowed);
+        if (_agentLimit[_tokenKey(ctx.vKey, params.orderChainToken)][ctx.account].capacity == 0) {
+            return _refuse(out, Refusal.TokenNotAllowed);
+        }
 
-        (bool scaled, uint256 amount) = _adAmount(params);
-        if (!scaled || amount == 0 || amount > row.maxPerOrder) return false;
+        bool scaled;
+        (scaled, out.amount) = _adAmount(params);
+        if (!scaled || out.amount == 0) return _refuse(out, Refusal.AmountNotScalable);
+        if (out.amount > out.row.maxPerOrder) return _refuse(out, Refusal.OverPerOrderCap);
+    }
 
-        // The volume bucket is the hook's alone. Refilling it needs the elapsed time and
-        // ERC-7562 [OP-011] bans TIMESTAMP during validation, so a validator that priced the
-        // bucket would be a validator no bundler carries — which
-        // `ValidationRulesTest` catches by simulating the real rules rather than reasoning about
-        // them. The per-order cap above is time-independent and still refuses an oversized call
-        // for free; the aggregate is refused at execution, where the maker pays the gas.
-        if (!ctx.commit) return _reserve(ctx, params.adChainToken, row, amount);
-        if (!_spend(ctx, params.adChainToken, row, amount)) return false;
-        // Debited for real now, so it is no longer "asked for and not yet counted". Without this the
-        // running total would double-count against a level the hook has already lowered whenever
-        // one transaction carries more than one `handleOps`.
-        _release(ctx, params.adChainToken, amount);
-        return true;
+    function _refuse(Checked memory out, Refusal refusal) private pure returns (Checked memory) {
+        out.refusal = refusal;
+        return out;
     }
 
     /**
@@ -870,12 +1051,12 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
      */
     function _reserve(WalkCtx memory ctx, bytes32 token, TokenLimitRow memory row, uint256 amount)
         internal
-        returns (bool)
+        returns (Refusal)
     {
         bytes32 agentRowKey = _tokenKey(ctx.vKey, token);
         bytes32 ceilingKey = _ceilKey(ctx.epoch, token);
         AgentRateLimit.Limit memory ceiling = _accountLimit[ceilingKey][ctx.account];
-        if (ceiling.capacity == 0) return false;
+        if (ceiling.capacity == 0) return Refusal.NoAccountCeiling;
 
         bytes32 agentSlot = _pendingSlot(ctx.account, agentRowKey);
         bytes32 ceilingSlot = _pendingSlot(ctx.account, ceilingKey);
@@ -884,11 +1065,11 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         stored = _accountBucket[ceilingKey][ctx.account];
         (bool okCeiling, uint256 ceilingTotal) =
             _fits(ceilingSlot, amount, stored.lastTs == 0 ? ceiling.capacity : stored.level);
-        if (!okAgent || !okCeiling) return false;
+        if (!okAgent || !okCeiling) return Refusal.OverStoredAllowance;
 
         _tstore(agentSlot, agentTotal);
         _tstore(ceilingSlot, ceilingTotal);
-        return true;
+        return Refusal.None;
     }
 
     function _release(WalkCtx memory ctx, bytes32 token, uint256 amount) internal {
@@ -930,28 +1111,28 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     function _spend(WalkCtx memory ctx, bytes32 token, TokenLimitRow memory row, uint256 amount)
         internal
         view
-        returns (bool)
+        returns (Refusal)
     {
         uint256 ai = _acquireAgent(ctx, token, row);
         uint256 ci = _acquireCeiling(ctx, token);
-        if (ci == type(uint256).max) return false;
+        if (ci == type(uint256).max) return Refusal.NoAccountCeiling;
 
         AgentRateLimit.Limit memory rate =
             AgentRateLimit.Limit({capacity: row.capacity, refillPerSecond: row.refillPerSecond});
         (bool okAgent, AgentRateLimit.Bucket memory nextAgent) =
             AgentRateLimit.trySpend(rate, ctx.running[ai].bucket, amount, ctx.nowTs);
-        if (!okAgent) return false;
+        if (!okAgent) return Refusal.AgentAllowanceExceeded;
 
         (bool okCeil, AgentRateLimit.Bucket memory nextCeil) = AgentRateLimit.trySpend(
             _accountLimit[_ceilKey(ctx.epoch, token)][ctx.account], ctx.running[ci].bucket, amount, ctx.nowTs
         );
-        if (!okCeil) return false;
+        if (!okCeil) return Refusal.AccountCeilingExceeded;
 
         ctx.running[ai].bucket = nextAgent;
         ctx.running[ai].dirty = true;
         ctx.running[ci].bucket = nextCeil;
         ctx.running[ci].dirty = true;
-        return true;
+        return Refusal.None;
     }
 
     function _acquireAgent(WalkCtx memory ctx, bytes32 token, TokenLimitRow memory row)

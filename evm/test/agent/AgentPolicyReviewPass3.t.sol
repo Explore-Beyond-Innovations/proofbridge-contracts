@@ -10,6 +10,9 @@ import {AgentPolicyBase} from "./AgentPolicyBase.t.sol";
 ///
 /// The module keeps a note of which halves are installed, and three passes found three ways for
 /// the note to be wrong. These tests are about not depending on it: the hook has to prove it runs.
+///
+/// One transaction per `handleOps`, as on a chain: sharing one is what hid pass 4's H1.
+/// forge-config: default.isolate = true
 contract AgentPolicyReviewPass3Test is AgentPolicyBase {
     using ModuleKitHelpers for *;
 
