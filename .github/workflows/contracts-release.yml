@@ -133,7 +133,7 @@ jobs:
           done
 
           # Copy only the artifacts the deployer actually loads.
-          EVM_ARTIFACTS="OrderPortal AdManager MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20 BLSKeyRegistry CounterpartyVerifier libSCL_EIP6565 RootAnchor Registrar DisputeManager"
+          EVM_ARTIFACTS="OrderPortal AdManager MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20 BLSKeyRegistry CounterpartyVerifier libSCL_EIP6565 RootAnchor Registrar DisputeManager AgentPolicyCodec ProofBridgeAgentPolicy"
           for c in $EVM_ARTIFACTS; do
             mkdir -p "$EVM_OUT/${c}.sol"
             cp evm/out/${c}.sol/*.json "$EVM_OUT/${c}.sol/"

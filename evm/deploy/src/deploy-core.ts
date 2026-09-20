@@ -50,6 +50,8 @@ export interface DeployCoreResult {
     rootAnchor: string;
     registrar: string;
     disputeManager: string;
+    agentPolicyCodec: string;
+    agentPolicy: string;
   };
 }
 
@@ -306,6 +308,34 @@ export async function deployCore(
     }
   }
 
+  // ── agent policy module (2.1g): the parser library, then the module linked to it ──
+  // One shared, ownerless contract per chain that every maker's account installs. Reused only as
+  // a pair: a reused module still points at the library it was linked with.
+  const reuseAgent =
+    existing?.contracts.agentPolicyCodec?.address && existing?.contracts.agentPolicy?.address;
+  const agentPolicyCodecAddr = await deployIfMissing(
+    "AgentPolicyCodec",
+    reuseAgent ? existing?.contracts.agentPolicyCodec?.address : undefined,
+    async () => {
+      const f = contractFactory("AgentPolicyCodec", "AgentPolicyCodec", signer);
+      const c = await f.deploy({ nonce: nonces.next() });
+      await c.deploymentTransaction()?.wait();
+      return c as ethers.Contract;
+    },
+  );
+  const agentPolicyAddr = await deployIfMissing(
+    "ProofBridgeAgentPolicy",
+    reuseAgent ? existing?.contracts.agentPolicy?.address : undefined,
+    async () => {
+      const f = contractFactoryLinked("ProofBridgeAgentPolicy", "ProofBridgeAgentPolicy", signer, {
+        AgentPolicyCodec: agentPolicyCodecAddr,
+      });
+      const c = await f.deploy({ nonce: nonces.next() });
+      await c.deploymentTransaction()?.wait();
+      return c as ethers.Contract;
+    },
+  );
+
   // ── wire the escrows as the registry's revoke guards ──────────────
   // Re-set every run (idempotent); guards only gate key revocation/rotation.
   {
@@ -410,6 +440,8 @@ export async function deployCore(
       rootAnchor: rootAnchorAddr,
       registrar: registrarAddr,
       disputeManager: disputeManagerAddr,
+      agentPolicyCodec: agentPolicyCodecAddr,
+      agentPolicy: agentPolicyAddr,
     },
     // Preserve tokens already in the manifest (added by deploy-test-tokens / hand-curation).
     tokens: (existing?.tokens ?? []) as BuildManifestInput["tokens"],
@@ -442,6 +474,8 @@ export async function deployCore(
       rootAnchor: rootAnchorAddr,
       registrar: registrarAddr,
       disputeManager: disputeManagerAddr,
+      agentPolicyCodec: agentPolicyCodecAddr,
+      agentPolicy: agentPolicyAddr,
     },
   };
 }
