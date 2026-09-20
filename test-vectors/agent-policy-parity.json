@@ -1,0 +1,1831 @@
+{
+  "_meta": {
+    "note": "T-60 layer 2. Policy + lock -> accept or reject. Every `expect` is written by hand from the policy as specified; nothing here is derived from an implementation. A case has exactly one fault. `target` and `signer` are symbolic: each reader resolves them against its own rig. Each reader runs the cases that name it and asserts it ran `counts[reader]`.",
+    "generator": "scripts/bls-vectors/src/gen-agent-policy-parity.ts"
+  },
+  "counts": {
+    "soroban": {
+      "cases": 19,
+      "steps": 43,
+      "installs": 4
+    },
+    "evm": {
+      "cases": 19,
+      "steps": 43,
+      "installs": 4
+    },
+    "ts": {
+      "cases": 12,
+      "steps": 21,
+      "installs": 0
+    }
+  },
+  "constants": {
+    "evmSettlementSigner": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "otherSigner": "0x7777777777777777777777777777777777777777777777777777777777777777"
+  },
+  "reasons": {
+    "TargetNotAllowed": {
+      "soroban": "TargetNotAllowed",
+      "evm": "TargetNotPinned"
+    },
+    "ActionNotAllowed": {
+      "soroban": "ActionNotAllowed",
+      "evm": "ActionNotAllowed"
+    },
+    "TokenNotAllowed": {
+      "soroban": "TokenNotAllowed",
+      "evm": "TokenNotAllowed",
+      "ts": "not on the policy whitelist"
+    },
+    "OverPerOrderCap": {
+      "soroban": "CapExceeded",
+      "evm": "OverPerOrderCap",
+      "ts": "exceeds the per-order cap"
+    },
+    "AmountNotScalable": {
+      "soroban": "BadArgs",
+      "evm": "AmountNotScalable",
+      "ts": "does not scale to ad units"
+    },
+    "AgentVolumeExceeded": {
+      "soroban": "VolumeExceeded",
+      "evm": "AgentAllowanceExceeded"
+    },
+    "AccountVolumeExceeded": {
+      "soroban": "VolumeExceeded",
+      "evm": "AccountCeilingExceeded"
+    },
+    "Expired": {
+      "soroban": "PolicyExpired",
+      "evm": "Expired",
+      "ts": "policy expired"
+    },
+    "Revoked": {
+      "soroban": "AgentRevoked",
+      "evm": "NoPolicy",
+      "ts": "agent revoked"
+    },
+    "SettlementSignerMismatch": {
+      "soroban": "SettlementSignerMismatch",
+      "evm": "SettlementSignerMismatch"
+    },
+    "AdNotInScope": {
+      "soroban": "AdNotAllowed",
+      "evm": "AdNotInScope",
+      "ts": "outside the agent's ad scope"
+    }
+  },
+  "installReasons": {
+    "NoAccountCeiling": {
+      "soroban": "NoVolumeLimit",
+      "evm": "AgentPolicy__NoAccountCeiling"
+    },
+    "AlreadyExpired": {
+      "soroban": "BadPolicy",
+      "evm": "AgentPolicy__BadExpiry"
+    }
+  },
+  "cases": [
+    {
+      "name": "a lock inside every limit is allowed",
+      "group": "control",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept"
+        }
+      ]
+    },
+    {
+      "name": "a contract that is not a pinned escrow",
+      "group": "target",
+      "readers": [
+        "soroban",
+        "evm"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "unpinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "TargetNotAllowed"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept",
+          "why": "the same lock at a pinned escrow"
+        }
+      ]
+    },
+    {
+      "name": "another function on a pinned escrow",
+      "group": "action",
+      "readers": [
+        "soroban",
+        "evm"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "other",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "ActionNotAllowed"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept"
+        }
+      ]
+    },
+    {
+      "name": "the ad-side token is off the whitelist",
+      "group": "whitelist",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x3333333333333333333333333333333333333333333333333333333333333333",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "TokenNotAllowed"
+        }
+      ]
+    },
+    {
+      "name": "the order-side token is off the whitelist",
+      "group": "whitelist",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x3333333333333333333333333333333333333333333333333333333333333333",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "TokenNotAllowed"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept"
+        }
+      ]
+    },
+    {
+      "name": "a lock naming a settlement signer the policy does not",
+      "group": "settlement signer",
+      "readers": [
+        "soroban",
+        "evm"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "other"
+          },
+          "expect": "SettlementSignerMismatch"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept"
+        }
+      ]
+    },
+    {
+      "name": "a scoped policy serves its ad and no other",
+      "group": "ad scope",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": [
+          "ad-alpha",
+          "ad-bravo"
+        ],
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a0102000861642d616c706861000861642d627261766f0000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-bravo",
+            "signer": "policy"
+          },
+          "expect": "accept"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-zulu",
+            "signer": "policy"
+          },
+          "expect": "AdNotInScope"
+        }
+      ]
+    },
+    {
+      "name": "an every-ad policy serves the ad a scoped one refused",
+      "group": "ad scope",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-zulu",
+            "signer": "policy"
+          },
+          "expect": "accept"
+        }
+      ]
+    },
+    {
+      "name": "the per-order cap binds at one unit over",
+      "group": "per-order cap",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1000000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept",
+          "why": "exactly the cap"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1000001",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "OverPerOrderCap"
+        }
+      ]
+    },
+    {
+      "name": "the cap is in ad-token units: 18 places down to 6",
+      "group": "decimal scaling",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1000000000000000000",
+            "orderDecimals": 18,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept",
+          "why": "10^18 at 18 places is 1,000,000 at 6: exactly the cap"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1000001000000000000",
+            "orderDecimals": 18,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "OverPerOrderCap",
+          "why": "1,000,001 at 6 places"
+        }
+      ]
+    },
+    {
+      "name": "the cap is in ad-token units: 6 places up to 18",
+      "group": "decimal scaling",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000000000000000",
+            "capacity": "5000000000000000000",
+            "refillPerSecond": "1000000000000"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000000000000000",
+            "capacity": "5000000000000000000",
+            "refillPerSecond": "1000000000000"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f01010211111111111111111111111111111111111111111111111111111111111111110000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000004563918244f40000000000000000000000000000000000000000000000000000000000e8d4a5100022222222222222222222222222222222222222222222222222222222222222220000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000004563918244f40000000000000000000000000000000000000000000000000000000000e8d4a5100000000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1000000",
+            "orderDecimals": 6,
+            "adDecimals": 18,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept",
+          "why": "1,000,000 at 6 places is 10^18 at 18: exactly the cap"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1000001",
+            "orderDecimals": 6,
+            "adDecimals": 18,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "OverPerOrderCap"
+        }
+      ]
+    },
+    {
+      "name": "an amount that does not scale exactly is refused, not rounded",
+      "group": "decimal scaling",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "100000000000000001",
+            "orderDecimals": 18,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "AmountNotScalable",
+          "why": "a remainder of one"
+        }
+      ]
+    },
+    {
+      "name": "an upscale past u128: refused everywhere, for different reasons",
+      "group": "decimal scaling",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "85070591730234615865843651857942052863",
+            "capacity": "170141183460469231731687303715884105727",
+            "refillPerSecond": "1"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "85070591730234615865843651857942052863",
+            "capacity": "170141183460469231731687303715884105727",
+            "refillPerSecond": "1"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f0101021111111111111111111111111111111111111111111111111111111111111111000000000000000000000000000000003fffffffffffffffffffffffffffffff000000000000000000000000000000007fffffffffffffffffffffffffffffff00000000000000000000000000000000000000000000000000000000000000012222222222222222222222222222222222222222222222222222222222222222000000000000000000000000000000003fffffffffffffffffffffffffffffff000000000000000000000000000000007fffffffffffffffffffffffffffffff000000000000000000000000000000000000000000000000000000000000000100000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "340282366920938463463374608",
+            "orderDecimals": 6,
+            "adDecimals": 18,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": {
+            "soroban": "AmountNotScalable",
+            "ts": "AmountNotScalable",
+            "evm": "OverPerOrderCap"
+          },
+          "why": "Soroban and TypeScript overflow at u128. The EVM scales in 256 bits and gets a number, which is over the cap because a cap cannot exceed u128."
+        }
+      ]
+    },
+    {
+      "name": "the agent's bucket drains, refuses, refills with time",
+      "group": "agent bucket",
+      "readers": [
+        "soroban",
+        "evm"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "2000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "2000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000001e848000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000001e848000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "2000000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept",
+          "why": "5,000,000 -> 3,000,000"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "2000000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept",
+          "why": "-> 1,000,000"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "2000000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "AgentVolumeExceeded",
+          "why": "1,000,000 left"
+        },
+        {
+          "op": "lock",
+          "warp": 100000,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "2000000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept",
+          "why": "100,000 s x 10 refills 1,000,000: exactly 2,000,000 -> 0"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "AgentVolumeExceeded",
+          "why": "empty, and no time has passed"
+        },
+        {
+          "op": "lock",
+          "warp": 1,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "10",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept",
+          "why": "one second is 10 units"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "AgentVolumeExceeded",
+          "why": "and not one more"
+        }
+      ]
+    },
+    {
+      "name": "a never-spent bucket is full: the first lock may take all of it",
+      "group": "agent bucket",
+      "readers": [
+        "soroban",
+        "evm"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "1000000",
+            "refillPerSecond": "1"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "1000000",
+            "refillPerSecond": "1"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000000f42400000000000000000000000000000000000000000000000000000000000000001222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000000f4240000000000000000000000000000000000000000000000000000000000000000100000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1000000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept",
+          "why": "capacity, from a bucket nothing has touched"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "AgentVolumeExceeded"
+        }
+      ]
+    },
+    {
+      "name": "the same, at a start time of 1",
+      "group": "agent bucket",
+      "readers": [
+        "soroban",
+        "evm"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "1000000",
+            "refillPerSecond": "1"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "1000000",
+            "refillPerSecond": "1"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000000f42400000000000000000000000000000000000000000000000000000000000000001222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000000f4240000000000000000000000000000000000000000000000000000000000000000100000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1000000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept",
+          "why": "the stamp written here is 1, as close to the EVM's lastTs == 0 'never spent' sentinel as a chain gets"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "2",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "AgentVolumeExceeded",
+          "why": "a spent bucket must not read as never spent"
+        },
+        {
+          "op": "lock",
+          "warp": 1,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept",
+          "why": "one second, one unit"
+        }
+      ]
+    },
+    {
+      "name": "the account's ceiling binds inside the agent's allowance",
+      "group": "account ceiling",
+      "readers": [
+        "soroban",
+        "evm"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "3000000",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "3000000",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1000000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1000000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1000000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept",
+          "why": "the account's 3,000,000 is gone; the agent still has 2,000,000"
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "1000000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "AccountVolumeExceeded"
+        }
+      ]
+    },
+    {
+      "name": "valid until is exclusive: the last second, then the first expired one",
+      "group": "expiry",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 1700000100
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a0000000000006553f164cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 99,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept",
+          "why": "now = validUntil - 1"
+        },
+        {
+          "op": "lock",
+          "warp": 1,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "Expired",
+          "why": "now = validUntil"
+        }
+      ]
+    },
+    {
+      "name": "a revoked agent is refused",
+      "group": "revoked",
+      "readers": [
+        "soroban",
+        "evm",
+        "ts"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "steps": [
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "accept"
+        },
+        {
+          "op": "revoke",
+          "warp": 0
+        },
+        {
+          "op": "lock",
+          "warp": 0,
+          "lock": {
+            "target": "pinned",
+            "action": "lock_for_order",
+            "adChainToken": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "orderChainToken": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "amount": "500000",
+            "orderDecimals": 6,
+            "adDecimals": 6,
+            "adId": "ad-alpha",
+            "signer": "policy"
+          },
+          "expect": "Revoked"
+        }
+      ]
+    }
+  ],
+  "installs": [
+    {
+      "name": "a well-formed policy with a ceiling for every token",
+      "readers": [
+        "soroban",
+        "evm"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "expect": "installs"
+    },
+    {
+      "name": "a token the account has no ceiling for",
+      "readers": [
+        "soroban",
+        "evm"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 0
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a00000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "expect": "NoAccountCeiling"
+    },
+    {
+      "name": "a policy that expires the second it is installed",
+      "readers": [
+        "soroban",
+        "evm"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 1700000000
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a0000000000006553f100cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "expect": "AlreadyExpired"
+    },
+    {
+      "name": "and one second later it installs",
+      "readers": [
+        "soroban",
+        "evm"
+      ],
+      "policy": {
+        "actions": [
+          "lock_for_order"
+        ],
+        "limits": [
+          {
+            "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          },
+          {
+            "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "maxPerOrder": "1000000",
+            "capacity": "5000000",
+            "refillPerSecond": "10"
+          }
+        ],
+        "adScope": null,
+        "validUntil": 1700000001
+      },
+      "evmPolicyHex": "0xc665e78e096650c4735a55146f5c2b68f47211a0ac0e7deca3761ba60adfbd8f010102111111111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a222222222222222222222222222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f424000000000000000000000000000000000000000000000000000000000004c4b40000000000000000000000000000000000000000000000000000000000000000a0000000000006553f101cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountCeilings": [
+        {
+          "token": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        },
+        {
+          "token": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "capacity": "170141183460469231731687303715884105727",
+          "refillPerSecond": "1"
+        }
+      ],
+      "startTime": 1700000000,
+      "expect": "installs"
+    }
+  ]
+}
