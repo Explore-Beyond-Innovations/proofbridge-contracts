@@ -83,7 +83,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         Paused, // MAX_UNCOUNTED reached; the owner resets
         SinglesOnly, // a batch while an approved request is still uncounted
         Expired, // preflight only: the validator leaves expiry to the EntryPoint
-        Malformed, // not an `execute` this module understands, or over MAX_BATCH
+        MalformedRequest, // not an `execute` this module understands, or over MAX_BATCH: no call to blame
+        MalformedCall, // this call is too short to carry a selector
         TargetNotPinned,
         ValueAttached,
         ActionNotAllowed,
@@ -98,6 +99,11 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         AgentAllowanceExceeded, // the hook, or preflight: the real, refilled number
         AccountCeilingExceeded
     }
+
+    /// @notice The `callIndex` of a refusal that is about the request or the agent as a whole —
+    ///         not mounted, no policy, paused, an envelope that cannot be decoded. Zero would have
+    ///         read as "the first call's fault".
+    uint256 public constant NO_CALL = type(uint256).max;
 
     /// @dev Validate: no clock, reserve against the stored floor. Commit: the hook — real refill,
     ///      buckets written. Dry: `preflight` — the hook's arithmetic with nothing written.
@@ -162,8 +168,10 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
      *      approved request not yet counted, the warning sign — the agent may send single trades
      *      only, until the hook proves itself again. So a maker with several orders batches them
      *      freely, a failed batch is one strike like a failed single trade, and the hookless bound is
-     *      **one batch plus two single trades, per token**, where the batch can never exceed the
-     *      stored allowance (`_reserve`). The one batch is unavoidable in any design that allows
+     *      **one batch plus two single trades, per token, per agent**, where the batch can never
+     *      exceed the stored allowance (`_reserve`). Per *agent*: the validator's running totals are
+     *      transient, so with the hook gone nothing lowers the stored ceiling, and each agent on the
+     *      account gets its own batch and its own two trades. The one batch is unavoidable in any design that allows
      *      batches: when the hook first goes missing the tally still reads zero. An agent is expected
      *      to read `uncountedOf` and, if it is not zero, lead with a single trade.
      *
@@ -568,7 +576,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         // other half — bundled ahead of it.
         Gate memory gate = _gate(account, agentId, Mode.Commit);
         if (gate.refusal == Refusal.NoPolicy) revert AgentPolicy__RevokedBeforeExecution();
-        if (gate.refusal != Refusal.None) revert AgentPolicy__RefusedAtExecution(0, gate.refusal);
+        if (gate.refusal != Refusal.None) revert AgentPolicy__RefusedAtExecution(NO_CALL, gate.refusal);
 
         // The same walk the validator ran, in `Mode.Commit`. A disagreement between the two is
         // impossible rather than unlikely: it is one function.
@@ -666,7 +674,13 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
      *      **may read the clock**, so unlike the validator it judges the allowance against the real,
      *      refilled number and answers `AgentAllowanceExceeded` where the validator could only let
      *      the hook find out. It cannot see an operation's gas fields: read `gasBudgetOf` for that.
-     *      A `None` here is not a promise — another operation can land first — but a refusal is one.
+     *      It answers for **both** halves, validator first: a batch the validator's floor would
+     *      refuse against a stale-low stored level is `OverStoredAllowance` here even though the
+     *      refilled allowance covers it, because that is what the chain will say until a single
+     *      trade lands. A `None` is not a promise — another operation can land first. A refusal that
+     *      depends only on the policy is one; `AgentAllowanceExceeded`, `AccountCeilingExceeded`,
+     *      `OverStoredAllowance`, `SinglesOnly` and `Paused` clear with time, a landed operation, or
+     *      the owner's reset.
      */
     function preflight(address account, bytes32 agentId, bytes calldata callData)
         external
@@ -674,21 +688,25 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         returns (Refusal reason, uint256 callIndex)
     {
         Gate memory gate = _gate(account, agentId, Mode.Dry);
-        if (gate.refusal != Refusal.None) return (gate.refusal, 0);
+        if (gate.refusal != Refusal.None) return (gate.refusal, NO_CALL);
 
         Call[] memory calls;
         WalkCtx memory ctx;
         (reason, calls, ctx) = _begin(account, gate, callData, Mode.Dry);
-        if (reason != Refusal.None) return (reason, 0);
-        // `_walk` in `Mode.Dry`: the hook's arithmetic, nothing written. Spelled out here only
-        // because a `view` cannot share a body with the modes that write.
+        if (reason != Refusal.None) return (reason, NO_CALL);
+        // The one Dry walk (`_walk` refuses the mode): the same per-call checks, then both halves'
+        // verdicts in the order the chain reaches them — the validator's clockless floor first,
+        // then the hook's real arithmetic — with nothing written.
+        Asked memory asked = Asked(new bytes32[](calls.length * 2), new uint256[](calls.length * 2), 0);
         for (uint256 i = 0; i < calls.length; ++i) {
             Checked memory checked = _checkStatic(ctx, calls[i]);
             if (checked.refusal != Refusal.None) return (checked.refusal, i);
+            reason = _reserveDry(ctx, checked, asked);
+            if (reason != Refusal.None) return (reason, i);
             reason = _spend(ctx, checked.token, checked.row, checked.amount);
             if (reason != Refusal.None) return (reason, i);
         }
-        return (Refusal.None, 0);
+        return (Refusal.None, NO_CALL);
     }
 
     /// @dev The agent-level answers, before any call is looked at — one function for the validator,
@@ -923,7 +941,9 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
     {
         bool decoded;
         (decoded, calls) = _decodeCalls(callData);
-        if (!decoded || calls.length == 0 || calls.length > MAX_BATCH) return (Refusal.Malformed, calls, ctx);
+        if (!decoded || calls.length == 0 || calls.length > MAX_BATCH) {
+            return (Refusal.MalformedRequest, calls, ctx);
+        }
         // Batches only while the tally is zero: see `MAX_UNCOUNTED`.
         if (calls.length > gate.maxCalls) return (Refusal.SinglesOnly, calls, ctx);
 
@@ -945,10 +965,12 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         internal
         returns (Refusal refusal, uint256 callIndex)
     {
+        // `preflight` is the one Dry walk. Taken here, Dry would fall into the branch that writes.
+        assert(mode != Mode.Dry);
         Call[] memory calls;
         WalkCtx memory ctx;
         (refusal, calls, ctx) = _begin(account, gate, callData, mode);
-        if (refusal != Refusal.None) return (refusal, 0);
+        if (refusal != Refusal.None) return (refusal, NO_CALL);
 
         for (uint256 i = 0; i < calls.length; ++i) {
             Checked memory checked = _checkStatic(ctx, calls[i]);
@@ -982,7 +1004,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         // The policy speaks about a target, a selector and the trade. ETH riding on the call is
         // outside all three, so the only amount it can vouch for is none.
         if (c.value != 0) return _refuse(out, Refusal.ValueAttached);
-        if (c.data.length < 4) return _refuse(out, Refusal.Malformed);
+        if (c.data.length < 4) return _refuse(out, Refusal.MalformedCall);
 
         uint8 actionId = _actionIdOf(bytes4(c.data));
         if (actionId == 0 || !_flag[_actionKey(ctx.vKey, actionId)][ctx.account]) {
@@ -1053,23 +1075,47 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         internal
         returns (Refusal)
     {
-        bytes32 agentRowKey = _tokenKey(ctx.vKey, token);
-        bytes32 ceilingKey = _ceilKey(ctx.epoch, token);
-        AgentRateLimit.Limit memory ceiling = _accountLimit[ceilingKey][ctx.account];
-        if (ceiling.capacity == 0) return Refusal.NoAccountCeiling;
+        Floors memory f = _floors(ctx, token, row);
+        if (f.refusal != Refusal.None) return f.refusal;
 
-        bytes32 agentSlot = _pendingSlot(ctx.account, agentRowKey);
-        bytes32 ceilingSlot = _pendingSlot(ctx.account, ceilingKey);
-        AgentRateLimit.Bucket memory stored = _agentBucket[agentRowKey][ctx.account];
-        (bool okAgent, uint256 agentTotal) = _fits(agentSlot, amount, stored.lastTs == 0 ? row.capacity : stored.level);
-        stored = _accountBucket[ceilingKey][ctx.account];
-        (bool okCeiling, uint256 ceilingTotal) =
-            _fits(ceilingSlot, amount, stored.lastTs == 0 ? ceiling.capacity : stored.level);
+        bytes32 agentSlot = _pendingSlot(ctx.account, f.agentKey);
+        bytes32 ceilingSlot = _pendingSlot(ctx.account, f.ceilingKey);
+        (bool okAgent, uint256 agentTotal) = _fits(agentSlot, amount, f.agentFloor);
+        (bool okCeiling, uint256 ceilingTotal) = _fits(ceilingSlot, amount, f.ceilingFloor);
         if (!okAgent || !okCeiling) return Refusal.OverStoredAllowance;
 
         _tstore(agentSlot, agentTotal);
         _tstore(ceilingSlot, ceilingTotal);
         return Refusal.None;
+    }
+
+    /// @dev The two buckets a call draws on and the stored level of each — the floor. One reading
+    ///      of storage for the validator's `_reserve` and `preflight`'s `_reserveDry`. A bucket
+    ///      never spent from stores nothing and reads as full.
+    struct Floors {
+        Refusal refusal;
+        bytes32 agentKey;
+        bytes32 ceilingKey;
+        uint256 agentFloor;
+        uint256 ceilingFloor;
+    }
+
+    function _floors(WalkCtx memory ctx, bytes32 token, TokenLimitRow memory row)
+        internal
+        view
+        returns (Floors memory f)
+    {
+        f.agentKey = _tokenKey(ctx.vKey, token);
+        f.ceilingKey = _ceilKey(ctx.epoch, token);
+        uint256 ceilingCapacity = _accountLimit[f.ceilingKey][ctx.account].capacity;
+        if (ceilingCapacity == 0) {
+            f.refusal = Refusal.NoAccountCeiling;
+            return f;
+        }
+        AgentRateLimit.Bucket memory stored = _agentBucket[f.agentKey][ctx.account];
+        f.agentFloor = stored.lastTs == 0 ? row.capacity : stored.level;
+        stored = _accountBucket[f.ceilingKey][ctx.account];
+        f.ceilingFloor = stored.lastTs == 0 ? ceilingCapacity : stored.level;
     }
 
     function _release(WalkCtx memory ctx, bytes32 token, uint256 amount) internal {
@@ -1092,8 +1138,48 @@ contract ProofBridgeAgentPolicy is IValidator, IHook {
         assembly ("memory-safe") {
             pending := tload(slot)
         }
+        return _fitsFloor(pending, amount, floor);
+    }
+
+    /// @dev The floor rule itself, once: the first request against a bucket is free, the rest are
+    ///      held cumulatively to the stored level. `_reserve` feeds it transient totals, `preflight`
+    ///      in-memory ones, and neither can restate it differently.
+    function _fitsFloor(uint256 pending, uint256 amount, uint256 floor) internal pure returns (bool ok, uint256 total) {
         total = pending + amount;
         ok = pending == 0 || total <= floor;
+    }
+
+    /// @dev What `preflight` has been asked for so far, per bucket — `_reserve`'s transient totals,
+    ///      in memory. In an `eth_call` nothing is pending, so starting from zero is exact.
+    struct Asked {
+        bytes32[] keys;
+        uint256[] totals;
+        uint256 used;
+    }
+
+    /// @dev `_reserve`, read-only: same keys, same floors, same rule, both checked before either
+    ///      total moves.
+    function _reserveDry(WalkCtx memory ctx, Checked memory c, Asked memory asked) internal view returns (Refusal) {
+        Floors memory f = _floors(ctx, c.token, c.row);
+        if (f.refusal != Refusal.None) return f.refusal;
+
+        uint256 ai = _askedIndex(asked, f.agentKey);
+        uint256 ci = _askedIndex(asked, f.ceilingKey);
+        (bool okAgent, uint256 agentTotal) = _fitsFloor(asked.totals[ai], c.amount, f.agentFloor);
+        (bool okCeiling, uint256 ceilingTotal) = _fitsFloor(asked.totals[ci], c.amount, f.ceilingFloor);
+        if (!okAgent || !okCeiling) return Refusal.OverStoredAllowance;
+
+        asked.totals[ai] = agentTotal;
+        asked.totals[ci] = ceilingTotal;
+        return Refusal.None;
+    }
+
+    function _askedIndex(Asked memory asked, bytes32 key) internal pure returns (uint256 i) {
+        for (i = 0; i < asked.used; ++i) {
+            if (asked.keys[i] == key) return i;
+        }
+        asked.keys[i] = key;
+        asked.used = i + 1;
     }
 
     function _tstore(bytes32 slot, uint256 value) internal {
