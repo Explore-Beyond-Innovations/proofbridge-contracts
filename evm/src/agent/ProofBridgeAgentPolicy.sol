@@ -699,7 +699,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         // validation in a bundle runs before any execution, so the validator's clockless floor is
         // asked about *every* call before the hook's real arithmetic is asked about any.
         Checked[] memory checked = new Checked[](calls.length);
-        Asked memory asked = Asked(new bytes32[](calls.length * 2), new uint256[](calls.length * 2), 0);
+        Asked memory asked =
+            Asked({keys: new bytes32[](calls.length * 2), totals: new uint256[](calls.length * 2), used: 0});
         for (uint256 i = 0; i < calls.length; ++i) {
             checked[i] = _checkStatic(ctx, calls[i]);
             if (checked[i].refusal != Refusal.None) return (checked[i].refusal, i);

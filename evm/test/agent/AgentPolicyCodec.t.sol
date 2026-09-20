@@ -143,8 +143,10 @@ contract AgentPolicyCodecTest is Test {
     /// `setAgentPolicy` — and a client decodes those with the *module's* ABI. Every error the
     /// library can raise has to be in it; one declared in the library alone would not be.
     function test_theModulesAbiCarriesEveryParserError() public view {
-        string memory lib = vm.readFile("out/AgentPolicyCodec.sol/AgentPolicyCodec.json");
-        string memory mod = vm.readFile("out/ProofBridgeAgentPolicy.sol/ProofBridgeAgentPolicy.json");
+        // Where this build wrote its artifacts, not where the default profile would have.
+        string memory out = vm.envOr("FOUNDRY_OUT", string("out"));
+        string memory lib = vm.readFile(string.concat(out, "/AgentPolicyCodec.sol/AgentPolicyCodec.json"));
+        string memory mod = vm.readFile(string.concat(out, "/ProofBridgeAgentPolicy.sol/ProofBridgeAgentPolicy.json"));
         string[] memory raised = _errorNames(lib);
         string[] memory known = _errorNames(mod);
 

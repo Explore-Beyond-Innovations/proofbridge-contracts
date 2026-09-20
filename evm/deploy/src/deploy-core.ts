@@ -3,6 +3,7 @@ import { MANAGER_ROLE, connect, envOrDefault, requireEnv } from "./common.js";
 import {
   contractFactory,
   contractFactoryLinked,
+  linkedLibraryIn,
   attachContract,
 } from "./artifacts.js";
 import {
@@ -88,6 +89,26 @@ export async function deployCore(
   console.log(`[evm-deploy] deployer=${deployer} admin=${admin}`);
   if (existing) {
     console.log(`[evm-deploy] reusing addresses from ${outPath}`);
+  }
+
+  // The manifest is a claim; the chain is the fact. One pointed at the wrong chain, or at a devnet
+  // that was reset, would otherwise print [reuse] for every contract and fail on the first read.
+  // Checked for all of them at once, before anything is sent.
+  if (existing) {
+    const provider = signer.provider!;
+    const codeless: string[] = [];
+    for (const [name, entry] of Object.entries(existing.contracts)) {
+      // The one entry the chain can correct: the module's code names its library (see below).
+      if (name === "agentPolicyCodec" && existing.contracts.agentPolicy?.address) continue;
+      const address = (entry as { address?: string } | undefined)?.address;
+      if (address && (await provider.getCode(address)) === "0x") codeless.push(`${name} ${address}`);
+    }
+    if (codeless.length > 0) {
+      throw new Error(
+        `${outPath} names ${codeless.length} contract(s) with no code on chain ${chainId}:\n    ${codeless.join("\n    ")}\n` +
+          `  Wrong chain, or a devnet that was reset? Delete the manifest (deploy-contracts.sh --fresh does) to deploy afresh.`,
+      );
+    }
   }
 
   async function deployIfMissing(
@@ -311,27 +332,35 @@ export async function deployCore(
   // ── agent policy module (2.1g): the parser library, then the module linked to it ──
   // One shared, ownerless contract per chain that every maker's account installs. Reused only as
   // a pair: a reused module still points at the library it was linked with.
-  // The manifest is a claim; the chain is the fact. A module linked to anything but the recorded
-  // library, or a library with no code, would print [reuse] and then revert on every setAgentPolicy.
-  let reuseAgent = false;
-  {
-    const codec = existing?.contracts.agentPolicyCodec?.address;
-    const mod = existing?.contracts.agentPolicy?.address;
-    if (codec && mod) {
-      const provider = signer.provider!;
-      const [codecCode, modCode] = await Promise.all([provider.getCode(codec), provider.getCode(mod)]);
-      reuseAgent =
-        codecCode !== "0x" && modCode.toLowerCase().includes(codec.slice(2).toLowerCase());
-      if (!reuseAgent) {
-        console.warn(
-          `  [redeploy] agent policy pair in the manifest does not hold on chain (codec ${codec}, module ${mod}); deploying both again`,
-        );
-      }
+  // The module is the one contract makers install, so its address never moves because the
+  // *library's* entry is wrong. Its code says which library it was linked with: read that, and
+  // correct the manifest. A module linked to nothing is not something a deploy can repair.
+  const reusedAgentPolicy = existing?.contracts.agentPolicy?.address;
+  let reusedAgentCodec = existing?.contracts.agentPolicyCodec?.address;
+  if (reusedAgentPolicy) {
+    const provider = signer.provider!;
+    const linked = linkedLibraryIn(
+      "ProofBridgeAgentPolicy",
+      "ProofBridgeAgentPolicy",
+      "AgentPolicyCodec",
+      await provider.getCode(reusedAgentPolicy),
+    );
+    if (!linked || (await provider.getCode(linked)) === "0x") {
+      throw new Error(
+        `ProofBridgeAgentPolicy at ${reusedAgentPolicy} is not linked to a deployed AgentPolicyCodec (read ${linked ?? "nothing"} from its code). ` +
+          `Makers install this address, so it is not replaced automatically: remove agentPolicy and agentPolicyCodec from the manifest to deploy a new pair.`,
+      );
+    }
+    if (linked.toLowerCase() !== reusedAgentCodec?.toLowerCase()) {
+      console.warn(
+        `  [repair] manifest says AgentPolicyCodec is ${reusedAgentCodec ?? "absent"}; the module's code is linked to ${linked}. Recording ${linked}; the module is untouched.`,
+      );
+      reusedAgentCodec = linked;
     }
   }
   const agentPolicyCodecAddr = await deployIfMissing(
     "AgentPolicyCodec",
-    reuseAgent ? existing?.contracts.agentPolicyCodec?.address : undefined,
+    reusedAgentPolicy ? reusedAgentCodec : undefined,
     async () => {
       const f = contractFactory("AgentPolicyCodec", "AgentPolicyCodec", signer);
       const c = await f.deploy({ nonce: nonces.next() });
@@ -341,7 +370,7 @@ export async function deployCore(
   );
   const agentPolicyAddr = await deployIfMissing(
     "ProofBridgeAgentPolicy",
-    reuseAgent ? existing?.contracts.agentPolicy?.address : undefined,
+    reusedAgentPolicy,
     async () => {
       const f = contractFactoryLinked("ProofBridgeAgentPolicy", "ProofBridgeAgentPolicy", signer, {
         AgentPolicyCodec: agentPolicyCodecAddr,
