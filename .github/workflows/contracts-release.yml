@@ -144,6 +144,8 @@ jobs:
           # reviewable, and this only ever *adds* a failure — if the scan under-matches, the bundle
           # is still correct, it is merely less well guarded. DisputeManager shipped missing because
           # nothing connected the two.
+          # A grep cannot count brackets, so this reads to the end of the statement and may pick up
+          # a name it should not: that can only add a failure. The exact scan is the repo-check.
           MISSING=""
           for c in $(cat evm/deploy/src/*.ts | tr '\n' ' ' \
                      | grep -oE '(contractFactoryLinked|contractFactory|attachContract|linkedLibraryIn|getAbi)\([^;]*' \
