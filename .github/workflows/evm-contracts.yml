@@ -98,6 +98,18 @@ jobs:
           forge test --match-contract OrderHashParity -vvv | tee /tmp/parity.log
           grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/parity.log
 
+      # T-60 (2.1h). The readers assert they ran every row of the table, which guards a reader that
+      # runs. This guards one that was renamed or deleted: the count is exact, so a test that
+      # quietly goes missing fails here rather than leaving three where there were four.
+      - name: Agent-policy arithmetic parity (EVM)
+        run: |
+          set -o pipefail
+          # The expected count is the number of tests in the reader, so it lives in one place.
+          expected=$(grep -cE '^ +function test_' test/agent/AgentPolicyMathParity.t.sol)
+          test "$expected" -ge 1
+          forge test --match-contract AgentPolicyMathParity -vvv | tee /tmp/policy-math.log
+          grep -qE "Suite result: ok\\. $expected passed; 0 failed; 0 skipped" /tmp/policy-math.log
+
       # Invariants are excluded here and run in the `invariants` job below: they are 596s of this
       # suite's 647s, so leaving them in makes every other signal wait on them. ValidationRules skips
       # itself here (it needs a tracer and its own gas limit) and runs in the step after this one.

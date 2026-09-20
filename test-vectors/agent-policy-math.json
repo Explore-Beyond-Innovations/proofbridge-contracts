@@ -1,0 +1,705 @@
+{
+  "_meta": {
+    "note": "T-60 layer 1. The arithmetic under an agent policy, computed in unbounded integers. Readers: proofbridge-core (Rust), AgentRateLimit + the agent module's scaling + the escrows' scaling (Solidity), order-params (TypeScript, scaling only: it does not mirror the bucket). `scalingEvmOnly` holds amounts past u128, which only the EVM can carry. Every reader asserts it ran `counts` rows.",
+    "generator": "scripts/bls-vectors/src/gen-agent-policy-math.ts"
+  },
+  "counts": {
+    "bucket": 32,
+    "scaling": 25,
+    "scalingEvmOnly": 7
+  },
+  "constants": {
+    "u128Max": "340282366920938463463374607431768211455",
+    "maxDecimals": 30
+  },
+  "bucket": [
+    {
+      "label": "a full bucket covers a spend",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "1000",
+      "lastTs": "1700000000",
+      "spend": "400",
+      "now": "1700000000",
+      "available": "1000",
+      "ok": true,
+      "nextLevel": "600",
+      "nextLastTs": "1700000000"
+    },
+    {
+      "label": "spending exactly what is there empties it",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "1000",
+      "lastTs": "1700000000",
+      "spend": "1000",
+      "now": "1700000000",
+      "available": "1000",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000000"
+    },
+    {
+      "label": "one unit more than is there is refused",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "1000",
+      "lastTs": "1700000000",
+      "spend": "1001",
+      "now": "1700000000",
+      "available": "1000",
+      "ok": false,
+      "nextLevel": "1000",
+      "nextLastTs": "1700000000"
+    },
+    {
+      "label": "a zero spend on an empty bucket is allowed",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "0",
+      "lastTs": "1700000000",
+      "spend": "0",
+      "now": "1700000000",
+      "available": "0",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000000"
+    },
+    {
+      "label": "an empty bucket refuses one unit",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "0",
+      "lastTs": "1700000000",
+      "spend": "1",
+      "now": "1700000000",
+      "available": "0",
+      "ok": false,
+      "nextLevel": "0",
+      "nextLastTs": "1700000000"
+    },
+    {
+      "label": "one second after draining, exactly one second's refill is there",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "0",
+      "lastTs": "1700000000",
+      "spend": "10",
+      "now": "1700000001",
+      "available": "10",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000001"
+    },
+    {
+      "label": "and not one unit more (the fixed-window bug passes this at 2x)",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "0",
+      "lastTs": "1700000000",
+      "spend": "11",
+      "now": "1700000001",
+      "available": "10",
+      "ok": false,
+      "nextLevel": "0",
+      "nextLastTs": "1700000000"
+    },
+    {
+      "label": "refill adds to what was left",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "250",
+      "lastTs": "1700000000",
+      "spend": "750",
+      "now": "1700000050",
+      "available": "750",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000050"
+    },
+    {
+      "label": "and the unit past that is refused",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "250",
+      "lastTs": "1700000000",
+      "spend": "751",
+      "now": "1700000050",
+      "available": "750",
+      "ok": false,
+      "nextLevel": "250",
+      "nextLastTs": "1700000000"
+    },
+    {
+      "label": "a rate of one unit per second",
+      "capacity": "7",
+      "refillPerSecond": "1",
+      "level": "0",
+      "lastTs": "1700000000",
+      "spend": "3",
+      "now": "1700000003",
+      "available": "3",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000003"
+    },
+    {
+      "label": "refill lands exactly on capacity",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "0",
+      "lastTs": "1700000000",
+      "spend": "1000",
+      "now": "1700000100",
+      "available": "1000",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000100"
+    },
+    {
+      "label": "refill past capacity stops at capacity",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "0",
+      "lastTs": "1700000000",
+      "spend": "1000",
+      "now": "1700000101",
+      "available": "1000",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000101"
+    },
+    {
+      "label": "a week idle is still only capacity",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "0",
+      "lastTs": "1700000000",
+      "spend": "1001",
+      "now": "1700604800",
+      "available": "1000",
+      "ok": false,
+      "nextLevel": "0",
+      "nextLastTs": "1700000000"
+    },
+    {
+      "label": "a rate that overshoots in one step",
+      "capacity": "1000",
+      "refillPerSecond": "999",
+      "level": "500",
+      "lastTs": "1700000000",
+      "spend": "1000",
+      "now": "1700000001",
+      "available": "1000",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000001"
+    },
+    {
+      "label": "a refill rate above capacity",
+      "capacity": "100",
+      "refillPerSecond": "5000",
+      "level": "0",
+      "lastTs": "1700000000",
+      "spend": "100",
+      "now": "1700000001",
+      "available": "100",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000001"
+    },
+    {
+      "label": "a stamp ahead of now refills nothing",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "100",
+      "lastTs": "1700000500",
+      "spend": "100",
+      "now": "1700000000",
+      "available": "100",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000500"
+    },
+    {
+      "label": "so the unit past the stored level is refused",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "100",
+      "lastTs": "1700000500",
+      "spend": "101",
+      "now": "1700000000",
+      "available": "100",
+      "ok": false,
+      "nextLevel": "100",
+      "nextLastTs": "1700000500"
+    },
+    {
+      "label": "and a spend at the earlier time does not rewind the stamp",
+      "capacity": "1000",
+      "refillPerSecond": "10",
+      "level": "100",
+      "lastTs": "1700000500",
+      "spend": "40",
+      "now": "1700000499",
+      "available": "100",
+      "ok": true,
+      "nextLevel": "60",
+      "nextLastTs": "1700000500"
+    },
+    {
+      "label": "a level above capacity reads as capacity",
+      "capacity": "500",
+      "refillPerSecond": "10",
+      "level": "900",
+      "lastTs": "1700000000",
+      "spend": "500",
+      "now": "1700000000",
+      "available": "500",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000000"
+    },
+    {
+      "label": "and cannot be spent past it",
+      "capacity": "500",
+      "refillPerSecond": "10",
+      "level": "900",
+      "lastTs": "1700000000",
+      "spend": "501",
+      "now": "1700000000",
+      "available": "500",
+      "ok": false,
+      "nextLevel": "900",
+      "nextLastTs": "1700000000"
+    },
+    {
+      "label": "nor after time has passed",
+      "capacity": "500",
+      "refillPerSecond": "10",
+      "level": "900",
+      "lastTs": "1700000000",
+      "spend": "501",
+      "now": "1700001000",
+      "available": "500",
+      "ok": false,
+      "nextLevel": "900",
+      "nextLastTs": "1700000000"
+    },
+    {
+      "label": "rate x elapsed overflows u128",
+      "capacity": "340282366920938463463374607431768211455",
+      "refillPerSecond": "340282366920938463463374607431768211455",
+      "level": "0",
+      "lastTs": "1700000000",
+      "spend": "340282366920938463463374607431768211455",
+      "now": "1700000002",
+      "available": "340282366920938463463374607431768211455",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000002"
+    },
+    {
+      "label": "level + refill overflows u128 while the product alone does not",
+      "capacity": "340282366920938463463374607431768211455",
+      "refillPerSecond": "1267650600228229401496703205376",
+      "level": "340282366920938463463374607431768211450",
+      "lastTs": "1700000000",
+      "spend": "340282366920938463463374607431768211455",
+      "now": "1700000001",
+      "available": "340282366920938463463374607431768211455",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000001"
+    },
+    {
+      "label": "the widest limit, the longest idle",
+      "capacity": "340282366920938463463374607431768211455",
+      "refillPerSecond": "340282366920938463463374607431768211455",
+      "level": "0",
+      "lastTs": "0",
+      "spend": "340282366920938463463374607431768211455",
+      "now": "18446744073709551615",
+      "available": "340282366920938463463374607431768211455",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "18446744073709551615"
+    },
+    {
+      "label": "the widest capacity, a unit refill, nothing past it",
+      "capacity": "340282366920938463463374607431768211455",
+      "refillPerSecond": "1",
+      "level": "340282366920938463463374607431768211454",
+      "lastTs": "1700000000",
+      "spend": "340282366920938463463374607431768211455",
+      "now": "1700000010",
+      "available": "340282366920938463463374607431768211455",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000010"
+    },
+    {
+      "label": "the product overflows under a small capacity",
+      "capacity": "1000",
+      "refillPerSecond": "340282366920938463463374607431768211455",
+      "level": "0",
+      "lastTs": "1700000000",
+      "spend": "1000",
+      "now": "1700000002",
+      "available": "1000",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000002"
+    },
+    {
+      "label": "the sum overflows under a small capacity",
+      "capacity": "1000",
+      "refillPerSecond": "1267650600228229401496703205376",
+      "level": "340282366920938463463374607431768211450",
+      "lastTs": "1700000000",
+      "spend": "1001",
+      "now": "1700000001",
+      "available": "1000",
+      "ok": false,
+      "nextLevel": "340282366920938463463374607431768211450",
+      "nextLastTs": "1700000000"
+    },
+    {
+      "label": "a big product that still fits, under a smaller capacity",
+      "capacity": "1237940039285380274899124224",
+      "refillPerSecond": "1152921504606846976",
+      "level": "0",
+      "lastTs": "1700000000",
+      "spend": "1237940039285380274899124224",
+      "now": "1101211627776",
+      "available": "1237940039285380274899124224",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1101211627776"
+    },
+    {
+      "label": "a big product that fits and does not reach capacity",
+      "capacity": "340282366920938463463374607431768211455",
+      "refillPerSecond": "1152921504606846976",
+      "level": "7",
+      "lastTs": "1700000000",
+      "spend": "1208925819614629174706183",
+      "now": "1701048576",
+      "available": "1208925819614629174706183",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1701048576"
+    },
+    {
+      "label": "and the unit past it",
+      "capacity": "340282366920938463463374607431768211455",
+      "refillPerSecond": "1152921504606846976",
+      "level": "7",
+      "lastTs": "1700000000",
+      "spend": "1208925819614629174706184",
+      "now": "1701048576",
+      "available": "1208925819614629174706183",
+      "ok": false,
+      "nextLevel": "7",
+      "nextLastTs": "1700000000"
+    },
+    {
+      "label": "a bucket from the epoch",
+      "capacity": "1000",
+      "refillPerSecond": "1",
+      "level": "0",
+      "lastTs": "0",
+      "spend": "1000",
+      "now": "1700000000",
+      "available": "1000",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "1700000000"
+    },
+    {
+      "label": "now at the end of u64",
+      "capacity": "1000",
+      "refillPerSecond": "1",
+      "level": "0",
+      "lastTs": "18446744073709551610",
+      "spend": "5",
+      "now": "18446744073709551615",
+      "available": "5",
+      "ok": true,
+      "nextLevel": "0",
+      "nextLastTs": "18446744073709551615"
+    }
+  ],
+  "scaling": [
+    {
+      "label": "equal decimals is the identity",
+      "amount": "1000000",
+      "fromDecimals": 6,
+      "toDecimals": 6,
+      "ok": true,
+      "value": "1000000"
+    },
+    {
+      "label": "equal decimals at the widest amount",
+      "amount": "340282366920938463463374607431768211455",
+      "fromDecimals": 18,
+      "toDecimals": 18,
+      "ok": true,
+      "value": "340282366920938463463374607431768211455"
+    },
+    {
+      "label": "zero scales to zero, up",
+      "amount": "0",
+      "fromDecimals": 6,
+      "toDecimals": 18,
+      "ok": true,
+      "value": "0"
+    },
+    {
+      "label": "zero scales to zero, down",
+      "amount": "0",
+      "fromDecimals": 18,
+      "toDecimals": 6,
+      "ok": true,
+      "value": "0"
+    },
+    {
+      "label": "6 to 18: one USDC in wei-like units",
+      "amount": "1000000",
+      "fromDecimals": 6,
+      "toDecimals": 18,
+      "ok": true,
+      "value": "1000000000000000000"
+    },
+    {
+      "label": "7 to 18: one XLM-like unit",
+      "amount": "10000000",
+      "fromDecimals": 7,
+      "toDecimals": 18,
+      "ok": true,
+      "value": "1000000000000000000"
+    },
+    {
+      "label": "one place up",
+      "amount": "123",
+      "fromDecimals": 6,
+      "toDecimals": 7,
+      "ok": true,
+      "value": "1230"
+    },
+    {
+      "label": "0 to 30: the widest step up",
+      "amount": "5",
+      "fromDecimals": 0,
+      "toDecimals": 30,
+      "ok": true,
+      "value": "5000000000000000000000000000000"
+    },
+    {
+      "label": "18 to 6, exactly",
+      "amount": "1000000000000000000",
+      "fromDecimals": 18,
+      "toDecimals": 6,
+      "ok": true,
+      "value": "1000000"
+    },
+    {
+      "label": "18 to 7, exactly",
+      "amount": "2500000000000",
+      "fromDecimals": 18,
+      "toDecimals": 7,
+      "ok": true,
+      "value": "25"
+    },
+    {
+      "label": "one place down, exactly",
+      "amount": "1230",
+      "fromDecimals": 7,
+      "toDecimals": 6,
+      "ok": true,
+      "value": "123"
+    },
+    {
+      "label": "30 to 0: the widest step down",
+      "amount": "9000000000000000000000000000000",
+      "fromDecimals": 30,
+      "toDecimals": 0,
+      "ok": true,
+      "value": "9"
+    },
+    {
+      "label": "a remainder of one is refused, not dropped",
+      "amount": "1000000000000000001",
+      "fromDecimals": 18,
+      "toDecimals": 6,
+      "ok": false,
+      "reason": "non-exact-downscale"
+    },
+    {
+      "label": "an amount smaller than the divisor",
+      "amount": "999",
+      "fromDecimals": 18,
+      "toDecimals": 6,
+      "ok": false,
+      "reason": "non-exact-downscale"
+    },
+    {
+      "label": "one place down with a remainder",
+      "amount": "1231",
+      "fromDecimals": 7,
+      "toDecimals": 6,
+      "ok": false,
+      "reason": "non-exact-downscale"
+    },
+    {
+      "label": "one short of exact",
+      "amount": "999999999999",
+      "fromDecimals": 18,
+      "toDecimals": 6,
+      "ok": false,
+      "reason": "non-exact-downscale"
+    },
+    {
+      "label": "the largest amount that still fits after 12 places",
+      "amount": "340282366920938463463374607",
+      "fromDecimals": 6,
+      "toDecimals": 18,
+      "ok": true,
+      "value": "340282366920938463463374607000000000000"
+    },
+    {
+      "label": "one more overflows u128",
+      "amount": "340282366920938463463374608",
+      "fromDecimals": 6,
+      "toDecimals": 18,
+      "ok": false,
+      "reason": "overflow",
+      "evmWide": {
+        "ok": true,
+        "value": "340282366920938463463374608000000000000"
+      }
+    },
+    {
+      "label": "the widest amount, one place up",
+      "amount": "340282366920938463463374607431768211455",
+      "fromDecimals": 6,
+      "toDecimals": 7,
+      "ok": false,
+      "reason": "overflow",
+      "evmWide": {
+        "ok": true,
+        "value": "3402823669209384634633746074317682114550"
+      }
+    },
+    {
+      "label": "the widest amount, the widest step",
+      "amount": "340282366920938463463374607431768211455",
+      "fromDecimals": 0,
+      "toDecimals": 30,
+      "ok": false,
+      "reason": "overflow",
+      "evmWide": {
+        "ok": true,
+        "value": "340282366920938463463374607431768211455000000000000000000000000000000"
+      }
+    },
+    {
+      "label": "30 decimals is allowed",
+      "amount": "1",
+      "fromDecimals": 30,
+      "toDecimals": 30,
+      "ok": true,
+      "value": "1"
+    },
+    {
+      "label": "31 is not, as the source",
+      "amount": "1",
+      "fromDecimals": 31,
+      "toDecimals": 6,
+      "ok": false,
+      "reason": "decimals-out-of-range"
+    },
+    {
+      "label": "31 is not, as the destination",
+      "amount": "1",
+      "fromDecimals": 6,
+      "toDecimals": 31,
+      "ok": false,
+      "reason": "decimals-out-of-range"
+    },
+    {
+      "label": "out of range even when the two are equal",
+      "amount": "1",
+      "fromDecimals": 31,
+      "toDecimals": 31,
+      "ok": false,
+      "reason": "decimals-out-of-range"
+    },
+    {
+      "label": "the top of a byte",
+      "amount": "1",
+      "fromDecimals": 255,
+      "toDecimals": 18,
+      "ok": false,
+      "reason": "decimals-out-of-range"
+    }
+  ],
+  "scalingEvmOnly": [
+    {
+      "label": "past u128, and the upscale still fits 256 bits",
+      "amount": "1361129467683753853853498429727072845824",
+      "fromDecimals": 6,
+      "toDecimals": 18,
+      "wraps": false,
+      "value": "1361129467683753853853498429727072845824000000000000"
+    },
+    {
+      "label": "the largest amount whose 12-place upscale fits",
+      "amount": "115792089237316195423570985008687907853269984665640564039457584007",
+      "fromDecimals": 6,
+      "toDecimals": 18,
+      "wraps": false,
+      "value": "115792089237316195423570985008687907853269984665640564039457584007000000000000"
+    },
+    {
+      "label": "one more wraps 256 bits",
+      "amount": "115792089237316195423570985008687907853269984665640564039457584008",
+      "fromDecimals": 6,
+      "toDecimals": 18,
+      "wraps": true,
+      "wrappedTo": "86870360064"
+    },
+    {
+      "label": "a wrap that lands on a small, plausible number",
+      "amount": "57896044618658097711785492504343953926634992332820282019728792003956564819973",
+      "fromDecimals": 17,
+      "toDecimals": 18,
+      "wraps": true,
+      "wrappedTo": "50"
+    },
+    {
+      "label": "the widest amount, the widest step",
+      "amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+      "fromDecimals": 0,
+      "toDecimals": 30,
+      "wraps": true,
+      "wrappedTo": "115792089237316195423570985008687907853269984664640564039457584007913129639936"
+    },
+    {
+      "label": "a wrap that lands above the amount",
+      "amount": "13895050708477943450828518201042548942392398159876867684734910080949575556792",
+      "fromDecimals": 17,
+      "toDecimals": 18,
+      "wraps": true,
+      "wrappedTo": "23158417847463239084714197001737581570653996933128112807891516801582625927984"
+    },
+    {
+      "label": "the widest amount at equal decimals is just itself",
+      "amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+      "fromDecimals": 18,
+      "toDecimals": 18,
+      "wraps": false,
+      "value": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+    }
+  ]
+}
