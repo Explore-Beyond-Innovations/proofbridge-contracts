@@ -2,7 +2,7 @@
 pragma solidity ^0.8.34;
 
 import {Test} from "forge-std/Test.sol";
-import {RhinestoneModuleKit, AccountInstance, UserOpData} from "modulekit/ModuleKit.sol";
+import {RhinestoneModuleKit, AccountInstance, UserOpData, PackedUserOperation} from "modulekit/ModuleKit.sol";
 import {ModuleKitHelpers} from "modulekit/ModuleKit.sol";
 import {Execution} from "modulekit/accounts/erc7579/lib/ExecutionLib.sol";
 
@@ -161,6 +161,53 @@ abstract contract AgentPolicyBase is RhinestoneModuleKit, Test {
     function _agentBatch(Execution[] memory executions) internal returns (UserOpData memory op) {
         op = instance.getExecOps(executions, address(module));
         op.userOp.signature = _sign(op.userOpHash, agentKey);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                     SHARED BY THE TOPIC SUITES
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev The EntryPoint's own refusal, for asserting *how* an operation was turned away:
+    ///      "AA24 signature error" is how a validator's "no" reads.
+    error FailedOp(uint256 opIndex, string reason);
+
+    /// @dev Re-hash and re-sign after a test has edited the operation.
+    function _resign(UserOpData memory op) internal view returns (UserOpData memory) {
+        op.userOpHash = instance.aux.entrypoint.getUserOpHash(op.userOp);
+        op.userOp.signature = _sign(op.userOpHash, agentKey);
+        return op;
+    }
+
+    /// @dev The `seq`-th agent operation of one bundle: same key space, the next nonce.
+    function _agentOpAt(uint256 seq, bytes memory callData) internal returns (PackedUserOperation memory) {
+        UserOpData memory op = _agentOp(callData);
+        op.userOp.nonce += seq;
+        return _resign(op).userOp;
+    }
+
+    function _batch(uint256 n, uint256 amount) internal view returns (Execution[] memory calls) {
+        calls = new Execution[](n);
+        for (uint256 i = 0; i < n; ++i) {
+            calls[i] = Execution({target: address(escrow), value: 0, callData: lockCall(amount)});
+        }
+    }
+
+    /// @dev The owner's operation that uninstalls the hook, for bundling ahead of the agent's.
+    function _uninstallHookOp() internal returns (PackedUserOperation memory) {
+        UserOpData memory uninstall = instance.getUninstallModuleOps(
+            TYPE_HOOK, address(module), bytes.concat(bytes32(TYPE_HOOK)), address(instance.defaultValidator)
+        );
+        return uninstall.signDefault().userOp;
+    }
+
+    /// @dev Every mount keeps its hook somewhere different, so "remove it without telling the module"
+    ///      is done the blunt way: the module's own `onUninstall` is a no-op for the duration. The
+    ///      module's note then still says "both", which is the state under test.
+    function _removeHookBehindTheModulesBack() internal {
+        vm.mockCall(address(module), abi.encodeWithSelector(module.onUninstall.selector), "");
+        instance.uninstallModule(TYPE_HOOK, address(module), bytes.concat(bytes32(TYPE_HOOK)));
+        vm.clearMockedCalls();
+        assertTrue(module.isInitialized(instance.account), "the note still says installed");
     }
 
     function _sign(bytes32 userOpHash, uint256 key) internal pure returns (bytes memory) {

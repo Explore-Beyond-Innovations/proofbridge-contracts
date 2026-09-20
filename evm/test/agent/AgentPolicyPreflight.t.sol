@@ -3,123 +3,21 @@ pragma solidity ^0.8.34;
 
 import {ModuleKitHelpers, UserOpData, PackedUserOperation} from "modulekit/ModuleKit.sol";
 import {Execution} from "modulekit/accounts/erc7579/lib/ExecutionLib.sol";
-
+import {Vm} from "forge-std/Vm.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
 import {ProofBridgeAgentPolicy} from "src/agent/ProofBridgeAgentPolicy.sol";
 import {AgentPolicyBase} from "./AgentPolicyBase.t.sol";
-import {Vm} from "forge-std/Vm.sol";
 
-/// Review pass 4 (internal-docs/t2/pr-reviews/contracts-33-evm-agent-module.md, H1–H9).
+/// The agent can ask why. `preflight` is a free read that walks a request with the module's own
+/// checks and names the first refusal and the call it belongs to — for both halves, validator
+/// first. (Review findings I1, I5, and the hook's named refusal.)
 ///
-/// **One transaction per `handleOps`, as on a chain.** Forge runs a whole test as one transaction
-/// by default, so transient state leaks between what a chain would treat as separate transactions.
-/// Pass 3's tally tests ran that way and only ever sent single trades, which together is what hid
-/// H1: the documented "three trades" bound was really three *requests*, and a request can be a
-/// batch.
+/// One transaction per `handleOps`, as on a chain. Forge runs a whole test as one transaction by
+/// default, so transient state leaks between what a chain would treat as separate ones — which is
+/// what once hid a wrong bound here.
 /// forge-config: default.isolate = true
-contract AgentPolicyReviewPass4Test is AgentPolicyBase {
+contract AgentPolicyPreflightTest is AgentPolicyBase {
     using ModuleKitHelpers for *;
-
-    error FailedOp(uint256 opIndex, string reason);
-
-    function _resign(UserOpData memory op) internal view returns (UserOpData memory) {
-        op.userOpHash = instance.aux.entrypoint.getUserOpHash(op.userOp);
-        op.userOp.signature = _sign(op.userOpHash, agentKey);
-        return op;
-    }
-
-    function _agentOpAt(uint256 seq, bytes memory callData) internal returns (PackedUserOperation memory) {
-        UserOpData memory op = _agentOp(callData);
-        op.userOp.nonce += seq;
-        return _resign(op).userOp;
-    }
-
-    function _batch(uint256 n, uint256 amount) internal view returns (Execution[] memory calls) {
-        calls = new Execution[](n);
-        for (uint256 i = 0; i < n; ++i) {
-            calls[i] = Execution({target: address(escrow), value: 0, callData: lockCall(amount)});
-        }
-    }
-
-    /// Every mount keeps its hook somewhere different, so "remove it without telling the module" is
-    /// done the blunt way: make the module's own `onUninstall` a no-op for the duration.
-    function _removeHookBehindTheModulesBack() internal {
-        vm.mockCall(address(module), abi.encodeWithSelector(module.onUninstall.selector), "");
-        instance.uninstallModule(TYPE_HOOK, address(module), bytes.concat(bytes32(TYPE_HOOK)));
-        vm.clearMockedCalls();
-    }
-
-    /*//////////////////////////////////////////////////////////////
-               H1 — THE HOOKLESS BOUND, WITH BATCHES IN IT
-    //////////////////////////////////////////////////////////////*/
-
-    /// The reviewer's run: hook gone, note still says "both", three batch requests of five in three
-    /// transactions. Fifteen locks — 15M against an 8M account ceiling — under a docstring that
-    /// promised three capped trades.
-    function test_H1_withTheHookGoneItIsOneBatchAndTwoSingleTrades() public {
-        _removeHookBehindTheModulesBack();
-
-        for (uint256 i = 0; i < 4; ++i) {
-            UserOpData memory op = _agentBatch(_batch(5, MAX_PER_ORDER));
-            instance.expect4337Revert();
-            op.execUserOps();
-        }
-        assertEq(escrow.locks(), 5, "one batch got through before anything could be known; no second one");
-
-        for (uint256 i = 0; i < 4; ++i) {
-            UserOpData memory op = _agentOp(lockCall(MAX_PER_ORDER));
-            instance.expect4337Revert();
-            op.execUserOps();
-        }
-        assertEq(escrow.locks(), 7, "then two single trades, and the agent is paused");
-    }
-
-    /*//////////////////////////////////////////////////////////////
-              THE TALLY DETECTS — IT DOES NOT CAP BATCHES
-    //////////////////////////////////////////////////////////////*/
-
-    /// The owner's objection to counting trades, as a test: a maker with several orders sends them
-    /// together, again and again, and never meets a limit.
-    function test_aHealthyAgentBatchesFreely() public {
-        for (uint256 i = 0; i < 3; ++i) {
-            _agentBatch(_batch(6, 1_000)).execUserOps();
-            assertEq(module.uncountedOf(instance.account, agentId), 0, "counted, so the next batch is welcome");
-        }
-        assertEq(escrow.locks(), 18);
-    }
-
-    /// A failed batch is one strike, like a failed single trade. Until something is counted the
-    /// agent sends single trades; one that lands clears the tally and batches are back.
-    function test_aFailedBatchIsOneStrikeAndOneGoodTradeClearsIt() public {
-        escrow.setFailNext(true);
-        UserOpData memory failing = _agentBatch(_batch(4, 1_000));
-        instance.expect4337Revert();
-        failing.execUserOps();
-        assertEq(module.uncountedOf(instance.account, agentId), 1, "one request, one strike, not four");
-        escrow.setFailNext(false);
-
-        UserOpData memory batch = _agentBatch(_batch(4, 1_000));
-        (ProofBridgeAgentPolicy.Refusal why,) = module.preflight(instance.account, agentId, batch.userOp.callData);
-        assertEq(
-            uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.SinglesOnly), "preflight says why, before anything is sent"
-        );
-        instance.expect4337Revert();
-        batch.execUserOps();
-        assertEq(escrow.locks(), 0, "no batches while a request is still uncounted");
-
-        _agentOp(lockCall(1_000)).execUserOps();
-        assertEq(module.uncountedOf(instance.account, agentId), 0, "a single trade landed and was counted");
-        _agentBatch(_batch(4, 1_000)).execUserOps();
-        assertEq(escrow.locks(), 5, "and batches are back");
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                         THE AGENT CAN ASK WHY
-    //////////////////////////////////////////////////////////////*/
-
-    function _why(bytes memory callData) internal view returns (ProofBridgeAgentPolicy.Refusal, uint256) {
-        return module.preflight(instance.account, agentId, callData);
-    }
 
     function test_preflight_namesTheCallAndTheReason() public {
         (ProofBridgeAgentPolicy.Refusal why, uint256 at) = _why(_agentOp(lockCall(1_000)).userOp.callData);
@@ -157,6 +55,36 @@ contract AgentPolicyReviewPass4Test is AgentPolicyBase {
         assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.None), "refilled: the read sees the clock");
     }
 
+    /// I1. The one refusal that is deterministic *and* surprising: a batch against a stale-low
+    /// stored level. The allowance has refilled, the validator cannot know that, and it refuses the
+    /// batch every time until one single trade lands. `preflight` said "fine".
+    function test_preflight_agreesWithTheValidatorAboutAStaleLevel() public {
+        _drainThenIdle();
+        UserOpData memory batch = _agentBatch(_batch(2, 1));
+
+        (ProofBridgeAgentPolicy.Refusal why, uint256 at) = _why(batch.userOp.callData);
+        assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.OverStoredAllowance), "what the validator will say");
+        assertEq(at, 1, "the first call against a bucket is free; it is the second that is refused");
+
+        // ...and the validator does say it
+        uint256 before = escrow.locks();
+        instance.expect4337Revert();
+        batch.execUserOps();
+        assertEq(escrow.locks(), before);
+
+        // a single trade is fine, and preflight knows that too
+        (why,) = _why(_agentOp(lockCall(1)).userOp.callData);
+        assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.None));
+        _agentOp(lockCall(1)).execUserOps();
+
+        // the level is fresh now, so the same batch passes — on the read and on the chain
+        batch = _agentBatch(_batch(2, 1));
+        (why,) = _why(batch.userOp.callData);
+        assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.None), "refreshed");
+        batch.execUserOps();
+        assertEq(escrow.locks(), before + 3);
+    }
+
     function test_preflight_reportsThePause() public {
         escrow.setFailNext(true);
         for (uint256 i = 0; i < 3; ++i) {
@@ -168,11 +96,30 @@ contract AgentPolicyReviewPass4Test is AgentPolicyBase {
         assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.Paused));
     }
 
-    /// H6. The typo guard `revokeAgent` has: an id with no policy here is a mistake, not a reset.
-    function test_H6_resettingAnIdWithNoPolicyIsRefused() public {
-        vm.prank(instance.account);
-        vm.expectRevert(ProofBridgeAgentPolicy.AgentPolicy__NoPolicyForAgent.selector);
-        module.resetAgentTally(bytes32(uint256(0xabc)));
+    /// I5. `callIndex` 0 meant both "the first call" and "no call in particular".
+    function test_preflight_aRefusalAboutTheWholeRequestNamesNoCall() public {
+        (ProofBridgeAgentPolicy.Refusal why, uint256 at) =
+            module.preflight(instance.account, bytes32(uint256(0xabc)), _agentOp(lockCall(1)).userOp.callData);
+        assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.NoPolicy));
+        assertEq(at, module.NO_CALL(), "nothing about this is call 0's fault");
+
+        (why, at) = _why(hex"deadbeef");
+        assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.MalformedRequest), "the envelope");
+        assertEq(at, module.NO_CALL());
+
+        // ...while a refusal that *is* about the first call still says 0
+        (why, at) = _why(_agentOp(lockCall(MAX_PER_ORDER + 1)).userOp.callData);
+        assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.OverPerOrderCap));
+        assertEq(at, 0);
+    }
+
+    /// I5. `Malformed` meant both "the envelope cannot be decoded" and "call i is too short".
+    function test_preflight_aMalformedCallIsNotAMalformedRequest() public {
+        Execution[] memory calls = _batch(3, 1);
+        calls[1].callData = hex"aabb";
+        (ProofBridgeAgentPolicy.Refusal why, uint256 at) = _why(_agentBatch(calls).userOp.callData);
+        assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.MalformedCall));
+        assertEq(at, 1);
     }
 
     /// When it is the *hook* that refuses, it says which call and why, instead of one fixed string.
@@ -223,6 +170,17 @@ contract AgentPolicyReviewPass4Test is AgentPolicyBase {
             bubbles,
             "the hook's reason, where the account passes it on"
         );
+    }
+
+    function _why(bytes memory callData) internal view returns (ProofBridgeAgentPolicy.Refusal, uint256) {
+        return module.preflight(instance.account, agentId, callData);
+    }
+
+    function _drainThenIdle() internal {
+        for (uint256 i = 0; i < CAPACITY / MAX_PER_ORDER; ++i) {
+            _agentOp(lockCall(MAX_PER_ORDER)).execUserOps();
+        }
+        vm.warp(block.timestamp + 7 days);
     }
 
     function _someLogContains(Vm.Log[] memory logs, bytes memory needle) internal pure returns (bool) {
