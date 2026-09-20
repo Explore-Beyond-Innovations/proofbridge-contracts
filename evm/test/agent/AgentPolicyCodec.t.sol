@@ -4,6 +4,7 @@ pragma solidity ^0.8.34;
 import {Test} from "forge-std/Test.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 import {AgentPolicyCodec, IAgentPolicyCodecErrors} from "src/agent/AgentPolicyCodec.sol";
+import {ProofBridgeAgentPolicy} from "src/agent/ProofBridgeAgentPolicy.sol";
 
 /// @dev `parse` reads `bytes calldata`, so the tests go through a real external call.
 contract CodecHarness {
@@ -143,10 +144,10 @@ contract AgentPolicyCodecTest is Test {
     /// `setAgentPolicy` — and a client decodes those with the *module's* ABI. Every error the
     /// library can raise has to be in it; one declared in the library alone would not be.
     function test_theModulesAbiCarriesEveryParserError() public view {
-        // Where this build wrote its artifacts, not where the default profile would have.
-        string memory out = vm.envOr("FOUNDRY_OUT", string("out"));
-        string memory lib = vm.readFile(string.concat(out, "/AgentPolicyCodec.sol/AgentPolicyCodec.json"));
-        string memory mod = vm.readFile(string.concat(out, "/ProofBridgeAgentPolicy.sol/ProofBridgeAgentPolicy.json"));
+        // Forge is asked where it put the artifacts for the code it just compiled, so a build into
+        // another directory fails on the read permission instead of quietly reading a stale `out/`.
+        string memory lib = vm.readFile(vm.getArtifactPathByCode(vm.getCode("AgentPolicyCodec.sol:AgentPolicyCodec")));
+        string memory mod = vm.readFile(vm.getArtifactPathByCode(type(ProofBridgeAgentPolicy).creationCode));
         string[] memory raised = _errorNames(lib);
         string[] memory known = _errorNames(mod);
 

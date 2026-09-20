@@ -91,23 +91,63 @@ export async function deployCore(
     console.log(`[evm-deploy] reusing addresses from ${outPath}`);
   }
 
-  // The manifest is a claim; the chain is the fact. One pointed at the wrong chain, or at a devnet
-  // that was reset, would otherwise print [reuse] for every contract and fail on the first read.
-  // Checked for all of them at once, before anything is sent.
+  // The manifest is a claim; the chain is the fact. The manifest is written once, at the end, so
+  // anything that stops the run after a contract has gone out loses that address and the next run
+  // deploys a second one. Every reason to refuse is therefore found here, before anything is sent.
+  const reusedAgentPolicy = existing?.contracts.agentPolicy?.address;
+  let reusedAgentCodec = existing?.contracts.agentPolicyCodec?.address;
   if (existing) {
     const provider = signer.provider!;
+    const entries = Object.entries(existing.contracts)
+      .map(([name, entry]) => ({ name, address: (entry as { address?: string } | undefined)?.address }))
+      // The one entry the chain can correct: the module's code names its library (below).
+      .filter((e): e is { name: string; address: string } => !!e.address)
+      .filter((e) => !(e.name === "agentPolicyCodec" && reusedAgentPolicy));
     const codeless: string[] = [];
-    for (const [name, entry] of Object.entries(existing.contracts)) {
-      // The one entry the chain can correct: the module's code names its library (see below).
-      if (name === "agentPolicyCodec" && existing.contracts.agentPolicy?.address) continue;
-      const address = (entry as { address?: string } | undefined)?.address;
-      if (address && (await provider.getCode(address)) === "0x") codeless.push(`${name} ${address}`);
+    for (const e of entries) {
+      if ((await provider.getCode(e.address)) === "0x") codeless.push(`${e.name} ${e.address}`);
     }
     if (codeless.length > 0) {
+      const advice =
+        codeless.length === entries.length
+          ? `None of them has code: the wrong chain, or a devnet that was reset. Delete the manifest (deploy-contracts.sh --fresh does) to deploy afresh.`
+          : `The other ${entries.length - codeless.length} are live, so this is a bad entry, not a bad manifest: correct the address. ` +
+            `Removing an entry instead deploys a new contract there, and whatever was wired to the old address stays wired to it.`;
       throw new Error(
-        `${outPath} names ${codeless.length} contract(s) with no code on chain ${chainId}:\n    ${codeless.join("\n    ")}\n` +
-          `  Wrong chain, or a devnet that was reset? Delete the manifest (deploy-contracts.sh --fresh does) to deploy afresh.`,
+        `${outPath} names ${codeless.length} of ${entries.length} contract(s) with no code on chain ${chainId}:\n    ${codeless.join("\n    ")}\n  ${advice}`,
       );
+    }
+
+    // The agent module is the one contract makers install, so its address never moves because the
+    // *library's* entry is wrong. Its code says which library it was linked with.
+    if (reusedAgentPolicy) {
+      const moduleCode = await provider.getCode(reusedAgentPolicy);
+      const hasCode = async (a: string | null | undefined) => !!a && (await provider.getCode(a)) !== "0x";
+      // At the offset this build's artifact records...
+      let linked = linkedLibraryIn("ProofBridgeAgentPolicy", "ProofBridgeAgentPolicy", "AgentPolicyCodec", moduleCode);
+      if (!(await hasCode(linked))) {
+        // ...or, for a module from a build that laid its code out differently, wherever the
+        // manifest's own library address appears in it.
+        const recorded = reusedAgentCodec;
+        linked =
+          recorded && (await hasCode(recorded)) && moduleCode.toLowerCase().includes(recorded.slice(2).toLowerCase())
+            ? recorded
+            : null;
+      }
+      if (!linked) {
+        throw new Error(
+          `ProofBridgeAgentPolicy at ${reusedAgentPolicy} cannot be tied to a deployed AgentPolicyCodec: nothing live at this build's link offset, ` +
+            `and the manifest's library (${reusedAgentCodec ?? "absent"}) is not both live and present in the module's code.\n` +
+            `  If the module entry is wrong, correct it. If the library entry is wrong and the module is from an older build, correct that.\n` +
+            `  Removing both entries deploys a new pair at a new address; every maker who installed the old module stays on it, so that is a migration, not a repair.`,
+        );
+      }
+      if (linked.toLowerCase() !== reusedAgentCodec?.toLowerCase()) {
+        console.warn(
+          `  [repair] manifest says AgentPolicyCodec is ${reusedAgentCodec ?? "absent"}; the module's code is linked to ${linked}. Recording ${linked}; the module is untouched.`,
+        );
+        reusedAgentCodec = linked;
+      }
     }
   }
 
@@ -332,32 +372,7 @@ export async function deployCore(
   // ── agent policy module (2.1g): the parser library, then the module linked to it ──
   // One shared, ownerless contract per chain that every maker's account installs. Reused only as
   // a pair: a reused module still points at the library it was linked with.
-  // The module is the one contract makers install, so its address never moves because the
-  // *library's* entry is wrong. Its code says which library it was linked with: read that, and
-  // correct the manifest. A module linked to nothing is not something a deploy can repair.
-  const reusedAgentPolicy = existing?.contracts.agentPolicy?.address;
-  let reusedAgentCodec = existing?.contracts.agentPolicyCodec?.address;
-  if (reusedAgentPolicy) {
-    const provider = signer.provider!;
-    const linked = linkedLibraryIn(
-      "ProofBridgeAgentPolicy",
-      "ProofBridgeAgentPolicy",
-      "AgentPolicyCodec",
-      await provider.getCode(reusedAgentPolicy),
-    );
-    if (!linked || (await provider.getCode(linked)) === "0x") {
-      throw new Error(
-        `ProofBridgeAgentPolicy at ${reusedAgentPolicy} is not linked to a deployed AgentPolicyCodec (read ${linked ?? "nothing"} from its code). ` +
-          `Makers install this address, so it is not replaced automatically: remove agentPolicy and agentPolicyCodec from the manifest to deploy a new pair.`,
-      );
-    }
-    if (linked.toLowerCase() !== reusedAgentCodec?.toLowerCase()) {
-      console.warn(
-        `  [repair] manifest says AgentPolicyCodec is ${reusedAgentCodec ?? "absent"}; the module's code is linked to ${linked}. Recording ${linked}; the module is untouched.`,
-      );
-      reusedAgentCodec = linked;
-    }
-  }
+  // Whether, and with which library, the recorded module is reused was settled up front.
   const agentPolicyCodecAddr = await deployIfMissing(
     "AgentPolicyCodec",
     reusedAgentPolicy ? reusedAgentCodec : undefined,

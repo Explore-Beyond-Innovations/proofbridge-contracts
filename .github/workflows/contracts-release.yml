@@ -146,7 +146,7 @@ jobs:
           # nothing connected the two.
           MISSING=""
           for c in $(cat evm/deploy/src/*.ts | tr '\n' ' ' \
-                     | grep -oE '(contractFactoryLinked|contractFactory|attachContract)\([^)]*' \
+                     | grep -oE '(contractFactoryLinked|contractFactory|attachContract|linkedLibraryIn|getAbi)\([^;]*' \
                      | grep -oE '"[A-Za-z0-9_]+" *, *"[A-Za-z0-9_]+"' \
                      | sed -E 's/"([A-Za-z0-9_]+)".*/\1/' | sort -u); do
             case " $EVM_ARTIFACTS " in *" $c "*) ;; *) MISSING="$MISSING $c" ;; esac
