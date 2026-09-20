@@ -16,6 +16,9 @@ contract AgentPolicyMountingTest is AgentPolicyBase {
     /// C1. Anyone could nominate the maker's account as *their* forwarder, and an agent could then
     /// pad its calldata so the hook resolved "the account" to that stranger — finding no marker
     /// there, and debiting nothing.
+    ///
+    /// End to end, so it bites only where the account calls the hook itself (the reference account,
+    /// Nexus). The test after this one covers the rest.
     function test_paddedCalldataCannotPointTheHookAtSomeoneElse() public {
         // Gating the setter is not enough on its own: the squatter simply installs the module on
         // itself first, which anyone may do. So this test does exactly that.
@@ -38,6 +41,43 @@ contract AgentPolicyMountingTest is AgentPolicyBase {
             module.agentBucket(instance.account, agentId, AD_TOKEN).level,
             CAPACITY - MAX_PER_ORDER,
             "and it was debited under the real account, whatever the calldata ended in"
+        );
+    }
+
+    /// C1 again, without the account in the way. The test above only means something where the
+    /// account itself calls the hook: Kernel and Safe call it through an adapter that writes the
+    /// calldata's tail, so the agent's padding never lands there and the fix can be removed unseen.
+    /// Here the hook is called directly as the account, which is the exploit's one requirement.
+    function test_theHookIgnoresAHostileTailWhenTheAccountIsTheCaller() public {
+        address stranger = makeAddr("forwarder-squatter");
+        vm.startPrank(stranger);
+        module.onInstall(bytes.concat(bytes32(TYPE_VALIDATOR)));
+        module.setTrustedForwarder(instance.account);
+        vm.stopPrank();
+
+        UserOpData memory op = _agentOp(lockCall(MAX_PER_ORDER));
+        // By selector: the module vendors its own `PackedUserOperation`, the same layout under
+        // another name.
+        vm.prank(instance.account);
+        (bool validated, bytes memory answer) =
+            address(module).call(abi.encodeWithSelector(module.validateUserOp.selector, op.userOp, op.userOpHash));
+        assertTrue(validated);
+        assertEq(uint160(abi.decode(answer, (uint256))), 0, "approved, so a marker waits under the real account");
+
+        // `forwarder ‖ account` as the last 40 bytes: the caller as its own forwarder, the squatter
+        // as the account. Believed, the hook looks for the marker under the squatter and finds none.
+        bytes memory hostile = bytes.concat(
+            abi.encodeCall(module.preCheck, (address(0), 0, op.userOp.callData)),
+            abi.encodePacked(instance.account, stranger)
+        );
+        vm.prank(instance.account);
+        (bool ok,) = address(module).call(hostile);
+
+        assertTrue(ok, "a trailing 40 bytes is not a reason to revert");
+        assertEq(
+            module.agentBucket(instance.account, agentId, AD_TOKEN).level,
+            CAPACITY - MAX_PER_ORDER,
+            "debited under the caller, whatever the calldata ended in"
         );
     }
 
