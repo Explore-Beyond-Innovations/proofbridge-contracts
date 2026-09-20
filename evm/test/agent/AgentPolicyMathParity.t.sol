@@ -183,8 +183,10 @@ contract AgentPolicyMathParityTest is Test {
                 unchecked {
                     unguarded = p.amount * (10 ** uint256(p.adDecimals - p.orderDecimals));
                 }
+                // `wrappedTo` was computed in unbounded integers, so agreeing with it is the proof of
+                // the wrap. Nothing is claimed about which way it lands: a wrapped product is often
+                // smaller than the amount and sometimes larger, and the table has both.
                 assertEq(unguarded, _uint("scalingEvmOnly", ran, ".wrappedTo"), label);
-                assertLt(unguarded, p.amount, "a wrap is what makes the product smaller than the amount");
 
                 try escrowScaling.scale(p.amount, p.orderDecimals, p.adDecimals) returns (uint256) {
                     revert(string.concat(label, ": the escrows' copy scaled a product that wraps"));

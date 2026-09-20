@@ -129,8 +129,11 @@ jobs:
       - name: Agent-policy arithmetic parity (Stellar)
         run: |
           set -o pipefail
+          # The expected count is the number of tests in the reader, so it lives in one place.
+          expected=$(grep -cE '^#\[test\]' lib/proofbridge-core/src/parity_math_test.rs)
+          test "$expected" -ge 1
           cargo test -p proofbridge-core parity_math -- --nocapture | tee /tmp/policy-math.log
-          grep -qE 'test result: ok\. 2 passed; 0 failed' /tmp/policy-math.log
+          grep -qE "test result: ok\\. $expected passed; 0 failed" /tmp/policy-math.log
         working-directory: stellar
 
       # The order-hash fixture drift guard (@proofbridge/bls-vectors) runs in the

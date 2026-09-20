@@ -6,7 +6,7 @@
   "counts": {
     "bucket": 32,
     "scaling": 25,
-    "scalingEvmOnly": 6
+    "scalingEvmOnly": 7
   },
   "constants": {
     "u128Max": "340282366920938463463374607431768211455",
@@ -684,6 +684,14 @@
       "toDecimals": 30,
       "wraps": true,
       "wrappedTo": "115792089237316195423570985008687907853269984664640564039457584007913129639936"
+    },
+    {
+      "label": "a wrap that lands above the amount",
+      "amount": "13895050708477943450828518201042548942392398159876867684734910080949575556792",
+      "fromDecimals": 17,
+      "toDecimals": 18,
+      "wraps": true,
+      "wrappedTo": "23158417847463239084714197001737581570653996933128112807891516801582625927984"
     },
     {
       "label": "the widest amount at equal decimals is just itself",
