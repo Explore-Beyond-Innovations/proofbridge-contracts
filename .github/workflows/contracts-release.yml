@@ -105,7 +105,11 @@ jobs:
           FOUNDRY_PROFILE: default
         # --skip test: the test tree imports ModuleKit from node_modules, this job installs none, and
         # a bundle has no use for test artifacts anyway.
-        run: forge build --silent --skip test
+        # The hasher is named because nothing in src/ imports it: the contracts reach it through an
+        # address, only the tests construct it, and the tests are skipped.
+        run: |
+          forge build --silent --skip test
+          forge build --silent lib/poseidon2-evm/src/bn254/yul/Poseidon2Yul.sol
 
       - name: Build event circuit VK
         run: scripts/build_circuits.sh proof_circuits/events
@@ -135,6 +139,7 @@ jobs:
           # Copy only the artifacts the deployer actually loads.
           EVM_ARTIFACTS="OrderPortal AdManager MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20 BLSKeyRegistry CounterpartyVerifier libSCL_EIP6565 RootAnchor Registrar DisputeManager AgentPolicyCodec ProofBridgeAgentPolicy"
           for c in $EVM_ARTIFACTS; do
+            [ -d "evm/out/${c}.sol" ] || { echo "::error::the build produced no ${c}.sol artifact"; exit 1; }
             mkdir -p "$EVM_OUT/${c}.sol"
             cp evm/out/${c}.sol/*.json "$EVM_OUT/${c}.sol/"
           done
