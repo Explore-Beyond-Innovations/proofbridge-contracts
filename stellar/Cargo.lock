@@ -1181,6 +1181,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "rand",
+ "serde_json",
  "sha3 0.11.0",
  "soroban-sdk",
  "stellar-strkey 0.0.16",

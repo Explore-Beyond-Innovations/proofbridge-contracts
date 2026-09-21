@@ -25,4 +25,6 @@ pub mod ttl;
 pub mod types;
 
 #[cfg(test)]
+mod parity_math_test;
+#[cfg(test)]
 mod test;
