@@ -444,6 +444,29 @@ async function main() {
     eventRoots[domain] = tree.root;
   }
 
+  // ----- 2.5c: a CANCEL claim bound to a DIFFERENT order -----
+  // The joint sweep's cross-order reuse negative: the event proof binds THIS
+  // order's hash, so a foreign order's honestly-anchored leaf must not refund
+  // anyone else. Subject = the fixture hash shifted by one (still canonical).
+  {
+    const hashBig = BigInt(orderHashMod.toString());
+    const foreignBig = hashBig > 1n ? hashBig - 1n : hashBig + 1n;
+    const foreignMod = "0x" + foreignBig.toString(16).padStart(64, "0");
+    console.log("Generating FOREIGN event claim (domain 2, shifted subject)...");
+    const tree = await buildSideTree(foreignMod, 2);
+    const { witness } = await noir.execute({
+      nullifier_hash: "0",
+      order_hash: foreignMod,
+      target_root: tree.root,
+      leaf_domain: "2",
+      secret: "0",
+      ...leanInputs(tree.merkleProof),
+    });
+    const claim = await honk.generateProof(witness, { keccak: true });
+    fs.writeFileSync(path.join(OUTPUT_DIR, "event_claim_2_foreign.bin"), Buffer.from(claim.proof));
+    (eventRoots as Record<string, string>)["2foreign"] = tree.root;
+  }
+
   // ----- 2.1b: a registration leaf (domain 4) for the vector maker's account + key -----
   // Subject = keccak256(TAG ‖ dstChainId ‖ dstRegistryId ‖ account32 ‖ keccak256(pkNative) ‖ epoch),
   // every field 32 bytes (proofbridge_core::cross_contract::registration_subject /

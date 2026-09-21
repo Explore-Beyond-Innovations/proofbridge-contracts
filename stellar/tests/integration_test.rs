@@ -240,6 +240,8 @@ struct TestParams {
     ad_chain_id: u128,
     // Event-claim roots for domains 2, 3, 4
     event_roots: [[u8; 32]; 4],
+    // 2.5c: a CANCEL root for a DIFFERENT order (the reuse negative)
+    foreign_cancel_root: [u8; 32],
 }
 
 fn hex_to_array(hex_str: &str) -> [u8; 32] {
@@ -294,6 +296,7 @@ fn load_test_params() -> TestParams {
         order_chain_id: json.chain_ids.order_chain_id,
         ad_chain_id: json.chain_ids.ad_chain_id,
         event_roots: [2u32, 3, 4, 5].map(|d| hex_to_array(&json.event_roots[&d.to_string()])),
+        foreign_cancel_root: hex_to_array(&json.event_roots["2foreign"]),
     }
 }
 
@@ -324,6 +327,9 @@ struct TestSetup<'a> {
     // Contracts
     ad_manager: ad_manager_contract::Client<'a>,
     order_portal: order_portal_contract::Client<'a>,
+    // T-25 leaf attribution: each leg's own merkle manager
+    ad_merkle_addr: Address,
+    order_merkle_addr: Address,
     // Admin
     admin_addr: Address,
     // The ad's maker: the account the fixture's `ad_creator` encodes (2.3c binds them at lock).
@@ -553,6 +559,8 @@ fn setup_opts(wire_root_verifiers: bool, wire_timing: bool) -> TestSetup<'static
         tp,
         ad_manager,
         order_portal,
+        ad_merkle_addr: ad_merkle_id.clone(),
+        order_merkle_addr: order_merkle_id.clone(),
         admin_addr,
         maker_addr,
         key_registry,
@@ -4899,4 +4907,515 @@ fn t24_run_scenario(
         sc["expect"]["bondToPoolUnits"].as_str().unwrap(),
         "{name}: bond to pool (units)"
     );
+}
+
+// --- T-25 (2.5c): the Soroban half of the JOINT-outcome sweep --------------------------------------
+//
+// Both legs of one logical trade in this one env — the ad-manager is the primary (the dispute head,
+// the only cancel clock), the order-portal the follower (proof-fed, no clock of its own) — driven
+// through the SAME scenario fixture the EVM driver (evm/test/JointOutcomes.t.sol) interprets, and
+// asserting the same normalized joint terminal record. Conservation (T-56's terminal half) rides
+// every scenario as the epilogue. Anchor discipline: only claims for leaves a leg ACTUALLY appended
+// are notarized (read per step, per merkle manager — events() holds one invocation).
+//
+// Proofs here are REAL always (the pregenerated fixture claims), so the wrong-domain and
+// foreign-order negatives verify natively; `followerRealProofs` in the fixture is EVM-only
+// staging (its deposit unlocks are mocked; ours are the real fixture proofs).
+
+const JOINT_OUTCOMES_JSON: &str = include_str!("../../test-vectors/joint-outcomes.json");
+#[allow(dead_code)]
+const JOINT_OUTCOMES_SHA256: &str =
+    "039d78d11e78012030fa3151ebc82e73ed9852bd54ed5a840df668e5ba3ab5ff";
+
+fn t25_wire(
+    s: &TestSetup,
+    challenge: u64,
+    floor: u128,
+) -> (dispute_manager_contract::Client<'static>, Address, Address) {
+    let dm_addr = Address::generate(&s.env);
+    s.env.register_at(&dm_addr, DISPUTE_MANAGER_WASM, ());
+    let dm = dispute_manager_contract::Client::new(&s.env, &dm_addr);
+    let arbiter = Address::generate(&s.env);
+    let fee_pool = Address::generate(&s.env);
+    dm.initialize(&s.admin_addr, &s.ad_token_addr);
+    dm.set_escrow(&s.ad_manager.address, &true);
+    dm.set_arbiter(&arbiter);
+    dm.set_protocol_fee_pool(&fee_pool);
+    dm.set_dispute_params(
+        &s.tp.order_chain_id,
+        &dispute_manager_contract::DisputeParams {
+            challenge_period: challenge,
+            bond_floor: floor,
+            bond_bps: 0,
+        },
+    );
+    s.ad_manager.set_dispute_manager(&dm_addr);
+    TokenContractClient::new(&s.env, &s.ad_token_addr).mint(&s.maker_addr, &1_000_000);
+    (dm, arbiter, fee_pool)
+}
+
+/// The LAST mmr_add THIS merkle manager emitted for the order in the LAST
+/// invocation — events() holds one invocation, so the runner calls this
+/// after every step and folds into a per-leg tracker.
+fn t25_leaf_in_last_invocation(
+    s: &TestSetup,
+    mm: &Address,
+    order_hash: &BytesN<32>,
+) -> Option<u32> {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::xdr::{ContractEventBody, ScVal};
+    let want = order_hash.to_array();
+    let mut found: Option<u32> = None;
+    for ev in s.env.events().all().filter_by_contract(mm).events() {
+        let ContractEventBody::V0(body) = &ev.body;
+        let Some(ScVal::Symbol(sym)) = body.topics.first() else {
+            continue;
+        };
+        if sym.to_utf8_string_lossy() != "mmr_add" {
+            continue;
+        }
+        let ScVal::Vec(Some(vec)) = &body.data else {
+            continue;
+        };
+        if vec.len() < 2 {
+            continue;
+        }
+        let ScVal::Bytes(h) = &vec[0] else { continue };
+        if h.as_slice() != want.as_slice() {
+            continue;
+        }
+        if let ScVal::U32(side) = &vec[1] {
+            found = Some(*side);
+        }
+    }
+    found
+}
+
+struct T25World<'a> {
+    s: &'a TestSetup<'a>,
+    pp: ad_manager_contract::OrderParams,
+    pf: order_portal_contract::OrderParams,
+    h: BytesN<32>,
+    // per-leg leaf trackers (folded after every step)
+    leaf_p: Option<u32>,
+    leaf_f: Option<u32>,
+    // the claim staged by the last anchor action, per consumer side
+    on_f: Option<(BytesN<32>, Bytes)>, // consumed by the portal
+    on_p: Option<(BytesN<32>, Bytes)>, // consumed by the ad manager
+    unlocked_p: bool,
+    unlocked_f: bool,
+}
+
+fn t25_claim_for(s: &TestSetup, domain: u32) -> (BytesN<32>, Bytes) {
+    match domain {
+        2 => cancel_proof(s),
+        3 => settled_proof(s),
+        5 => forfeit_proof(s),
+        other => panic!("no fixture claim for domain {other}"),
+    }
+}
+
+fn t25_now(s: &TestSetup) -> u64 {
+    s.env.ledger().timestamp()
+}
+
+#[test]
+fn test_t25_joint_outcome_sweep() {
+    let v: serde_json::Value = serde_json::from_str(JOINT_OUTCOMES_JSON).unwrap();
+    let header = &v["header"];
+    let scale: i128 = 10i128.pow(header["sorobanScaleExp"].as_u64().unwrap() as u32);
+    let challenge = header["challengePeriodS"].as_u64().unwrap();
+    let floor: u128 = header["bondFloorUnits"]
+        .as_str()
+        .unwrap()
+        .parse::<u128>()
+        .unwrap()
+        * scale as u128;
+    let bond_units: i128 = header["bondUnits"].as_str().unwrap().parse().unwrap();
+    for sc in v["scenarios"].as_array().unwrap() {
+        t25_run_scenario(sc, challenge, floor, scale, bond_units);
+    }
+}
+
+fn t25_run_scenario(
+    sc: &serde_json::Value,
+    challenge: u64,
+    floor: u128,
+    scale: i128,
+    bond_units: i128,
+) {
+    let name = sc["name"].as_str().unwrap();
+
+    // fresh env per scenario — every scenario is its own isolated world
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let (dm, arbiter, fee_pool) = t25_wire(&s, challenge, floor);
+
+    // one canonical order, both legs, ONE hash (the load-bearing assert)
+    let pf = created_portal_order(&s);
+    let pp = locked_ad_order(&s);
+    let hp = s.ad_manager.hash_order(&pp);
+    let hf = s.order_portal.hash_order(&pf);
+    assert_eq!(hp, hf, "{name}: ONE canonical hash across both legs");
+    assert_ne!(
+        s.ad_merkle_addr, s.order_merkle_addr,
+        "{name}: leg isolation"
+    );
+
+    let ad_token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let order_token = TokenContractClient::new(&s.env, &s.order_token_addr);
+    let bridger_addr = account_addr(&s, &s.tp.bridger);
+    let order_recipient_addr = account_addr(&s, &s.tp.order_recipient);
+    let ad_recipient_addr = account_addr(&s, &s.tp.ad_recipient);
+
+    let mut w = T25World {
+        s: &s,
+        pp,
+        pf,
+        h: hp,
+        leaf_p: None,
+        leaf_f: None,
+        on_f: None,
+        on_p: None,
+        unlocked_p: false,
+        unlocked_f: false,
+    };
+
+    // D4: everything the scenario can move, both tokens, all doors — the
+    // parties, both escrows, the module and the pool. Bond money was minted
+    // in t25_wire, BEFORE this snapshot.
+    let holders: [Address; 9] = [
+        s.maker_addr.clone(),
+        bridger_addr.clone(),
+        order_recipient_addr.clone(),
+        ad_recipient_addr.clone(),
+        fee_pool.clone(),
+        arbiter.clone(),
+        s.ad_manager.address.clone(),
+        s.order_portal.address.clone(),
+        dm.address.clone(),
+    ];
+    let sum = |dm: &dispute_manager_contract::Client| -> i128 {
+        let mut t: i128 = 0;
+        for a in holders.iter() {
+            t += ad_token.balance(a) + order_token.balance(a) + dm.claimable(a) as i128;
+        }
+        t
+    };
+    let sum_before = sum(&dm);
+    let pool_before = ad_token.balance(&fee_pool) + dm.claimable(&fee_pool) as i128;
+
+    for step in sc["steps"].as_array().unwrap() {
+        t25_step(&mut w, step, &dm, &arbiter, &anchor);
+        // fold this invocation's appends into the per-leg trackers
+        if let Some(d) = t25_leaf_in_last_invocation(&s, &s.ad_merkle_addr, &w.h) {
+            w.leaf_p = Some(d);
+        }
+        if let Some(d) = t25_leaf_in_last_invocation(&s, &s.order_merkle_addr, &w.h) {
+            w.leaf_f = Some(d);
+        }
+    }
+
+    // --- the joint record -------------------------------------------------
+    let want_status = |key: &str| -> &str { sc["expect"][key].as_str().unwrap() };
+    t25_assert_status(
+        &s.ad_manager.get_order_status(&w.h),
+        want_status("primaryStatus"),
+        name,
+        "primary",
+    );
+    t25_assert_portal_status(
+        &s.order_portal.get_order_status(&w.h),
+        want_status("followerStatus"),
+        name,
+    );
+    t25_assert_leaf(
+        w.leaf_p,
+        sc["expect"]["primaryLeafDomain"].as_str().unwrap(),
+        name,
+        "primary",
+    );
+    t25_assert_leaf(
+        w.leaf_f,
+        sc["expect"]["followerLeafDomain"].as_str().unwrap(),
+        name,
+        "follower",
+    );
+
+    // nullifier flags: consumed=true is probed by REPLAY (the second unlock
+    // must die on the spent nullifier); consumed=false is a fact of the
+    // steps themselves (no unlock ran on that leg), already enforced by the
+    // interpreter's trackers.
+    if sc["expect"]["primaryUnlockNullifierConsumed"]
+        .as_bool()
+        .unwrap()
+    {
+        assert!(w.unlocked_p, "{name}: record says primary unlocked");
+        assert!(
+            s.ad_manager
+                .try_unlock(
+                    &w.pp,
+                    &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+                    &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+                    &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+                    &Bytes::new(&s.env),
+                )
+                .is_err(),
+            "{name}: primary nullifier must be spent (replay refused)"
+        );
+    } else {
+        assert!(!w.unlocked_p, "{name}: no primary unlock in this scenario");
+    }
+    if sc["expect"]["followerUnlockNullifierConsumed"]
+        .as_bool()
+        .unwrap()
+    {
+        assert!(w.unlocked_f, "{name}: record says follower unlocked");
+        assert!(
+            portal_unlock(&s, &w.pf).is_err(),
+            "{name}: follower nullifier must be spent (replay refused)"
+        );
+    } else {
+        assert!(!w.unlocked_f, "{name}: no follower unlock in this scenario");
+    }
+
+    // --- D4: conservation + exact bond routing ----------------------------
+    let sum_after = sum(&dm);
+    assert_eq!(sum_after, sum_before, "{name}: conservation (T-56)");
+    let to_pool: i128 = sc["expect"]["bondToPoolUnits"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let pool_after = ad_token.balance(&fee_pool) + dm.claimable(&fee_pool) as i128;
+    assert_eq!(
+        pool_after - pool_before,
+        to_pool * scale,
+        "{name}: bond to pool (exact)"
+    );
+    let _ = bond_units;
+}
+
+fn t25_step(
+    w: &mut T25World,
+    step: &serde_json::Value,
+    dm: &dispute_manager_contract::Client,
+    arbiter: &Address,
+    anchor: &root_anchor_contract::Client,
+) {
+    let s = w.s;
+    let action = step["action"].as_str().unwrap();
+    let neg = !step["expectRevert"].is_null();
+    let primary = step["leg"].as_str() == Some("primary");
+
+    match action {
+        "unlock" | "unlockNearDeadline" => {
+            if action == "unlockNearDeadline" {
+                warp(s, w.pf.deadline - 60);
+            }
+            if primary {
+                unlock_fixture_order(s, &w.pp);
+                w.unlocked_p = true;
+            } else {
+                portal_unlock(s, &w.pf).unwrap();
+                w.unlocked_f = true;
+            }
+        }
+        "recordSettled" => {
+            if primary {
+                s.ad_manager.record_settled(&w.pp);
+            } else {
+                s.order_portal.record_settled(&w.pf);
+            }
+        }
+        "claimCancel" => {
+            if t25_now(s) < w.pp.deadline {
+                warp(s, w.pp.deadline);
+            }
+            s.ad_manager.claim_cancel(&w.pp);
+        }
+        "finalizeCancel" => {
+            if neg {
+                assert!(
+                    s.ad_manager.try_finalize_cancel(&w.pp).is_err(),
+                    "finalizeCancel must revert (window)"
+                );
+            } else {
+                s.ad_manager.finalize_cancel(&w.pp);
+            }
+        }
+        "warpPastCancelWindow" | "warpPastBackstopWindow" => {
+            warp(s, t25_now(s) + SUITE_BUFFER + 1);
+        }
+        "warpPastDeadline" => {
+            if t25_now(s) <= w.pp.deadline {
+                warp(s, w.pp.deadline + 1);
+            }
+        }
+        "dispute" => {
+            s.ad_manager.dispute(
+                &w.pp,
+                &s.maker_addr,
+                &bytes32_to_bytesn(&s.env, &[0xEE; 32]),
+            );
+        }
+        "rule" => {
+            let outcome = match step["outcome"].as_str().unwrap() {
+                "MutualRefund" => dispute_manager_contract::DisputeOutcome::MutualRefund,
+                "BridgerForfeit" => dispute_manager_contract::DisputeOutcome::BridgerForfeit,
+                "MakerForfeit" => dispute_manager_contract::DisputeOutcome::MakerForfeit,
+                other => panic!("unknown outcome {other}"),
+            };
+            let _ = arbiter;
+            dm.resolve_dispute(&w.h, &outcome);
+        }
+        "warpPastWindow" | "warpPastChallenge" => {
+            warp(s, dm.effective_challenge_deadline(&w.h) + 1);
+        }
+        "claimDispute" => dm.claim_dispute(&w.h),
+        "finalizeDispute" => {
+            if neg {
+                assert!(
+                    s.ad_manager.try_finalize_dispute(&w.pp).is_err(),
+                    "finalizeDispute must revert (T-50)"
+                );
+            } else {
+                s.ad_manager.finalize_dispute(&w.pp);
+            }
+        }
+        "anchorPrimaryLeaf" => {
+            let d = w
+                .leaf_p
+                .expect("anchor discipline: the primary appended nothing");
+            let (root, proof) = t25_claim_for(s, d);
+            notarize(s, anchor, s.tp.ad_chain_id, &root);
+            w.on_f = Some((root, proof));
+        }
+        "anchorFollowerLeaf" => {
+            let d = w
+                .leaf_f
+                .expect("anchor discipline: the follower appended nothing");
+            let (root, proof) = t25_claim_for(s, d);
+            notarize(s, anchor, s.tp.order_chain_id, &root);
+            w.on_p = Some((root, proof));
+        }
+        "refundByCancel" => {
+            let (root, proof) = w.on_f.clone().expect("nothing anchored for the follower");
+            if neg {
+                assert!(
+                    s.order_portal
+                        .try_refund_by_cancel(&w.pf, &root, &proof)
+                        .is_err(),
+                    "wrong-domain refund must revert"
+                );
+            } else {
+                s.order_portal.refund_by_cancel(&w.pf, &root, &proof);
+            }
+        }
+        "payMakerByForfeit" => {
+            let (root, proof) = w.on_f.clone().expect("nothing anchored for the follower");
+            if neg {
+                assert!(
+                    s.order_portal
+                        .try_pay_maker_by_forfeit(&w.pf, &root, &proof)
+                        .is_err(),
+                    "wrong-domain forfeit must revert"
+                );
+            } else {
+                s.order_portal.pay_maker_by_forfeit(&w.pf, &root, &proof);
+            }
+        }
+        "refundByCancelUnanchored" => {
+            // the fixture's CANCEL claim exists as bytes, but its root was
+            // never notarized — the anchor gate must refuse before any proof
+            let (root, proof) = cancel_proof(s);
+            assert!(
+                s.order_portal
+                    .try_refund_by_cancel(&w.pf, &root, &proof)
+                    .is_err(),
+                "unanchored root must be refused"
+            );
+        }
+        "refundByCancelForeignOrder" => {
+            // a CANCEL leaf of a DIFFERENT order, honestly notarized: the
+            // proof binds ITS order hash, not this one's
+            let root = bytes32_to_bytesn(&s.env, &s.tp.foreign_cancel_root);
+            let proof =
+                Bytes::from_slice(&s.env, include_bytes!("fixtures/event_claim_2_foreign.bin"));
+            notarize(s, anchor, s.tp.ad_chain_id, &root);
+            assert!(
+                s.order_portal
+                    .try_refund_by_cancel(&w.pf, &root, &proof)
+                    .is_err(),
+                "a foreign order's leaf must not refund this order"
+            );
+        }
+        "presentSettled" => {
+            if primary {
+                let (root, proof) = w.on_p.clone().expect("nothing anchored for the primary");
+                s.ad_manager.present_settled(&w.pp, &root, &proof);
+            } else {
+                let (root, proof) = w.on_f.clone().expect("nothing anchored for the follower");
+                if neg {
+                    assert!(s
+                        .order_portal
+                        .try_present_settled(&w.pf, &root, &proof)
+                        .is_err());
+                } else {
+                    s.order_portal.present_settled(&w.pf, &root, &proof);
+                }
+            }
+        }
+        "warpPastLongBackstop" => {
+            if t25_now(s) <= w.pf.deadline + SUITE_LONG_BACKSTOP {
+                warp(s, w.pf.deadline + SUITE_LONG_BACKSTOP + 1);
+            }
+        }
+        "claimBackstop" => s.order_portal.claim_backstop(&w.pf),
+        "finalizeBackstop" => {
+            if neg {
+                // r2's pinned negative: the presentation purged the claim
+                assert_eq!(
+                    s.order_portal.try_finalize_backstop(&w.pf),
+                    Err(Ok(order_portal_contract::OrderPortalError::NotClaimed)),
+                    "late finalizeBackstop must die on NotClaimed exactly"
+                );
+            } else {
+                s.order_portal.finalize_backstop(&w.pf);
+            }
+        }
+        other => panic!("unknown step {other}"),
+    }
+}
+
+fn t25_assert_status(got: &ad_manager_contract::Status, want: &str, name: &str, leg: &str) {
+    let ok = match want {
+        "Filled" => *got == ad_manager_contract::Status::Filled,
+        "Cancelled" => *got == ad_manager_contract::Status::Cancelled,
+        "Resolved" => *got == ad_manager_contract::Status::Resolved,
+        other => panic!("unknown status {other}"),
+    };
+    assert!(ok, "{name}: {leg} status (got {got:?}, want {want})");
+}
+
+fn t25_assert_portal_status(got: &order_portal_contract::Status, want: &str, name: &str) {
+    let ok = match want {
+        "Filled" => *got == order_portal_contract::Status::Filled,
+        "Cancelled" => *got == order_portal_contract::Status::Cancelled,
+        "Resolved" => *got == order_portal_contract::Status::Resolved,
+        other => panic!("unknown status {other}"),
+    };
+    assert!(ok, "{name}: follower status (got {got:?}, want {want})");
+}
+
+fn t25_assert_leaf(got: Option<u32>, want: &str, name: &str, leg: &str) {
+    if want == "none" {
+        assert_eq!(got, None, "{name}: unexpected {leg} leaf");
+    } else {
+        assert_eq!(
+            got,
+            Some(want.parse::<u32>().unwrap()),
+            "{name}: {leg} leaf domain"
+        );
+    }
 }
