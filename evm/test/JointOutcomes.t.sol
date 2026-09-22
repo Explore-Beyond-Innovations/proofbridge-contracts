@@ -12,7 +12,7 @@ import {IVerifier} from "src/interfaces/IVerifier.sol";
 import {IMerkleManager} from "src/interfaces/IMerkleManager.sol";
 import {IDisputeManager} from "src/interfaces/IDisputeManager.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
-import {HonkVerifier} from "src/Verifier.sol";
+import {BaseHonkVerifier, HonkVerifier} from "src/Verifier.sol";
 import {RootAnchor} from "src/RootAnchor.sol";
 import {MerkleManager} from "src/MerkleManager.sol";
 import {DisputeManager} from "src/DisputeManager.sol";
@@ -45,7 +45,7 @@ import {MockKeyRegistry} from "./mocks/MockKeyRegistry.sol";
 /// scenario's negatives are proof-semantic (wrong domain, foreign order),
 /// mock elsewhere (deposit-proof unlocks stay mock territory).
 contract JointOutcomesTest is Test {
-    string internal constant FIXTURE_SHA256 = "039d78d11e78012030fa3151ebc82e73ed9852bd54ed5a840df668e5ba3ab5ff";
+    string internal constant FIXTURE_SHA256 = "c5409fb9a6647b7c052caa4aad6c33845a67749731ba2a492a8b71a741aab459";
 
     bytes32 private constant LEAF_TOPIC = keccak256("DepositHashAppended(uint256,bytes32,uint256,bytes32)");
 
@@ -175,7 +175,19 @@ contract JointOutcomesTest is Test {
         bytes32 nfP;
         bytes32 nfF;
         uint256 sumBefore;
-        uint256 dmNativeBefore;
+        uint256 filerBase;
+        uint256 bondPaid;
+    }
+
+    /// r3 F1: the monorepo's repo-checks gate pins these constants, but it
+    /// arrives with a different PR and this one merges first. Until then
+    /// nothing in this repo checks them, so the driver hashes what it read.
+    function test_fixturePinMatchesTheFileRead() public view {
+        assertEq(
+            vm.toString(sha256(bytes(_fixture()))),
+            string.concat("0x", FIXTURE_SHA256),
+            "joint-outcomes.json changed without repinning FIXTURE_SHA256"
+        );
     }
 
     function test_jointOutcomeSweep() public {
@@ -191,18 +203,18 @@ contract JointOutcomesTest is Test {
         w.at = string.concat(".scenarios[", vm.toString(i), "]");
         w.name = vm.parseJsonString(v, string.concat(w.at, ".name"));
 
-        // per-scenario verifier mode on the FOLLOWER (r-design: proof-semantic
-        // negatives need the real circuit; deposit unlocks need the mock)
-        bool real = vm.keyExistsJson(v, string.concat(w.at, ".followerRealProofs"));
-        vm.etch(address(verifierF), real ? realCode : mockCode);
-
         delete _buffered;
         _openJointTrade(w, i);
 
         // The bond's native is dealt BEFORE the snapshot so conservation
         // holds across the scenario (D4).
-        if (_scenarioDisputes(v, w.at)) vm.deal(maker, maker.balance + bondWei);
+        if (_scenarioDisputes(v, w.at)) {
+            vm.deal(maker, maker.balance + bondWei);
+            w.bondPaid = bondWei;
+        }
         w.sumBefore = _worldSum();
+        w.filerBase = _spendableNative(maker); // the filer is the maker on every row
+        _poolBase = _spendableNative(feePool);
 
         vm.recordLogs();
         uint256 steps = _stepCount(v, w.at);
@@ -278,11 +290,17 @@ contract JointOutcomesTest is Test {
     function _step(string memory v, string memory sAt, World memory w) internal {
         string memory action = vm.parseJsonString(v, string.concat(sAt, ".action"));
         bool neg = vm.keyExistsJson(v, string.concat(sAt, ".expectRevert"));
+        // Armed immediately before each TARGET call, never here: several steps
+        // make preparatory external calls (anchoring a freshly minted root)
+        // that would consume an expectation armed at the top.
+        string memory reason = neg ? vm.parseJsonString(v, string.concat(sAt, ".expectRevert")) : "";
 
         if (_eq(action, "unlock")) {
+            _useMock(_isPrimary(v, sAt));
             _unlock(w, _isPrimary(v, sAt));
         } else if (_eq(action, "unlockNearDeadline")) {
             vm.warp(w.pF.deadline - 60);
+            _useMock(_isPrimary(v, sAt));
             _unlock(w, _isPrimary(v, sAt));
         } else if (_eq(action, "recordSettled")) {
             if (_isPrimary(v, sAt)) adManager.recordSettled(w.pP);
@@ -291,7 +309,7 @@ contract JointOutcomesTest is Test {
             if (block.timestamp < w.pP.deadline) vm.warp(w.pP.deadline);
             adManager.claimCancel(w.pP);
         } else if (_eq(action, "finalizeCancel")) {
-            if (neg) vm.expectRevert();
+            if (neg) _expectNamedRevert(reason, w);
             adManager.finalizeCancel(w.pP);
         } else if (_eq(action, "warpPastCancelWindow")) {
             vm.warp(block.timestamp + BUFFER + 1);
@@ -308,21 +326,24 @@ contract JointOutcomesTest is Test {
         } else if (_eq(action, "claimDispute")) {
             dm.claimDispute(w.h);
         } else if (_eq(action, "finalizeDispute")) {
-            if (neg) vm.expectRevert();
+            if (neg) _expectNamedRevert(reason, w);
             adManager.finalizeDispute(w.pP);
         } else if (_eq(action, "anchorPrimaryLeaf")) {
             (w.rootOnF, w.proofOnF) = _mintAndAnchor(w.h, _lastLeafDomain(w.h, address(mmP)), anchorF);
         } else if (_eq(action, "anchorFollowerLeaf")) {
             (w.rootOnP, w.proofOnP) = _mintAndAnchor(w.h, _lastLeafDomain(w.h, address(mmF)), anchorP);
         } else if (_eq(action, "refundByCancel")) {
-            if (neg) vm.expectRevert();
+            _useReal(false);
+            if (neg) _expectNamedRevert(reason, w);
             portal.refundByCancel(w.pF, w.rootOnF, w.proofOnF);
         } else if (_eq(action, "payMakerByForfeit")) {
-            if (neg) vm.expectRevert();
+            _useReal(false);
+            if (neg) _expectNamedRevert(reason, w);
             portal.payMakerByForfeit(w.pF, w.rootOnF, w.proofOnF);
         } else if (_eq(action, "refundByCancelUnanchored")) {
             (bytes memory proof, bytes32 root) = _eventProof(2, w.h);
-            vm.expectRevert();
+            _useReal(false);
+            if (neg) _expectNamedRevert(reason, w);
             portal.refundByCancel(w.pF, root, proof);
         } else if (_eq(action, "refundByCancelForeignOrder")) {
             // a CANCEL claim bound to a DIFFERENT order hash, honestly anchored:
@@ -330,13 +351,16 @@ contract JointOutcomesTest is Test {
             bytes32 foreign = keccak256(abi.encode(w.h, "foreign"));
             (bytes memory proof, bytes32 root) = _eventProof(2, foreign);
             anchorF.anchor(block.chainid, root, nextSeq++);
-            vm.expectRevert();
+            _useReal(false);
+            if (neg) _expectNamedRevert(reason, w);
             portal.refundByCancel(w.pF, root, proof);
         } else if (_eq(action, "presentSettled")) {
-            if (_isPrimary(v, sAt)) {
+            bool prim = _isPrimary(v, sAt);
+            _useReal(prim);
+            if (prim) {
                 adManager.presentSettled(w.pP, w.rootOnP, w.proofOnP);
             } else {
-                if (neg) vm.expectRevert();
+                if (neg) _expectNamedRevert(reason, w);
                 portal.presentSettled(w.pF, w.rootOnF, w.proofOnF);
             }
         } else if (_eq(action, "warpPastLongBackstop")) {
@@ -346,12 +370,54 @@ contract JointOutcomesTest is Test {
         } else if (_eq(action, "warpPastBackstopWindow")) {
             vm.warp(block.timestamp + BUFFER + 1);
         } else if (_eq(action, "finalizeBackstop")) {
-            // r2's pinned negative: the presentation purged the claim, so the
-            // late finalize dies on the SPECIFIC guard, not just any revert.
-            if (neg) vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimed.selector, w.h));
+            if (neg) _expectNamedRevert(reason, w);
             portal.finalizeBackstop(w.pF);
         } else {
             revert(string.concat("unknown step: ", action));
+        }
+    }
+
+    /// r3 F4: the leaf domain lives ONLY in the verifier's public inputs —
+    /// EscrowBase hands `domain` to i_verifier.verify and does nothing else
+    /// with it — so every event-claim consumption must run the REAL circuit or
+    /// the domain goes unchecked, on BOTH escrows (etching only the follower
+    /// graded the same fixture row differently on the two chains). Deposit
+    /// proofs carry no domain and keep the permissive mock; one escrow's
+    /// verifier serves both paths, so the swap is per STEP.
+    function _useReal(bool primary) internal {
+        vm.etch(primary ? address(verifierP) : address(verifierF), realCode);
+    }
+
+    function _useMock(bool primary) internal {
+        vm.etch(primary ? address(verifierP) : address(verifierF), mockCode);
+    }
+
+    /// r3 F7: the fixture NAMES the reason; a bare expectRevert lets a row
+    /// pass on whichever guard happened to fire first — exactly how
+    /// `filled-primary-refund-unreachable` could stop testing the domain
+    /// check it exists for.
+    function _expectNamedRevert(string memory reason, World memory w) internal {
+        if (_eq(reason, "rootNotAnchored")) {
+            vm.expectPartialRevert(IEscrow.Escrow__RootNotAnchored.selector);
+        } else if (_eq(reason, "wrongLeafDomain") || _eq(reason, "proofBindsOrderHash")) {
+            // The leaf domain and the order hash are public inputs of the same
+            // event-proof verification, and with the real circuit in place
+            // (F4) the rejection happens INSIDE the verifier — it reverts
+            // rather than returning false, so `Escrow__InvalidProof` is never
+            // reached. Pinning the circuit's own failure is the stronger
+            // statement: the proof did not verify, not merely "something
+            // reverted".
+            vm.expectPartialRevert(BaseHonkVerifier.SumcheckFailed.selector);
+        } else if (_eq(reason, "terminalStatus")) {
+            vm.expectPartialRevert(IEscrow.Escrow__NotClaimable.selector);
+        } else if (_eq(reason, "windowNotOver")) {
+            vm.expectPartialRevert(IEscrow.Escrow__TooEarly.selector);
+        } else if (_eq(reason, "disputeNotResolved")) {
+            vm.expectPartialRevert(IEscrow.Escrow__DisputeNotResolved.selector);
+        } else if (_eq(reason, "notClaimed")) {
+            vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimed.selector, w.h));
+        } else {
+            revert(string.concat("unmapped expectRevert reason: ", reason));
         }
     }
 
@@ -439,12 +505,19 @@ contract JointOutcomesTest is Test {
         uint256 sumAfter = _worldSum();
         assertEq(sumAfter, w.sumBefore, string.concat(w.name, ": conservation (T-56)"));
 
-        // bond routing in fixture units, measured at the two destinations
-        uint256 toFiler = vm.parseJsonUint(v, string.concat(w.at, ".expect.bondToFilerUnits"));
-        uint256 toPool = vm.parseJsonUint(v, string.concat(w.at, ".expect.bondToPoolUnits"));
-        assertEq(_spendableNative(feePool) / scale, _poolBase / scale + toPool, string.concat(w.name, ": bond to pool"));
+        // r3 F2 + F9: assert BOTH destinations, in CHAIN units. Conservation
+        // does not imply the filer's share — _worldSum counts the arbiter and
+        // all three contracts, so a bond routed to the arbiter or left in the
+        // module balances the sum with the pool delta at zero. And dividing by
+        // `scale` before comparing would swallow any sub-scale discrepancy.
+        uint256 toFiler = vm.parseJsonUint(v, string.concat(w.at, ".expect.bondToFilerUnits")) * scale;
+        uint256 toPool = vm.parseJsonUint(v, string.concat(w.at, ".expect.bondToPoolUnits")) * scale;
+        assertEq(_spendableNative(feePool) - _poolBase, toPool, string.concat(w.name, ": bond to pool"));
+        // The filer POSTS the bond during the steps, so its own outlay is
+        // added back before comparing — otherwise a forfeiting row underflows
+        // and a returning row reads as zero movement.
+        assertEq(_spendableNative(maker) + w.bondPaid - w.filerBase, toFiler, string.concat(w.name, ": bond to filer"));
         _poolBase = _spendableNative(feePool);
-        toFiler; // the filer's return is implied by conservation + pool exactness
     }
 
     uint256 internal _poolBase;

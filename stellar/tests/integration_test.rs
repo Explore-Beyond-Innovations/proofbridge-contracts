@@ -4711,7 +4711,7 @@ fn test_2_3g_in_flight_clears_on_resolved() {
 const DISPUTE_SCENARIOS_JSON: &str = include_str!("../../test-vectors/dispute-scenarios.json");
 #[allow(dead_code)]
 const DISPUTE_SCENARIOS_SHA256: &str =
-    "54fcf9f016c1b1754127950a6773d5526e02815263f70046458cdaae4f7c6792";
+    "832864d8032f9a7f3df6e71d1c833b221bc94d1e7d8f6fb3945e9e90b13bc1cd";
 
 fn t24_wire(
     s: &TestSetup,
@@ -4771,6 +4771,37 @@ fn t24_last_leaf_domain(s: &TestSetup, order_hash: &BytesN<32>) -> Option<u32> {
         }
     }
     found
+}
+
+/// r3 F1: the monorepo's repo-checks gate pins these constants, but it lands
+/// with a different PR. Until then nothing in this repo checks them, so each
+/// driver hashes the bytes it actually compiled in.
+#[test]
+fn test_fixture_pins_match_the_files_read() {
+    let env = Env::default();
+    for (label, json, pinned) in [
+        (
+            "dispute-scenarios.json",
+            DISPUTE_SCENARIOS_JSON,
+            DISPUTE_SCENARIOS_SHA256,
+        ),
+        (
+            "joint-outcomes.json",
+            JOINT_OUTCOMES_JSON,
+            JOINT_OUTCOMES_SHA256,
+        ),
+    ] {
+        let digest = env
+            .crypto()
+            .sha256(&Bytes::from_slice(&env, json.as_bytes()))
+            .to_bytes()
+            .to_array();
+        let hex: std::string::String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, pinned,
+            "{label} changed without repinning its SHA256 constant"
+        );
+    }
 }
 
 #[test]
@@ -4925,12 +4956,13 @@ fn t24_run_scenario(
 const JOINT_OUTCOMES_JSON: &str = include_str!("../../test-vectors/joint-outcomes.json");
 #[allow(dead_code)]
 const JOINT_OUTCOMES_SHA256: &str =
-    "039d78d11e78012030fa3151ebc82e73ed9852bd54ed5a840df668e5ba3ab5ff";
+    "c5409fb9a6647b7c052caa4aad6c33845a67749731ba2a492a8b71a741aab459";
 
 fn t25_wire(
     s: &TestSetup,
     challenge: u64,
     floor: u128,
+    bond_bps: u32,
 ) -> (dispute_manager_contract::Client<'static>, Address, Address) {
     let dm_addr = Address::generate(&s.env);
     s.env.register_at(&dm_addr, DISPUTE_MANAGER_WASM, ());
@@ -4946,7 +4978,7 @@ fn t25_wire(
         &dispute_manager_contract::DisputeParams {
             challenge_period: challenge,
             bond_floor: floor,
-            bond_bps: 0,
+            bond_bps,
         },
     );
     s.ad_manager.set_dispute_manager(&dm_addr);
@@ -4993,6 +5025,7 @@ fn t25_leaf_in_last_invocation(
 
 struct T25World<'a> {
     s: &'a TestSetup<'a>,
+    name: &'a str,
     pp: ad_manager_contract::OrderParams,
     pf: order_portal_contract::OrderParams,
     h: BytesN<32>,
@@ -5015,6 +5048,43 @@ fn t25_claim_for(s: &TestSetup, domain: u32) -> (BytesN<32>, Bytes) {
     }
 }
 
+/// r3 F6: the EVM half reads `nullifierUsed(hash)` — a direct state read.
+/// This does the same instead of restating the driver's own step log.
+/// escrow_storage keys the replay guard as `("nulls", hash)` in persistent
+/// storage, read here inside the contract's own context. A post-hoc
+/// `try_unlock` probe cannot serve: by then the order is Filled and the
+/// status guard fires long before the nullifier is consulted.
+fn t25_nullifier_used(s: &TestSetup, escrow: &Address, nullifier: &BytesN<32>) -> bool {
+    let key = (soroban_sdk::Symbol::new(&s.env, "nulls"), nullifier.clone());
+    s.env
+        .as_contract(escrow, || s.env.storage().persistent().get(&key))
+        .unwrap_or(false)
+}
+
+/// r3 F7: the fixture names WHY a negative step must fail. Reducing that to
+/// `.is_err()` lets a row pass on whichever guard fired first — which is how
+/// `leaf-replay-and-reuse`'s cross-order attempt could stop testing proof
+/// binding and start testing the terminal-status guard instead.
+fn t25_expect_portal_err<T>(
+    reason: &str,
+    got: Result<T, Result<OpErr, soroban_sdk::InvokeError>>,
+    name: &str,
+    step: &str,
+) {
+    let want = match reason {
+        "rootNotAnchored" => OpErr::RootNotAnchored,
+        "wrongLeafDomain" | "proofBindsOrderHash" => OpErr::InvalidProof,
+        "terminalStatus" => OpErr::NotClaimable,
+        "notClaimed" => OpErr::NotClaimed,
+        other => panic!("unmapped expectRevert reason: {other}"),
+    };
+    match got {
+        Ok(_) => panic!("{name}: {step} succeeded, wanted {reason}"),
+        Err(Err(ie)) => panic!("{name}: {step} failed as a host error ({ie:?}), wanted {reason}"),
+        Err(Ok(e)) => assert_eq!(e, want, "{name}: {step} must fail with {reason}"),
+    }
+}
+
 fn t25_now(s: &TestSetup) -> u64 {
     s.env.ledger().timestamp()
 }
@@ -5031,9 +5101,27 @@ fn test_t25_joint_outcome_sweep() {
         .parse::<u128>()
         .unwrap()
         * scale as u128;
+    // r3 F5: read the rate from the header and wire it, instead of hard-coding
+    // 0 — otherwise the EVM driver could configure something else while this
+    // silently stayed 0, and the two chains would settle different bonds
+    // against one expected record.
+    let bond_bps: u32 = header["bondBps"].as_u64().unwrap() as u32;
     let bond_units: i128 = header["bondUnits"].as_str().unwrap().parse().unwrap();
+    let order_amount_units: i128 = header["orderAmountUnits"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
     for sc in v["scenarios"].as_array().unwrap() {
-        t25_run_scenario(sc, challenge, floor, scale, bond_units);
+        t25_run_scenario(
+            sc,
+            challenge,
+            floor,
+            scale,
+            bond_units,
+            bond_bps,
+            order_amount_units,
+        );
     }
 }
 
@@ -5043,13 +5131,22 @@ fn t25_run_scenario(
     floor: u128,
     scale: i128,
     bond_units: i128,
+    bond_bps: u32,
+    order_amount_units: i128,
 ) {
     let name = sc["name"].as_str().unwrap();
 
     // fresh env per scenario — every scenario is its own isolated world
     let s = setup();
     let anchor = wire_anchor(&s);
-    let (dm, arbiter, fee_pool) = t25_wire(&s, challenge, floor);
+    let (dm, arbiter, fee_pool) = t25_wire(&s, challenge, floor, bond_bps);
+    // The fixture's order size, in chain units, must be the size the legs
+    // actually carry — otherwise `orderAmountUnits` describes nothing (F5).
+    assert_eq!(
+        s.tp.amount as i128,
+        order_amount_units * scale,
+        "{name}: orderAmountUnits must match the legs' amount"
+    );
 
     // one canonical order, both legs, ONE hash (the load-bearing assert)
     let pf = created_portal_order(&s);
@@ -5070,6 +5167,7 @@ fn t25_run_scenario(
 
     let mut w = T25World {
         s: &s,
+        name,
         pp,
         pf,
         h: hp,
@@ -5142,42 +5240,29 @@ fn t25_run_scenario(
         "follower",
     );
 
-    // nullifier flags: consumed=true is probed by REPLAY (the second unlock
-    // must die on the spent nullifier); consumed=false is a fact of the
-    // steps themselves (no unlock ran on that leg), already enforced by the
-    // interpreter's trackers.
-    if sc["expect"]["primaryUnlockNullifierConsumed"]
-        .as_bool()
-        .unwrap()
-    {
-        assert!(w.unlocked_p, "{name}: record says primary unlocked");
-        assert!(
-            s.ad_manager
-                .try_unlock(
-                    &w.pp,
-                    &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
-                    &bytes32_to_bytesn(&s.env, &s.tp.order_root),
-                    &Bytes::from_slice(&s.env, PROOF_BRIDGER),
-                    &Bytes::new(&s.env),
-                )
-                .is_err(),
-            "{name}: primary nullifier must be spent (replay refused)"
-        );
-    } else {
-        assert!(!w.unlocked_p, "{name}: no primary unlock in this scenario");
-    }
-    if sc["expect"]["followerUnlockNullifierConsumed"]
-        .as_bool()
-        .unwrap()
-    {
-        assert!(w.unlocked_f, "{name}: record says follower unlocked");
-        assert!(
-            portal_unlock(&s, &w.pf).is_err(),
-            "{name}: follower nullifier must be spent (replay refused)"
-        );
-    } else {
-        assert!(!w.unlocked_f, "{name}: no follower unlock in this scenario");
-    }
+    // r3 F6: both columns are CONTRACT STATE reads now, matching the EVM half.
+    assert_eq!(
+        t25_nullifier_used(
+            &s,
+            &s.ad_manager.address,
+            &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier)
+        ),
+        sc["expect"]["primaryUnlockNullifierConsumed"]
+            .as_bool()
+            .unwrap(),
+        "{name}: primary nullifier"
+    );
+    assert_eq!(
+        t25_nullifier_used(
+            &s,
+            &s.order_portal.address,
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier)
+        ),
+        sc["expect"]["followerUnlockNullifierConsumed"]
+            .as_bool()
+            .unwrap(),
+        "{name}: follower nullifier"
+    );
 
     // --- D4: conservation + exact bond routing ----------------------------
     let sum_after = sum(&dm);
@@ -5206,6 +5291,8 @@ fn t25_step(
     let s = w.s;
     let action = step["action"].as_str().unwrap();
     let neg = !step["expectRevert"].is_null();
+    let reason = step["expectRevert"].as_str().unwrap_or("");
+    let name = w.name;
     let primary = step["leg"].as_str() == Some("primary");
 
     match action {
@@ -5302,11 +5389,11 @@ fn t25_step(
         "refundByCancel" => {
             let (root, proof) = w.on_f.clone().expect("nothing anchored for the follower");
             if neg {
-                assert!(
-                    s.order_portal
-                        .try_refund_by_cancel(&w.pf, &root, &proof)
-                        .is_err(),
-                    "wrong-domain refund must revert"
+                t25_expect_portal_err(
+                    reason,
+                    s.order_portal.try_refund_by_cancel(&w.pf, &root, &proof),
+                    name,
+                    "refundByCancel",
                 );
             } else {
                 s.order_portal.refund_by_cancel(&w.pf, &root, &proof);
@@ -5315,11 +5402,12 @@ fn t25_step(
         "payMakerByForfeit" => {
             let (root, proof) = w.on_f.clone().expect("nothing anchored for the follower");
             if neg {
-                assert!(
+                t25_expect_portal_err(
+                    reason,
                     s.order_portal
-                        .try_pay_maker_by_forfeit(&w.pf, &root, &proof)
-                        .is_err(),
-                    "wrong-domain forfeit must revert"
+                        .try_pay_maker_by_forfeit(&w.pf, &root, &proof),
+                    name,
+                    "payMakerByForfeit",
                 );
             } else {
                 s.order_portal.pay_maker_by_forfeit(&w.pf, &root, &proof);
@@ -5329,11 +5417,11 @@ fn t25_step(
             // the fixture's CANCEL claim exists as bytes, but its root was
             // never notarized — the anchor gate must refuse before any proof
             let (root, proof) = cancel_proof(s);
-            assert!(
-                s.order_portal
-                    .try_refund_by_cancel(&w.pf, &root, &proof)
-                    .is_err(),
-                "unanchored root must be refused"
+            t25_expect_portal_err(
+                "rootNotAnchored",
+                s.order_portal.try_refund_by_cancel(&w.pf, &root, &proof),
+                name,
+                "refundByCancelUnanchored",
             );
         }
         "refundByCancelForeignOrder" => {
@@ -5343,11 +5431,11 @@ fn t25_step(
             let proof =
                 Bytes::from_slice(&s.env, include_bytes!("fixtures/event_claim_2_foreign.bin"));
             notarize(s, anchor, s.tp.ad_chain_id, &root);
-            assert!(
-                s.order_portal
-                    .try_refund_by_cancel(&w.pf, &root, &proof)
-                    .is_err(),
-                "a foreign order's leaf must not refund this order"
+            t25_expect_portal_err(
+                "proofBindsOrderHash",
+                s.order_portal.try_refund_by_cancel(&w.pf, &root, &proof),
+                name,
+                "refundByCancelForeignOrder",
             );
         }
         "presentSettled" => {

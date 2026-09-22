@@ -6,6 +6,7 @@ import {DisputeTest} from "./Dispute.t.sol";
 import {Dispute} from "../src/libraries/Dispute.sol";
 import {IEscrow} from "../src/interfaces/IEscrow.sol";
 import {IAdManager} from "../src/interfaces/IAdManager.sol";
+import {RouteTiming} from "../src/libraries/RouteTiming.sol";
 
 /// T-24 (2.3j): the EVM half of the differential harness. Interprets the
 /// shared scenario fixture — the SAME steps the Soroban driver interprets —
@@ -21,15 +22,26 @@ import {IAdManager} from "../src/interfaces/IAdManager.sol";
 /// wei. The fixture's sha256 is pinned below; scripts/repo-checks compares
 /// it against the file so neither driver can drift alone.
 contract DisputeDifferentialTest is DisputeTest {
-    string internal constant FIXTURE_SHA256 = "54fcf9f016c1b1754127950a6773d5526e02815263f70046458cdaae4f7c6792";
+    string internal constant FIXTURE_SHA256 = "832864d8032f9a7f3df6e71d1c833b221bc94d1e7d8f6fb3945e9e90b13bc1cd";
 
     bytes32 private constant LEAF_TOPIC = keccak256("DepositHashAppended(uint256,bytes32,uint256,bytes32)");
+
+    /// r3 F1: the monorepo gate that enforces this constant arrives with a
+    /// different PR, and this one merges first.
+    function test_fixturePinMatchesTheFileRead() public view {
+        assertEq(
+            vm.toString(sha256(bytes(vm.readFile("../test-vectors/dispute-scenarios.json")))),
+            string.concat("0x", FIXTURE_SHA256),
+            "dispute-scenarios.json changed without repinning FIXTURE_SHA256"
+        );
+    }
 
     function test_t24_differentialScenarios() public {
         string memory v = vm.readFile("../test-vectors/dispute-scenarios.json");
 
         uint256 scale = 10 ** vm.parseJsonUint(v, ".header.evmScaleExp");
         uint64 challenge = uint64(vm.parseJsonUint(v, ".header.challengePeriodS"));
+        challengeS = challenge;
         uint128 floorWei = uint128(vm.parseJsonUint(v, ".header.bondFloorUnits") * scale);
         uint16 bps = uint16(vm.parseJsonUint(v, ".header.bondBps"));
         uint256 amountWei = vm.parseJsonUint(v, ".header.orderAmountUnits") * scale;
@@ -47,11 +59,27 @@ contract DisputeDifferentialTest is DisputeTest {
         adManager.setTokenRoute(address(adToken), orderChainId, _b32(orderToken));
         vm.stopPrank();
 
+        // r3 F3: both drivers used to advance with
+        // `warp(effectiveChallengeDeadline(h) + 1)` — a value read back from
+        // the very implementation under test, so if the two chains computed
+        // different horizons each would warp to its own answer and both would
+        // finalize. The fixture now pins `bufferS`, the driver configures it,
+        // and `_assertHorizon` checks the chain agrees with the horizon
+        // computed here before any warp relies on it.
+        bufferS = uint64(vm.parseJsonUint(v, ".header.bufferS"));
+        vm.prank(admin);
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, bufferS, 0, 1 days, 0));
+
         uint256 n = vm.parseJsonUint(v, ".counts.scenarios");
         for (uint256 i = 0; i < n; i++) {
             _runScenario(v, i, amountWei, bondWei, scale);
         }
     }
+
+    uint64 internal bufferS;
+    uint64 internal challengeS;
+    uint64 internal filedAt;
+    uint64 internal ruledAt;
 
     struct Run {
         string at;
@@ -78,12 +106,34 @@ contract DisputeDifferentialTest is DisputeTest {
         vm.deal(maker, bondWei);
         vm.prank(maker);
         adManager.dispute{value: bondWei}(r.p, bytes32("evidence"));
+        filedAt = uint64(block.timestamp);
+        ruledAt = 0;
+        _assertHorizon(r);
         r.filerBase = _spendable(maker);
         r.poolBase = _spendable(feePool);
 
         vm.recordLogs();
         _runSteps(v, r);
         _assertRecord(v, r);
+    }
+
+    /// The horizon the FIXTURE describes: the challenge period is a floor,
+    /// never a licence to finish before the order's own deadline + buffer
+    /// (D3/T-50). Computed here and checked against the chain, so the two
+    /// implementations cannot disagree about it invisibly (r3 F3).
+    function _horizon(Run memory r) internal view returns (uint64) {
+        uint64 fromChallenge = filedAt + challengeS;
+        uint64 fromDeadline = uint64(r.p.deadline) + bufferS;
+        return fromChallenge > fromDeadline ? fromChallenge : fromDeadline;
+    }
+
+    function _assertHorizon(Run memory r) internal view {
+        uint64 want = _horizon(r);
+        assertEq(
+            dm.effectiveChallengeDeadline(r.h),
+            want,
+            string.concat(r.name, ": horizon must equal max(filedAt+period, deadline+buffer)")
+        );
     }
 
     function _runSteps(string memory v, Run memory r) internal {
@@ -99,12 +149,31 @@ contract DisputeDifferentialTest is DisputeTest {
         if (_eq(action, "rule")) {
             vm.prank(arbiter);
             dm.resolveDispute(r.h, _outcome(vm.parseJsonString(v, string.concat(sAt, ".outcome"))));
+            ruledAt = uint64(block.timestamp);
         } else if (_eq(action, "warpPastChallenge")) {
-            vm.warp(dm.effectiveChallengeDeadline(r.h) + 1);
+            // Past the horizon the FIXTURE describes, which is what makes the
+            // permissionless fallback claimable. Distinct from the window a
+            // claim then OPENS — warpPastWindow below computes that one.
+            vm.warp(uint256(_horizon(r)) + 1);
         } else if (_eq(action, "claimDispute")) {
+            // A fallback claim is an ANNOUNCEMENT, not a state change: it
+            // emits DisputeClaimed and extends nothing, because the horizon
+            // already provided the presentation window. Only a ruling opens a
+            // new one.
             dm.claimDispute(r.h);
         } else if (_eq(action, "warpPastWindow")) {
-            _warpPastWindow(r.h);
+            // The window a ruling or a fallback claim opened:
+            // max(openedAt, orderDeadline) + buffer (D3). Computed from the
+            // fixture, then checked against the chain before relying on it.
+            uint64 want;
+            if (ruledAt == 0) {
+                want = _horizon(r); // no ruling: the horizon is the window
+            } else {
+                uint64 base = ruledAt > uint64(r.p.deadline) ? ruledAt : uint64(r.p.deadline);
+                want = base + bufferS;
+            }
+            assertEq(dm.effectiveChallengeDeadline(r.h), want, string.concat(r.name, ": opened window"));
+            vm.warp(uint256(want) + 1);
         } else if (_eq(action, "finalize")) {
             adManager.finalizeDispute(r.p);
         } else if (_eq(action, "present")) {

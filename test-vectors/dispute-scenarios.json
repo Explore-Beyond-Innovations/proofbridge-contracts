@@ -7,13 +7,13 @@
   "header": {
     "note": "amounts are fixture units; 1 unit = 10^evmScaleExp wei = 10^sorobanScaleExp stroops; drivers scale at the boundary and compare deltas in fixture units; every amount is a multiple of 10^4 so the bond's bps division is exact",
     "evmScaleExp": 12,
-    "sorobanScaleExp": 1,
+    "sorobanScaleExp": 0,
     "orderAmountUnits": "1000000",
     "challengePeriodS": 7200,
+    "bufferS": 1800,
     "bondFloorUnits": "10000",
     "bondBps": 0,
-    "bondUnits": "10000",
-    "filerIsBridger": false
+    "bondUnits": "10000"
   },
   "counts": {
     "scenarios": 6

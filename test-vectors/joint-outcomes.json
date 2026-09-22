@@ -7,9 +7,11 @@
   "header": {
     "note": "amounts are fixture units per dispute-scenarios.json's convention; drivers configure params from this header, never inherit; the anchor actions anchor ONLY leaves the emitting leg actually appended (the anchor discipline)",
     "evmScaleExp": 12,
-    "sorobanScaleExp": 1,
+    "sorobanScaleExp": 0,
     "orderAmountUnits": "1000000",
     "challengePeriodS": 7200,
+    "bufferS": 1800,
+    "longBackstopS": 86400,
     "bondFloorUnits": "10000",
     "bondBps": 0,
     "bondUnits": "10000",
@@ -177,7 +179,7 @@
     },
     {
       "name": "fast-unlock-race-silent",
-      "note": "8.4's Tier-1 statement: with EVERY holder of the public evidence silent through the window, the claim finalizes — the stated boundary, not a bug (residual 14)",
+      "note": "TIER-1 STATED BOUNDARY (8.4): with EVERY holder of the public evidence silent through the window, the claim finalizes — the stated boundary, not a bug (residual 14)",
       "steps": [
         {
           "leg": "follower",
@@ -212,8 +214,7 @@
         "primaryUnlockNullifierConsumed": false,
         "followerUnlockNullifierConsumed": true,
         "bondToFilerUnits": "0",
-        "bondToPoolUnits": "0",
-        "tier1Stated": true
+        "bondToPoolUnits": "0"
       }
     },
     {
@@ -440,7 +441,7 @@
         {
           "leg": "primary",
           "action": "finalizeDispute",
-          "expectRevert": "windowNotOver"
+          "expectRevert": "disputeNotResolved"
         },
         {
           "leg": "primary",
@@ -499,17 +500,17 @@
         },
         {
           "leg": "follower",
+          "action": "refundByCancelForeignOrder",
+          "expectRevert": "proofBindsOrderHash"
+        },
+        {
+          "leg": "follower",
           "action": "refundByCancel"
         },
         {
           "leg": "follower",
           "action": "refundByCancel",
           "expectRevert": "terminalStatus"
-        },
-        {
-          "leg": "follower",
-          "action": "refundByCancelForeignOrder",
-          "expectRevert": "proofBindsOrderHash"
         }
       ],
       "expect": {
@@ -569,7 +570,7 @@
     },
     {
       "name": "backstop-silent",
-      "note": "8.3's first attack via the backstop bypass, Tier-1-stated: refund executes only if every evidence holder — the victim included — stays silent through longBackstop + the window",
+      "note": "TIER-1 STATED BOUNDARY (8.3, backstop bypass): refund executes only if every evidence holder — the victim included — stays silent through longBackstop + the window",
       "steps": [
         {
           "leg": "primary",
@@ -604,8 +605,7 @@
         "primaryUnlockNullifierConsumed": true,
         "followerUnlockNullifierConsumed": false,
         "bondToFilerUnits": "0",
-        "bondToPoolUnits": "0",
-        "tier1Stated": true
+        "bondToPoolUnits": "0"
       }
     }
   ]
