@@ -76,10 +76,10 @@ pub fn check_contract_call(
     let raw = c.args.get(0).ok_or(AccountError::BadArgs)?;
     let lock: Map<Symbol, Val> = Map::try_from_val(env, &raw).map_err(|_| AccountError::BadArgs)?;
 
-    // One order, shared with the EVM module and the relayer's TypeScript check, and pinned by the
+    // One order, shared with the EVM module and the agent runtime's TypeScript check, and pinned by the
     // shared fixture's precedence cases (T-60): **reach, then size, then rate**. Who and what the
     // lock is for, before how much, before how much lately. A lock with two faults is refused for
-    // the earlier one on every implementation, so the relayer's pre-flight reason is the chain's.
+    // the earlier one on every implementation, so the runtime's pre-flight reason is the chain's.
     //
     // ---- reach ----
     // `ad_creator` is the ad's maker, i.e. this account, always (the EVM escrow
@@ -99,6 +99,12 @@ pub fn check_contract_call(
     {
         return Err(AccountError::TokenNotAllowed);
     }
+    // The row is part of "is this token allowed": looked up here, not after scaling, because on
+    // the EVM the limit row *is* the whitelist and a token without one fails at this step. No
+    // current install path can produce a whitelisted token with no row (`validate` pins the two to
+    // each other), so this is for a policy an older wasm wrote — and the word stays this chain's.
+    let token_limit =
+        policy::limit_for(policy, &ad_chain_token).ok_or(AccountError::NoVolumeLimit)?;
 
     let ad_id: String = field(env, &lock, "ad_id")?;
     if !policy::ad_in_scope(policy, &ad_id) {
@@ -123,8 +129,6 @@ pub fn check_contract_call(
     if ad_amount == 0 {
         return Err(AccountError::BadArgs);
     }
-    let token_limit =
-        policy::limit_for(policy, &ad_chain_token).ok_or(AccountError::NoVolumeLimit)?;
     if ad_amount > token_limit.max_per_order {
         return Err(AccountError::CapExceeded);
     }

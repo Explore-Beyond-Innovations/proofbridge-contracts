@@ -1022,10 +1022,10 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         } catch {
             return _refuse(out, Refusal.BadArguments);
         }
-        // One order, shared with the Soroban account and the relayer's TypeScript check, and pinned by
+        // One order, shared with the Soroban account and the agent runtime's TypeScript check, and pinned by
         // the shared fixture's precedence cases (T-60): **reach, then size, then rate**. Who and what
         // the lock is for, before how much, before how much lately. A lock with two faults is
-        // refused for the earlier one on every implementation, so the relayer's pre-flight reason is
+        // refused for the earlier one on every implementation, so the runtime's pre-flight reason is
         // the chain's.
         //
         // Reach: the settlement signer, the whitelist, the ad scope.
