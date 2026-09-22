@@ -31,7 +31,10 @@ contract AgentPolicyParityTest is AgentPolicyBase {
     using stdJson for string;
 
     MockEscrow internal unpinned;
-    string internal vectors;
+    /// The fixture is read from disk into *memory* by each external helper, never kept in storage:
+    /// a storage string is copied out whole on every `vm.readX`, and at 116 KB that copy costs about
+    /// 8M gas, which was most of what these tests spent. `vm.readFile` is a cheat and costs nothing.
+    string internal constant VECTORS = "../test-vectors/agent-policy-parity.json";
 
     /// The base rig's account, module and pinned escrow, with no ceilings and no policy: the
     /// fixture brings those, case by case.
@@ -51,8 +54,6 @@ contract AgentPolicyParityTest is AgentPolicyBase {
             TYPE_VALIDATOR, address(module), bytes.concat(bytes32(TYPE_VALIDATOR), abi.encode(targets))
         );
         instance.installModule(TYPE_HOOK, address(module), bytes.concat(bytes32(TYPE_HOOK)));
-
-        vectors = vm.readFile("../test-vectors/agent-policy-parity.json");
     }
 
     /// What one step needs, read out of the fixture in a call of its own. Every JSON read copies the
@@ -118,18 +119,20 @@ contract AgentPolicyParityTest is AgentPolicyBase {
     /// executes nothing, and holds what it finds to the fixture's own counts — and to the slices
     /// between them covering every index.
     function test_theSlicesSeeEveryCaseAndStep() public view {
+        string memory vectors = vm.readFile(VECTORS);
         uint256 cases;
         uint256 steps;
         uint256[] memory perSlice = new uint256[](SLICES);
         uint256 total = vectors.readUint(".counts.total.cases");
         // The count is the table's real length, not a number the fixture could understate.
         assertTrue(this.exists(_case(total - 1, "")) && !this.exists(_case(total, "")), "counts.total.cases");
+        assertEq(vectors.readUint(".counts.evm.slices"), SLICES, "the fixture and this reader agree on the slice count");
         for (uint256 c = 0; c < total; ++c) {
-            Setup memory setup = this.loadSetup(_case(c, ""), false);
-            if (!setup.mine) continue;
+            (bool mine, uint256 stepCount, uint256 slice) = this.loadCount(c);
+            if (!mine) continue;
             ++cases;
-            steps += setup.steps;
-            ++perSlice[c % SLICES];
+            steps += stepCount;
+            ++perSlice[slice];
         }
         assertGt(cases, 0, "no case is this reader's");
         assertEq(cases, vectors.readUint(".counts.evm.cases"), "cases seen");
@@ -140,14 +143,17 @@ contract AgentPolicyParityTest is AgentPolicyBase {
     }
 
     function _runSlice(uint256 slice) internal {
+        string memory vectors = vm.readFile(VECTORS);
         uint256 ranCases;
         uint256 total = vectors.readUint(".counts.total.cases");
 
-        // By stride, so a slice reads only its own cases: every read of the fixture copies the whole
-        // file out of storage, and that, not the operations, is most of what this test costs.
-        for (uint256 c = slice; c < total; c += SLICES) {
+        // The fixture assigns cases to slices, balanced by step count, so skipping another slice's
+        // case is one small read: every read of the fixture copies the whole file out of storage,
+        // and that, not the operations, is most of what this test costs.
+        for (uint256 c = 0; c < total; ++c) {
+            if (!this.inSlice(c, slice)) continue;
             Setup memory setup = this.loadSetup(_case(c, ""), false);
-            if (!setup.mine) continue;
+            assertTrue(setup.mine, "a case assigned to an EVM slice is not this reader's");
 
             // Each case starts from the bare rig: no case inherits another's buckets or tally.
             uint256 snapshot = vm.snapshotState();
@@ -159,10 +165,12 @@ contract AgentPolicyParityTest is AgentPolicyBase {
             vm.prank(instance.account);
             module.setAgentGasBudget(agentId, type(uint128).max);
 
+            uint256 ranSteps;
             for (uint256 s = 0; s < setup.steps; ++s) {
                 Loaded memory step = this.loadStep(c, s, setup.name);
                 nowTs += step.warp;
                 vm.warp(nowTs);
+                ++ranSteps;
 
                 if (step.revoke) {
                     vm.prank(instance.account);
@@ -178,6 +186,9 @@ contract AgentPolicyParityTest is AgentPolicyBase {
                 }
                 _judge(step);
             }
+            // Every step, not most of them: a loop that stopped one early in each case would
+            // otherwise pass, and did once, when the single-frame test's step count went with it.
+            assertEq(ranSteps, setup.steps, string.concat(setup.name, ": steps ran"));
 
             vm.revertToState(snapshot);
             ++ranCases;
@@ -186,6 +197,7 @@ contract AgentPolicyParityTest is AgentPolicyBase {
     }
 
     function test_installingAPolicyMatchesTheSharedFixture() public {
+        string memory vectors = vm.readFile(VECTORS);
         uint256 ran;
         uint256 totalInstalls = vectors.readUint(".counts.total.installs");
         assertTrue(
@@ -259,12 +271,14 @@ contract AgentPolicyParityTest is AgentPolicyBase {
     //////////////////////////////////////////////////////////////*/
 
     function exists(string calldata path) external view returns (bool) {
+        string memory vectors = vm.readFile(VECTORS);
         return vm.keyExistsJson(vectors, path);
     }
 
     /// @param install true for a row of the `installs` table, which carries an `expect` of its own.
     function loadSetup(string calldata at, bool install) external view returns (Setup memory setup) {
-        setup.mine = _reads(string.concat(at, ".readers"));
+        string memory vectors = vm.readFile(VECTORS);
+        setup.mine = _reads(vectors, string.concat(at, ".readers"));
         if (!setup.mine) return setup;
         setup.name = vectors.readString(string.concat(at, ".name"));
         setup.startTime = vectors.readUint(string.concat(at, ".startTime"));
@@ -289,11 +303,40 @@ contract AgentPolicyParityTest is AgentPolicyBase {
                 setup.installError = _installError(vectors.readString(string.concat(".installReasons.", want, ".evm")));
             }
         } else {
-            while (vm.keyExistsJson(vectors, _nth(string.concat(at, ".steps"), setup.steps, ""))) ++setup.steps;
+            setup.steps = vectors.readUint(string.concat(at, ".stepCount"));
         }
     }
 
+    /// @dev The two numbers the enumeration needs, and nothing else: `loadSetup` also reads the policy
+    ///      bytes and every ceiling, which for counting is most of the cost.
+    /// @dev Whether case `c` is in EVM slice `slice`: one read. A case with no slice is not this
+    ///      reader's, which the enumeration test holds to `readers`.
+    function inSlice(uint256 c, uint256 slice) external view returns (bool) {
+        string memory vectors = vm.readFile(VECTORS);
+        string memory at = _case(c, ".evmSlice");
+        return vm.keyExistsJson(vectors, at) && vectors.readUint(at) == slice;
+    }
+
+    function loadCount(uint256 c) external view returns (bool mine, uint256 steps, uint256 slice) {
+        string memory vectors = vm.readFile(VECTORS);
+        mine = _reads(vectors, _case(c, ".readers"));
+        // A case is this reader's exactly when the fixture gave it a slice.
+        assertEq(vm.keyExistsJson(vectors, _case(c, ".evmSlice")), mine, "evmSlice present iff evm reads the case");
+        if (!mine) return (false, 0, 0);
+        steps = vectors.readUint(_case(c, ".stepCount"));
+        slice = vectors.readUint(_case(c, ".evmSlice"));
+        // Stated by the fixture; held to the array's real end, or an understated count would let a
+        // reader skip the tail of every case.
+        string memory tail = _case(c, ".steps");
+        assertTrue(
+            steps > 0 && vm.keyExistsJson(vectors, _nth(tail, steps - 1, ""))
+                && !vm.keyExistsJson(vectors, _nth(tail, steps, "")),
+            "stepCount"
+        );
+    }
+
     function loadStep(uint256 c, uint256 s, string calldata name) external view returns (Loaded memory step) {
+        string memory vectors = vm.readFile(VECTORS);
         step.at = string.concat(name, " [step ", vm.toString(s), "]");
         step.warp = vectors.readUint(_step(c, s, ".warp"));
         string memory op = vectors.readString(_step(c, s, ".op"));
@@ -304,9 +347,9 @@ contract AgentPolicyParityTest is AgentPolicyBase {
 
         string memory lock = _step(c, s, ".lock");
         step.pinned = _eq(vectors.readString(string.concat(lock, ".target")), "pinned");
-        step.callData = _callData(lock);
+        step.callData = _callData(vectors, lock);
 
-        string memory want = _expected(_step(c, s, ".expect"));
+        string memory want = _expected(vectors, _step(c, s, ".expect"));
         step.accept = _eq(want, "accept");
         step.refusal = step.accept
             ? ProofBridgeAgentPolicy.Refusal.None
@@ -314,7 +357,7 @@ contract AgentPolicyParityTest is AgentPolicyBase {
         if (!step.accept) step.at = string.concat(step.at, ": want ", want);
     }
 
-    function _callData(string memory lock) internal view returns (bytes memory) {
+    function _callData(string memory vectors, string memory lock) internal view returns (bytes memory) {
         IAdManager.OrderParams memory p = orderParams(
             vectors.readUint(string.concat(lock, ".amount")),
             vectors.readBytes32(string.concat(lock, ".adChainToken")),
@@ -383,12 +426,12 @@ contract AgentPolicyParityTest is AgentPolicyBase {
     }
 
     /// @dev One word for everyone, or a word per reader where the implementations differ by design.
-    function _expected(string memory path) internal view returns (string memory) {
+    function _expected(string memory vectors, string memory path) internal view returns (string memory) {
         string memory mine = string.concat(path, ".evm");
         return vm.keyExistsJson(vectors, mine) ? vectors.readString(mine) : vectors.readString(path);
     }
 
-    function _reads(string memory path) internal view returns (bool) {
+    function _reads(string memory vectors, string memory path) internal view returns (bool) {
         string[] memory readers = vectors.readStringArray(path);
         for (uint256 i = 0; i < readers.length; ++i) {
             if (_eq(readers[i], "evm")) return true;

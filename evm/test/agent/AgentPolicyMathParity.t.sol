@@ -48,34 +48,37 @@ contract AgentPolicyMathParityTest is Test {
     RateLimitHarness internal rate;
     PolicyHarness internal policy;
     ScalingHarness internal escrowScaling;
-    string internal vectors;
+    /// Read from disk into memory by each test, never kept in storage: a storage string is copied
+    /// out whole on every `vm.readX`, and that copy was most of what these tests spent.
+    string internal constant VECTORS = "../test-vectors/agent-policy-math.json";
 
     function setUp() public {
         rate = new RateLimitHarness();
         policy = new PolicyHarness();
         escrowScaling = new ScalingHarness();
-        vectors = vm.readFile("../test-vectors/agent-policy-math.json");
     }
 
     function test_theBucketMatchesTheSharedVectors() public view {
+        string memory vectors = vm.readFile(VECTORS);
         uint256 ran;
         for (; vm.keyExistsJson(vectors, _at("bucket", ran, "")); ++ran) {
             string memory label = vectors.readString(_at("bucket", ran, ".label"));
             AgentRateLimit.Limit memory limit = AgentRateLimit.Limit({
-                capacity: _uint("bucket", ran, ".capacity"), refillPerSecond: _uint("bucket", ran, ".refillPerSecond")
+                capacity: _uint(vectors, "bucket", ran, ".capacity"),
+                refillPerSecond: _uint(vectors, "bucket", ran, ".refillPerSecond")
             });
             AgentRateLimit.Bucket memory bucket = AgentRateLimit.Bucket({
-                level: _uint("bucket", ran, ".level"), lastTs: uint64(_uint("bucket", ran, ".lastTs"))
+                level: _uint(vectors, "bucket", ran, ".level"), lastTs: uint64(_uint(vectors, "bucket", ran, ".lastTs"))
             });
-            uint64 nowTs = uint64(_uint("bucket", ran, ".now"));
+            uint64 nowTs = uint64(_uint(vectors, "bucket", ran, ".now"));
 
-            assertEq(rate.available(limit, bucket, nowTs), _uint("bucket", ran, ".available"), label);
+            assertEq(rate.available(limit, bucket, nowTs), _uint(vectors, "bucket", ran, ".available"), label);
 
             (bool ok, AgentRateLimit.Bucket memory next) =
-                rate.trySpend(limit, bucket, _uint("bucket", ran, ".spend"), nowTs);
+                rate.trySpend(limit, bucket, _uint(vectors, "bucket", ran, ".spend"), nowTs);
             assertEq(ok, vectors.readBool(_at("bucket", ran, ".ok")), label);
-            assertEq(next.level, _uint("bucket", ran, ".nextLevel"), label);
-            assertEq(next.lastTs, _uint("bucket", ran, ".nextLastTs"), label);
+            assertEq(next.level, _uint(vectors, "bucket", ran, ".nextLevel"), label);
+            assertEq(next.lastTs, _uint(vectors, "bucket", ran, ".nextLastTs"), label);
         }
         // Zero rows is a failure, and so is some: a reader that parsed half the file would pass.
         assertGt(ran, 0, "no bucket rows ran");
@@ -86,13 +89,14 @@ contract AgentPolicyMathParityTest is Test {
     /// arithmetic so it can answer instead of reverting during validation, and
     /// `testFuzz_scalingMatchesTheEscrowsOrRefuses` holds the two together.
     function test_scalingMatchesTheSharedVectors() public view {
+        string memory vectors = vm.readFile(VECTORS);
         uint256 ran;
         for (; vm.keyExistsJson(vectors, _at("scaling", ran, "")); ++ran) {
             string memory label = vectors.readString(_at("scaling", ran, ".label"));
             IAdManager.OrderParams memory p;
-            p.amount = _uint("scaling", ran, ".amount");
-            p.orderDecimals = uint8(_uint("scaling", ran, ".fromDecimals"));
-            p.adDecimals = uint8(_uint("scaling", ran, ".toDecimals"));
+            p.amount = _uint(vectors, "scaling", ran, ".amount");
+            p.orderDecimals = uint8(_uint(vectors, "scaling", ran, ".fromDecimals"));
+            p.adDecimals = uint8(_uint(vectors, "scaling", ran, ".toDecimals"));
             (bool ok, uint256 value) = policy.adAmount(p);
 
             // The EVM's word is 256 bits and the module scales in it, so a product past u128 — an
@@ -100,13 +104,13 @@ contract AgentPolicyMathParityTest is Test {
             // a per-order cap cannot exceed u128, so an amount that large is over it.
             string memory wide = _at("scaling", ran, ".evmWide");
             if (vm.keyExistsJson(vectors, wide)) {
-                _assertIsAnOverflowRefusal(ran, label);
+                _assertIsAnOverflowRefusal(vectors, ran, label);
                 assertTrue(ok, label);
                 assertEq(value, vectors.readUint(string.concat(wide, ".value")), label);
                 assertGt(value, type(uint128).max, "evmWide rows are exactly the ones past u128");
             } else if (vectors.readBool(_at("scaling", ran, ".ok"))) {
                 assertTrue(ok, label);
-                assertEq(value, _uint("scaling", ran, ".value"), label);
+                assertEq(value, _uint(vectors, "scaling", ran, ".value"), label);
             } else {
                 // The module answers yes or no and keeps no reason; the refusal is the parity claim.
                 assertFalse(ok, label);
@@ -119,19 +123,20 @@ contract AgentPolicyMathParityTest is Test {
     /// The escrows' copy, which is the one that moves money. It keeps its reasons, so here the
     /// shared word for each refusal is held to this implementation's error.
     function test_theEscrowsScalingMatchesTheSharedVectors() public view {
+        string memory vectors = vm.readFile(VECTORS);
         uint256 ran;
         for (; vm.keyExistsJson(vectors, _at("scaling", ran, "")); ++ran) {
             string memory label = vectors.readString(_at("scaling", ran, ".label"));
-            uint256 amount = _uint("scaling", ran, ".amount");
-            uint8 from = uint8(_uint("scaling", ran, ".fromDecimals"));
-            uint8 to = uint8(_uint("scaling", ran, ".toDecimals"));
+            uint256 amount = _uint(vectors, "scaling", ran, ".amount");
+            uint8 from = uint8(_uint(vectors, "scaling", ran, ".fromDecimals"));
+            uint8 to = uint8(_uint(vectors, "scaling", ran, ".toDecimals"));
 
             string memory wide = _at("scaling", ran, ".evmWide");
             if (vm.keyExistsJson(vectors, wide)) {
-                _assertIsAnOverflowRefusal(ran, label);
+                _assertIsAnOverflowRefusal(vectors, ran, label);
                 assertEq(escrowScaling.scale(amount, from, to), vectors.readUint(string.concat(wide, ".value")), label);
             } else if (vectors.readBool(_at("scaling", ran, ".ok"))) {
-                assertEq(escrowScaling.scale(amount, from, to), _uint("scaling", ran, ".value"), label);
+                assertEq(escrowScaling.scale(amount, from, to), _uint(vectors, "scaling", ran, ".value"), label);
             } else {
                 bytes32 reason = keccak256(bytes(vectors.readString(_at("scaling", ran, ".reason"))));
                 bytes4 want;
@@ -163,14 +168,15 @@ contract AgentPolicyMathParityTest is Test {
     /// The two Solidity copies differ here on purpose. The module answers no, because a revert
     /// during validation gets a module dropped from the mempool; the escrows' copy panics.
     function test_amountsOnlyTheEvmCanCarry() public view {
+        string memory vectors = vm.readFile(VECTORS);
         uint256 ran;
         uint256 wrapped;
         for (; vm.keyExistsJson(vectors, _at("scalingEvmOnly", ran, "")); ++ran) {
             string memory label = vectors.readString(_at("scalingEvmOnly", ran, ".label"));
             IAdManager.OrderParams memory p;
-            p.amount = _uint("scalingEvmOnly", ran, ".amount");
-            p.orderDecimals = uint8(_uint("scalingEvmOnly", ran, ".fromDecimals"));
-            p.adDecimals = uint8(_uint("scalingEvmOnly", ran, ".toDecimals"));
+            p.amount = _uint(vectors, "scalingEvmOnly", ran, ".amount");
+            p.orderDecimals = uint8(_uint(vectors, "scalingEvmOnly", ran, ".fromDecimals"));
+            p.adDecimals = uint8(_uint(vectors, "scalingEvmOnly", ran, ".toDecimals"));
             assertGt(p.amount, type(uint128).max, "these rows are exactly the ones past u128");
             (bool ok, uint256 value) = policy.adAmount(p);
 
@@ -186,7 +192,7 @@ contract AgentPolicyMathParityTest is Test {
                 // `wrappedTo` was computed in unbounded integers, so agreeing with it is the proof of
                 // the wrap. Nothing is claimed about which way it lands: a wrapped product is often
                 // smaller than the amount and sometimes larger, and the table has both.
-                assertEq(unguarded, _uint("scalingEvmOnly", ran, ".wrappedTo"), label);
+                assertEq(unguarded, _uint(vectors, "scalingEvmOnly", ran, ".wrappedTo"), label);
 
                 try escrowScaling.scale(p.amount, p.orderDecimals, p.adDecimals) returns (uint256) {
                     revert(string.concat(label, ": the escrows' copy scaled a product that wraps"));
@@ -195,7 +201,7 @@ contract AgentPolicyMathParityTest is Test {
                 }
             } else {
                 assertTrue(ok, label);
-                assertEq(value, _uint("scalingEvmOnly", ran, ".value"), label);
+                assertEq(value, _uint(vectors, "scalingEvmOnly", ran, ".value"), label);
                 assertEq(escrowScaling.scale(p.amount, p.orderDecimals, p.adDecimals), value, label);
             }
         }
@@ -207,7 +213,7 @@ contract AgentPolicyMathParityTest is Test {
     /// `evmWide` replaces a row's expectation, so its presence is not taken on trust: it belongs on
     /// an `overflow` refusal and nowhere else, and a generator edit that moved it would swap what
     /// this reader expects without a word.
-    function _assertIsAnOverflowRefusal(uint256 i, string memory label) internal view {
+    function _assertIsAnOverflowRefusal(string memory vectors, uint256 i, string memory label) internal view {
         assertFalse(vectors.readBool(_at("scaling", i, ".ok")), label);
         assertEq(vectors.readString(_at("scaling", i, ".reason")), "overflow", label);
     }
@@ -216,7 +222,11 @@ contract AgentPolicyMathParityTest is Test {
         return string.concat(".", table, "[", vm.toString(i), "]", field);
     }
 
-    function _uint(string memory table, uint256 i, string memory field) internal view returns (uint256) {
+    function _uint(string memory vectors, string memory table, uint256 i, string memory field)
+        internal
+        pure
+        returns (uint256)
+    {
         return vectors.readUint(_at(table, i, field));
     }
 }
