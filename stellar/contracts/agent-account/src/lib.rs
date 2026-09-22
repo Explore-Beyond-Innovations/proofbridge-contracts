@@ -471,3 +471,6 @@ mod test;
 
 #[cfg(test)]
 mod fingerprint_test;
+
+#[cfg(test)]
+mod parity_test;

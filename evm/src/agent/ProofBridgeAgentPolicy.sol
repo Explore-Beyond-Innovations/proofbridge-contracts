@@ -1027,9 +1027,13 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
             return _refuse(out, Refusal.AdNotInScope);
         }
 
-        // Reach before size, as on Soroban: a trade the agent may not serve at all is not a sizing
-        // question. Both tokens have to be on the whitelist, and a whitelisted token with no limit
-        // row is refused rather than waved through.
+        // Reach before size: a trade the agent may not serve at all is not a sizing question. Here
+        // that means signer, then ad scope, then the whitelist, then scaling and the cap. **Soroban's
+        // order differs** (whitelist, scaling and the cap come before the signer and the scope), so
+        // a lock with two faults is refused for a different one on each chain. It is refused on
+        // both, which is what matters; the shared fixture pins the difference in its two-fault case
+        // (T-60). Both tokens have to be on the whitelist, and a whitelisted token with no limit row
+        // is refused rather than waved through.
         out.token = params.adChainToken;
         out.row = _agentLimit[_tokenKey(ctx.vKey, out.token)][ctx.account];
         if (out.row.capacity == 0) return _refuse(out, Refusal.TokenNotAllowed);
