@@ -9,7 +9,7 @@ use soroban_sdk::{
     auth::ContractContext, Address, BytesN, Env, Map, String, Symbol, TryFromVal, Val, Vec,
 };
 
-use proofbridge_core::rate_limit::{self, Bucket};
+use proofbridge_core::rate_limit::{self, Bucket, Limit};
 
 use crate::errors::AccountError;
 use crate::policy::{self, AccountVolume, AgentPolicy};
@@ -137,7 +137,7 @@ pub fn check_contract_call(
     // Last, and the only step that writes. A rejected `__check_auth` takes the whole frame with
     // it, so a refused lock cannot spend allowance whichever way round these go; the order is for
     // cost, for legibility, and so that all three implementations name the same fault.
-    spend_volume(env, policy, &ad_chain_token, ad_amount)
+    spend_volume(env, policy, &ad_chain_token, &token_limit.rate, ad_amount)
 }
 
 /// Debit the agent's bucket and the account's, in ad-token units.
@@ -149,27 +149,23 @@ fn spend_volume(
     env: &Env,
     policy: &mut AgentPolicy,
     token: &BytesN<32>,
+    agent_limit: &Limit,
     amount: u128,
 ) -> Result<(), AccountError> {
     let now = env.ledger().timestamp();
-
-    // A whitelisted token with no limit is refused, not waved through: the whitelist says which
-    // tokens are permitted at all, `limits` says how much, and silence in the second is not
-    // permission. `validate` already makes the two agree at install; this is the read-side half of
-    // that, and it is what a policy written by an older wasm would trip on.
-    let agent_limit = policy::limit_for(policy, token)
-        .ok_or(AccountError::NoVolumeLimit)?
-        .rate;
+    // The agent's limit arrives from the caller, which looked it up at the whitelist step (a
+    // whitelisted token with no row is refused there, as on the EVM). Looking it up again here
+    // would be an arm nothing can reach.
     // No stored bucket means never spent — the policy entry holds the buckets, so this cannot be
     // an entry that quietly archived and read back as full.
     let agent_bucket =
-        policy::bucket_for(policy, token).unwrap_or_else(|| Bucket::full(&agent_limit, now));
+        policy::bucket_for(policy, token).unwrap_or_else(|| Bucket::full(agent_limit, now));
 
     // Absence here means *unconfigured*, and refuses. The limit and the bucket share one entry
     // precisely so this read cannot see a live bucket with a vanished ceiling.
     let account = policy::get_account_volume(env, token).ok_or(AccountError::NoVolumeLimit)?;
 
-    let next_agent = rate_limit::try_spend(&agent_limit, &agent_bucket, amount, now)
+    let next_agent = rate_limit::try_spend(agent_limit, &agent_bucket, amount, now)
         .ok_or(AccountError::VolumeExceeded)?;
     let next_account = rate_limit::try_spend(&account.limit, &account.bucket, amount, now)
         .ok_or(AccountError::VolumeExceeded)?;

@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "note": "T-60 layer 2. Policy + lock -> accept or reject. Every `expect` is written by hand from the policy as specified; nothing here is derived from an implementation. A refused lock has exactly one fault, except in a step marked `twoFaults`, where every reader names the earlier one: all three check in one order. `target` and `signer` are symbolic: each reader resolves them against its own rig. `evmPolicyHex` is null for a policy no chain can install (`whitelistOnly`). Each reader runs the cases that name it and asserts it ran `counts[reader]`.",
+    "note": "T-60 layer 2. Policy + lock -> accept or reject. Every `expect` is written by hand from the policy as specified; nothing here is derived from an implementation. A refused lock has exactly one fault, except in a step that names `faults`, where every reader names the earlier one: all three check in one order. `target` and `signer` are symbolic: each reader resolves them against its own rig. `evmPolicyHex` is null for a policy no chain can install (`whitelistOnly`). Each reader runs the cases that name it and asserts it ran `counts[reader]`.",
     "generator": "scripts/bls-vectors/src/gen-agent-policy-parity.ts"
   },
   "counts": {
