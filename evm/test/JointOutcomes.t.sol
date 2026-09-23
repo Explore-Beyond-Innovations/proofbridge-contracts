@@ -110,6 +110,8 @@ contract JointOutcomesTest is Test {
         string memory v = _fixture();
         scale = 10 ** vm.parseJsonUint(v, ".header.evmScaleExp");
         challenge = uint64(vm.parseJsonUint(v, ".header.challengePeriodS"));
+        // r4 (F3): the route buffer below is the fixture's, not a free constant
+        assertEq(vm.parseJsonUint(v, ".header.bufferS"), BUFFER, "fixture bufferS must be the configured buffer");
         amountWei = vm.parseJsonUint(v, ".header.orderAmountUnits") * scale;
         bondWei = vm.parseJsonUint(v, ".header.bondUnits") * scale;
         uint128 floorWei = uint128(vm.parseJsonUint(v, ".header.bondFloorUnits") * scale);
@@ -177,6 +179,9 @@ contract JointOutcomesTest is Test {
         uint256 sumBefore;
         uint256 filerBase;
         uint256 bondPaid;
+        // r4 (F3): the horizon the fixture describes, fixed at filing
+        uint64 horizon;
+        uint64 ruledAt;
     }
 
     /// r3 F1: the monorepo's repo-checks gate pins these constants, but it
@@ -318,11 +323,33 @@ contract JointOutcomesTest is Test {
         } else if (_eq(action, "dispute")) {
             vm.prank(maker);
             adManager.dispute{value: bondWei}(w.pP, bytes32("evidence"));
+            // r4 (F3): compute the horizon from the fixture and check the chain agrees
+            uint64 fromChallenge = uint64(block.timestamp) + challenge;
+            uint64 fromDeadline = uint64(w.pP.deadline) + BUFFER;
+            w.horizon = fromChallenge > fromDeadline ? fromChallenge : fromDeadline;
+            assertEq(
+                dm.effectiveChallengeDeadline(w.h),
+                w.horizon,
+                string.concat(w.name, ": horizon must equal max(filedAt+period, deadline+buffer)")
+            );
         } else if (_eq(action, "rule")) {
             vm.prank(arbiter);
             dm.resolveDispute(w.h, _outcome(vm.parseJsonString(v, string.concat(sAt, ".outcome"))));
-        } else if (_eq(action, "warpPastWindow") || _eq(action, "warpPastChallenge")) {
-            vm.warp(dm.effectiveChallengeDeadline(w.h) + 1);
+            w.ruledAt = uint64(block.timestamp);
+        } else if (_eq(action, "warpPastChallenge")) {
+            require(w.horizon != 0, "warpPastChallenge before any dispute");
+            vm.warp(uint256(w.horizon) + 1);
+        } else if (_eq(action, "warpPastWindow")) {
+            // the window a ruling opened, max(ruledAt, deadline) + buffer; with no
+            // ruling the horizon itself is the window (a fallback claim extends nothing)
+            require(w.horizon != 0, "warpPastWindow before any dispute");
+            uint64 want = w.horizon;
+            if (w.ruledAt != 0) {
+                uint64 base = w.ruledAt > uint64(w.pP.deadline) ? w.ruledAt : uint64(w.pP.deadline);
+                want = base + BUFFER;
+            }
+            assertEq(dm.effectiveChallengeDeadline(w.h), want, string.concat(w.name, ": opened window"));
+            vm.warp(uint256(want) + 1);
         } else if (_eq(action, "claimDispute")) {
             dm.claimDispute(w.h);
         } else if (_eq(action, "finalizeDispute")) {

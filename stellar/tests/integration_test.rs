@@ -4818,9 +4818,38 @@ fn test_t24_differential_scenarios() {
         * scale as u128;
     assert_eq!(header["bondBps"].as_u64().unwrap(), 0, "T-24 pins bps=0");
     let bond_units: i128 = header["bondUnits"].as_str().unwrap().parse().unwrap();
+    let buffer_s = t24_buffer_from(header);
 
     for sc in v["scenarios"].as_array().unwrap() {
-        t24_run_scenario(sc, challenge, floor, scale, bond_units);
+        t24_run_scenario(sc, challenge, floor, scale, bond_units, buffer_s);
+    }
+}
+
+/// r4 (F3): the fixture pins the presentation buffer; the suite's route timing must
+/// be the value the fixture describes, or the horizon computed below means nothing.
+fn t24_buffer_from(header: &serde_json::Value) -> u64 {
+    let buffer_s = header["bufferS"].as_u64().unwrap();
+    assert_eq!(
+        buffer_s, SUITE_BUFFER,
+        "the fixture's bufferS must be the buffer the suite configures"
+    );
+    buffer_s
+}
+
+/// r4 (F3): the challenge horizon the FIXTURE describes, computed here rather than
+/// read back from the module under test — max(filedAt + period, orderDeadline + buffer).
+/// Both drivers compute it and assert the chain agrees, so a divergence in the
+/// formula between the chains fails by name instead of each warping to its own answer.
+fn t24_horizon(filed_at: u64, challenge: u64, deadline: u64, buffer_s: u64) -> u64 {
+    core::cmp::max(filed_at + challenge, deadline + buffer_s)
+}
+
+/// The window a ruling opens: max(ruledAt, orderDeadline) + buffer (D3). With no
+/// ruling the horizon itself is the window — a fallback claim extends nothing.
+fn t24_window(horizon: u64, ruled_at: Option<u64>, deadline: u64, buffer_s: u64) -> u64 {
+    match ruled_at {
+        None => horizon,
+        Some(r) => core::cmp::max(r, deadline) + buffer_s,
     }
 }
 
@@ -4830,6 +4859,7 @@ fn t24_run_scenario(
     floor: u128,
     scale: i128,
     _bond_units: i128,
+    buffer_s: u64,
 ) {
     use soroban_sdk::testutils::Ledger;
     let name = sc["name"].as_str().unwrap();
@@ -4870,6 +4900,15 @@ fn t24_run_scenario(
     let filer_base = token.balance(&s.maker_addr);
     let pool_base = token.balance(&fee_pool);
 
+    let filed_at = s.env.ledger().timestamp();
+    let horizon = t24_horizon(filed_at, challenge, params.deadline, buffer_s);
+    assert_eq!(
+        dm.effective_challenge_deadline(&order_hash),
+        horizon,
+        "{name}: horizon must equal max(filedAt+period, deadline+buffer)"
+    );
+    let mut ruled_at: Option<u64> = None;
+
     let steps = sc["steps"].as_array().unwrap();
     for step in steps.iter().skip(1) {
         match step["action"].as_str().unwrap() {
@@ -4881,12 +4920,19 @@ fn t24_run_scenario(
                     other => panic!("unknown outcome {other}"),
                 };
                 dm.resolve_dispute(&order_hash, &outcome);
+                ruled_at = Some(s.env.ledger().timestamp());
             }
-            "warpPastChallenge" | "warpPastWindow" => {
-                // identical to the EVM driver: past the window the module
-                // actually enforces NOW (it moves when a fallback opens)
-                let until = dm.effective_challenge_deadline(&order_hash);
-                s.env.ledger().set_timestamp(until + 1);
+            // r4 (F3): both warps go to instants the FIXTURE describes, computed
+            // here; the window a ruling opened is checked against the chain first.
+            "warpPastChallenge" => s.env.ledger().set_timestamp(horizon + 1),
+            "warpPastWindow" => {
+                let want = t24_window(horizon, ruled_at, params.deadline, buffer_s);
+                assert_eq!(
+                    dm.effective_challenge_deadline(&order_hash),
+                    want,
+                    "{name}: opened window"
+                );
+                s.env.ledger().set_timestamp(want + 1);
             }
             "claimDispute" => dm.claim_dispute(&order_hash),
             "finalize" => s.ad_manager.finalize_dispute(&params),
@@ -4926,17 +4972,18 @@ fn t24_run_scenario(
         .parse()
         .unwrap();
     assert_eq!(leaf_domain, Some(want_domain), "{name}: leaf domain");
-    let to_filer_units = (token.balance(&s.maker_addr) - filer_base) / scale;
-    let to_pool_units = (token.balance(&fee_pool) - pool_base) / scale;
+    // r4 (F9): compare in CHAIN units — dividing by `scale` first would swallow
+    // any sub-unit discrepancy in either settle path.
+    let units = |key: &str| -> i128 { sc["expect"][key].as_str().unwrap().parse().unwrap() };
     assert_eq!(
-        to_filer_units.to_string(),
-        sc["expect"]["bondToFilerUnits"].as_str().unwrap(),
-        "{name}: bond to filer (units)"
+        token.balance(&s.maker_addr) - filer_base,
+        units("bondToFilerUnits") * scale,
+        "{name}: bond to filer (chain units)"
     );
     assert_eq!(
-        to_pool_units.to_string(),
-        sc["expect"]["bondToPoolUnits"].as_str().unwrap(),
-        "{name}: bond to pool (units)"
+        token.balance(&fee_pool) - pool_base,
+        units("bondToPoolUnits") * scale,
+        "{name}: bond to pool (chain units)"
     );
 }
 
@@ -5037,6 +5084,13 @@ struct T25World<'a> {
     on_p: Option<(BytesN<32>, Bytes)>, // consumed by the ad manager
     unlocked_p: bool,
     unlocked_f: bool,
+    // r4 (F3): the horizon the fixture describes, fixed at filing
+    challenge: u64,
+    buffer_s: u64,
+    horizon: Option<u64>,
+    ruled_at: Option<u64>,
+    // r4 (F2): what the filer posted
+    bond_paid: i128,
 }
 
 fn t25_claim_for(s: &TestSetup, domain: u32) -> (BytesN<32>, Bytes) {
@@ -5085,6 +5139,30 @@ fn t25_expect_portal_err<T>(
     }
 }
 
+/// r4 (F7): the primary leg's twin of `t25_expect_portal_err`. Round 3 mapped
+/// only the follower's reasons; the primary's negatives were still "any error".
+fn t25_expect_ad_err<T>(
+    reason: &str,
+    got: Result<T, Result<AdErr, soroban_sdk::InvokeError>>,
+    name: &str,
+    step: &str,
+) {
+    let want = match reason {
+        "windowNotOver" => AdErr::TooEarly,
+        "disputeNotResolved" => AdErr::DisputeNotResolved,
+        "rootNotAnchored" => AdErr::RootNotAnchored,
+        "wrongLeafDomain" | "proofBindsOrderHash" => AdErr::InvalidProof,
+        "terminalStatus" => AdErr::NotClaimable,
+        "notClaimed" => AdErr::NotClaimed,
+        other => panic!("unmapped expectRevert reason: {other}"),
+    };
+    match got {
+        Ok(_) => panic!("{name}: {step} succeeded, wanted {reason}"),
+        Err(Err(ie)) => panic!("{name}: {step} failed as a host error ({ie:?}), wanted {reason}"),
+        Err(Ok(e)) => assert_eq!(e, want, "{name}: {step} must fail with {reason}"),
+    }
+}
+
 fn t25_now(s: &TestSetup) -> u64 {
     s.env.ledger().timestamp()
 }
@@ -5112,6 +5190,7 @@ fn test_t25_joint_outcome_sweep() {
         .unwrap()
         .parse()
         .unwrap();
+    let buffer_s = t24_buffer_from(header);
     for sc in v["scenarios"].as_array().unwrap() {
         t25_run_scenario(
             sc,
@@ -5121,6 +5200,7 @@ fn test_t25_joint_outcome_sweep() {
             bond_units,
             bond_bps,
             order_amount_units,
+            buffer_s,
         );
     }
 }
@@ -5133,6 +5213,7 @@ fn t25_run_scenario(
     bond_units: i128,
     bond_bps: u32,
     order_amount_units: i128,
+    buffer_s: u64,
 ) {
     let name = sc["name"].as_str().unwrap();
 
@@ -5177,6 +5258,11 @@ fn t25_run_scenario(
         on_p: None,
         unlocked_p: false,
         unlocked_f: false,
+        challenge,
+        buffer_s,
+        horizon: None,
+        ruled_at: None,
+        bond_paid: 0,
     };
 
     // D4: everything the scenario can move, both tokens, all doors — the
@@ -5202,6 +5288,9 @@ fn t25_run_scenario(
     };
     let sum_before = sum(&dm);
     let pool_before = ad_token.balance(&fee_pool) + dm.claimable(&fee_pool) as i128;
+    // the filer is the maker on every row; the bond is the same asset as the
+    // ad leg here, so the door-agnostic balance is token + module credit
+    let filer_before = ad_token.balance(&s.maker_addr) + dm.claimable(&s.maker_addr) as i128;
 
     for step in sc["steps"].as_array().unwrap() {
         t25_step(&mut w, step, &dm, &arbiter, &anchor);
@@ -5278,7 +5367,24 @@ fn t25_run_scenario(
         to_pool * scale,
         "{name}: bond to pool (exact)"
     );
-    let _ = bond_units;
+    // r4 (F2): the FILER's share is asserted too. Conservation does not imply it —
+    // the sum counts the arbiter, both escrows and the module, so a bond left in
+    // the module or paid to the wrong party balances with the pool delta at zero.
+    // The filer posts the bond during the steps; its outlay is added back.
+    let to_filer: i128 = sc["expect"]["bondToFilerUnits"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let filer_after = ad_token.balance(&s.maker_addr) + dm.claimable(&s.maker_addr) as i128;
+    assert_eq!(
+        filer_after + w.bond_paid - filer_before,
+        to_filer * scale,
+        "{name}: bond to filer (exact)"
+    );
+    if w.bond_paid != 0 {
+        assert_eq!(w.bond_paid, bond_units * scale, "{name}: bond posted");
+    }
 }
 
 fn t25_step(
@@ -5323,9 +5429,11 @@ fn t25_step(
         }
         "finalizeCancel" => {
             if neg {
-                assert!(
-                    s.ad_manager.try_finalize_cancel(&w.pp).is_err(),
-                    "finalizeCancel must revert (window)"
+                t25_expect_ad_err(
+                    reason,
+                    s.ad_manager.try_finalize_cancel(&w.pp),
+                    name,
+                    "finalizeCancel",
                 );
             } else {
                 s.ad_manager.finalize_cancel(&w.pp);
@@ -5340,11 +5448,19 @@ fn t25_step(
             }
         }
         "dispute" => {
-            s.ad_manager.dispute(
+            let bond = s.ad_manager.dispute(
                 &w.pp,
                 &s.maker_addr,
                 &bytes32_to_bytesn(&s.env, &[0xEE; 32]),
             );
+            w.bond_paid = bond as i128;
+            let horizon = t24_horizon(t25_now(s), w.challenge, w.pp.deadline, w.buffer_s);
+            assert_eq!(
+                dm.effective_challenge_deadline(&w.h),
+                horizon,
+                "{name}: horizon must equal max(filedAt+period, deadline+buffer)"
+            );
+            w.horizon = Some(horizon);
         }
         "rule" => {
             let outcome = match step["outcome"].as_str().unwrap() {
@@ -5355,16 +5471,32 @@ fn t25_step(
             };
             let _ = arbiter;
             dm.resolve_dispute(&w.h, &outcome);
+            w.ruled_at = Some(t25_now(s));
         }
-        "warpPastWindow" | "warpPastChallenge" => {
-            warp(s, dm.effective_challenge_deadline(&w.h) + 1);
+        // r4 (F3): warp to instants the fixture describes, not to a value read
+        // back off the module under test.
+        "warpPastChallenge" => {
+            let horizon = w.horizon.expect("warpPastChallenge before any dispute");
+            warp(s, horizon + 1);
+        }
+        "warpPastWindow" => {
+            let horizon = w.horizon.expect("warpPastWindow before any dispute");
+            let want = t24_window(horizon, w.ruled_at, w.pp.deadline, w.buffer_s);
+            assert_eq!(
+                dm.effective_challenge_deadline(&w.h),
+                want,
+                "{name}: opened window"
+            );
+            warp(s, want + 1);
         }
         "claimDispute" => dm.claim_dispute(&w.h),
         "finalizeDispute" => {
             if neg {
-                assert!(
-                    s.ad_manager.try_finalize_dispute(&w.pp).is_err(),
-                    "finalizeDispute must revert (T-50)"
+                t25_expect_ad_err(
+                    reason,
+                    s.ad_manager.try_finalize_dispute(&w.pp),
+                    name,
+                    "finalizeDispute",
                 );
             } else {
                 s.ad_manager.finalize_dispute(&w.pp);
@@ -5445,10 +5577,12 @@ fn t25_step(
             } else {
                 let (root, proof) = w.on_f.clone().expect("nothing anchored for the follower");
                 if neg {
-                    assert!(s
-                        .order_portal
-                        .try_present_settled(&w.pf, &root, &proof)
-                        .is_err());
+                    t25_expect_portal_err(
+                        reason,
+                        s.order_portal.try_present_settled(&w.pf, &root, &proof),
+                        name,
+                        "presentSettled",
+                    );
                 } else {
                     s.order_portal.present_settled(&w.pf, &root, &proof);
                 }

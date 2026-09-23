@@ -201,15 +201,17 @@ contract DisputeDifferentialTest is DisputeTest {
             vm.parseJsonUint(v, string.concat(r.at, ".expect.primaryLeafDomain")),
             string.concat(r.name, ": leaf domain")
         );
+        // r4 (F9): compare in CHAIN units — dividing by the scale first would
+        // swallow any sub-unit discrepancy in either settle path.
         assertEq(
-            (_spendable(maker) - r.filerBase) / r.scale,
-            vm.parseJsonUint(v, string.concat(r.at, ".expect.bondToFilerUnits")),
-            string.concat(r.name, ": bond to filer (units)")
+            _spendable(maker) - r.filerBase,
+            vm.parseJsonUint(v, string.concat(r.at, ".expect.bondToFilerUnits")) * r.scale,
+            string.concat(r.name, ": bond to filer (chain units)")
         );
         assertEq(
-            (_spendable(feePool) - r.poolBase) / r.scale,
-            vm.parseJsonUint(v, string.concat(r.at, ".expect.bondToPoolUnits")),
-            string.concat(r.name, ": bond to pool (units)")
+            _spendable(feePool) - r.poolBase,
+            vm.parseJsonUint(v, string.concat(r.at, ".expect.bondToPoolUnits")) * r.scale,
+            string.concat(r.name, ": bond to pool (chain units)")
         );
     }
 
