@@ -1,5 +1,5 @@
 import * as path from "path";
-import { signerHoldsAdmin } from "./handover.js";
+import { adminBlockFromChain, adminsOf, foreignAdmins, type HeldAdmin } from "./handover.js";
 import {
   DEFAULT_STELLAR_CHAIN_ID,
   envOrDefault,
@@ -15,6 +15,7 @@ import {
   getAddress,
   invokeContract,
   latestLedger,
+  readView,
 } from "./stellar-cli.js";
 import {
   buildManifest,
@@ -83,12 +84,12 @@ export async function deployCore(
     return existingAddr;
   }
 
-  // Who holds admin on what is reused, read before anything is sent. After a handover the source
-  // account is not the admin, and every admin-only wiring call below is described, not sent (#424).
-  const acting = new Acting(
-    existing ? signerHoldsAdmin(existing.contracts, adminStrkey, "stellar-deploy") : true,
-    "wire",
-  );
+  // Who holds admin on what is reused, read before anything is sent. A call to a contract handed
+  // over is described, not sent; what this run deploys has the source account as admin and is
+  // wired now (#424).
+  const heldAdmins: HeldAdmin[] = existing ? adminsOf(existing.contracts) : [];
+  const acting = new Acting(foreignAdmins(adminStrkey, heldAdmins, "stellar-deploy"), "wire");
+  const deployedNow: string[] = [];
 
   // ── Verifier ────────────────────────────────────────────────────
   let verifier = reused(existing?.contracts.verifier.address);
@@ -110,6 +111,7 @@ export async function deployCore(
     merkleManagerDeployBlock = latestLedger() ?? merkleManagerDeployBlock;
     merkleManager = deployContract(path.join(wasmBase, "merkle_manager.wasm"));
     invokeContract(merkleManager, "initialize", ["--admin", adminStrkey]);
+    deployedNow.push("MerkleManager");
     console.log(`  [deploy] MerkleManager: ${merkleManager}`);
   } else {
     console.log(`  [reuse] MerkleManager: ${merkleManager}`);
@@ -140,6 +142,7 @@ export async function deployCore(
       "--chain_id",
       chainId.toString(),
     ]);
+    deployedNow.push("AdManager");
     console.log(`  [deploy] AdManager: ${adManager}`);
   } else {
     console.log(`  [reuse] AdManager: ${adManager}`);
@@ -161,6 +164,7 @@ export async function deployCore(
       "--chain_id",
       chainId.toString(),
     ]);
+    deployedNow.push("OrderPortal");
     console.log(`  [deploy] OrderPortal: ${orderPortal}`);
   } else {
     console.log(`  [reuse] OrderPortal: ${orderPortal}`);
@@ -176,6 +180,7 @@ export async function deployCore(
       "--chain_id",
       chainId.toString(),
     ]);
+    deployedNow.push("BLSKeyRegistry");
     console.log(`  [deploy] BLSKeyRegistry: ${blsKeyRegistry}`);
   } else {
     console.log(`  [reuse] BLSKeyRegistry: ${blsKeyRegistry}`);
@@ -197,14 +202,26 @@ export async function deployCore(
     console.log(`  [reuse] CounterpartyVerifier: ${counterpartyVerifier}`);
   }
 
-  // ── Wire the escrows as the registry's revoke guards (idempotent) ──
-  acting.call(blsKeyRegistry, "BLSKeyRegistry", "set_position_guards", ["--guards", JSON.stringify([adManager, orderPortal])],
-    "BLSKeyRegistry.set_position_guards([AdManager, OrderPortal])");
+  // ── Wire the escrows as the registry's revoke guards (check first, then set) ──
+  {
+    const have = readView(blsKeyRegistry, "position_guards");
+    const want = [adManager, orderPortal];
+    if (Array.isArray(have) && have.length === want.length && have.every((g, i) => g === want[i])) {
+      console.log(`  [skip] BLSKeyRegistry.set_position_guards already [AdManager, OrderPortal]`);
+    } else {
+      acting.call(blsKeyRegistry, "BLSKeyRegistry", "set_position_guards", ["--guards", JSON.stringify(want)],
+        "BLSKeyRegistry.set_position_guards([AdManager, OrderPortal])");
+    }
+  }
 
-  // ── Point the AdManager at the registry (2.3c; idempotent) ─────────
+  // ── Point the AdManager at the registry (2.3c; check first, then set) ─────────
   // create_ad / set_settlement_signer / lock_for_order fail closed until this is set: an
   // ad's settlement signer must hold a live, unexpired key.
-  acting.call(adManager, "AdManager", "set_key_registry", ["--registry", blsKeyRegistry], `AdManager.set_key_registry(${blsKeyRegistry})`);
+  if (readView(adManager, "key_registry") === blsKeyRegistry) {
+    console.log(`  [skip] AdManager.set_key_registry already ${blsKeyRegistry}`);
+  } else {
+    acting.call(adManager, "AdManager", "set_key_registry", ["--registry", blsKeyRegistry], `AdManager.set_key_registry(${blsKeyRegistry})`);
+  }
 
   // ── RootAnchor (2.3f) + Registrar (2.1b) ───────────────────────────
   // T2 notary: the publisher key(s) in ANCHOR_PUBLISHER (comma-separated G-addresses,
@@ -225,6 +242,7 @@ export async function deployCore(
       "--threshold",
       String(anchorThreshold),
     ]);
+    deployedNow.push("RootAnchor");
     console.log(`  [deploy] RootAnchor: ${rootAnchor}`);
   } else {
     console.log(`  [reuse] RootAnchor: ${rootAnchor}`);
@@ -252,6 +270,7 @@ export async function deployCore(
       "--w_native",
       wNativeToken,
     ]);
+    deployedNow.push("DisputeManager");
     console.log(`  [deploy] DisputeManager: ${disputeManager}`);
   } else {
     console.log(`  [reuse] DisputeManager: ${disputeManager}`);
@@ -271,12 +290,24 @@ export async function deployCore(
         "deploy-core: DISPUTE_ARBITER must not be the admin — the arbiter's containment is that it holds no escrow powers",
       );
     }
-    acting.call(disputeManager, "DisputeManager", "set_arbiter", ["--arbiter", arbiterAddr], `DisputeManager.set_arbiter(${arbiterAddr})`);
-    acting.call(disputeManager, "DisputeManager", "set_protocol_fee_pool", ["--pool", feePoolAddr], `DisputeManager.set_protocol_fee_pool(${feePoolAddr})`);
+    if (readView(disputeManager, "get_arbiter") === arbiterAddr) {
+      console.log(`  [skip] DisputeManager.set_arbiter already ${arbiterAddr}`);
+    } else {
+      acting.call(disputeManager, "DisputeManager", "set_arbiter", ["--arbiter", arbiterAddr], `DisputeManager.set_arbiter(${arbiterAddr})`);
+    }
+    if (readView(disputeManager, "get_protocol_fee_pool") === feePoolAddr) {
+      console.log(`  [skip] DisputeManager.set_protocol_fee_pool already ${feePoolAddr}`);
+    } else {
+      acting.call(disputeManager, "DisputeManager", "set_protocol_fee_pool", ["--pool", feePoolAddr], `DisputeManager.set_protocol_fee_pool(${feePoolAddr})`);
+    }
   }
 
-  // ── Grant MANAGER permission on MerkleManager (idempotent) ─────
+  // ── Grant MANAGER permission on MerkleManager (check first, then set) ─────
   for (const manager of [adManager, orderPortal, registrar]) {
+    if (readView(merkleManager, "is_manager", ["--addr", manager]) === true) {
+      console.log(`  [skip] MerkleManager.set_manager(${manager}) already true`);
+      continue;
+    }
     acting.call(merkleManager, "MerkleManager", "set_manager", ["--manager", manager, "--status", "true"], `MerkleManager.set_manager(${manager}, true)`);
   }
 
@@ -308,8 +339,9 @@ export async function deployCore(
     rootAnchorConfig: existing?.contracts.rootAnchor
       ? existing.rootAnchorConfig
       : { signers: anchorSigners, threshold: anchorThreshold, anchorDelays: {} },
-    // Who holds admin: the source account for everything deployed here; `handover` moves it.
-    admin: existing?.admin ?? { current: adminStrkey },
+    // Who holds admin, from what the chain answered for the reused contracts; the source account
+    // for a fresh deploy. `handover` moves it.
+    admin: adminBlockFromChain(existing?.admin, heldAdmins, adminStrkey, "stellar-deploy"),
     // Preserve tokens already in the manifest (test / curated). XLM entry is (re)set by deploy-test-tokens.
     tokens: (existing?.tokens.map((t) => ({
       pairKey: t.pairKey,
@@ -326,6 +358,14 @@ export async function deployCore(
   await writeManifest(outPath, manifest);
   console.log(`[stellar-deploy] wrote manifest → ${outPath}`);
   acting.report();
+  if (!acting.allMine && deployedNow.length > 0) {
+    // Deployed after a handover: wired now, with the source account as admin, not yet handed over.
+    const holder = heldAdmins.find((h) => h.admin !== adminStrkey)?.admin ?? "<admin>";
+    console.warn(
+      `[stellar-deploy] ${deployedNow.length} contract(s) deployed in this run (${deployedNow.join(", ")}) have the source account as admin ` +
+        `while the rest were handed over; run \`handover --to ${holder}\` to hand them over too.`,
+    );
+  }
 
   return {
     manifestPath: outPath,

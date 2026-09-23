@@ -6,9 +6,8 @@ import {
   duplicatePairKeys,
 } from "@proofbridge/deployment-manifest";
 import { DEFAULT_STELLAR_CHAIN_ID } from "./common.js";
-import { Acting, invokeContract, type DescribedCall } from "./stellar-cli.js";
-import { signerHoldsAdmin } from "./handover.js";
-import { getAddress } from "./stellar-cli.js";
+import { Acting, getAddress, invokeContract, type DescribedCall } from "./stellar-cli.js";
+import { adminsOf, foreignAdmins } from "./handover.js";
 import { manifestPath, writeManifest } from "./manifest.js";
 
 export interface StellarLinkOptions {
@@ -62,12 +61,13 @@ export async function link(
 
   const peerChainId = peer.chain.chainId;
 
-  // Who holds admin, read before anything is sent; after a handover every call below is described,
-  // not sent (#424). The manifest records what was set, so in describe mode it is not written.
-  const acting = new Acting(signerHoldsAdmin(local.contracts, getAddress(), "stellar-link"), "link");
-  const record = async () => {
-    if (acting.canSend) await writeManifest(localPath, local);
-  };
+  // Who holds admin on the four contracts link configures, read before anything is sent; a call
+  // to one handed over is described, not sent (#424). A section of the manifest is written only
+  // when its value is on chain — already there, or sent by this run — so a described call leaves
+  // the section it would have set as it was.
+  const held = adminsOf(local.contracts, ["adManager", "orderPortal", "rootAnchor", "disputeManager"]);
+  const acting = new Acting(foreignAdmins(getAddress(), held, "stellar-link"), "link");
+  const record = async () => writeManifest(localPath, local);
 
   // ── Chain-level linking ────────────────────────────────────────────
   // Stellar CLI takes bytes without the `0x` prefix.
@@ -151,13 +151,15 @@ export async function link(
       ["--source_chain_id", peerChainId],
       { send: false },
     ).trim();
-    if (cur.replace(/"/g, "") === delay) {
+    let onChain = cur.replace(/"/g, "") === delay;
+    if (onChain) {
       console.log(`  [skip] RootAnchor.set_anchor_delay(${peerChainId}) already ${delay}s`);
     } else {
-      if (acting.call(local.contracts.rootAnchor.address, "RootAnchor", "set_anchor_delay",
-        ["--source_chain_id", peerChainId, "--delay", delay], `RootAnchor.set_anchor_delay(${peerChainId}, ${delay}s)`)) chainTxs++;
+      onChain = acting.call(local.contracts.rootAnchor.address, "RootAnchor", "set_anchor_delay",
+        ["--source_chain_id", peerChainId, "--delay", delay], `RootAnchor.set_anchor_delay(${peerChainId}, ${delay}s)`);
+      if (onChain) chainTxs++;
     }
-    if (local.rootAnchorConfig) {
+    if (onChain && local.rootAnchorConfig) {
       local.rootAnchorConfig.anchorDelays[peerChainId] = delay;
       await record();
     }
@@ -205,6 +207,7 @@ export async function link(
         return false;
       }
     };
+    let onChain = true;
     for (const [name, escrow] of [
       ["AdManager", local.contracts.adManager.address],
       ["OrderPortal", local.contracts.orderPortal.address],
@@ -215,9 +218,12 @@ export async function link(
       }
       if (acting.call(escrow, name, "set_route_timing", ["--chain_id", peerChainId, "--timing", timingArg],
         `${name}.set_route_timing(${peerChainId}, minWindow=${timing.minWindow}s buffer=${timing.buffer}s margin=${timing.margin}s longBackstop=${timing.longBackstop}s claimStagger=${timing.claimStagger}s)`)) chainTxs++;
+      else onChain = false;
     }
-    local.routeTiming[peerChainId] = timing;
-    await record();
+    if (onChain) {
+      local.routeTiming[peerChainId] = timing;
+      await record();
+    }
   }
   if (local.contracts.rootAnchor) {
     const anchorAddr = local.contracts.rootAnchor.address;
@@ -302,14 +308,18 @@ export async function link(
       BigInt(cur.challenge_period ?? -1) === challengePeriod &&
       BigInt(cur.bond_floor ?? -1) === BigInt(params.bondFloor) &&
       Number(cur.bond_bps ?? -1) === params.bondBps;
-    if (same) {
+    let onChain = same;
+    if (onChain) {
       console.log(`  [skip] DisputeManager.set_dispute_params(${peerChainId}) already set`);
     } else {
-      if (acting.call(moduleAddr, "DisputeManager", "set_dispute_params", ["--chain_id", peerChainId, "--params", paramsArg],
-        `DisputeManager.set_dispute_params(${peerChainId}, challengePeriod=${params.challengePeriod}s bondFloor=${params.bondFloor} bondBps=${params.bondBps})`)) chainTxs++;
+      onChain = acting.call(moduleAddr, "DisputeManager", "set_dispute_params", ["--chain_id", peerChainId, "--params", paramsArg],
+        `DisputeManager.set_dispute_params(${peerChainId}, challengePeriod=${params.challengePeriod}s bondFloor=${params.bondFloor} bondBps=${params.bondBps})`);
+      if (onChain) chainTxs++;
     }
-    local.disputeParams[peerChainId] = params;
-    await record();
+    if (onChain) {
+      local.disputeParams[peerChainId] = params;
+      await record();
+    }
   } else {
     console.log("  [link] no DisputeManager in the local manifest; disputes stay unavailable on this chain");
   }

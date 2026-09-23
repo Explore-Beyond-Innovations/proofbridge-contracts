@@ -555,3 +555,18 @@ fn the_admin_is_not_the_arbiter() {
         "admin may"
     );
 }
+
+#[test]
+fn arbiter_and_fee_pool_views_follow_their_setters() {
+    let f = fixture();
+    let arbiter = Address::generate(&f.env);
+    let pool = Address::generate(&f.env);
+    let before_arbiter = f.client.get_arbiter();
+    let before_pool = f.client.get_protocol_fee_pool();
+    f.client.set_arbiter(&arbiter);
+    f.client.set_protocol_fee_pool(&pool);
+    assert_ne!(before_arbiter, Some(arbiter.clone()));
+    assert_ne!(before_pool, Some(pool.clone()));
+    assert_eq!(f.client.get_arbiter(), Some(arbiter));
+    assert_eq!(f.client.get_protocol_fee_pool(), Some(pool));
+}

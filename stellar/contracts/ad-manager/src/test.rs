@@ -351,6 +351,22 @@ mod contract_tests {
     }
 
     #[test]
+    fn key_registry_view_follows_set_key_registry() {
+        let (env, admin, client) = setup_env();
+        client.initialize(
+            &admin,
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &2_000_000_002u128,
+        );
+        assert_eq!(client.key_registry(), None);
+        let registry = Address::generate(&env);
+        client.set_key_registry(&registry);
+        assert_eq!(client.key_registry(), Some(registry));
+    }
+
+    #[test]
     fn test_initialization() {
         let (env, admin, client) = setup_env();
 

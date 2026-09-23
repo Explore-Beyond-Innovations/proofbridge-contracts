@@ -1,6 +1,7 @@
+import { StrKey } from "@stellar/stellar-sdk";
 import { readManifest, type ChainDeploymentManifest } from "@proofbridge/deployment-manifest";
 import { DEFAULT_STELLAR_CHAIN_ID } from "./common.js";
-import { getAddress, invokeContract } from "./stellar-cli.js";
+import { getAddress, invokeContract, readView } from "./stellar-cli.js";
 import { manifestPath, writeManifest } from "./manifest.js";
 
 /**
@@ -29,7 +30,7 @@ export const ADMIN_BEARING = [
   { key: "disputeManager", label: "DisputeManager", view: "get_admin", field: null },
 ] as const;
 
-type AdminBearingKey = (typeof ADMIN_BEARING)[number]["key"];
+export type AdminBearingKey = (typeof ADMIN_BEARING)[number]["key"];
 
 export interface StellarHandoverOptions {
   manifest?: string;
@@ -44,28 +45,77 @@ export interface StellarHandoverResult {
   outstanding: string[];
 }
 
-interface Seen {
+export interface HeldAdmin {
   key: AdminBearingKey;
   label: string;
   address: string;
   admin: string;
 }
 
-/** The last line of a read-only invoke, parsed: the CLI prints the return value as JSON. */
-function readValue(contractId: string, fn: string): unknown {
-  const out = invokeContract(contractId, fn, [], { send: false });
-  const last = out.split("\n").filter(Boolean).pop() ?? "null";
-  return JSON.parse(last);
-}
-
 /** Who a contract answers with. `Option<Address>` views print `null` before initialize. */
 export function readAdmin(contractId: string, spec: (typeof ADMIN_BEARING)[number]): string {
-  const v = readValue(contractId, spec.view);
+  const v = readView(contractId, spec.view);
   const admin = spec.field ? (v as Record<string, unknown> | null)?.[spec.field] : v;
   if (typeof admin !== "string" || !admin.startsWith("G") && !admin.startsWith("C")) {
     throw new Error(`handover: ${spec.label} at ${contractId} did not answer ${spec.view} with an address: ${JSON.stringify(v)}`);
   }
   return admin;
+}
+
+/**
+ * Who holds admin on the manifest's admin-bearing contracts (all six, or `keys` of them), read
+ * from the chain. The one reader `deploy`, `link` and `handover` share.
+ */
+export function adminsOf(
+  contracts: ChainDeploymentManifest["contracts"],
+  keys: readonly AdminBearingKey[] = ADMIN_BEARING.map((s) => s.key),
+): HeldAdmin[] {
+  const held: HeldAdmin[] = [];
+  for (const spec of ADMIN_BEARING) {
+    if (!keys.includes(spec.key)) continue;
+    const address = contracts[spec.key]?.address;
+    if (!address) continue;
+    held.push({ key: spec.key, label: spec.label, address, admin: readAdmin(address, spec) });
+  }
+  return held;
+}
+
+/** The contract ids among `held` whose admin is not `me`; logs them. Empty = the signer holds all. */
+export function foreignAdmins(me: string, held: HeldAdmin[], command: string): string[] {
+  const foreign = held.filter((h) => h.admin !== me);
+  if (foreign.length > 0) {
+    console.warn(
+      `[${command}] the source account ${me} is not the admin of: ${foreign.map((h) => `${h.label} (admin ${h.admin})`).join(", ")}. ` +
+        `Calls to those will be described, not sent.`,
+    );
+  }
+  return foreign.map((h) => h.address);
+}
+
+type AdminBlock = NonNullable<ChainDeploymentManifest["admin"]>;
+
+/**
+ * The manifest's `admin` block, from what the chain answered (#424 H3): every reused contract
+ * agreeing on one address makes it `current`, and if that is the recorded nominee the handover is
+ * recorded as accepted. Disagreement keeps the old block, with a warning. Nothing reused means
+ * everything deployed in this run has the source account as admin.
+ */
+export function adminBlockFromChain(
+  existing: AdminBlock | undefined,
+  held: HeldAdmin[],
+  me: string,
+  command: string,
+): AdminBlock {
+  if (held.length === 0) return existing ?? { current: me };
+  const admins = new Set(held.map((h) => h.admin));
+  if (admins.size !== 1) {
+    console.warn(`[${command}] the reused contracts disagree about their admin; the manifest's admin block is left as it was`);
+    return existing ?? { current: me };
+  }
+  const current = held[0]!.admin;
+  if (existing?.current === current) return existing;
+  if (existing?.pending === current) return { current, acceptedAt: new Date().toISOString() };
+  return { current };
 }
 
 export async function handover(opts: StellarHandoverOptions): Promise<StellarHandoverResult> {
@@ -78,18 +128,18 @@ export async function handover(opts: StellarHandoverOptions): Promise<StellarHan
   const me = getAddress();
 
   // Read before anything is sent: the chain is the fact, the manifest is the record.
-  const seen: Seen[] = [];
-  for (const spec of ADMIN_BEARING) {
-    const entry = manifest.contracts[spec.key];
-    if (!entry?.address) continue;
-    seen.push({ key: spec.key, label: spec.label, address: entry.address, admin: readAdmin(entry.address, spec) });
-  }
+  const seen = adminsOf(manifest.contracts);
   if (seen.length === 0) throw new Error(`handover: ${path} names no admin-bearing contract`);
 
   if (opts.verify) return verify(manifest, path, seen, me);
 
   const to = opts.to;
   if (!to) throw new Error("handover: --to <G...> is required (or --verify)");
+  // An account (G…) or a contract (C…, a multisig): anything else is a typo nobody could accept
+  // from, refused before a nomination is sent.
+  if (!StrKey.isValidEd25519PublicKey(to) && !StrKey.isValidContract(to)) {
+    throw new Error(`handover: --to ${to} is not a Stellar account or contract address; nothing was sent`);
+  }
   if (to === me) throw new Error(`handover: --to ${to} is the source account; nothing to hand over`);
 
   const result: StellarHandoverResult = { nominated: [], accepted: [], outstanding: [] };
@@ -114,16 +164,22 @@ export async function handover(opts: StellarHandoverOptions): Promise<StellarHan
     result.outstanding.push(s.label);
   }
 
-  manifest.admin = { current: me, pending: to, nominatedAt: new Date().toISOString() };
-  await writeManifest(path, manifest);
+  // The manifest changes only when something was nominated: after every contract has accepted,
+  // `current` is the nominee, and a rerun must not rewrite it as the source account (#424 H2).
+  if (result.nominated.length > 0) {
+    manifest.admin = { current: me, pending: to, nominatedAt: new Date().toISOString() };
+    await writeManifest(path, manifest);
+  }
   console.log(
-    `[stellar-handover] ${result.nominated.length} nominated, ${result.outstanding.length} awaiting accept_admin from ${to}. ` +
-      `Run \`handover --verify\` once it has accepted.`,
+    result.outstanding.length === 0
+      ? `[stellar-handover] every contract already answers with ${to}; nothing nominated, manifest unchanged (run \`handover --verify\` to record it)`
+      : `[stellar-handover] ${result.nominated.length} nominated, ${result.outstanding.length} awaiting accept_admin from ${to}. ` +
+          `Run \`handover --verify\` once it has accepted.`,
   );
   return result;
 }
 
-async function verify(manifest: ChainDeploymentManifest, path: string, seen: Seen[], me: string): Promise<StellarHandoverResult> {
+async function verify(manifest: ChainDeploymentManifest, path: string, seen: HeldAdmin[], me: string): Promise<StellarHandoverResult> {
   const target = manifest.admin?.pending;
   const result: StellarHandoverResult = { nominated: [], accepted: [], outstanding: [] };
   for (const s of seen) {
@@ -155,24 +211,4 @@ async function verify(manifest: ChainDeploymentManifest, path: string, seen: See
     );
   }
   return result;
-}
-
-/** Who holds admin on the manifest's admin-bearing contracts, and whether `me` holds all of them. */
-export function signerHoldsAdmin(
-  contracts: ChainDeploymentManifest["contracts"],
-  me: string,
-  command: string,
-): boolean {
-  const foreign: string[] = [];
-  for (const spec of ADMIN_BEARING) {
-    const address = contracts[spec.key]?.address;
-    if (!address) continue;
-    const admin = readAdmin(address, spec);
-    if (admin !== me) foreign.push(`${spec.label} (admin ${admin})`);
-  }
-  if (foreign.length === 0) return true;
-  console.warn(
-    `[${command}] the source account ${me} is not the admin of: ${foreign.join(", ")}. Admin-only calls will be described, not sent.`,
-  );
-  return false;
 }

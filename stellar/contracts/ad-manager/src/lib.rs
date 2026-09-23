@@ -1080,6 +1080,12 @@ impl AdManagerContract {
         storage::get_config(&env)
     }
 
+    /// The BLS key registry `set_key_registry` installed, `None` before it. The deploy CLI reads
+    /// this so a redeploy sends `set_key_registry` only when it would change something (#424).
+    pub fn key_registry(env: Env) -> Option<Address> {
+        storage::get_key_registry(&env)
+    }
+
     // =========================================================================
     // Internal Helpers
     // =========================================================================

@@ -8,7 +8,7 @@
 //   evm-deploy handover --to <address> | --verify   [--in <manifest-path>]
 //
 // Reads EVM_RPC_URL, EVM_ADMIN_PRIVATE_KEY from env. Other knobs:
-//   ADMIN, CHAIN_NAME, DEPLOY_ENV, GIT_COMMIT,
+//   CHAIN_NAME, DEPLOY_ENV, GIT_COMMIT (ADMIN is refused: the deployer is the admin; see handover),
 //   WNATIVE_NAME, WNATIVE_SYMBOL, WNATIVE_DECIMALS,
 //   EVM_OUT_DIR, EVM_DEPLOYMENTS_DIR.
 

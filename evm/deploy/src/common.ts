@@ -100,20 +100,35 @@ const show = (v: unknown): string =>
 /**
  * The CLI acts while it is the admin and describes when it is not (#424).
  *
- * Every wiring call goes through `call`. When the signer holds admin on the contracts a command is
- * about to configure, the call is sent. When it does not — the admin has been handed over — the
- * call is recorded with its calldata and printed at the end for the admin to make, nothing is sent,
- * and the command exits 2 so no script mistakes "described" for "done". Which of the two happens is
- * decided up front, from `admin()` on chain, before the first transaction.
+ * Every wiring call goes through `call`. The decision is **per contract**: a call to a contract
+ * whose admin is the signer is sent; a call to one whose admin is someone else — it was handed
+ * over — is recorded with its calldata and printed at the end for the admin to make, and the
+ * command exits 2 so no script mistakes "described" for "done". A contract deployed in this run has
+ * the deployer as admin and is always sendable, whatever happened to the others. Which contracts
+ * are foreign is decided up front, from `admin()` on chain, before the first transaction.
  */
 export class Acting {
   readonly described: DescribedCall[] = [];
+  private readonly foreign: Set<string>;
 
+  /** @param foreign addresses whose `admin()` is not the signer (lower-cased or not; compared case-insensitively). */
   constructor(
-    readonly canSend: boolean,
+    foreign: Iterable<string>,
     private readonly nonces: NonceTracker,
     private readonly tag: string,
-  ) {}
+  ) {
+    this.foreign = new Set([...foreign].map((a) => a.toLowerCase()));
+  }
+
+  /** Whether a call to `address` would be sent. */
+  canSendTo(address: string): boolean {
+    return !this.foreign.has(address.toLowerCase());
+  }
+
+  /** True when every contract this command touches is the signer's. */
+  get allMine(): boolean {
+    return this.foreign.size === 0;
+  }
 
   /** Send `fn(args)` on `contract`, or describe it. Returns whether it was sent. */
   async call(
@@ -123,10 +138,11 @@ export class Acting {
     args: unknown[],
     line: string,
   ): Promise<boolean> {
-    if (!this.canSend) {
+    const to = await contract.getAddress();
+    if (!this.canSendTo(to)) {
       this.described.push({
         label,
-        to: await contract.getAddress(),
+        to,
         fn,
         args: args.map(show),
         data: contract.interface.encodeFunctionData(fn, args),
@@ -166,6 +182,8 @@ export interface HeldAdmin {
   label: string;
   address: string;
   admin: string;
+  /** `pendingAdmin()`: a nomination not yet accepted, or the zero address. */
+  pendingAdmin: string;
 }
 
 /**
@@ -178,19 +196,52 @@ export async function adminsOf(
 ): Promise<HeldAdmin[]> {
   const held: HeldAdmin[] = [];
   for (const c of contracts) {
-    const admin = String(await attach(c.address, c.artifact, c.artifact).getFunction("admin")());
-    held.push({ label: c.label, address: c.address, admin });
+    const contract = attach(c.address, c.artifact, c.artifact);
+    held.push({
+      label: c.label,
+      address: c.address,
+      admin: String(await contract.getFunction("admin")()),
+      pendingAdmin: String(await contract.getFunction("pendingAdmin")()),
+    });
   }
   return held;
 }
 
-/** True when `me` holds admin on every one of `held`; logs the ones it does not. */
-export function signerHoldsAdmin(me: string, held: HeldAdmin[], command: string): boolean {
+/** The addresses among `held` whose admin is not `me`; logs them. Empty means the signer holds all. */
+export function foreignAdmins(me: string, held: HeldAdmin[], command: string): string[] {
   const foreign = held.filter((h) => h.admin.toLowerCase() !== me.toLowerCase());
-  if (foreign.length === 0) return true;
-  console.warn(
-    `[${command}] the signer ${me} is not the admin of: ${foreign.map((h) => `${h.label} (admin ${h.admin})`).join(", ")}. ` +
-      `Admin-only calls will be described, not sent.`,
-  );
-  return false;
+  if (foreign.length > 0) {
+    console.warn(
+      `[${command}] the signer ${me} is not the admin of: ${foreign.map((h) => `${h.label} (admin ${h.admin})`).join(", ")}. ` +
+        `Calls to those will be described, not sent.`,
+    );
+  }
+  return foreign.map((h) => h.address);
+}
+
+/**
+ * The manifest's `admin` block, from what the chain answered (H3 of the #424 review: the manifest
+ * is a claim, the chain is the fact). Every reused contract agreeing on one address makes that
+ * address `current`; if it is the recorded nominee, the handover is recorded as accepted. Contracts
+ * that disagree keep the old block, with a warning. Nothing reused means everything deployed in
+ * this run has `deployer` as admin.
+ */
+export function adminBlockFromChain(
+  existing: { current: string; pending?: string; nominatedAt?: string; acceptedAt?: string } | undefined,
+  held: HeldAdmin[],
+  deployer: string,
+  command: string,
+): { current: string; pending?: string; nominatedAt?: string; acceptedAt?: string } {
+  if (held.length === 0) return existing ?? { current: deployer };
+  const admins = new Set(held.map((h) => h.admin.toLowerCase()));
+  if (admins.size !== 1) {
+    console.warn(`[${command}] the reused contracts disagree about their admin; the manifest's admin block is left as it was`);
+    return existing ?? { current: deployer };
+  }
+  const current = held[0]!.admin;
+  if (existing && existing.current.toLowerCase() === current.toLowerCase()) return existing;
+  if (existing?.pending && existing.pending.toLowerCase() === current.toLowerCase()) {
+    return { current, acceptedAt: new Date().toISOString() };
+  }
+  return { current };
 }

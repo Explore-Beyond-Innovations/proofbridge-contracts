@@ -4,6 +4,11 @@ import { execFileSync } from "child_process";
 import { StrKey } from "@stellar/stellar-sdk";
 
 const NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
+
+/** Single-quote a shell argument; a bare flag or plain word is left as is. */
+export function shellQuote(arg: string): string {
+  return /^[A-Za-z0-9_\-=.:/]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
+}
 const SOURCE = process.env.STELLAR_SOURCE_ACCOUNT ?? "admin";
 
 function exec(args: string[]): string {
@@ -170,14 +175,39 @@ export interface DescribedCall {
  * sent; in describe mode every call is printed as the `stellar contract invoke` the admin has to
  * make, and the command exits 2.
  */
+/** The last line of a read-only invoke, parsed: the CLI prints the return value as JSON. */
+export function readView(contractId: string, fn: string, args: string[] = []): unknown {
+  const out = invokeContract(contractId, fn, args, { send: false });
+  const last = out.split("\n").filter(Boolean).pop() ?? "null";
+  return JSON.parse(last);
+}
+
 export class Acting {
   readonly described: DescribedCall[] = [];
+  private readonly foreign: Set<string>;
 
-  constructor(readonly canSend: boolean, private readonly tag: string) {}
+  /**
+   * @param foreign contract ids whose admin is not the source account. The decision is per
+   * contract: a call to one of these is described, a call to any other contract is sent, so a
+   * contract deployed in this run (its admin is the source account) is wired whatever happened to
+   * the rest (#424 H1).
+   */
+  constructor(foreign: Iterable<string>, private readonly tag: string) {
+    this.foreign = new Set(foreign);
+  }
+
+  canSendTo(contractId: string): boolean {
+    return !this.foreign.has(contractId);
+  }
+
+  /** True when every contract this command touches is the source account's. */
+  get allMine(): boolean {
+    return this.foreign.size === 0;
+  }
 
   /** Send `fn(args)` on `contractId`, or describe it. Returns whether it was sent. */
   call(contractId: string, label: string, fn: string, args: string[], line: string): boolean {
-    if (!this.canSend) {
+    if (!this.canSendTo(contractId)) {
       this.described.push({ label, contractId, fn, args });
       console.log(`  [describe] ${line}`);
       return false;
@@ -190,11 +220,13 @@ export class Acting {
   report(): void {
     if (this.described.length === 0) return;
     console.log(
-      `\n[${this.tag}] the source account is not the admin, so nothing was sent. The admin has to make these ${this.described.length} call(s):`,
+      `\n[${this.tag}] the source account is not the admin of every contract, so these ${this.described.length} call(s) were not sent. The admin has to make them:`,
     );
     for (const d of this.described) {
+      // Args are quoted for a shell: JSON values (`--guards '[...]'`, `--timing '{...}'`) carry
+      // characters the shell would otherwise split or expand.
       console.log(
-        `  ${d.label}.${d.fn}\n    stellar contract invoke --id ${d.contractId} --source-account <admin> --network ${NETWORK} -- ${d.fn} ${d.args.join(" ")}`,
+        `  ${d.label}.${d.fn}\n    stellar contract invoke --id ${d.contractId} --source-account <admin> --network ${NETWORK} -- ${d.fn} ${d.args.map(shellQuote).join(" ")}`,
       );
     }
   }

@@ -4,11 +4,12 @@ import {
   ADMIN_BEARING,
   Acting,
   MANAGER_ROLE,
+  adminBlockFromChain,
   adminsOf,
   connect,
   envOrDefault,
+  foreignAdmins,
   requireEnv,
-  signerHoldsAdmin,
   type DescribedCall,
 } from "./common.js";
 import {
@@ -187,8 +188,8 @@ async function deployCoreRun(
   // ...and so is what depends on the chain. The manifest is a claim; the chain is the fact.
   const reusedAgentPolicy = existing?.contracts.agentPolicy?.address;
   let reusedAgentCodec = existing?.contracts.agentPolicyCodec?.address;
-  let signerIsAdmin = true;
-  let heldAdmins: { label: string; address: string; admin: string }[] = [];
+  let foreign: string[] = [];
+  let heldAdmins: Awaited<ReturnType<typeof adminsOf>> = [];
   if (existing) {
     const provider = signer.provider!;
     const entries = Object.entries(existing.contracts)
@@ -219,7 +220,7 @@ async function deployCoreRun(
       return address ? [{ label: artifact, artifact, address }] : [];
     });
     heldAdmins = await adminsOf(reusedAdminBearing, (a, f, n) => attachContract(a, f, n, signer));
-    signerIsAdmin = signerHoldsAdmin(deployer, heldAdmins, "evm-deploy");
+    foreign = foreignAdmins(deployer, heldAdmins, "evm-deploy");
 
     // A reused pre-2.3c AdManager has no `keyRegistry()`, and the wiring below cannot do without it.
     try {
@@ -276,7 +277,8 @@ async function deployCoreRun(
     }
   }
 
-  const acting = new Acting(signerIsAdmin, nonces, "wire");
+  // Per contract: what this run deploys has the deployer as admin and is always wired now (H1).
+  const acting = new Acting(foreign, nonces, "wire");
 
   async function deployIfMissing(
     label: string,
@@ -514,13 +516,27 @@ async function deployCoreRun(
   // sent was decided up front; a revert here is a failure, not a warning.
   {
     const registry = attachContract(blsKeyRegistryAddr, "BLSKeyRegistry", "BLSKeyRegistry", signer);
-    await acting.call(
-      registry,
-      "BLSKeyRegistry",
-      "setPositionGuards",
-      [[adManagerAddr, orderPortalAddr]],
-      `BLSKeyRegistry.setPositionGuards([AdManager, OrderPortal])`,
-    );
+    // `positionGuards` is a public array with no length getter: read by index until it reverts.
+    const want = [adManagerAddr, orderPortalAddr].map((a) => a.toLowerCase());
+    const have: string[] = [];
+    for (let i = 0; ; i++) {
+      try {
+        have.push(String(await registry.getFunction("positionGuards")(i)).toLowerCase());
+      } catch {
+        break;
+      }
+    }
+    if (have.length === want.length && have.every((g, i) => g === want[i])) {
+      console.log(`  [skip] BLSKeyRegistry.setPositionGuards already [AdManager, OrderPortal]`);
+    } else {
+      await acting.call(
+        registry,
+        "BLSKeyRegistry",
+        "setPositionGuards",
+        [[adManagerAddr, orderPortalAddr]],
+        `BLSKeyRegistry.setPositionGuards([AdManager, OrderPortal])`,
+      );
+    }
   }
 
   // ── point the AdManager at the registry (2.3c) ────────────────────
@@ -594,17 +610,20 @@ async function deployCoreRun(
     rootAnchorConfig: existing?.contracts.rootAnchor
       ? existing.rootAnchorConfig
       : { signers: anchorSigners, threshold: anchorThreshold, anchorDelays: {} },
-    // Who holds admin: whatever the chain said for the reused contracts if they agree, else the
-    // deployer, who is the admin of everything deployed in this run. `handover` moves it.
-    admin: existing?.admin ?? { current: deployer },
+    // Who holds admin, from what the chain answered for the reused contracts; the deployer for a
+    // fresh deploy. `handover` moves it.
+    admin: adminBlockFromChain(existing?.admin, heldAdmins, deployer, "evm-deploy"),
   });
 
   await writeManifest(outPath, manifest);
   console.log(`[evm-deploy] wrote manifest → ${outPath}`);
   acting.report();
-  if (!signerIsAdmin && heldAdmins.length > 0) {
+  if (foreign.length > 0 && run.deployed.length > 0) {
+    // Deployed after a handover: wired now, with the deployer as admin, and not yet handed over.
+    const holder = heldAdmins.find((h) => h.admin.toLowerCase() !== deployer.toLowerCase())?.admin ?? "<admin>";
     console.warn(
-      `[evm-deploy] anything deployed in this run has the deployer as admin; hand it over with \`handover --to ${heldAdmins[0]!.admin}\`.`,
+      `[evm-deploy] ${run.deployed.length} contract(s) deployed in this run (${run.deployed.map((d) => d.label).join(", ")}) have the deployer as admin ` +
+        `while the rest were handed over; run \`handover --to ${holder}\` to hand them over too.`,
     );
   }
 
