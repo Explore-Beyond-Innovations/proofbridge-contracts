@@ -1,0 +1,612 @@
+{
+  "_meta": {
+    "purpose": "2.5c: both legs of one logical trade driven in one per-chain world, on both chains, asserting one normalized JOINT terminal record per scenario — the cancellation-proofs 8.* matrix by exhaustion. Conservation (T-56 terminal half) rides EVERY scenario as the drivers' epilogue.",
+    "generator": "scripts/bls-vectors/src/gen-joint-outcomes.ts",
+    "spec": "docs/engineering/t2/2.5-build/01-terminal-state-sweeps.md"
+  },
+  "header": {
+    "note": "amounts are fixture units per dispute-scenarios.json's convention; drivers configure params from this header, never inherit; the anchor actions anchor ONLY leaves the emitting leg actually appended (the anchor discipline)",
+    "evmScaleExp": 12,
+    "sorobanScaleExp": 0,
+    "orderAmountUnits": "1000000",
+    "challengePeriodS": 7200,
+    "bufferS": 1800,
+    "longBackstopS": 86400,
+    "bondFloorUnits": "10000",
+    "bondBps": 0,
+    "bondUnits": "10000",
+    "filerIsBridger": false
+  },
+  "counts": {
+    "scenarios": 14
+  },
+  "scenarios": [
+    {
+      "name": "happy-joint",
+      "steps": [
+        {
+          "leg": "follower",
+          "action": "unlock"
+        },
+        {
+          "leg": "primary",
+          "action": "unlock"
+        },
+        {
+          "leg": "follower",
+          "action": "recordSettled"
+        },
+        {
+          "leg": "primary",
+          "action": "recordSettled"
+        }
+      ],
+      "expect": {
+        "primaryStatus": "Filled",
+        "followerStatus": "Filled",
+        "primaryLeafDomain": "3",
+        "followerLeafDomain": "3",
+        "primaryUnlockNullifierConsumed": true,
+        "followerUnlockNullifierConsumed": true,
+        "bondToFilerUnits": "0",
+        "bondToPoolUnits": "0"
+      }
+    },
+    {
+      "name": "cancel-joint",
+      "note": "T-41: the follower refunds on the primary's CANCEL leaf with NO clock consulted on the follower",
+      "steps": [
+        {
+          "leg": "primary",
+          "action": "claimCancel"
+        },
+        {
+          "leg": "primary",
+          "action": "finalizeCancel",
+          "expectRevert": "windowNotOver"
+        },
+        {
+          "leg": "primary",
+          "action": "warpPastCancelWindow"
+        },
+        {
+          "leg": "primary",
+          "action": "finalizeCancel"
+        },
+        {
+          "action": "anchorPrimaryLeaf"
+        },
+        {
+          "leg": "follower",
+          "action": "refundByCancel"
+        }
+      ],
+      "expect": {
+        "primaryStatus": "Cancelled",
+        "followerStatus": "Cancelled",
+        "primaryLeafDomain": "2",
+        "followerLeafDomain": "none",
+        "primaryUnlockNullifierConsumed": false,
+        "followerUnlockNullifierConsumed": false,
+        "bondToFilerUnits": "0",
+        "bondToPoolUnits": "0"
+      }
+    },
+    {
+      "name": "filled-primary-refund-unreachable",
+      "note": "T-41 Tier 0 under the anchor discipline: no CANCEL leaf was ever emitted, so nothing refund-provable can be anchored; a minted CANCEL root is rejected as unanchored, the anchored SETTLED root fails the domain check",
+      "followerRealProofs": true,
+      "steps": [
+        {
+          "leg": "primary",
+          "action": "unlock"
+        },
+        {
+          "leg": "primary",
+          "action": "recordSettled"
+        },
+        {
+          "action": "anchorPrimaryLeaf"
+        },
+        {
+          "leg": "follower",
+          "action": "refundByCancelUnanchored",
+          "expectRevert": "rootNotAnchored"
+        },
+        {
+          "leg": "follower",
+          "action": "refundByCancel",
+          "expectRevert": "wrongLeafDomain"
+        },
+        {
+          "leg": "follower",
+          "action": "presentSettled"
+        }
+      ],
+      "expect": {
+        "primaryStatus": "Filled",
+        "followerStatus": "Filled",
+        "primaryLeafDomain": "3",
+        "followerLeafDomain": "none",
+        "primaryUnlockNullifierConsumed": true,
+        "followerUnlockNullifierConsumed": false,
+        "bondToFilerUnits": "0",
+        "bondToPoolUnits": "0"
+      }
+    },
+    {
+      "name": "fast-unlock-race",
+      "note": "T-45a: the in-flight gap is the WITHHELD anchor; presentation during the primary's claim window kills the claim",
+      "steps": [
+        {
+          "leg": "follower",
+          "action": "unlockNearDeadline"
+        },
+        {
+          "leg": "follower",
+          "action": "recordSettled"
+        },
+        {
+          "leg": "primary",
+          "action": "warpPastDeadline"
+        },
+        {
+          "leg": "primary",
+          "action": "claimCancel"
+        },
+        {
+          "action": "anchorFollowerLeaf"
+        },
+        {
+          "leg": "primary",
+          "action": "presentSettled"
+        },
+        {
+          "leg": "primary",
+          "action": "recordSettled"
+        }
+      ],
+      "expect": {
+        "primaryStatus": "Filled",
+        "followerStatus": "Filled",
+        "primaryLeafDomain": "3",
+        "followerLeafDomain": "3",
+        "primaryUnlockNullifierConsumed": false,
+        "followerUnlockNullifierConsumed": true,
+        "bondToFilerUnits": "0",
+        "bondToPoolUnits": "0"
+      }
+    },
+    {
+      "name": "fast-unlock-race-silent",
+      "note": "TIER-1 STATED BOUNDARY (8.4): with EVERY holder of the public evidence silent through the window, the claim finalizes — the stated boundary, not a bug (residual 14)",
+      "steps": [
+        {
+          "leg": "follower",
+          "action": "unlockNearDeadline"
+        },
+        {
+          "leg": "follower",
+          "action": "recordSettled"
+        },
+        {
+          "leg": "primary",
+          "action": "warpPastDeadline"
+        },
+        {
+          "leg": "primary",
+          "action": "claimCancel"
+        },
+        {
+          "leg": "primary",
+          "action": "warpPastCancelWindow"
+        },
+        {
+          "leg": "primary",
+          "action": "finalizeCancel"
+        }
+      ],
+      "expect": {
+        "primaryStatus": "Cancelled",
+        "followerStatus": "Filled",
+        "primaryLeafDomain": "2",
+        "followerLeafDomain": "3",
+        "primaryUnlockNullifierConsumed": false,
+        "followerUnlockNullifierConsumed": true,
+        "bondToFilerUnits": "0",
+        "bondToPoolUnits": "0"
+      }
+    },
+    {
+      "name": "settle-then-dispute-leafproof",
+      "note": "T-61(a), the strict ordering 2.3j deferred: the follower settled FIRST; the dispute then dies to the counterpart-settlement leaf proof",
+      "steps": [
+        {
+          "leg": "follower",
+          "action": "unlock"
+        },
+        {
+          "leg": "follower",
+          "action": "recordSettled"
+        },
+        {
+          "action": "anchorFollowerLeaf"
+        },
+        {
+          "leg": "primary",
+          "action": "dispute"
+        },
+        {
+          "leg": "primary",
+          "action": "presentSettled"
+        },
+        {
+          "leg": "primary",
+          "action": "recordSettled"
+        }
+      ],
+      "expect": {
+        "primaryStatus": "Filled",
+        "followerStatus": "Filled",
+        "primaryLeafDomain": "3",
+        "followerLeafDomain": "3",
+        "primaryUnlockNullifierConsumed": false,
+        "followerUnlockNullifierConsumed": true,
+        "bondToFilerUnits": "0",
+        "bondToPoolUnits": "10000"
+      }
+    },
+    {
+      "name": "settle-then-dispute-cosign-unlock",
+      "note": "T-61(b): the co-signed unlock is ITSELF evidence (D5) — it admits Disputed and closes the dispute in the same tx",
+      "steps": [
+        {
+          "leg": "follower",
+          "action": "unlock"
+        },
+        {
+          "leg": "follower",
+          "action": "recordSettled"
+        },
+        {
+          "leg": "primary",
+          "action": "dispute"
+        },
+        {
+          "leg": "primary",
+          "action": "unlock"
+        },
+        {
+          "leg": "primary",
+          "action": "recordSettled"
+        }
+      ],
+      "expect": {
+        "primaryStatus": "Filled",
+        "followerStatus": "Filled",
+        "primaryLeafDomain": "3",
+        "followerLeafDomain": "3",
+        "primaryUnlockNullifierConsumed": true,
+        "followerUnlockNullifierConsumed": true,
+        "bondToFilerUnits": "0",
+        "bondToPoolUnits": "10000"
+      }
+    },
+    {
+      "name": "partial-mutualrefund",
+      "note": "T-55: ruled on the primary ONLY; the follower is always the un-ruled leg (ad-leg-only correction)",
+      "followerRealProofs": true,
+      "steps": [
+        {
+          "leg": "primary",
+          "action": "dispute"
+        },
+        {
+          "leg": "primary",
+          "action": "rule",
+          "outcome": "MutualRefund"
+        },
+        {
+          "leg": "primary",
+          "action": "warpPastWindow"
+        },
+        {
+          "leg": "primary",
+          "action": "finalizeDispute"
+        },
+        {
+          "action": "anchorPrimaryLeaf"
+        },
+        {
+          "leg": "follower",
+          "action": "payMakerByForfeit",
+          "expectRevert": "wrongLeafDomain"
+        },
+        {
+          "leg": "follower",
+          "action": "refundByCancel"
+        }
+      ],
+      "expect": {
+        "primaryStatus": "Resolved",
+        "followerStatus": "Cancelled",
+        "primaryLeafDomain": "2",
+        "followerLeafDomain": "none",
+        "primaryUnlockNullifierConsumed": false,
+        "followerUnlockNullifierConsumed": false,
+        "bondToFilerUnits": "10000",
+        "bondToPoolUnits": "0"
+      }
+    },
+    {
+      "name": "partial-bridgerforfeit",
+      "note": "T-55: ruled on the primary ONLY; the follower is always the un-ruled leg (ad-leg-only correction)",
+      "followerRealProofs": true,
+      "steps": [
+        {
+          "leg": "primary",
+          "action": "dispute"
+        },
+        {
+          "leg": "primary",
+          "action": "rule",
+          "outcome": "BridgerForfeit"
+        },
+        {
+          "leg": "primary",
+          "action": "warpPastWindow"
+        },
+        {
+          "leg": "primary",
+          "action": "finalizeDispute"
+        },
+        {
+          "action": "anchorPrimaryLeaf"
+        },
+        {
+          "leg": "follower",
+          "action": "refundByCancel",
+          "expectRevert": "wrongLeafDomain"
+        },
+        {
+          "leg": "follower",
+          "action": "payMakerByForfeit"
+        }
+      ],
+      "expect": {
+        "primaryStatus": "Resolved",
+        "followerStatus": "Filled",
+        "primaryLeafDomain": "5",
+        "followerLeafDomain": "none",
+        "primaryUnlockNullifierConsumed": false,
+        "followerUnlockNullifierConsumed": false,
+        "bondToFilerUnits": "10000",
+        "bondToPoolUnits": "0"
+      }
+    },
+    {
+      "name": "partial-makerforfeit",
+      "note": "T-55: ruled on the primary ONLY; the follower is always the un-ruled leg (ad-leg-only correction)",
+      "followerRealProofs": true,
+      "steps": [
+        {
+          "leg": "primary",
+          "action": "dispute"
+        },
+        {
+          "leg": "primary",
+          "action": "rule",
+          "outcome": "MakerForfeit"
+        },
+        {
+          "leg": "primary",
+          "action": "warpPastWindow"
+        },
+        {
+          "leg": "primary",
+          "action": "finalizeDispute"
+        },
+        {
+          "action": "anchorPrimaryLeaf"
+        },
+        {
+          "leg": "follower",
+          "action": "payMakerByForfeit",
+          "expectRevert": "wrongLeafDomain"
+        },
+        {
+          "leg": "follower",
+          "action": "refundByCancel"
+        }
+      ],
+      "expect": {
+        "primaryStatus": "Resolved",
+        "followerStatus": "Cancelled",
+        "primaryLeafDomain": "2",
+        "followerLeafDomain": "none",
+        "primaryUnlockNullifierConsumed": false,
+        "followerUnlockNullifierConsumed": false,
+        "bondToFilerUnits": "0",
+        "bondToPoolUnits": "10000"
+      }
+    },
+    {
+      "name": "vacuum-timeout-joint",
+      "note": "no ruling at all: both legs unwind symmetrically — finality lost, nothing stolen (8.4's floor); the T-50 bound re-asserted on the way",
+      "steps": [
+        {
+          "leg": "primary",
+          "action": "dispute"
+        },
+        {
+          "leg": "primary",
+          "action": "finalizeDispute",
+          "expectRevert": "disputeNotResolved"
+        },
+        {
+          "leg": "primary",
+          "action": "warpPastChallenge"
+        },
+        {
+          "leg": "primary",
+          "action": "claimDispute"
+        },
+        {
+          "leg": "primary",
+          "action": "warpPastWindow"
+        },
+        {
+          "leg": "primary",
+          "action": "finalizeDispute"
+        },
+        {
+          "action": "anchorPrimaryLeaf"
+        },
+        {
+          "leg": "follower",
+          "action": "refundByCancel"
+        }
+      ],
+      "expect": {
+        "primaryStatus": "Resolved",
+        "followerStatus": "Cancelled",
+        "primaryLeafDomain": "2",
+        "followerLeafDomain": "none",
+        "primaryUnlockNullifierConsumed": false,
+        "followerUnlockNullifierConsumed": false,
+        "bondToFilerUnits": "10000",
+        "bondToPoolUnits": "0"
+      }
+    },
+    {
+      "name": "leaf-replay-and-reuse",
+      "note": "the leaf paths are replay-guarded by TERMINAL STATUS (A6's shape); cross-order reuse is structurally blocked — the event proof binds THIS order's hash",
+      "followerRealProofs": true,
+      "steps": [
+        {
+          "leg": "primary",
+          "action": "claimCancel"
+        },
+        {
+          "leg": "primary",
+          "action": "warpPastCancelWindow"
+        },
+        {
+          "leg": "primary",
+          "action": "finalizeCancel"
+        },
+        {
+          "action": "anchorPrimaryLeaf"
+        },
+        {
+          "leg": "follower",
+          "action": "refundByCancelForeignOrder",
+          "expectRevert": "proofBindsOrderHash"
+        },
+        {
+          "leg": "follower",
+          "action": "refundByCancel"
+        },
+        {
+          "leg": "follower",
+          "action": "refundByCancel",
+          "expectRevert": "terminalStatus"
+        }
+      ],
+      "expect": {
+        "primaryStatus": "Cancelled",
+        "followerStatus": "Cancelled",
+        "primaryLeafDomain": "2",
+        "followerLeafDomain": "none",
+        "primaryUnlockNullifierConsumed": false,
+        "followerUnlockNullifierConsumed": false,
+        "bondToFilerUnits": "0",
+        "bondToPoolUnits": "0"
+      }
+    },
+    {
+      "name": "backstop-vs-late-anchor",
+      "note": "the follower's ONLY timer is the far backstop; a late anchor + presentation beats the finalize, and the purged claim makes the late finalize revert (r2's pinned negative)",
+      "steps": [
+        {
+          "leg": "primary",
+          "action": "unlock"
+        },
+        {
+          "leg": "primary",
+          "action": "recordSettled"
+        },
+        {
+          "leg": "follower",
+          "action": "warpPastLongBackstop"
+        },
+        {
+          "leg": "follower",
+          "action": "claimBackstop"
+        },
+        {
+          "action": "anchorPrimaryLeaf"
+        },
+        {
+          "leg": "follower",
+          "action": "presentSettled"
+        },
+        {
+          "leg": "follower",
+          "action": "finalizeBackstop",
+          "expectRevert": "notClaimed"
+        }
+      ],
+      "expect": {
+        "primaryStatus": "Filled",
+        "followerStatus": "Filled",
+        "primaryLeafDomain": "3",
+        "followerLeafDomain": "none",
+        "primaryUnlockNullifierConsumed": true,
+        "followerUnlockNullifierConsumed": false,
+        "bondToFilerUnits": "0",
+        "bondToPoolUnits": "0"
+      }
+    },
+    {
+      "name": "backstop-silent",
+      "note": "TIER-1 STATED BOUNDARY (8.3, backstop bypass): refund executes only if every evidence holder — the victim included — stays silent through longBackstop + the window",
+      "steps": [
+        {
+          "leg": "primary",
+          "action": "unlock"
+        },
+        {
+          "leg": "primary",
+          "action": "recordSettled"
+        },
+        {
+          "leg": "follower",
+          "action": "warpPastLongBackstop"
+        },
+        {
+          "leg": "follower",
+          "action": "claimBackstop"
+        },
+        {
+          "leg": "follower",
+          "action": "warpPastBackstopWindow"
+        },
+        {
+          "leg": "follower",
+          "action": "finalizeBackstop"
+        }
+      ],
+      "expect": {
+        "primaryStatus": "Filled",
+        "followerStatus": "Cancelled",
+        "primaryLeafDomain": "3",
+        "followerLeafDomain": "none",
+        "primaryUnlockNullifierConsumed": true,
+        "followerUnlockNullifierConsumed": false,
+        "bondToFilerUnits": "0",
+        "bondToPoolUnits": "0"
+      }
+    }
+  ]
+}
