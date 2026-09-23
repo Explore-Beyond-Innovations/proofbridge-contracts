@@ -155,3 +155,47 @@ export function decodeEd25519Secret(secret: string): Buffer {
   }
   return StrKey.decodeEd25519SecretSeed(secret);
 }
+
+/** One call the CLI would have made, for the admin to make instead (#424). */
+export interface DescribedCall {
+  label: string;
+  contractId: string;
+  fn: string;
+  args: string[];
+}
+
+/**
+ * The CLI acts while it is the admin and describes when it is not (#424): see the EVM twin in
+ * evm/deploy/src/common.ts. Decided up front from each contract's admin view, before anything is
+ * sent; in describe mode every call is printed as the `stellar contract invoke` the admin has to
+ * make, and the command exits 2.
+ */
+export class Acting {
+  readonly described: DescribedCall[] = [];
+
+  constructor(readonly canSend: boolean, private readonly tag: string) {}
+
+  /** Send `fn(args)` on `contractId`, or describe it. Returns whether it was sent. */
+  call(contractId: string, label: string, fn: string, args: string[], line: string): boolean {
+    if (!this.canSend) {
+      this.described.push({ label, contractId, fn, args });
+      console.log(`  [describe] ${line}`);
+      return false;
+    }
+    invokeContract(contractId, fn, args);
+    console.log(`  [${this.tag}] ${line}`);
+    return true;
+  }
+
+  report(): void {
+    if (this.described.length === 0) return;
+    console.log(
+      `\n[${this.tag}] the source account is not the admin, so nothing was sent. The admin has to make these ${this.described.length} call(s):`,
+    );
+    for (const d of this.described) {
+      console.log(
+        `  ${d.label}.${d.fn}\n    stellar contract invoke --id ${d.contractId} --source-account <admin> --network ${NETWORK} -- ${d.fn} ${d.args.join(" ")}`,
+      );
+    }
+  }
+}

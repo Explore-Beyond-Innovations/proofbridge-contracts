@@ -525,6 +525,25 @@ fn only_the_escrow_that_opened_a_dispute_may_settle_it() {
         .is_err());
 }
 
+/// The handover reads who the admin is (#424): the deployer until the nominee accepts, the nominee
+/// after, and never anyone else in between.
+#[test]
+fn get_admin_follows_the_two_step_handover() {
+    let f = fixture();
+    assert_eq!(f.client.get_admin(), Some(f.admin.clone()));
+
+    let multisig = Address::generate(&f.env);
+    f.client.transfer_admin(&multisig);
+    assert_eq!(
+        f.client.get_admin(),
+        Some(f.admin.clone()),
+        "nominated, not yet accepted"
+    );
+
+    f.client.accept_admin();
+    assert_eq!(f.client.get_admin(), Some(multisig));
+}
+
 #[test]
 fn the_admin_is_not_the_arbiter() {
     let f = fixture();

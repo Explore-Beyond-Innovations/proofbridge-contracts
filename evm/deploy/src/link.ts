@@ -5,7 +5,7 @@ import {
   type DisputeParams,
   duplicatePairKeys,
 } from "@proofbridge/deployment-manifest";
-import { connect, requireEnv } from "./common.js";
+import { Acting, adminsOf, connect, requireEnv, signerHoldsAdmin, type DescribedCall } from "./common.js";
 import { attachContract } from "./artifacts.js";
 import { manifestPath, writeManifest } from "./manifest.js";
 
@@ -30,6 +30,8 @@ export interface LinkResult {
   peerChainId: string;
   chainTxs: number;
   routeTxs: number;
+  /** Calls the signer could not make because the admin was handed over; empty when all were sent. */
+  described: DescribedCall[];
 }
 
 /** Wires setPeerEscrow + setTokenRoute on this chain's AdManager + OrderPortal from the peer manifest. Idempotent. */
@@ -74,6 +76,22 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
   const sameHex = (a: unknown, b: string) =>
     String(a).toLowerCase() === b.toLowerCase();
 
+  // Who holds admin on what this command configures, read before anything is sent. After a
+  // handover the signer is not the admin, and every call below is described, not sent (#424).
+  const me = await signer.getAddress();
+  const toConfigure = [
+    { label: "AdManager", artifact: "AdManager", address: local.contracts.adManager.address },
+    { label: "OrderPortal", artifact: "OrderPortal", address: local.contracts.orderPortal.address },
+    ...(local.contracts.rootAnchor ? [{ label: "RootAnchor", artifact: "RootAnchor", address: local.contracts.rootAnchor.address }] : []),
+    ...(local.contracts.disputeManager ? [{ label: "DisputeManager", artifact: "DisputeManager", address: local.contracts.disputeManager.address }] : []),
+  ];
+  const held = await adminsOf(toConfigure, (a, f, n) => attachContract(a, f, n, signer));
+  const acting = new Acting(signerHoldsAdmin(me, held, "evm-link"), nonces, "link");
+  // The manifest records what was set; in describe mode nothing was.
+  const record = async () => {
+    if (acting.canSend) await writeManifest(localPath, local);
+  };
+
   // ── Chain-level linking ────────────────────────────────────────────
   // Local adManager accepts from peer orderPortal; local orderPortal accepts
   // from peer adManager. Every write is check-first: state already on-chain
@@ -85,16 +103,8 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     if (sameHex(cur, peer.contracts.orderPortal.addressBytes32)) {
       console.log(`  [skip] AdManager.setPeerEscrow(${peerChainId}) already set`);
     } else {
-      const tx = await adManager.getFunction("setPeerEscrow")(
-        peerChainId,
-        peer.contracts.orderPortal.addressBytes32,
-        { nonce: nonces.next() },
-      );
-      await tx.wait();
-      chainTxs++;
-      console.log(
-        `  [link] AdManager.setPeerEscrow(${peerChainId}, peerOrderPortal=${peer.contracts.orderPortal.address})`,
-      );
+      if (await acting.call(adManager, "AdManager", "setPeerEscrow", [peerChainId, peer.contracts.orderPortal.addressBytes32],
+        `AdManager.setPeerEscrow(${peerChainId}, peerOrderPortal=${peer.contracts.orderPortal.address})`)) chainTxs++;
     }
   }
   {
@@ -102,16 +112,8 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     if (sameHex(cur, peer.contracts.adManager.addressBytes32)) {
       console.log(`  [skip] OrderPortal.setPeerEscrow(${peerChainId}) already set`);
     } else {
-      const tx = await orderPortal.getFunction("setPeerEscrow")(
-        peerChainId,
-        peer.contracts.adManager.addressBytes32,
-        { nonce: nonces.next() },
-      );
-      await tx.wait();
-      chainTxs++;
-      console.log(
-        `  [link] OrderPortal.setPeerEscrow(${peerChainId}, peerAdManager=${peer.contracts.adManager.address})`,
-      );
+      if (await acting.call(orderPortal, "OrderPortal", "setPeerEscrow", [peerChainId, peer.contracts.adManager.addressBytes32],
+        `OrderPortal.setPeerEscrow(${peerChainId}, peerAdManager=${peer.contracts.adManager.address})`)) chainTxs++;
     }
   }
 
@@ -134,16 +136,8 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
         console.log(`  [skip] ${name}.setRootVerifier(${peerChainId}) already set`);
         continue;
       }
-      const tx = await escrow.getFunction("setRootVerifier")(
-        peerChainId,
-        verifierEntry.address,
-        { nonce: nonces.next() },
-      );
-      await tx.wait();
-      chainTxs++;
-      console.log(
-        `  [link] ${name}.setRootVerifier(${peerChainId}, ${verifierEntry.address}) - BLS gate ENFORCED for peer roots`,
-      );
+      if (await acting.call(escrow, name, "setRootVerifier", [peerChainId, verifierEntry.address],
+        `${name}.setRootVerifier(${peerChainId}, ${verifierEntry.address}) - BLS gate ENFORCED for peer roots`)) chainTxs++;
     }
   } else {
     console.log(
@@ -173,16 +167,11 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     if (cur === delay) {
       console.log(`  [skip] RootAnchor.setAnchorDelay(${peerChainId}) already ${delay}s`);
     } else {
-      const tx = await anchor.getFunction("setAnchorDelay")(peerChainId, delay, {
-        nonce: nonces.next(),
-      });
-      await tx.wait();
-      chainTxs++;
-      console.log(`  [link] RootAnchor.setAnchorDelay(${peerChainId}, ${delay}s)`);
+      if (await acting.call(anchor, "RootAnchor", "setAnchorDelay", [peerChainId, delay], `RootAnchor.setAnchorDelay(${peerChainId}, ${delay}s)`)) chainTxs++;
     }
     if (local.rootAnchorConfig) {
       local.rootAnchorConfig.anchorDelays[peerChainId.toString()] = delay.toString();
-      await writeManifest(localPath, local);
+      await record();
     }
   } else {
     console.log("  [link] no RootAnchor in the local manifest; redeploy core to add the notary");
@@ -209,19 +198,12 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
         console.log(`  [skip] ${name}.setRouteTiming(${peerChainId}) already set`);
         continue;
       }
-      const tx = await escrow.getFunction("setRouteTiming")(
-        peerChainId,
-        [timing.minWindow, timing.buffer, timing.margin, timing.longBackstop, timing.claimStagger],
-        { nonce: nonces.next() },
-      );
-      await tx.wait();
-      chainTxs++;
-      console.log(
-        `  [link] ${name}.setRouteTiming(${peerChainId}, minWindow=${timing.minWindow}s buffer=${timing.buffer}s margin=${timing.margin}s longBackstop=${timing.longBackstop}s claimStagger=${timing.claimStagger}s)`,
-      );
+      if (await acting.call(escrow, name, "setRouteTiming",
+        [peerChainId, [timing.minWindow, timing.buffer, timing.margin, timing.longBackstop, timing.claimStagger]],
+        `${name}.setRouteTiming(${peerChainId}, minWindow=${timing.minWindow}s buffer=${timing.buffer}s margin=${timing.margin}s longBackstop=${timing.longBackstop}s claimStagger=${timing.claimStagger}s)`)) chainTxs++;
     }
     local.routeTiming[peerChainId.toString()] = timing;
-    await writeManifest(localPath, local);
+    await record();
   }
   if (local.contracts.rootAnchor) {
     const anchorAddr = local.contracts.rootAnchor.address;
@@ -234,10 +216,7 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
         console.log(`  [skip] ${name}.setRootAnchor already ${anchorAddr}`);
         continue;
       }
-      const tx = await escrow.getFunction("setRootAnchor")(anchorAddr, { nonce: nonces.next() });
-      await tx.wait();
-      chainTxs++;
-      console.log(`  [link] ${name}.setRootAnchor(${anchorAddr}) - evidence paths live`);
+      if (await acting.call(escrow, name, "setRootAnchor", [anchorAddr], `${name}.setRootAnchor(${anchorAddr}) - evidence paths live`)) chainTxs++;
     }
   } else {
     console.log("  [link] no RootAnchor in the local manifest; the escrows' evidence paths stay fail-closed");
@@ -264,23 +243,13 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
       if (sameHex(cur, moduleAddr)) {
         console.log(`  [skip] ${name}.setDisputeManager already ${moduleAddr}`);
       } else {
-        const tx = await escrow.getFunction("setDisputeManager")(moduleAddr, {
-          nonce: nonces.next(),
-        });
-        await tx.wait();
-        chainTxs++;
-        console.log(`  [link] ${name}.setDisputeManager(${moduleAddr})`);
+        if (await acting.call(escrow, name, "setDisputeManager", [moduleAddr], `${name}.setDisputeManager(${moduleAddr})`)) chainTxs++;
       }
       const escrowAddr = await escrow.getAddress();
       if (await disputeManager.getFunction("isEscrow")(escrowAddr)) {
         console.log(`  [skip] DisputeManager.setEscrow(${name}) already allowed`);
       } else {
-        const tx = await disputeManager.getFunction("setEscrow")(escrowAddr, true, {
-          nonce: nonces.next(),
-        });
-        await tx.wait();
-        chainTxs++;
-        console.log(`  [link] DisputeManager.setEscrow(${name}=${escrowAddr}, true)`);
+        if (await acting.call(disputeManager, "DisputeManager", "setEscrow", [escrowAddr, true], `DisputeManager.setEscrow(${name}=${escrowAddr}, true)`)) chainTxs++;
       }
     }
 
@@ -296,19 +265,12 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     if (same) {
       console.log(`  [skip] DisputeManager.setDisputeParams(${peerChainId}) already set`);
     } else {
-      const tx = await disputeManager.getFunction("setDisputeParams")(
-        peerChainId,
-        [params.challengePeriod, params.bondFloor, params.bondBps],
-        { nonce: nonces.next() },
-      );
-      await tx.wait();
-      chainTxs++;
-      console.log(
-        `  [link] DisputeManager.setDisputeParams(${peerChainId}, challengePeriod=${params.challengePeriod}s bondFloor=${params.bondFloor} bondBps=${params.bondBps})`,
-      );
+      if (await acting.call(disputeManager, "DisputeManager", "setDisputeParams",
+        [peerChainId, [params.challengePeriod, params.bondFloor, params.bondBps]],
+        `DisputeManager.setDisputeParams(${peerChainId}, challengePeriod=${params.challengePeriod}s bondFloor=${params.bondFloor} bondBps=${params.bondBps})`)) chainTxs++;
     }
     local.disputeParams[peerChainId.toString()] = params;
-    await writeManifest(localPath, local);
+    await record();
   } else {
     console.log("  [link] no DisputeManager in the local manifest; disputes stay unavailable on this chain");
   }
@@ -352,14 +314,9 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
       if (sameHex(cur, peerTok.addressBytes32)) {
         console.log(`  [skip] AdManager route "${localTok.pairKey}" already set`);
       } else {
-        const tx = await adManager.getFunction("setTokenRoute")(
-          localTok.address, // adToken
-          peerChainId, // orderChainId
-          peerTok.addressBytes32, // orderToken (bytes32)
-          { nonce: nonces.next() },
-        );
-        await tx.wait();
-        routeTxs++;
+        // setTokenRoute(adToken, orderChainId, orderToken)
+        if (await acting.call(adManager, "AdManager", "setTokenRoute", [localTok.address, peerChainId, peerTok.addressBytes32],
+          `AdManager.setTokenRoute("${localTok.pairKey}")`)) routeTxs++;
       }
     }
     // Direction B: local is order-side.
@@ -369,14 +326,9 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
       if (sameHex(cur, peerTok.addressBytes32)) {
         console.log(`  [skip] OrderPortal route "${localTok.pairKey}" already set`);
       } else {
-        const tx = await orderPortal.getFunction("setTokenRoute")(
-          localTok.address, // orderToken
-          peerChainId, // adChainId
-          peerTok.addressBytes32, // adToken (bytes32)
-          { nonce: nonces.next() },
-        );
-        await tx.wait();
-        routeTxs++;
+        // setTokenRoute(orderToken, adChainId, adToken)
+        if (await acting.call(orderPortal, "OrderPortal", "setTokenRoute", [localTok.address, peerChainId, peerTok.addressBytes32],
+          `OrderPortal.setTokenRoute("${localTok.pairKey}")`)) routeTxs++;
       }
     }
     console.log(
@@ -385,13 +337,15 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
   }
 
   console.log(
-    `[evm-link] done: ${chainTxs} chain tx(s), ${routeTxs} route tx(s)`,
+    `[evm-link] done: ${chainTxs} chain tx(s), ${routeTxs} route tx(s)${acting.described.length ? `, ${acting.described.length} described` : ""}`,
   );
+  acting.report();
   return {
     localChainId: local.chain.chainId,
     peerChainId: peer.chain.chainId,
     chainTxs,
     routeTxs,
+    described: acting.described,
   };
 }
 

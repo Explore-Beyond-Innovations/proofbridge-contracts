@@ -1,4 +1,5 @@
 import * as path from "path";
+import { signerHoldsAdmin } from "./handover.js";
 import {
   DEFAULT_STELLAR_CHAIN_ID,
   envOrDefault,
@@ -7,6 +8,8 @@ import {
   wasmDir,
 } from "./common.js";
 import {
+  Acting,
+  type DescribedCall,
   deployContract,
   deploySAC,
   getAddress,
@@ -36,6 +39,8 @@ export interface DeployStellarCoreOptions {
 
 export interface DeployStellarCoreResult {
   manifestPath: string;
+  /** Admin-only calls the source account could not make (the admin was handed over); empty when all sent. */
+  described: DescribedCall[];
   chainId: bigint;
   adminStrkey: string;
   contracts: {
@@ -77,6 +82,13 @@ export async function deployCore(
   function reused(existingAddr: string | undefined): string | undefined {
     return existingAddr;
   }
+
+  // Who holds admin on what is reused, read before anything is sent. After a handover the source
+  // account is not the admin, and every admin-only wiring call below is described, not sent (#424).
+  const acting = new Acting(
+    existing ? signerHoldsAdmin(existing.contracts, adminStrkey, "stellar-deploy") : true,
+    "wire",
+  );
 
   // ── Verifier ────────────────────────────────────────────────────
   let verifier = reused(existing?.contracts.verifier.address);
@@ -186,15 +198,13 @@ export async function deployCore(
   }
 
   // ── Wire the escrows as the registry's revoke guards (idempotent) ──
-  invokeContract(blsKeyRegistry, "set_position_guards", [
-    "--guards",
-    JSON.stringify([adManager, orderPortal]),
-  ]);
+  acting.call(blsKeyRegistry, "BLSKeyRegistry", "set_position_guards", ["--guards", JSON.stringify([adManager, orderPortal])],
+    "BLSKeyRegistry.set_position_guards([AdManager, OrderPortal])");
 
   // ── Point the AdManager at the registry (2.3c; idempotent) ─────────
   // create_ad / set_settlement_signer / lock_for_order fail closed until this is set: an
   // ad's settlement signer must hold a live, unexpired key.
-  invokeContract(adManager, "set_key_registry", ["--registry", blsKeyRegistry]);
+  acting.call(adManager, "AdManager", "set_key_registry", ["--registry", blsKeyRegistry], `AdManager.set_key_registry(${blsKeyRegistry})`);
 
   // ── RootAnchor (2.3f) + Registrar (2.1b) ───────────────────────────
   // T2 notary: the publisher key(s) in ANCHOR_PUBLISHER (comma-separated G-addresses,
@@ -261,19 +271,13 @@ export async function deployCore(
         "deploy-core: DISPUTE_ARBITER must not be the admin — the arbiter's containment is that it holds no escrow powers",
       );
     }
-    invokeContract(disputeManager, "set_arbiter", ["--arbiter", arbiterAddr]);
-    invokeContract(disputeManager, "set_protocol_fee_pool", ["--pool", feePoolAddr]);
-    console.log(`  [deploy] DisputeManager arbiter=${arbiterAddr} feePool=${feePoolAddr}`);
+    acting.call(disputeManager, "DisputeManager", "set_arbiter", ["--arbiter", arbiterAddr], `DisputeManager.set_arbiter(${arbiterAddr})`);
+    acting.call(disputeManager, "DisputeManager", "set_protocol_fee_pool", ["--pool", feePoolAddr], `DisputeManager.set_protocol_fee_pool(${feePoolAddr})`);
   }
 
   // ── Grant MANAGER permission on MerkleManager (idempotent) ─────
   for (const manager of [adManager, orderPortal, registrar]) {
-    invokeContract(merkleManager, "set_manager", [
-      "--manager",
-      manager,
-      "--status",
-      "true",
-    ]);
+    acting.call(merkleManager, "MerkleManager", "set_manager", ["--manager", manager, "--status", "true"], `MerkleManager.set_manager(${manager}, true)`);
   }
 
   // ── manifest ───────────────────────────────────────────────────
@@ -304,6 +308,8 @@ export async function deployCore(
     rootAnchorConfig: existing?.contracts.rootAnchor
       ? existing.rootAnchorConfig
       : { signers: anchorSigners, threshold: anchorThreshold, anchorDelays: {} },
+    // Who holds admin: the source account for everything deployed here; `handover` moves it.
+    admin: existing?.admin ?? { current: adminStrkey },
     // Preserve tokens already in the manifest (test / curated). XLM entry is (re)set by deploy-test-tokens.
     tokens: (existing?.tokens.map((t) => ({
       pairKey: t.pairKey,
@@ -319,9 +325,11 @@ export async function deployCore(
 
   await writeManifest(outPath, manifest);
   console.log(`[stellar-deploy] wrote manifest → ${outPath}`);
+  acting.report();
 
   return {
     manifestPath: outPath,
+    described: acting.described,
     chainId,
     adminStrkey,
     contracts: {

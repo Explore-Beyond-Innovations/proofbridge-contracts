@@ -373,6 +373,12 @@ impl DisputeManagerContract {
 
     /// Whether this escrow may file here. The EVM twin exposes the same thing as a public mapping;
     /// the deploy CLI reads it to make the escrow ↔ module wiring idempotent.
+    /// Who holds the admin role, or `None` before `initialize`. The deploy CLI's `handover --verify`
+    /// reads this to record acceptance (#424); every other admin-bearing contract already had one.
+    pub fn get_admin(env: Env) -> Option<Address> {
+        storage::get_admin(&env)
+    }
+
     pub fn is_escrow(env: Env, escrow: Address) -> bool {
         storage::is_escrow(&env, &escrow)
     }

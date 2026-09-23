@@ -1,5 +1,6 @@
 import * as path from "path";
 import {
+  type AdminHandover,
   type ChainDeploymentManifest,
   type ContractEntry,
   type TokenEntry,
@@ -78,6 +79,8 @@ export interface BuildStellarManifestInput {
   routeTiming?: Record<string, RouteTiming>;
   /** Per peer chain id → the dispute params link set; preserved the same way (2.3g). */
   disputeParams?: Record<string, DisputeParams>;
+  /** Who holds admin (#424): the source account until `handover`; preserved across redeploys. */
+  admin?: AdminHandover;
 }
 
 export function buildManifest(
@@ -125,6 +128,7 @@ export function buildManifest(
     ...(input.rootAnchorConfig ? { rootAnchorConfig: input.rootAnchorConfig } : {}),
     routeTiming: input.routeTiming ?? {},
     disputeParams: input.disputeParams ?? {},
+    ...(input.admin ? { admin: input.admin } : {}),
     meta: {
       deployedAt: new Date().toISOString(),
       deployer: input.deployer,
