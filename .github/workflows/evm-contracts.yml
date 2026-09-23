@@ -174,56 +174,10 @@ jobs:
           grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/gas.log
         id: gas-baseline
 
-  # The deploy CLI is the only thing that ever deploys these contracts, and nothing else ran it
-  # (#424 review): deploy → link → handover → accept → verify on two Anvils, then the edges the
-  # review found by hand — a contract deployed after the handover, a handover rerun, a stale
-  # manifest, a redeploy with nothing to do. The script is the check; this job only runs it.
-  deploy-cli:
-    name: EVM deploy CLI (handover)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: evm
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: v1.7.1
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "pnpm"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: .
-
-      # The bundle the CLI deploys from, built the way the release builds it: the shipped profile,
-      # not `ci`, and Poseidon2Yul by name since only tests import it.
-      - name: Build the artifacts
-        env:
-          FOUNDRY_PROFILE: default
-        run: |
-          forge build --skip test
-          forge build --silent lib/poseidon2-evm/src/bn254/yul/Poseidon2Yul.sol
-
-      # tsx never type-checks; this is the only place the CLI's types are looked at.
-      - name: Type-check the deploy CLI
-        run: pnpm exec tsc --noEmit
-        working-directory: evm/deploy
-
-      - name: deploy → link → handover → accept → verify → link-describes
-        run: bash deploy/scripts/handover-check.sh
+  # The deploy CLI's own check (deploy → link → handover → accept → verify on two Anvils) runs in
+  # the monorepo's copy of this workflow, not here: evm/deploy depends on
+  # @proofbridge/deployment-manifest, which lives in ProofBridge, and this repo's workspace leaves
+  # the deploy packages out on purpose (see pnpm-workspace.yaml).
 
   invariants:
     name: EVM Invariants

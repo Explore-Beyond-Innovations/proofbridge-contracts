@@ -85,10 +85,8 @@ jobs:
       - name: Install Node dependencies
         run: pnpm install --frozen-lockfile
 
-      # The deploy CLI ships as TypeScript run by tsx; nothing else compiles it (#424 review).
-      - name: Type-check the deploy CLI
-        run: pnpm exec tsc --noEmit
-        working-directory: stellar/deploy
+      # stellar/deploy is type-checked in the monorepo's copy of this workflow: it depends on
+      # @proofbridge/deployment-manifest, which this repo's workspace does not carry.
 
       # --optimize (bare flag on the pinned v28.0.0 CLI) opts the build into
       # wasm-opt, so the metered/deployed bytes are optimized. On a CLI compiled
