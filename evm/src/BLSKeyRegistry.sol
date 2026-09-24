@@ -55,9 +55,10 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
     mapping(bytes32 => RegistryEntry) private entries;
 
     mapping(bytes32 => uint256) public nonceOf;
-    /// #422 D14: when each slot's expiry was last set. A shorten naming a past date (our own kill
-    /// names `1`) stopped the slot at the shorten, not at the date; `_expiredAt` reads the later of the two.
-    mapping(bytes32 => mapping(uint32 => uint64)) private shortenedAt;
+    /// #422 D14/D14b: when each shortened slot stopped being usable — the later of the date the
+    /// shorten named (our own kill names `1`) and the moment of the shorten; a later shorten can only
+    /// move it earlier, so a re-kill after a window cannot erase a death inside it.
+    mapping(bytes32 => mapping(uint32 => uint64)) private expiries;
     /// Any commitment that ever held a slot for the account can never re-enter one.
     mapping(bytes32 => mapping(bytes32 => bool)) public usedCommitment;
 
@@ -235,7 +236,9 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         );
 
         slot.validUntil = validUntil;
-        shortenedAt[account][slotId] = uint64(block.timestamp);
+        uint64 eff = uint64(block.timestamp) > validUntil ? uint64(block.timestamp) : validUntil;
+        uint64 prev = expiries[account][slotId];
+        expiries[account][slotId] = (prev == 0 || eff < prev) ? eff : prev;
         emit SlotValidUntilSet(account, slotId, validUntil);
     }
 
@@ -251,7 +254,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
 
         for (uint256 i = 0; i < e.liveSlots.length; i++) {
             delete e.slots[e.liveSlots[i]];
-            delete shortenedAt[account][e.liveSlots[i]];
+            delete expiries[account][e.liveSlots[i]];
         }
         delete e.liveSlots;
         nonceOf[account] = nonce + 1;
@@ -271,24 +274,26 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         usedCommitment[account][commitment] = true;
     }
 
-    /// When the slot stopped being usable: `0` while unbounded, else the later of the date its last
-    /// shorten named and the moment of that shorten (#422 D14).
+    /// When the slot stopped being usable: `0` while unbounded, else the recorded expiry (#422 D14/D14b).
     function _expiredAt(bytes32 account, uint32 id) private view returns (uint64) {
         uint64 vu = entries[account].slots[id].validUntil;
         if (vu == 0) return 0;
-        uint64 at = shortenedAt[account][id];
-        return at > vu ? at : vu;
+        uint64 at = expiries[account][id];
+        return at == 0 ? vu : at;
     }
 
-    /// Drops every slot past its expiry + GRACE_PERIOD (swap-remove; order is not meaningful).
+    /// Drops every dead slot the escrows can no longer need: past its expiry + GRACE_PERIOD, or at
+    /// once when no guard reports open positions for the account (#422 D17 — no order's cancel can
+    /// still ask about its history). Swap-remove; order is not meaningful.
     function _prune(bytes32 account, RegistryEntry storage e) private {
+        bool free = !_hasOpenPositions(account);
         uint256 i = 0;
         while (i < e.liveSlots.length) {
             uint32 id = e.liveSlots[i];
             uint64 vu = _expiredAt(account, id);
-            if (vu != 0 && block.timestamp > uint256(vu) + GRACE_PERIOD) {
+            if (vu != 0 && (block.timestamp > uint256(vu) + GRACE_PERIOD || (free && block.timestamp >= vu))) {
                 delete e.slots[id];
-                delete shortenedAt[account][id];
+                delete expiries[account][id];
                 e.liveSlots[i] = e.liveSlots[e.liveSlots.length - 1];
                 e.liveSlots.pop();
                 emit SlotPruned(account, id);
@@ -299,9 +304,14 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
     }
 
     function _requireNoOpenPositions(bytes32 account) private view {
+        if (_hasOpenPositions(account)) revert AccountInFlight();
+    }
+
+    function _hasOpenPositions(bytes32 account) private view returns (bool) {
         for (uint256 i = 0; i < positionGuards.length; i++) {
-            if (positionGuards[i].hasOpenPositions(account)) revert AccountInFlight();
+            if (positionGuards[i].hasOpenPositions(account)) return true;
         }
+        return false;
     }
 
     // =========================================================================
@@ -326,7 +336,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         return false;
     }
 
-    /// @notice Did any of `account`'s slots expire in `[from, to]` (#422 D12/D14, `IKeyRegistry`).
+    /// @notice Did any of `account`'s slots expire in `[from, to]` (#422 D12/D14/D14b, `IKeyRegistry`).
     function anySlotExpiredWithin(bytes32 account, uint64 from, uint64 to) external view returns (bool) {
         RegistryEntry storage e = entries[account];
         for (uint256 i = 0; i < e.liveSlots.length; i++) {

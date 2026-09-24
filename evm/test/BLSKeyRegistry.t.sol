@@ -231,11 +231,7 @@ contract BLSKeyRegistryTest is Test {
         }
         setValidUntil("makerOnSepolia", 2, true); // validUntil = 1, expired at the kill (D14)
         vm.warp(T0 + 1);
-        // D14: a kill occupies its slot for the grace like any other expiry — the escrow may still
-        // need to see it for an order locked before the kill.
-        vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
-        registerSlot("makerOnSepolia", 5);
-        vm.warp(T0 + 30 days + 1);
+        // D17: no guard reports positions, so no order can need the dead slot's history — pruned at once.
 
         vm.expectEmit(true, true, false, true, REGISTRY);
         emit IBLSKeyRegistry.SlotPruned(account, 2);
@@ -245,6 +241,38 @@ contract BLSKeyRegistryTest is Test {
         registry.lookup(account, 2);
         assertEq(registry.liveSlots(account).length, 5);
         assertEq(registry.nextSlotId(account), 6);
+    }
+
+    /// #422 D17: while a guard reports positions a dead slot keeps its place for the grace — an open
+    /// order's cancel may still ask about it — and leaves once the grace is over regardless.
+    function test_registerAtCap_deadSlotKeptWhileInFlight_prunedAfterTheGrace() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        busyGuard();
+        for (uint256 i = 0; i < 5; i++) {
+            registerSlot("makerOnSepolia", i);
+        }
+        setValidUntil("makerOnSepolia", 2, true);
+        vm.warp(T0 + 1);
+        vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
+        registerSlot("makerOnSepolia", 5);
+
+        vm.warp(T0 + 30 days + 1);
+        assertEq(registerSlot("makerOnSepolia", 5), 5);
+        vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
+        registry.lookup(account, 2);
+    }
+
+    /// #422 D14b: a shorten on a slot that already died cannot move its death later — a re-kill
+    /// after an order's window must not erase an expiry inside it.
+    function test_setValidUntil_recordedExpiryOnlyMovesEarlier() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        registerSlot("makerOnSepolia", 0);
+        setValidUntil("makerOnSepolia", 0, false); // at T0, naming graceTs
+        uint64 g = graceTs();
+        vm.warp(g + 100);
+        setValidUntil("makerOnSepolia", 0, true); // a kill to 1, after the slot died at g
+        assertTrue(registry.anySlotExpiredWithin(account, g, g), "still died at g");
+        assertFalse(registry.anySlotExpiredWithin(account, g + 1, type(uint64).max), "not at the re-kill");
     }
 
     /// In-grace slots still count toward the cap and are not pruned.

@@ -14,6 +14,8 @@ import {stdJson} from "forge-std/StdJson.sol";
 import {IKeyRegistry} from "src/interfaces/IKeyRegistry.sol";
 import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
 import {BLSKeyRegistry} from "src/BLSKeyRegistry.sol";
+import {RouteTiming} from "src/libraries/RouteTiming.sol";
+import {AdManagerTest} from "./Admanager.t.sol";
 
 /*//////////////////////////////////////////////////////////////
           #422 — the maker's settlement halt (F1 residual)
@@ -207,34 +209,13 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
-    /// An expiry before the lock is history: the order was signed under a later slot. (The kill
-    /// itself, and where its expiry lands, is the real registry's business: `SettlementHaltRealRegistryTest`.)
-    function test_finalizeCancel_expiryBeforeTheLock_ordinaryTiming() public {
-        vm.warp(block.timestamp + 10);
-        (IAdManager.OrderParams memory p,) = _lock(15);
-        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(block.timestamp - 1));
-        _claim(p);
-        vm.warp(p.deadline + 30 minutes);
-        adManager.finalizeCancel(p);
-    }
-
-    /// D15: the interval closes at the signed deadline, inclusive — an expiry in its second counts.
-    function test_finalizeCancel_expiryAtTheDeadline_counts() public {
-        (IAdManager.OrderParams memory p,) = _lock(21);
-        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(p.deadline));
-        _claim(p);
-        vm.warp(p.deadline + 30 minutes);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
-        adManager.finalizeCancel(p);
-    }
-
-    /// D15: past the deadline no payout was possible, so an expiry there denied nothing — even one
-    /// that lands before the finalize call.
-    function test_finalizeCancel_expiryAfterTheDeadline_ordinaryTiming() public {
+    /// D16: past the presentation cutoff (window end − margin; margin 0 here) no payout was
+    /// possible, so an expiry there denied nothing — even one that lands before the finalize call.
+    function test_finalizeCancel_expiryAfterTheCutoff_ordinaryTiming() public {
         (IAdManager.OrderParams memory p,) = _lock(22);
-        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(p.deadline + 1));
+        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(p.deadline + 30 minutes + 1));
         _claim(p);
-        vm.warp(p.deadline + 30 minutes);
+        vm.warp(p.deadline + 30 minutes + 1);
         adManager.finalizeCancel(p);
     }
 
@@ -434,9 +415,9 @@ contract SettlementHaltDisputeTest is DisputeTest {
 //////////////////////////////////////////////////////////////*/
 
 /// The mock above restates the registry's predicate, so it proves wiring and nothing about what the
-/// registry stores. These run the escrow against `BLSKeyRegistry` itself, with the vector maker's
-/// slots, and use the retirement the protocol actually sends: `setValidUntil(.., 1)`.
-contract SettlementHaltRealRegistryTest is AdManagerCancellationTest {
+/// registry stores. The fixture below runs an escrow against `BLSKeyRegistry` itself, with the
+/// vector maker's slots, and uses the retirement the protocol actually sends: `setValidUntil(.., 1)`.
+abstract contract RealRegistryFixture is AdManagerTest {
     using stdJson for string;
 
     uint256 constant VECTOR_CHAIN_ID = 11155111;
@@ -526,8 +507,12 @@ contract SettlementHaltRealRegistryTest is AdManagerCancellationTest {
         vm.prank(maker);
         adManager.lockForOrder(p);
     }
+}
 
-    /*//////////////////////////// the cases ////////////////////////////*/
+contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancellationTest {
+    function setUp() public override(AdManagerTest, AdManagerCancellationTest) {
+        AdManagerCancellationTest.setUp();
+    }
 
     /// Pass 4 (c41-F3): the standard kill after the lock, a second slot still live. The stored
     /// expiry says 1970; the slot died at the kill, inside the order's life.
@@ -583,13 +568,121 @@ contract SettlementHaltRealRegistryTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
-    function test_realRegistry_killAfterTheDeadline_ordinaryTiming() public {
+    /// D16: past the presentation cutoff (window end − margin; margin 0 here) the co-signed payout
+    /// could not land, so a kill there denies nothing.
+    function test_realRegistry_killAfterTheCutoff_ordinaryTiming() public {
         _realRegistry();
         IAdManager.OrderParams memory p = _lockAs(5);
         _claim(p);
-        vm.warp(p.deadline + 1);
+        vm.warp(p.deadline + 30 minutes + 1);
+        _setValidUntil(0, true);
+        adManager.finalizeCancel(p);
+    }
+
+    /// Pass 5 (PoC e): the co-signed unlock is accepted until the cutoff, not the deadline. A kill
+    /// in the gap blocks the payout, so the cancel waits.
+    function test_realRegistry_killBetweenTheDeadlineAndTheCutoff_waitsTheGrace() public {
+        _realRegistry();
+        IAdManager.OrderParams memory p = _lockAs(6);
+        _claim(p);
+        vm.warp(p.deadline + 10 minutes);
+        _setValidUntil(0, true);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        vm.warp(p.deadline + 60 minutes);
+        adManager.finalizeCancel(p);
+    }
+
+    /// Pass 5 (PoC f): a shorten naming a date in the gap is the same denial by another route.
+    function test_realRegistry_shortenNamingADateInTheGap_waitsTheGrace() public {
+        _realRegistry();
+        vm.warp(_graceTs() - 1 days - 10 minutes);
+        IAdManager.OrderParams memory p = _lockAs(7);
+        assertTrue(_graceTs() > p.deadline && _graceTs() <= p.deadline + 30 minutes, "the date is in the gap");
+        _setValidUntil(0, false);
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+    }
+
+    /// Pass 5 (PoC h/h2): a slot that died inside the window, re-killed to `1` after it, still
+    /// reads as dying inside it (D14b).
+    function test_realRegistry_reKillAfterTheWindow_keepsTheInWindowExpiry() public {
+        _realRegistry();
+        vm.warp(_graceTs() - 12 hours);
+        IAdManager.OrderParams memory p = _lockAs(8);
+        _setValidUntil(0, false);
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes + 1);
+        _setValidUntil(0, true);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+    }
+
+    /// D16 at the boundary, under a margin so the cutoff and the window end differ: a kill in the
+    /// cutoff's own second counts, the next second does not.
+    function test_realRegistry_killAtTheCutoff_counts() public {
+        _realRegistry();
+        _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 5 minutes, 1 days, 0));
+        IAdManager.OrderParams memory p = _lockAs(9);
+        _claim(p);
+        vm.warp(p.deadline + 25 minutes);
+        _setValidUntil(0, true);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+    }
+
+    function test_realRegistry_killJustPastTheCutoff_ordinaryTiming() public {
+        _realRegistry();
+        _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 5 minutes, 1 days, 0));
+        IAdManager.OrderParams memory p = _lockAs(10);
+        _claim(p);
+        vm.warp(p.deadline + 25 minutes + 1);
         _setValidUntil(0, true);
         vm.warp(p.deadline + 30 minutes);
         adManager.finalizeCancel(p);
+    }
+}
+
+/// Pass 5 (PoC g): the dispute door runs to the effective challenge deadline, past the cancel's
+/// cutoff. A kill in between blocks the payout the module still accepts, so the fallback waits.
+contract SettlementHaltDisputeRealRegistryTest is RealRegistryFixture, DisputeTest {
+    function setUp() public override(AdManagerTest, DisputeTest) {
+        DisputeTest.setUp();
+    }
+
+    function test_realRegistry_killBeforeTheChallengeDeadline_fallbackWaitsTheGrace() public {
+        _realRegistry();
+        IAdManager.OrderParams memory p = _lockAs(11);
+        bytes32 h = adManager.hashOrderPublic(p);
+        // Filed late enough that the challenge period outruns the cancel window.
+        vm.warp(p.deadline - 1 hours);
+        _file(p, maker);
+        uint256 until_ = dm.effectiveChallengeDeadline(h);
+        assertGt(until_, p.deadline + 30 minutes, "the dispute door outlives the cancel cutoff");
+        vm.warp(p.deadline + 45 minutes);
+        _setValidUntil(0, true);
+        vm.warp(until_ + 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, until_ + 30 minutes));
+        adManager.finalizeDispute(p);
+        vm.warp(until_ + 30 minutes);
+        adManager.finalizeDispute(p);
+        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
+    }
+
+    function test_realRegistry_killAfterTheChallengeDeadline_fallbackOrdinaryTiming() public {
+        _realRegistry();
+        IAdManager.OrderParams memory p = _lockAs(12);
+        bytes32 h = adManager.hashOrderPublic(p);
+        vm.warp(p.deadline - 1 hours);
+        _file(p, maker);
+        uint256 until_ = dm.effectiveChallengeDeadline(h);
+        vm.warp(until_ + 1);
+        _setValidUntil(0, true);
+        adManager.finalizeDispute(p);
+        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
     }
 }

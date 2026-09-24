@@ -17,8 +17,8 @@ const KEY_ENTRY: Symbol = symbol_short!("entry");
 const KEY_SLOT: Symbol = symbol_short!("slot");
 /// (KEY_NONCE, account) -> u64
 const KEY_NONCE: Symbol = symbol_short!("nonce");
-/// (KEY_SHORTAT, account, slot_id) -> u64: when the slot's expiry was last set (#422 D14).
-const KEY_SHORTAT: Symbol = symbol_short!("shortat");
+/// (KEY_EXPIRED, account, slot_id) -> u64: when a shortened slot stopped being usable (#422 D14/D14b).
+const KEY_EXPIRED: Symbol = symbol_short!("expiredat");
 /// (KEY_USED, account, commitment) -> bool; a commitment never re-enters a slot.
 const KEY_USED: Symbol = symbol_short!("used");
 /// 2.1b proof-carried registration wiring (instance); absent = disabled.
@@ -133,18 +133,18 @@ pub fn remove_slot(env: &Env, account: &BytesN<32>, slot_id: u32) {
         .remove(&(KEY_SLOT, account.clone(), slot_id));
     env.storage()
         .persistent()
-        .remove(&(KEY_SHORTAT, account.clone(), slot_id));
+        .remove(&(KEY_EXPIRED, account.clone(), slot_id));
 }
 
-pub fn get_shortened_at(env: &Env, account: &BytesN<32>, slot_id: u32) -> u64 {
+pub fn get_expired_at(env: &Env, account: &BytesN<32>, slot_id: u32) -> u64 {
     env.storage()
         .persistent()
-        .get(&(KEY_SHORTAT, account.clone(), slot_id))
+        .get(&(KEY_EXPIRED, account.clone(), slot_id))
         .unwrap_or(0)
 }
 
-pub fn set_shortened_at(env: &Env, account: &BytesN<32>, slot_id: u32, at: u64) {
-    let key = (KEY_SHORTAT, account.clone(), slot_id);
+pub fn set_expired_at(env: &Env, account: &BytesN<32>, slot_id: u32, at: u64) {
+    let key = (KEY_EXPIRED, account.clone(), slot_id);
     env.storage().persistent().set(&key, &at);
     bump(env, &key);
 }

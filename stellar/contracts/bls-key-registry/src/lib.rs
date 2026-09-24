@@ -338,7 +338,12 @@ impl BlsKeyRegistry {
 
         slot.valid_until = valid_until;
         storage::set_slot(&env, &account, slot_id, &slot);
-        storage::set_shortened_at(&env, &account, slot_id, env.ledger().timestamp());
+        // D14/D14b: the slot stops at the later of the named date and now, and a later shorten can
+        // only move that earlier.
+        let eff = valid_until.max(env.ledger().timestamp());
+        let prev = storage::get_expired_at(&env, &account, slot_id);
+        let at = if prev == 0 { eff } else { prev.min(eff) };
+        storage::set_expired_at(&env, &account, slot_id, at);
         events::SlotValidUntilSet {
             account,
             slot_id,
@@ -399,12 +404,14 @@ impl BlsKeyRegistry {
         Ok(slot.commitment)
     }
 
-    /// Did any of `account`'s slots expire in `[from, to]` (#422 D12/D14). The escrows' cancel grace
-    /// asks it over the order's life as a payout, `[locked_at, deadline]`: a slot the order may have
-    /// been co-signed under died while it was open. A slot expires at the later of the date its
-    /// shorten named and the moment of the shorten (a kill names `1`), so a kill, a near-future
-    /// shorten and a pre-lock shorten naming a date inside the window all count; a rotation whose
-    /// old slot outlives the deadline does not. Slots pruned 30 days past that expiry are forgotten.
+    /// Did any of `account`'s slots expire in `[from, to]` (#422 D12/D14/D14b). The escrows' cancel
+    /// grace asks it over the order's life as a payout, `[locked_at, cutoff]` (D16): a slot the order
+    /// may have been co-signed under died while the payout could still land. A slot expires at the
+    /// later of the date its shorten named and the moment of the shorten (a kill names `1`), and a
+    /// later shorten can only move that earlier, so a kill, a near-future shorten, a pre-lock shorten
+    /// naming a date inside the window and a re-kill after it all count; a rotation whose old slot
+    /// outlives the cutoff does not. A dead slot is forgotten once the account has no open positions,
+    /// or 30 days on.
     pub fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool {
         storage::get_entry(&env, &account)
             .live
@@ -576,26 +583,29 @@ fn add_slot(
     Ok(slot_id)
 }
 
-/// When the slot stopped being usable: `0` while unbounded, else the later of the date its last
-/// shorten named and the moment of that shorten (#422 D14: our own kill names `1`).
+/// When the slot stopped being usable: `0` while unbounded, else the recorded expiry (#422 D14/D14b).
 fn expired_at(env: &Env, account: &BytesN<32>, slot_id: u32) -> u64 {
     match storage::get_slot(env, account, slot_id) {
-        Some(s) if s.valid_until != 0 => s
-            .valid_until
-            .max(storage::get_shortened_at(env, account, slot_id)),
+        Some(s) if s.valid_until != 0 => match storage::get_expired_at(env, account, slot_id) {
+            0 => s.valid_until,
+            at => at,
+        },
         _ => 0,
     }
 }
 
-/// Drops every slot past its expiry + GRACE_PERIOD (order of `live` is not meaningful).
+/// Drops every dead slot the escrows can no longer need: past its expiry + GRACE_PERIOD, or at once
+/// when no guard reports open positions for the account (#422 D17 — no order's cancel can still ask
+/// about its history). Order of `live` is not meaningful.
 fn prune(env: &Env, account: &BytesN<32>, entry: &mut storage::RegistryEntry) {
     let now = env.ledger().timestamp();
+    let free = !has_open_positions(env, account);
     let mut kept = Vec::new(env);
     for slot_id in entry.live.iter() {
         let prunable = match storage::get_slot(env, account, slot_id) {
             Some(_) => {
                 let vu = expired_at(env, account, slot_id);
-                vu != 0 && now > vu.saturating_add(GRACE_PERIOD)
+                vu != 0 && (now > vu.saturating_add(GRACE_PERIOD) || (free && now >= vu))
             }
             None => true,
         };
@@ -671,14 +681,19 @@ fn hex_0x_lower(b: &[u8; 32]) -> [u8; 66] {
 }
 
 fn require_no_open_positions(env: &Env, account: &BytesN<32>) -> Result<(), RegistryError> {
-    if let Some(guards) = storage::get_guards(env) {
-        for guard in guards.iter() {
-            if PositionGuardClient::new(env, &guard).has_open_positions(account) {
-                return Err(RegistryError::AccountInFlight);
-            }
-        }
+    if has_open_positions(env, account) {
+        return Err(RegistryError::AccountInFlight);
     }
     Ok(())
+}
+
+fn has_open_positions(env: &Env, account: &BytesN<32>) -> bool {
+    match storage::get_guards(env) {
+        Some(guards) => guards
+            .iter()
+            .any(|guard| PositionGuardClient::new(env, &guard).has_open_positions(account)),
+        None => false,
+    }
 }
 
 fn verify_pop(

@@ -540,20 +540,7 @@ fn register_at_cap_prunes_expired_slot() {
     }
     set_valid_until(&env, &client, &v, MAKER, 2, true); // valid_until = 1, expired at the kill (D14)
     env.ledger().set_timestamp(T0 + 1);
-    // D14: a kill occupies its slot for the grace like any other expiry — the escrow may still
-    // need to see it for an order locked before the kill.
-    let r = slot_reg(&v, MAKER, 5);
-    assert_eq!(
-        client.try_register(
-            &account,
-            &owner_for(&env, &v, MAKER, &r["ownerSig"]),
-            &bn::<96>(&env, &r["pkNative"]),
-            &bn::<192>(&env, &r["pop"]),
-            &5,
-        ),
-        Err(Ok(RegistryError::RegistryFull))
-    );
-    env.ledger().set_timestamp(T0 + 30 * 86_400 + 1);
+    // D17: no guard reports positions, so no order can need the dead slot's history — pruned at once.
 
     assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
     assert_eq!(client.lookup(&account, &2), None);
@@ -597,6 +584,55 @@ fn any_slot_expired_within_an_early_shorten_expires_at_its_date() {
         "the date, not the shorten"
     );
     assert!(!client.any_slot_expired_within(&account, &(T0 + 1), &(g - 1)));
+}
+
+/// #422 D17: while a guard reports positions a dead slot keeps its place for the grace — an open
+/// order's cancel may still ask about it — and leaves once the grace is over regardless.
+#[test]
+fn register_at_cap_keeps_a_dead_slot_while_in_flight_until_the_grace() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    busy_guard(&env, &client);
+    for i in 0..5 {
+        register_slot(&env, &client, &v, MAKER, i);
+    }
+    set_valid_until(&env, &client, &v, MAKER, 2, true);
+    env.ledger().set_timestamp(T0 + 1);
+    let r = slot_reg(&v, MAKER, 5);
+    assert_eq!(
+        client.try_register(
+            &account,
+            &owner_for(&env, &v, MAKER, &r["ownerSig"]),
+            &bn::<96>(&env, &r["pkNative"]),
+            &bn::<192>(&env, &r["pop"]),
+            &5,
+        ),
+        Err(Ok(RegistryError::RegistryFull))
+    );
+    env.ledger().set_timestamp(T0 + 30 * 86_400 + 1);
+    assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
+    assert_eq!(client.lookup(&account, &2), None);
+}
+
+/// #422 D14b: a shorten on a slot that already died cannot move its death later — a re-kill after
+/// an order's window must not erase an expiry inside it.
+#[test]
+fn set_valid_until_recorded_expiry_only_moves_earlier() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    set_valid_until(&env, &client, &v, MAKER, 0, false); // at T0, naming grace_ts
+    let g = grace_ts(&v);
+    env.ledger().set_timestamp(g + 100);
+    set_valid_until(&env, &client, &v, MAKER, 0, true); // a kill to 1, after the slot died at g
+    assert!(
+        client.any_slot_expired_within(&account, &g, &g),
+        "still died at g"
+    );
+    assert!(
+        !client.any_slot_expired_within(&account, &(g + 1), &u64::MAX),
+        "not at the re-kill"
+    );
 }
 
 /// In-grace slots still count toward the cap and are not pruned.

@@ -281,7 +281,7 @@ contract AdManager is EscrowBase, IAdManager {
         // #422 rule 3: when the co-signed payout was denied, the cancel waits for the order chain's
         // SETTLED evidence to be anchorable and presented, so a maker paid on the other chain cannot
         // also take the lock back.
-        if (_coSignDenied(params, orderHash)) {
+        if (_coSignDenied(params, orderHash, _presentationCutoff(orderHash, params))) {
             _requireReached(_claimedWindowEnd(orderHash) + _evidenceGrace(params.orderChainId));
         }
 
@@ -337,10 +337,11 @@ contract AdManager is EscrowBase, IAdManager {
         if (outcome == Dispute.Outcome.None) outcome = Dispute.Outcome.MutualRefund;
         // #422 rule 3, this door too: every outcome but MakerForfeit hands the lock back to the maker,
         // so a denied payout waits the evidence grace past the challenge deadline (review F1).
-        if (outcome != Dispute.Outcome.MakerForfeit && _coSignDenied(params, orderHash)) {
-            _requireReached(
-                _disputeManager().effectiveChallengeDeadline(orderHash) + _evidenceGrace(params.orderChainId)
-            );
+        if (outcome != Dispute.Outcome.MakerForfeit) {
+            uint256 until = _disputeManager().effectiveChallengeDeadline(orderHash);
+            if (_coSignDenied(params, orderHash, until)) {
+                _requireReached(until + _evidenceGrace(params.orderChainId));
+            }
         }
 
         Ad storage ad = ads[params.adId];
@@ -602,14 +603,15 @@ contract AdManager is EscrowBase, IAdManager {
     ///      no usable slot at all. Every reference is one the maker signed (the deadline) or the
     ///      chain stamped (the lock), never one the maker can choose later. No registry wired means
     ///      no lever 2 to read.
-    function _coSignDenied(OrderParams calldata p, bytes32 orderHash) private view returns (bool) {
+    function _coSignDenied(OrderParams calldata p, bytes32 orderHash, uint256 until) private view returns (bool) {
         address maker = ads[p.adId].maker;
         if (halted[maker] || lastResumedAt[maker] >= p.deadline) return true;
         IKeyRegistry registry = keyRegistry;
         if (address(registry) == address(0)) return false;
-        // D15: the order's life as a payout ends at its signed deadline; an expiry past it denied
-        // nothing, and a fixed interval keeps finalize monotone.
-        return registry.anySlotExpiredWithin(p.adSettlementSigner, _lockedAt(orderHash), uint64(p.deadline))
+        // D16: the order's life as a payout ends at the payout's own cutoff — the presentation cutoff
+        // for a cancel, the challenge deadline for a dispute — which the caller passes in. An expiry
+        // past it denied nothing; the bound moves only with a pause, which delays finalize as much.
+        return registry.anySlotExpiredWithin(p.adSettlementSigner, _lockedAt(orderHash), uint64(until))
             || !registry.hasUsableSlot(p.adSettlementSigner);
     }
 
@@ -618,7 +620,9 @@ contract AdManager is EscrowBase, IAdManager {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
         if (_statusOf(orderHash) != Status.Claimed) return 0;
         uint256 end = _claimedWindowEnd(orderHash);
-        return _coSignDenied(params, orderHash) ? end + _evidenceGrace(params.orderChainId) : end;
+        return _coSignDenied(params, orderHash, _presentationCutoff(orderHash, params))
+            ? end + _evidenceGrace(params.orderChainId)
+            : end;
     }
 
     /// @dev How long a denied order's cancel waits past its window: the order chain's anchor delay

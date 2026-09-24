@@ -3849,21 +3849,6 @@ fn test_422_finalize_cancel_signer_killed_since_the_lock_waits_the_grace() {
     s.ad_manager.finalize_cancel(&p);
 }
 
-/// An expiry before the lock is history: the order was signed under a later slot. (The kill itself,
-/// and where its expiry lands, is the real registry's business: the `real_registry` tests below.)
-#[test]
-fn test_422_finalize_cancel_expiry_before_the_lock_ordinary_timing() {
-    let s = setup();
-    warp(&s, s.env.ledger().timestamp() + 10);
-    let p = locked_ad_order(&s);
-    MockKeyRegistryClient::new(&s.env, &s.key_registry)
-        .add_slot_expiry(&p.ad_settlement_signer, &(s.env.ledger().timestamp() - 1));
-    warp(&s, p.deadline);
-    s.ad_manager.claim_cancel(&p);
-    warp(&s, p.deadline + SUITE_BUFFER);
-    s.ad_manager.finalize_cancel(&p);
-}
-
 /// The boundary is the lock's own second: a shorten stamped then counts (`>=`).
 #[test]
 fn test_422_finalize_cancel_signer_killed_in_the_locks_second_counts() {
@@ -3954,33 +3939,17 @@ fn test_422_finalize_cancel_rotation_outliving_the_cancel_ordinary_timing() {
     s.ad_manager.finalize_cancel(&p);
 }
 
-/// D15: the interval closes at the signed deadline, inclusive — an expiry in its second counts.
+/// D16: past the presentation cutoff (window end − margin; margin 0 here) no payout was possible,
+/// so an expiry there denied nothing — even one that lands before the finalize call.
 #[test]
-fn test_422_finalize_cancel_expiry_at_the_deadline_counts() {
+fn test_422_finalize_cancel_expiry_after_the_cutoff_ordinary_timing() {
     let s = setup();
     let p = locked_ad_order(&s);
     MockKeyRegistryClient::new(&s.env, &s.key_registry)
-        .add_slot_expiry(&p.ad_settlement_signer, &p.deadline);
+        .add_slot_expiry(&p.ad_settlement_signer, &(p.deadline + SUITE_BUFFER + 1));
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
-    warp(&s, p.deadline + SUITE_BUFFER);
-    assert_eq!(
-        s.ad_manager.try_finalize_cancel(&p),
-        Err(Ok(AdErr::TooEarly))
-    );
-}
-
-/// D15: past the deadline no payout was possible, so an expiry there denied nothing — even one
-/// that lands before the finalize call.
-#[test]
-fn test_422_finalize_cancel_expiry_after_the_deadline_ordinary_timing() {
-    let s = setup();
-    let p = locked_ad_order(&s);
-    MockKeyRegistryClient::new(&s.env, &s.key_registry)
-        .add_slot_expiry(&p.ad_settlement_signer, &(p.deadline + 1));
-    warp(&s, p.deadline);
-    s.ad_manager.claim_cancel(&p);
-    warp(&s, p.deadline + SUITE_BUFFER);
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
     s.ad_manager.finalize_cancel(&p);
 }
 
@@ -4101,17 +4070,164 @@ fn test_422_real_registry_kill_at_the_deadline_counts() {
     );
 }
 
+/// D16: past the presentation cutoff (window end − margin; margin 0 here) the co-signed payout
+/// could not land, so a kill there denies nothing.
 #[test]
-fn test_422_real_registry_kill_after_the_deadline_ordinary_timing() {
+fn test_422_real_registry_kill_after_the_cutoff_ordinary_timing() {
     let s = setup();
     let (client, account, auth) = real_registry_signer(&s);
     let p = lock_signed_by(&s, &account);
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
-    warp(&s, p.deadline + 1);
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    client.set_valid_until(&account, &auth, &0, &1);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// Pass 5 (PoC e): the co-signed unlock is accepted until the cutoff, not the deadline. A kill in
+/// the gap blocks the payout, so the cancel waits.
+#[test]
+fn test_422_real_registry_kill_between_the_deadline_and_the_cutoff_waits_the_grace() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + 600);
+    client.set_valid_until(&account, &auth, &0, &1);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// Pass 5 (PoC f): a shorten naming a date in the gap is the same denial by another route.
+#[test]
+fn test_422_real_registry_shorten_naming_a_date_in_the_gap_waits_the_grace() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    client.set_valid_until(&account, &auth, &0, &(p.deadline + 600));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// Pass 5 (PoC h/h2): a slot that died inside the window, re-killed to `1` after it, still reads
+/// as dying inside it (D14b).
+#[test]
+fn test_422_real_registry_re_kill_after_the_window_keeps_the_in_window_expiry() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    client.set_valid_until(&account, &auth, &0, &(p.deadline - 600));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    client.set_valid_until(&account, &auth, &0, &1);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// D16 at the boundary, under a margin so the cutoff and the window end differ: a kill in the
+/// cutoff's own second counts, the next second does not.
+#[test]
+fn test_422_real_registry_kill_at_the_cutoff_counts() {
+    let s = setup();
+    s.ad_manager.set_route_timing(
+        &s.tp.order_chain_id,
+        &ad_timing(3_600, SUITE_BUFFER, 300, SUITE_LONG_BACKSTOP, 0),
+    );
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER - 300);
+    client.set_valid_until(&account, &auth, &0, &1);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+#[test]
+fn test_422_real_registry_kill_just_past_the_cutoff_ordinary_timing() {
+    let s = setup();
+    s.ad_manager.set_route_timing(
+        &s.tp.order_chain_id,
+        &ad_timing(3_600, SUITE_BUFFER, 300, SUITE_LONG_BACKSTOP, 0),
+    );
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER - 300 + 1);
     client.set_valid_until(&account, &auth, &0, &1);
     warp(&s, p.deadline + SUITE_BUFFER);
     s.ad_manager.finalize_cancel(&p);
+}
+
+/// Pass 5 (PoC g): the dispute door runs to the effective challenge deadline, past the cancel's
+/// cutoff. A kill in between blocks the payout the module still accepts, so the fallback waits.
+#[test]
+fn test_422_real_registry_kill_before_the_challenge_deadline_fallback_waits_the_grace() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    let order_hash = s.ad_manager.hash_order(&p);
+    // Filed late enough that the challenge period outruns the cancel window.
+    warp(&s, p.deadline - 3_600);
+    s.ad_manager
+        .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    let until = dm.effective_challenge_deadline(&order_hash);
+    assert!(
+        until > p.deadline + SUITE_BUFFER,
+        "the dispute door outlives the cancel cutoff"
+    );
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    client.set_valid_until(&account, &auth, &0, &1);
+    warp(&s, until + 1);
+    assert_eq!(
+        s.ad_manager.try_finalize_dispute(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, until + SUITE_BUFFER);
+    s.ad_manager.finalize_dispute(&p);
+    assert_eq!(
+        s.ad_manager.get_order_status(&order_hash),
+        ad_manager_contract::Status::Resolved
+    );
+}
+
+#[test]
+fn test_422_real_registry_kill_after_the_challenge_deadline_fallback_ordinary_timing() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    let order_hash = s.ad_manager.hash_order(&p);
+    warp(&s, p.deadline - 3_600);
+    s.ad_manager
+        .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    let until = dm.effective_challenge_deadline(&order_hash);
+    warp(&s, until + 1);
+    client.set_valid_until(&account, &auth, &0, &1);
+    s.ad_manager.finalize_dispute(&p);
+    assert_eq!(
+        s.ad_manager.get_order_status(&order_hash),
+        ad_manager_contract::Status::Resolved
+    );
 }
 
 /// The view the relayer's janitor asks: 0 before a claim, the window end after, plus the grace once

@@ -435,10 +435,17 @@ impl AdManagerContract {
         if storage::get_order_status(&env, &order_hash) != Status::Claimed {
             return Ok(0);
         }
-        let buffer = Self::timing(&env, params.order_chain_id)?.buffer;
+        let t = Self::timing(&env, params.order_chain_id)?;
+        let buffer = t.buffer;
         let end = Self::window_end(&env, &order_hash, 0, buffer);
         let ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
-        if Self::co_sign_denied(&env, &ad.maker, &params, &order_hash) {
+        if Self::co_sign_denied(
+            &env,
+            &ad.maker,
+            &params,
+            &order_hash,
+            end.saturating_sub(t.margin),
+        ) {
             let grace = Self::evidence_grace(&env, params.order_chain_id, buffer)?;
             Ok(end.saturating_add(grace))
         } else {
@@ -876,9 +883,7 @@ impl AdManagerContract {
         let mut ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
         // #422 rule 3, this door too: every outcome but MakerForfeit hands the lock back to the
         // maker, so a denied payout waits the evidence grace past the challenge deadline (F1).
-        if outcome != DisputeOutcome::MakerForfeit
-            && Self::co_sign_denied(&env, &ad.maker, &params, &order_hash)
-        {
+        if outcome != DisputeOutcome::MakerForfeit {
             let manager =
                 storage::get_dispute_manager(&env).ok_or(AdManagerError::NoDisputeManager)?;
             let until = proofbridge_core::cross_contract::challenge_deadline_of(
@@ -887,9 +892,11 @@ impl AdManagerContract {
                 &order_hash,
                 storage::get_paused_seconds(&env),
             );
-            let buffer = Self::timing(&env, params.order_chain_id)?.buffer;
-            let grace = Self::evidence_grace(&env, params.order_chain_id, buffer)?;
-            Self::require_reached(&env, until.saturating_add(grace))?;
+            if Self::co_sign_denied(&env, &ad.maker, &params, &order_hash, until) {
+                let buffer = Self::timing(&env, params.order_chain_id)?.buffer;
+                let grace = Self::evidence_grace(&env, params.order_chain_id, buffer)?;
+                Self::require_reached(&env, until.saturating_add(grace))?;
+            }
         }
         ad.locked -= ad_amount;
         if outcome == DisputeOutcome::MakerForfeit {
@@ -942,7 +949,8 @@ impl AdManagerContract {
         Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
-        let buffer = Self::timing(&env, params.order_chain_id)?.buffer;
+        let t = Self::timing(&env, params.order_chain_id)?;
+        let buffer = t.buffer;
         Self::require_finalizable(&env, &order_hash, buffer)?;
 
         let ad_amount = Self::ad_amount(&params)?;
@@ -950,8 +958,14 @@ impl AdManagerContract {
         // #422 rule 3: when the co-signed payout was denied, the cancel waits for the order chain's
         // SETTLED evidence to be anchorable and presented, so a maker paid on the other chain cannot
         // also take the lock back.
-        if Self::co_sign_denied(&env, &ad.maker, &params, &order_hash) {
-            let end = Self::window_end(&env, &order_hash, 0, buffer);
+        let end = Self::window_end(&env, &order_hash, 0, buffer);
+        if Self::co_sign_denied(
+            &env,
+            &ad.maker,
+            &params,
+            &order_hash,
+            end.saturating_sub(t.margin),
+        ) {
             let grace = Self::evidence_grace(&env, params.order_chain_id, buffer)?;
             Self::require_reached(&env, end.saturating_add(grace))?;
         }
@@ -1331,9 +1345,10 @@ impl AdManagerContract {
 
     /// Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force now
     /// or at any point at or after the order's deadline (a resume stamp at or after it), any of the
-    /// signer's registry slots expiring during the order's life as a payout, `[locked_at, deadline]`
-    /// (`any_slot_expired_within`, D12/D14/D15: a kill, a near-future shorten and a pre-lock shorten
-    /// naming a date in the window all count; a rotation whose old slot outlives the deadline does not), or the signer left with no usable slot
+    /// signer's registry slots expiring during the order's life as a payout, `[locked_at, until]`
+    /// with `until` the payout's own cutoff (`any_slot_expired_within`, D12/D14/D14b/D16: a kill, a
+    /// near-future shorten, a pre-lock shorten naming a date in the window and a re-kill after it
+    /// all count; a rotation whose old slot outlives the cutoff does not), or the signer left with no usable slot
     /// at all. Every reference is one the maker signed (the deadline) or the chain stamped (the
     /// lock), never one the maker can choose later. No registry wired means no lever 2 to read.
     fn co_sign_denied(
@@ -1341,6 +1356,7 @@ impl AdManagerContract {
         maker: &Address,
         params: &OrderParams,
         order_hash: &BytesN<32>,
+        until: u64,
     ) -> bool {
         if let Some(h) = storage::get_halt(env, maker) {
             if h.halted || h.last_resumed_at >= params.deadline {
@@ -1352,14 +1368,12 @@ impl AdManagerContract {
         };
         let signer = &params.ad_settlement_signer;
         let locked_at = storage::get_order(env, order_hash).locked_at;
-        // D15: the order's life as a payout ends at its signed deadline; an expiry past it denied
-        // nothing, and a fixed interval keeps finalize monotone.
+        // D16: the order's life as a payout ends at the payout's own cutoff — the presentation
+        // cutoff for a cancel, the challenge deadline for a dispute — which the caller passes in.
+        // An expiry past it denied nothing; the bound moves only with a pause, which delays
+        // finalize as much.
         proofbridge_core::cross_contract::any_slot_expired_within(
-            env,
-            &registry,
-            signer,
-            locked_at,
-            params.deadline,
+            env, &registry, signer, locked_at, until,
         ) || !proofbridge_core::cross_contract::has_usable_slot(env, &registry, signer)
     }
 
