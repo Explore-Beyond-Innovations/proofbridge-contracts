@@ -39,11 +39,11 @@ B pnpm -s cli link --peer $MA > $L/2m.log 2>&1 && pass "link B→A sent" || fail
 
 echo "== 3. --to 0x0 is refused; handover to $A1; rerun sends nothing"
 n0=$(nonceA); A pnpm -s cli handover --to 0x0000000000000000000000000000000000000000 > $L/3z.log 2>&1; rc=$?
-[ $rc -ne 0 ] && [ "$(nonceA)" = "$n0" ] && pass "--to 0x0 refused, 0 txs" || fail "--to 0x0: exit $rc, txs $(( $(nonceA) - n0 ))"
+[ $rc -ne 0 ] && grep -q "is not a usable address" $L/3z.log && [ "$(nonceA)" = "$n0" ] && pass "--to 0x0 refused by name, 0 txs" || fail "--to 0x0: exit $rc, txs $(( $(nonceA) - n0 )), $(grep -m1 -i error $L/3z.log | cut -c1-120)"
 n0=$(nonceA); A pnpm -s cli handover --to $A1 > $L/3.log 2>&1; rc=$?
 [ $rc -eq 0 ] && [ "$(grep -c '\[nominate\]' $L/3.log)" = "6" ] && grep -q "no code on chain" $L/3.log && pass "6 nominated, EOA target named" || fail "handover: exit $rc, $(grep -c '\[nominate\]' $L/3.log) nominated"
 [ "$(adminOf pending)" = "$A1" ] && pass "admin.pending recorded" || fail "pending: $(node -p "JSON.stringify(require('$MA').admin)")"
-n0=$(nonceA); A pnpm -s cli handover --to $A1 > $L/3b.log 2>&1; [ "$(nonceA)" = "$n0" ] && pass "handover rerun sends nothing" || fail "rerun sent $(( $(nonceA) - n0 ))"
+n0=$(nonceA); A pnpm -s cli handover --to $A1 > $L/3b.log 2>&1; rc=$?; [ $rc -eq 0 ] && [ "$(nonceA)" = "$n0" ] && [ "$(grep -c '\[pending\]' $L/3b.log)" = "6" ] && pass "handover rerun: exit 0, 6 pending, sends nothing" || fail "rerun: exit $rc, sent $(( $(nonceA) - n0 ))"
 
 echo "== 4. the nominee accepts on all six; verify records it"
 for key in merkleManager adManager orderPortal blsKeyRegistry rootAnchor disputeManager; do
@@ -59,7 +59,7 @@ cp $MA $WORK/ma.5; A pnpm -s cli handover --to $A1 > $L/5.log 2>&1; rc=$?
 echo "== 6. (H6) an unchanged redeploy after the handover is a clean exit 0"
 n0=$(nonceA); A pnpm -s run deploy > $L/6.log 2>&1; rc=$?
 [ $rc -eq 0 ] && [ "$(nonceA)" = "$n0" ] && ! grep -q "\[describe\]" $L/6.log && pass "redeploy: exit 0, 0 txs, nothing described" || fail "redeploy: exit $rc, txs $(( $(nonceA) - n0 )), described $(grep -c '\[describe\]' $L/6.log)"
-[ "$(adminOf current)" = "$A1" ] && pass "(H3) admin.current still what the chain says" || fail "admin after redeploy: $(node -p "JSON.stringify(require('$MA').admin)")"
+[ "$(adminOf current)" = "$A1" ] && pass "admin block left as it was (already true)" || fail "admin after redeploy: $(node -p "JSON.stringify(require('$MA').admin)")"
 
 echo "== 7. (H3) a manifest whose admin block is stale is corrected from the chain"
 node -e "const fs=require('fs'),m=JSON.parse(fs.readFileSync('$MA'));m.admin={current:'$A0'};fs.writeFileSync('$MA',JSON.stringify(m,null,2))"
@@ -74,10 +74,12 @@ echo "== 9. (H1) a contract deployed after the handover is wired now and named a
 node -e "const fs=require('fs'),m=JSON.parse(fs.readFileSync('$MA'));delete m.contracts.disputeManager;m.disputeParams={};fs.writeFileSync('$MA',JSON.stringify(m,null,2))"
 A pnpm -s run deploy > $L/9.log 2>&1; rc=$?
 DM=$(addrOf disputeManager); ARB=$(cast call --rpc-url http://127.0.0.1:$PA $DM 'arbiter()(address)')
-[ "$ARB" = "$A0" ] && pass "new DisputeManager wired: arbiter set (local default: the deployer)" || fail "new DisputeManager not wired: arbiter=$ARB"
+[ $rc -eq 0 ] && [ "$ARB" = "$A0" ] && pass "mixed deploy exit 0; new DisputeManager wired: arbiter set (local default: the deployer)" || fail "mixed deploy: exit $rc, arbiter=$ARB"
 [ "$(cast call --rpc-url http://127.0.0.1:$PA $DM 'admin()(address)')" = "$A0" ] && grep -q "have the deployer as admin" $L/9.log && pass "run says the new contract needs its own handover" || fail "no handover notice for the new contract"
 [ "$(adminOf current)" = "$A1" ] && pass "admin.current still the multisig (the reused contracts agree)" || fail "admin after mixed deploy: $(node -p "JSON.stringify(require('$MA').admin)")"
 
-echo "== 10. chain B, never handed over: link again is a no-op exit 0"
-B pnpm -s cli link --peer $MA > $L/10.log 2>&1; rc=$?; [ $rc -eq 0 ] && ! grep -q "\[describe\]" $L/10.log && pass "chain B link exit 0" || fail "chain B link exit $rc"
+echo "== 10. chain B, never handed over: link again sends nothing (every escrow wire is check-first)"
+nonceB(){ cast nonce $A0 --rpc-url http://127.0.0.1:$PB; }
+n0=$(nonceB); B pnpm -s cli link --peer $MA > $L/10.log 2>&1; rc=$?
+[ $rc -eq 0 ] && [ "$(nonceB)" = "$n0" ] && ! grep -q "\[describe\]" $L/10.log && pass "chain B link: exit 0, 0 txs on chain B" || fail "chain B link: exit $rc, txs $(( $(nonceB) - n0 ))"
 echo; echo "fails: $fails"; exit $fails
