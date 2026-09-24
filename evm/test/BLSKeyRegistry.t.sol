@@ -224,14 +224,22 @@ contract BLSKeyRegistryTest is Test {
     }
 
     /// A slot past validUntil + GRACE_PERIOD is pruned to make room; its id is never reissued.
+    function idleGuard() internal {
+        address[] memory guards = new address[](1);
+        guards[0] = address(new ToggleGuard());
+        registry.setPositionGuards(guards);
+    }
+
     function test_registerAtCapPrunesExpiredSlot() public {
         bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        idleGuard();
         for (uint256 i = 0; i < 5; i++) {
             registerSlot("makerOnSepolia", i);
         }
         setValidUntil("makerOnSepolia", 2, true); // validUntil = 1, expired at the kill (D14)
         vm.warp(T0 + 1);
-        // D17: no guard reports positions, so no order can need the dead slot's history — pruned at once.
+        // D17: the guard is wired and reports no positions, so no order can need the dead slot's
+        // history — pruned at once.
 
         vm.expectEmit(true, true, false, true, REGISTRY);
         emit IBLSKeyRegistry.SlotPruned(account, 2);
@@ -248,6 +256,23 @@ contract BLSKeyRegistryTest is Test {
     function test_registerAtCap_deadSlotKeptWhileInFlight_prunedAfterTheGrace() public {
         bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
         busyGuard();
+        for (uint256 i = 0; i < 5; i++) {
+            registerSlot("makerOnSepolia", i);
+        }
+        setValidUntil("makerOnSepolia", 2, true);
+        vm.warp(T0 + 1);
+        vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
+        registerSlot("makerOnSepolia", 5);
+
+        vm.warp(T0 + 30 days + 1);
+        assertEq(registerSlot("makerOnSepolia", 5), 5);
+        vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
+        registry.lookup(account, 2);
+    }
+
+    /// #422 D17b: with no guard wired there is nobody to ask, so a dead slot keeps its place for the grace.
+    function test_registerAtCap_noGuardWired_deadSlotKeptUntilTheGrace() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
         for (uint256 i = 0; i < 5; i++) {
             registerSlot("makerOnSepolia", i);
         }

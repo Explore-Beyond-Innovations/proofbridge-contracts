@@ -3939,20 +3939,6 @@ fn test_422_finalize_cancel_rotation_outliving_the_cancel_ordinary_timing() {
     s.ad_manager.finalize_cancel(&p);
 }
 
-/// D16: past the presentation cutoff (window end − margin; margin 0 here) no payout was possible,
-/// so an expiry there denied nothing — even one that lands before the finalize call.
-#[test]
-fn test_422_finalize_cancel_expiry_after_the_cutoff_ordinary_timing() {
-    let s = setup();
-    let p = locked_ad_order(&s);
-    MockKeyRegistryClient::new(&s.env, &s.key_registry)
-        .add_slot_expiry(&p.ad_settlement_signer, &(p.deadline + SUITE_BUFFER + 1));
-    warp(&s, p.deadline);
-    s.ad_manager.claim_cancel(&p);
-    warp(&s, p.deadline + SUITE_BUFFER + 1);
-    s.ad_manager.finalize_cancel(&p);
-}
-
 // --- #422 D14: the denial read off the REAL registry -------------------------
 //
 // The mock restates the registry's predicate, so it proves wiring and nothing about what the
@@ -4157,6 +4143,63 @@ fn test_422_real_registry_kill_at_the_cutoff_counts() {
     assert_eq!(
         s.ad_manager.try_finalize_cancel(&p),
         Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// D17a: a kill, an at-cap registration and a lock in the same second. The prune must not run in
+/// the expiry's own second, or the lock's-second kill the design counts is forgotten.
+#[test]
+fn test_422_real_registry_same_second_kill_prune_and_lock_still_waits_the_grace() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
+    let hexv =
+        |v: &serde_json::Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
+    let reg = |i: usize| {
+        let r = &vectors["slots"]["makerOnStellarTestnet"]["registrations"][i];
+        client.try_register(
+            &account,
+            &auth,
+            &BytesN::from_array(&s.env, &hexv(&r["pkNative"]).try_into().unwrap()),
+            &BytesN::from_array(&s.env, &hexv(&r["pop"]).try_into().unwrap()),
+            &(i as u64),
+        )
+    };
+    for i in 2..5 {
+        assert!(reg(i).is_ok());
+    }
+    client.set_position_guards(&soroban_sdk::vec![&s.env, s.ad_manager.address.clone()]);
+    client.set_valid_until(&account, &auth, &0, &1);
+    assert_eq!(
+        reg(5),
+        Err(Ok(bls_key_registry_contract::RegistryError::RegistryFull)),
+        "not prunable in the kill's own second"
+    );
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// The view the relayer's janitor plans around must carry the same bound as the door.
+#[test]
+fn test_422_real_registry_cancel_finalizes_at_reads_the_grace_for_a_kill_in_the_gap() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + 600);
+    client.set_valid_until(&account, &auth, &0, &1);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER,
+        "window end + grace"
     );
 }
 

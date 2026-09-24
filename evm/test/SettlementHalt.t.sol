@@ -209,16 +209,6 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
-    /// D16: past the presentation cutoff (window end − margin; margin 0 here) no payout was
-    /// possible, so an expiry there denied nothing — even one that lands before the finalize call.
-    function test_finalizeCancel_expiryAfterTheCutoff_ordinaryTiming() public {
-        (IAdManager.OrderParams memory p,) = _lock(22);
-        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(p.deadline + 30 minutes + 1));
-        _claim(p);
-        vm.warp(p.deadline + 30 minutes + 1);
-        adManager.finalizeCancel(p);
-    }
-
     /// The boundary is the lock's own second: a slot expiring then counts (`>=`).
     function test_finalizeCancel_signerKilledInTheLocksSecond_counts() public {
         vm.warp(block.timestamp + 10);
@@ -633,6 +623,36 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         vm.warp(p.deadline + 30 minutes);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
         adManager.finalizeCancel(p);
+    }
+
+    /// D17a: a kill, an at-cap registration and a lock in the same second. The prune must not run
+    /// in the expiry's own second, or the lock's-second kill the design counts is forgotten.
+    function test_realRegistry_sameSecondKillPruneAndLock_stillWaitsTheGrace() public {
+        _realRegistry();
+        for (uint256 i = 2; i < 5; i++) {
+            _registerSlot(i);
+        }
+        address[] memory guards = new address[](1);
+        guards[0] = address(adManager);
+        registry.setPositionGuards(guards);
+        _setValidUntil(0, true);
+        vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
+        _registerSlot(5);
+        IAdManager.OrderParams memory p = _lockAs(13);
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+    }
+
+    /// The view the relayer's janitor plans around must carry the same bound as the door.
+    function test_realRegistry_cancelFinalizesAt_readsTheGraceForAKillInTheGap() public {
+        _realRegistry();
+        IAdManager.OrderParams memory p = _lockAs(14);
+        _claim(p);
+        vm.warp(p.deadline + 10 minutes);
+        _setValidUntil(0, true);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "window end + grace");
     }
 
     function test_realRegistry_killJustPastTheCutoff_ordinaryTiming() public {

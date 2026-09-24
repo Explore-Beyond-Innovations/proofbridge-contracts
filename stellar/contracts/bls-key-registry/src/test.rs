@@ -152,6 +152,11 @@ fn busy_guard(env: &Env, client: &BlsKeyRegistryClient) {
     client.set_position_guards(&soroban_sdk::vec![env, guard]);
 }
 
+fn idle_guard(env: &Env, client: &BlsKeyRegistryClient) {
+    let guard = env.register(IdleGuard, ());
+    client.set_position_guards(&soroban_sdk::vec![env, guard]);
+}
+
 // =============================================================================
 // Happy paths
 // =============================================================================
@@ -372,6 +377,17 @@ impl MockGuard {
     }
 }
 
+/// A wired guard that reports no positions.
+#[contract]
+pub struct IdleGuard;
+
+#[contractimpl]
+impl IdleGuard {
+    pub fn has_open_positions(_env: Env, _account: BytesN<32>) -> bool {
+        false
+    }
+}
+
 #[test]
 fn revoke_blocked_while_in_flight() {
     let (env, client, v) = setup();
@@ -535,12 +551,14 @@ fn sixth_slot_reverts_registry_full() {
 fn register_at_cap_prunes_expired_slot() {
     let (env, client, v) = setup();
     let account = slot_account(&env, &v, MAKER);
+    idle_guard(&env, &client);
     for i in 0..5 {
         register_slot(&env, &client, &v, MAKER, i);
     }
     set_valid_until(&env, &client, &v, MAKER, 2, true); // valid_until = 1, expired at the kill (D14)
     env.ledger().set_timestamp(T0 + 1);
-    // D17: no guard reports positions, so no order can need the dead slot's history — pruned at once.
+    // D17: the guard is wired and reports no positions, so no order can need the dead slot's
+    // history — pruned at once.
 
     assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
     assert_eq!(client.lookup(&account, &2), None);
@@ -593,6 +611,32 @@ fn register_at_cap_keeps_a_dead_slot_while_in_flight_until_the_grace() {
     let (env, client, v) = setup();
     let account = slot_account(&env, &v, MAKER);
     busy_guard(&env, &client);
+    for i in 0..5 {
+        register_slot(&env, &client, &v, MAKER, i);
+    }
+    set_valid_until(&env, &client, &v, MAKER, 2, true);
+    env.ledger().set_timestamp(T0 + 1);
+    let r = slot_reg(&v, MAKER, 5);
+    assert_eq!(
+        client.try_register(
+            &account,
+            &owner_for(&env, &v, MAKER, &r["ownerSig"]),
+            &bn::<96>(&env, &r["pkNative"]),
+            &bn::<192>(&env, &r["pop"]),
+            &5,
+        ),
+        Err(Ok(RegistryError::RegistryFull))
+    );
+    env.ledger().set_timestamp(T0 + 30 * 86_400 + 1);
+    assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
+    assert_eq!(client.lookup(&account, &2), None);
+}
+
+/// #422 D17b: with no guard wired there is nobody to ask, so a dead slot keeps its place for the grace.
+#[test]
+fn register_at_cap_no_guard_wired_keeps_a_dead_slot_until_the_grace() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
     for i in 0..5 {
         register_slot(&env, &client, &v, MAKER, i);
     }

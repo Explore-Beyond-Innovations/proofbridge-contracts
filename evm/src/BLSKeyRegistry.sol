@@ -283,15 +283,17 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
     }
 
     /// Drops every dead slot the escrows can no longer need: past its expiry + GRACE_PERIOD, or at
-    /// once when no guard reports open positions for the account (#422 D17 — no order's cancel can
-    /// still ask about its history). Swap-remove; order is not meaningful.
+    /// once when the guards are wired and none reports open positions for the account (#422 D17 —
+    /// no order's cancel can still ask about its history; D17b — with no guard to ask, never at
+    /// once). Not in the expiry's own second (D17a): a lock in that second still counts the kill.
+    /// Swap-remove; order is not meaningful.
     function _prune(bytes32 account, RegistryEntry storage e) private {
-        bool free = !_hasOpenPositions(account);
+        bool free = positionGuards.length != 0 && !_hasOpenPositions(account);
         uint256 i = 0;
         while (i < e.liveSlots.length) {
             uint32 id = e.liveSlots[i];
             uint64 vu = _expiredAt(account, id);
-            if (vu != 0 && (block.timestamp > uint256(vu) + GRACE_PERIOD || (free && block.timestamp >= vu))) {
+            if (vu != 0 && (block.timestamp > uint256(vu) + GRACE_PERIOD || (free && block.timestamp > vu))) {
                 delete e.slots[id];
                 delete expiries[account][id];
                 e.liveSlots[i] = e.liveSlots[e.liveSlots.length - 1];
