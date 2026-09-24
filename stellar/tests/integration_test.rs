@@ -3630,7 +3630,11 @@ fn test_422_halt_refuses_the_co_signed_unlock_resume_admits_it() {
         ),
         Err(Ok(AdErr::Halted))
     );
-    assert_eq!(ad_status(&s), ad_manager_contract::Status::Open, "nothing moved");
+    assert_eq!(
+        ad_status(&s),
+        ad_manager_contract::Status::Open,
+        "nothing moved"
+    );
 
     s.ad_manager.resume_settlement(&maker);
     assert!(!s.ad_manager.halt_of(&maker).unwrap().halted);
@@ -3695,9 +3699,15 @@ fn test_422_finalize_cancel_halted_since_before_the_claim_waits_the_grace() {
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER);
-    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
     warp(&s, p.deadline + 2 * SUITE_BUFFER - 1);
-    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
     warp(&s, p.deadline + 2 * SUITE_BUFFER);
     s.ad_manager.finalize_cancel(&p);
     assert_eq!(ad_locked(&s), 0, "the lock is released after the grace");
@@ -3716,7 +3726,10 @@ fn test_422_finalize_cancel_halted_then_resumed_after_the_claim_still_waits() {
     warp(&s, p.deadline + 1200);
     s.ad_manager.resume_settlement(&maker);
     warp(&s, p.deadline + SUITE_BUFFER);
-    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
     warp(&s, p.deadline + 2 * SUITE_BUFFER);
     s.ad_manager.finalize_cancel(&p);
 }
@@ -3734,7 +3747,10 @@ fn test_422_finalize_cancel_halted_through_the_claim_resumed_at_the_end_still_wa
     warp(&s, p.deadline + SUITE_BUFFER - 1);
     s.ad_manager.resume_settlement(&maker);
     warp(&s, p.deadline + SUITE_BUFFER);
-    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
     warp(&s, p.deadline + 2 * SUITE_BUFFER);
     s.ad_manager.finalize_cancel(&p);
 }
@@ -3764,7 +3780,10 @@ fn test_422_finalize_cancel_halt_in_the_claims_second_counts() {
     s.ad_manager.claim_cancel(&p);
     s.ad_manager.halt_settlement(&maker_addr(&s));
     warp(&s, p.deadline + SUITE_BUFFER);
-    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
 }
 
 /// With an anchor wired the grace is its delay for the order chain plus the buffer.
@@ -3778,7 +3797,10 @@ fn test_422_finalize_cancel_grace_is_anchor_delay_plus_buffer() {
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER + 7_200);
-    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
     warp(&s, p.deadline + SUITE_BUFFER + 7_200 + SUITE_BUFFER);
     s.ad_manager.finalize_cancel(&p);
 }
@@ -3793,7 +3815,10 @@ fn test_422_finalize_cancel_signer_with_no_usable_slot_waits_the_grace() {
     s.ad_manager.claim_cancel(&p);
     MockKeyRegistryClient::new(&s.env, &s.key_registry).set(&p.ad_settlement_signer, &false);
     warp(&s, p.deadline + SUITE_BUFFER);
-    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
     warp(&s, p.deadline + 2 * SUITE_BUFFER);
     s.ad_manager.finalize_cancel(&p);
 }
@@ -3811,7 +3836,10 @@ fn test_422_finalize_cancel_grace_stacks_on_a_pause() {
     s.ad_manager.unpause();
     // 900 s paused: the window ends at +buffer+900, the grace at +2*buffer+900.
     warp(&s, p.deadline + 2 * SUITE_BUFFER + 900 - 1);
-    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
     warp(&s, p.deadline + 2 * SUITE_BUFFER + 900);
     s.ad_manager.finalize_cancel(&p);
 }
@@ -3833,7 +3861,10 @@ fn test_t06_halted_order_stops_settling_and_still_terminates() {
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER);
-    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
     // The window's last second (inclusive): still the halt that refuses; a second later the cutoff.
     assert_eq!(
         s.ad_manager.try_unlock(
