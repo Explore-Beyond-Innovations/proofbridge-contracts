@@ -387,12 +387,14 @@ impl AdManagerContract {
     /// here, and a halted order's cancel waits an evidence grace so that proof always has time.
     pub fn halt_settlement(env: Env, maker: Address) -> Result<(), AdManagerError> {
         maker.require_auth();
+        let last_resumed_at = storage::get_halt(&env, &maker).map_or(0, |h| h.last_resumed_at);
         storage::set_halt(
             &env,
             &maker,
             &Halt {
                 halted: true,
                 last_halted_at: env.ledger().timestamp(),
+                last_resumed_at,
             },
         );
         events::SettlementHalted {
@@ -411,6 +413,7 @@ impl AdManagerContract {
             return Err(AdManagerError::NotHalted);
         }
         halt.halted = false;
+        halt.last_resumed_at = env.ledger().timestamp();
         storage::set_halt(&env, &maker, &halt);
         events::SettlementResumed {
             maker: maker.clone(),
@@ -1291,9 +1294,10 @@ impl AdManagerContract {
     }
 
     /// Was this order's co-signed payout denied by a maker-side lever while its window was open: a
-    /// halt in force, a halt at or after the claim opened (resumed since or not), or the order's
-    /// settlement signer left with no usable registry slot (a full retirement, lever 2; a rotation
-    /// keeps a usable slot and does not count). No registry wired means no lever 2 to read.
+    /// halt in force, a halt in force at any point since the claim opened (stamped at or after it,
+    /// or resumed at or after it), or the order's settlement signer left with no usable registry
+    /// slot (a full retirement, lever 2; a rotation keeps a usable slot and does not count). No
+    /// registry wired means no lever 2 to read.
     fn co_sign_denied(
         env: &Env,
         maker: &Address,
@@ -1302,7 +1306,7 @@ impl AdManagerContract {
     ) -> bool {
         if let Some(h) = storage::get_halt(env, maker) {
             let opened_at = storage::get_claim(env, order_hash).map_or(u64::MAX, |c| c.opened_at);
-            if h.halted || h.last_halted_at >= opened_at {
+            if h.halted || h.last_halted_at >= opened_at || h.last_resumed_at >= opened_at {
                 return true;
             }
         }

@@ -79,10 +79,12 @@ pub struct OrderParams {
 }
 
 /// A maker's settlement halt (#422): `halted` refuses the co-signed unlock of every order against
-/// the maker's ads; `last_halted_at` is when they last halted, kept across a resume.
+/// the maker's ads; `last_halted_at` / `last_resumed_at` are when they last halted and resumed, so
+/// a cancel can tell whether the halt was in force at any point since its claim opened.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Halt {
     pub halted: bool,
     pub last_halted_at: u64,
+    pub last_resumed_at: u64,
 }

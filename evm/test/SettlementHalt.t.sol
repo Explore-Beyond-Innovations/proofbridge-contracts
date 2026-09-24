@@ -134,6 +134,21 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
+    /// Halted from before the claim and resumed only after the window's last useful second: the
+    /// halt covered the whole window, so the payout was denied and the cancel waits.
+    function test_finalizeCancel_haltedThroughTheClaim_resumedAtTheEnd_stillWaits() public {
+        (IAdManager.OrderParams memory p,) = _lock(12);
+        _halt();
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes - 1);
+        _resume();
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        vm.warp(p.deadline + 60 minutes);
+        adManager.finalizeCancel(p);
+    }
+
     /// A halt lifted before the claim opened never denied this window: ordinary timing.
     function test_finalizeCancel_haltLiftedBeforeTheClaim_ordinaryTiming() public {
         (IAdManager.OrderParams memory p,) = _lock(6);

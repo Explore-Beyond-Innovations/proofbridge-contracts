@@ -59,10 +59,13 @@ contract AdManager is EscrowBase, IAdManager {
     ///         ignores it, so a halt can delay a payout but never keep both sides.
     mapping(address maker => bool) public halted;
 
-    /// @notice When `maker` last halted. `finalizeCancel` treats a halt at or after the claim opened
-    ///         as a denied payout even if it was resumed since: the resume may have come after the
-    ///         presentation cutoff, when it could no longer help the counterparty.
+    /// @notice When `maker` last halted, and last resumed. `finalizeCancel` treats a halt that was in
+    ///         force at any point since the claim opened as a denied payout even if it was resumed
+    ///         since: a halt stamped at or after the claim, or a resume at or after it (the halt was
+    ///         in force when the claim opened). The resume may have come after the presentation
+    ///         cutoff, when it could no longer help the counterparty.
     mapping(address maker => uint64) public lastHaltedAt;
+    mapping(address maker => uint64) public lastResumedAt;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -176,6 +179,7 @@ contract AdManager is EscrowBase, IAdManager {
     function resumeSettlement() external nonReentrant {
         if (!halted[msg.sender]) revert AdManager__NotHalted();
         halted[msg.sender] = false;
+        lastResumedAt[msg.sender] = uint64(block.timestamp);
         emit SettlementResumed(msg.sender);
     }
 
@@ -587,12 +591,15 @@ contract AdManager is EscrowBase, IAdManager {
     }
 
     /// @dev Was this order's co-signed payout denied by a maker-side lever while its window was open:
-    ///      a halt in force, a halt at or after the claim opened (resumed since or not), or the order's
-    ///      settlement signer left with no usable registry slot (a full retirement, lever 2; a rotation
-    ///      keeps a usable slot and does not count). No registry wired means no lever 2 to read.
+    ///      a halt in force, a halt in force at any point since the claim opened (stamped at or after
+    ///      it, or resumed at or after it), or the order's settlement signer left with no usable
+    ///      registry slot (a full retirement, lever 2; a rotation keeps a usable slot and does not
+    ///      count). No registry wired means no lever 2 to read.
     function _coSignDenied(OrderParams calldata p, uint64 claimOpenedAt) private view returns (bool) {
         address maker = ads[p.adId].maker;
-        if (halted[maker] || lastHaltedAt[maker] >= claimOpenedAt) return true;
+        if (halted[maker] || lastHaltedAt[maker] >= claimOpenedAt || lastResumedAt[maker] >= claimOpenedAt) {
+            return true;
+        }
         IKeyRegistry registry = keyRegistry;
         return address(registry) != address(0) && !registry.hasUsableSlot(p.adSettlementSigner);
     }

@@ -3733,6 +3733,24 @@ fn test_422_finalize_cancel_halted_then_resumed_after_the_claim_still_waits() {
     s.ad_manager.finalize_cancel(&p);
 }
 
+/// Halted from before the claim and resumed only at the window's last second: the halt covered
+/// the whole window, so the payout was denied and the cancel waits.
+#[test]
+fn test_422_finalize_cancel_halted_through_the_claim_resumed_at_the_end_still_waits() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let maker = maker_addr(&s);
+    s.ad_manager.halt_settlement(&maker);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER - 1);
+    s.ad_manager.resume_settlement(&maker);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
 /// A halt lifted before the claim opened never denied this window: ordinary timing.
 #[test]
 fn test_422_finalize_cancel_halt_lifted_before_the_claim_ordinary_timing() {
