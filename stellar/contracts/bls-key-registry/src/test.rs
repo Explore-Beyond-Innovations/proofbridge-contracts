@@ -1108,3 +1108,21 @@ fn position_guards_view_follows_set_position_guards() {
     client.set_position_guards(&soroban_sdk::vec![&env, guard.clone()]);
     assert_eq!(client.position_guards(), soroban_sdk::vec![&env, guard]);
 }
+
+/// #422: a shorten to the past stamps the kill; a rotation's future date does not.
+#[test]
+fn set_valid_until_stamps_a_kill_but_not_a_rotation() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    assert_eq!(client.last_retired_at(&account), 0);
+    set_valid_until(&env, &client, &v, MAKER, 0, false);
+    assert_eq!(
+        client.last_retired_at(&account),
+        0,
+        "a rotation is not a kill"
+    );
+    env.ledger().set_timestamp(T0 + 5);
+    set_valid_until(&env, &client, &v, MAKER, 0, true);
+    assert_eq!(client.last_retired_at(&account), T0 + 5);
+}

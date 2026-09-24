@@ -1922,6 +1922,19 @@ impl MockKeyRegistry {
             .get(&(soroban_sdk::symbol_short!("usable"), account))
             .unwrap_or(false)
     }
+
+    pub fn set_last_retired_at(env: Env, account: BytesN<32>, at: u64) {
+        env.storage()
+            .instance()
+            .set(&(soroban_sdk::symbol_short!("retired"), account), &at);
+    }
+
+    pub fn last_retired_at(env: Env, account: BytesN<32>) -> u64 {
+        env.storage()
+            .instance()
+            .get(&(soroban_sdk::symbol_short!("retired"), account))
+            .unwrap_or(0)
+    }
 }
 
 fn other_account(env: &Env, tag: u8) -> BytesN<32> {
@@ -3713,9 +3726,9 @@ fn test_422_finalize_cancel_halted_since_before_the_claim_waits_the_grace() {
     assert_eq!(ad_locked(&s), 0, "the lock is released after the grace");
 }
 
-/// Halted after the claim opened and resumed before the window ended: still denied.
+/// Halted after the deadline and resumed before the window ended: still denied.
 #[test]
-fn test_422_finalize_cancel_halted_then_resumed_after_the_claim_still_waits() {
+fn test_422_finalize_cancel_halted_then_resumed_after_the_deadline_still_waits() {
     let s = setup();
     let p = locked_ad_order(&s);
     let maker = maker_addr(&s);
@@ -3734,10 +3747,10 @@ fn test_422_finalize_cancel_halted_then_resumed_after_the_claim_still_waits() {
     s.ad_manager.finalize_cancel(&p);
 }
 
-/// Halted from before the claim and resumed only at the window's last second: the halt covered
+/// Halted from before the deadline and resumed only at the window's last second: the halt covered
 /// the whole window, so the payout was denied and the cancel waits.
 #[test]
-fn test_422_finalize_cancel_halted_through_the_claim_resumed_at_the_end_still_waits() {
+fn test_422_finalize_cancel_halted_through_the_window_resumed_at_the_end_still_waits() {
     let s = setup();
     let p = locked_ad_order(&s);
     let maker = maker_addr(&s);
@@ -3755,14 +3768,14 @@ fn test_422_finalize_cancel_halted_through_the_claim_resumed_at_the_end_still_wa
     s.ad_manager.finalize_cancel(&p);
 }
 
-/// A halt lifted before the claim opened never denied this window: ordinary timing.
+/// A halt lifted before the deadline never denied this window: ordinary timing.
 #[test]
-fn test_422_finalize_cancel_halt_lifted_before_the_claim_ordinary_timing() {
+fn test_422_finalize_cancel_halt_lifted_before_the_deadline_ordinary_timing() {
     let s = setup();
     let p = locked_ad_order(&s);
     let maker = maker_addr(&s);
     s.ad_manager.halt_settlement(&maker);
-    warp(&s, s.env.ledger().timestamp() + 1);
+    warp(&s, p.deadline - 1);
     s.ad_manager.resume_settlement(&maker);
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
@@ -3771,19 +3784,139 @@ fn test_422_finalize_cancel_halt_lifted_before_the_claim_ordinary_timing() {
     assert_eq!(ad_locked(&s), 0);
 }
 
-/// A halt in the same second the claim opened counts (the safe direction of `>=`).
+/// The boundary is the deadline itself: a resume in the deadline's second counts (`>=`).
 #[test]
-fn test_422_finalize_cancel_halt_in_the_claims_second_counts() {
+fn test_422_finalize_cancel_resume_in_the_deadlines_second_counts() {
     let s = setup();
     let p = locked_ad_order(&s);
+    let maker = maker_addr(&s);
+    s.ad_manager.halt_settlement(&maker);
     warp(&s, p.deadline);
+    s.ad_manager.resume_settlement(&maker);
     s.ad_manager.claim_cancel(&p);
-    s.ad_manager.halt_settlement(&maker_addr(&s));
     warp(&s, p.deadline + SUITE_BUFFER);
     assert_eq!(
         s.ad_manager.try_finalize_cancel(&p),
         Err(Ok(AdErr::TooEarly))
     );
+}
+
+/// Review F2: the claim's open time was the maker's to pick. A maker who halts through the cutoff,
+/// resumes, and opens and finalizes the claim in the same ledger still waits.
+#[test]
+fn test_422_finalize_cancel_late_claim_cannot_skip_the_grace() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let maker = maker_addr(&s);
+    s.ad_manager.halt_settlement(&maker);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.resume_settlement(&maker);
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// Review F3: a kill of the signer's slot since the lock is a denied payout even when a replacement
+/// slot keeps `has_usable_slot` true.
+#[test]
+fn test_422_finalize_cancel_signer_killed_since_the_lock_waits_the_grace() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    let reg = MockKeyRegistryClient::new(&s.env, &s.key_registry);
+    reg.set_last_retired_at(&p.ad_settlement_signer, &s.env.ledger().timestamp());
+    assert!(
+        reg.has_usable_slot(&p.ad_settlement_signer),
+        "a replacement slot is live"
+    );
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// A kill before the lock is history: the order was signed under a later slot.
+#[test]
+fn test_422_finalize_cancel_signer_killed_before_the_lock_ordinary_timing() {
+    let s = setup();
+    warp(&s, s.env.ledger().timestamp() + 10);
+    let p = locked_ad_order(&s);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .set_last_retired_at(&p.ad_settlement_signer, &(s.env.ledger().timestamp() - 1));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// The view the relayer's janitor asks: 0 before a claim, the window end after, plus the grace once
+/// the payout is denied.
+#[test]
+fn test_422_cancel_finalizes_at_reports_the_grace() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    assert_eq!(s.ad_manager.cancel_finalizes_at(&p), 0);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + SUITE_BUFFER
+    );
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+    assert_eq!(s.ad_manager.cancel_finalizes_at(&p), 0, "terminal");
+}
+
+/// Review F1: the dispute fallback is a door too. Every outcome but MakerForfeit hands the lock back
+/// to the maker, so a denied payout waits the grace past the challenge deadline.
+#[test]
+fn test_422_finalize_dispute_fallback_waits_the_grace_when_halted() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let order_hash = s.ad_manager.hash_order(&p);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    s.ad_manager
+        .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    let until = dm.effective_challenge_deadline(&order_hash);
+    warp(&s, until + 1);
+    // No anchor wired here: the grace is the buffer.
+    assert_eq!(
+        s.ad_manager.try_finalize_dispute(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, until + SUITE_BUFFER);
+    s.ad_manager.finalize_dispute(&p);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Resolved);
+}
+
+/// Not halted: the fallback finalizes at the challenge deadline as before.
+#[test]
+fn test_422_finalize_dispute_fallback_ordinary_timing_when_not_denied() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let order_hash = s.ad_manager.hash_order(&p);
+    s.ad_manager
+        .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    warp_past_dispute_window(&s, &dm, &order_hash);
+    s.ad_manager.finalize_dispute(&p);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Resolved);
 }
 
 /// With an anchor wired the grace is its delay for the order chain plus the buffer.

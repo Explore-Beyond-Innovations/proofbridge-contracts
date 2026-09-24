@@ -14,4 +14,10 @@ contract MockKeyRegistry is IKeyRegistry {
     function hasUsableSlot(bytes32 account) external view returns (bool) {
         return usable[account];
     }
+
+    mapping(bytes32 => uint64) public lastRetiredAt;
+
+    function setLastRetiredAt(bytes32 account, uint64 at) external {
+        lastRetiredAt[account] = at;
+    }
 }

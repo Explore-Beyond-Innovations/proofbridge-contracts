@@ -123,6 +123,8 @@ pub struct DisputeRecord {
 pub struct OrderRecord {
     pub status: Status,
     pub paused_at_open: u64,
+    /// When the leg opened (#422): a registry kill of the signer since then is a denied payout.
+    pub locked_at: u64,
 }
 
 /// The open presentation window on an order (`Claimed` ⇔ a record exists). `paused_at_open` is

@@ -148,6 +148,13 @@ interface IAdManager is IEscrow {
 
     /// @notice Lift the caller's halt; co-signed payouts resume in the same block.
     function resumeSettlement() external;
+
+    /**
+     * @notice When a claimed cancel really finalizes: the claim window's end plus the evidence grace
+     *         when the co-signed payout was denied (#422). 0 when the order is not `Claimed`. The
+     *         relayer's janitor asks this instead of computing the clock itself.
+     */
+    function cancelFinalizesAt(OrderParams calldata params) external view returns (uint256);
     function fundAd(string calldata adId, uint256 amount) external payable;
     function withdrawFromAd(string calldata adId, uint256 amount, address to) external;
     function closeAd(string calldata adId, address to) external;

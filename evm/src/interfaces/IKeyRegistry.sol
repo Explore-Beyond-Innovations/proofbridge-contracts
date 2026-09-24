@@ -11,4 +11,8 @@ pragma solidity ^0.8.34;
 ///      on chain.
 interface IKeyRegistry {
     function hasUsableSlot(bytes32 account) external view returns (bool);
+    /// @notice When `account` last shortened a slot to the past (a kill, never a rotation's future
+    ///         date); 0 if never. The escrow's cancel grace reads it (#422): a kill since the order
+    ///         was locked means the co-signed payout was denied.
+    function lastRetiredAt(bytes32 account) external view returns (uint64);
 }

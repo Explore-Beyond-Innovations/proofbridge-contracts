@@ -144,6 +144,8 @@ pub enum AdManagerError {
     Halted = 66,
     /// `resume_settlement` with no halt in force.
     NotHalted = 67,
+    /// The wired anchor did not answer `anchor_delay`; a denied order's cancel waits until it does.
+    AnchorDelayUnreadable = 68,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for AdManagerError {

@@ -102,16 +102,16 @@ pub fn get_key_registry(env: &Env) -> Option<Address> {
 
 // ── the settlement halt (#422) ────────────────────────────────────────────
 
-/// A maker's halt, absent until they first halt. `last_halted_at` survives a resume: the cancel
-/// grace treats a halt at or after the claim opened as a denied payout, resumed since or not.
+/// A maker's halt, absent until they first halt. `last_resumed_at` survives a resume: the cancel
+/// grace treats a halt in force at any point at or after the order's deadline as a denied payout.
 pub fn get_halt(env: &Env, maker: &Address) -> Option<Halt> {
     let key = (KEY_HALT, maker.clone());
     env.storage().persistent().get(&key)
 }
 
 /// Written on every halt and resume; the entry's TTL is extended each time, like every other entry a
-/// lever depends on. An archived entry reads as "never halted", so a maker who stays halted for
-/// longer than the persistent lifetime re-halts (the runbook says so).
+/// lever depends on. An archived entry is restored on access (protocol 23+), so a halt survives
+/// archival; the TTL is only extended on write.
 pub fn set_halt(env: &Env, maker: &Address, halt: &Halt) {
     let key = (KEY_HALT, maker.clone());
     env.storage().persistent().set(&key, halt);

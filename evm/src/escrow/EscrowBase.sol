@@ -246,7 +246,7 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     ///      lock/create of the same hash reverts.
     function _openOrder(bytes32 orderHash) internal {
         if (_orders[orderHash].status != Status.None) revert Escrow__OrderExists(orderHash);
-        _orders[orderHash] = Order(Status.Open, pausedSeconds);
+        _orders[orderHash] = Order(Status.Open, pausedSeconds, uint64(block.timestamp));
     }
 
     /// @dev Append this leg's leaf to the chain's MMR under `domain` (a `LeafDomain` constant).
@@ -407,6 +407,16 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
         Order storage o = _orders[orderHash];
         if (o.status == Status.Claimed) return _claimedWindowEnd(orderHash);
         return deadline + buffer + (pausedSeconds - o.pausedAtOpen);
+    }
+
+    /// @dev When the leg opened on this chain (0 for a leg that never did).
+    function _lockedAt(bytes32 orderHash) internal view returns (uint64) {
+        return _orders[orderHash].lockedAt;
+    }
+
+    /// @dev The leg's status, for children that gate a view on it.
+    function _statusOf(bytes32 orderHash) internal view returns (Status) {
+        return _orders[orderHash].status;
     }
 
     /// @dev The claimed arm of {_windowEnd}, for callers that have already asserted `Claimed`.

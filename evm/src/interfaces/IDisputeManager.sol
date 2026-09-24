@@ -29,6 +29,10 @@ interface IDisputeManager {
     /// @notice Who filed, if anyone. Reads no clock, so the escrow can call it mid-transaction.
     function initiatorOf(bytes32 orderHash) external view returns (address);
 
+    /// @notice The challenge deadline in real time (the recorded one plus the escrow's paused
+    ///         seconds since the dispute opened). The escrow's cancel grace counts from it (#422).
+    function effectiveChallengeDeadline(bytes32 orderHash) external view returns (uint256);
+
     /// @notice Whether a dispute is open on this order at all.
     function isDisputed(bytes32 orderHash) external view returns (bool);
 

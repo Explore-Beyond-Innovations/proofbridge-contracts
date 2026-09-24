@@ -59,12 +59,10 @@ contract AdManager is EscrowBase, IAdManager {
     ///         ignores it, so a halt can delay a payout but never keep both sides.
     mapping(address maker => bool) public halted;
 
-    /// @notice When `maker` last halted, and last resumed. `finalizeCancel` treats a halt that was in
-    ///         force at any point since the claim opened as a denied payout even if it was resumed
-    ///         since: a halt stamped at or after the claim, or a resume at or after it (the halt was
-    ///         in force when the claim opened). The resume may have come after the presentation
-    ///         cutoff, when it could no longer help the counterparty.
-    mapping(address maker => uint64) public lastHaltedAt;
+    /// @notice When `maker` last resumed. A halt in force at any point at or after an order's
+    ///         deadline is a denied payout even if it was resumed since: either it is still in force,
+    ///         or this stamp is at or after the deadline. The deadline is signed into the order, so
+    ///         nothing the maker does later moves the reference (#422 review, F2).
     mapping(address maker => uint64) public lastResumedAt;
 
     /*//////////////////////////////////////////////////////////////
@@ -166,12 +164,10 @@ contract AdManager is EscrowBase, IAdManager {
     /**
      * @inheritdoc IAdManager
      * @dev Custody-authorized and never pause-gated, like `setSettlementSigner`: an incident lever
-     *      must not be freezable. Idempotent, so a runbook that fires it twice is not an error; the
-     *      stamp moves each time, which only ever lengthens a cancel's wait.
+     *      must not be freezable. Idempotent, so a runbook that fires it twice is not an error.
      */
     function haltSettlement() external nonReentrant {
         halted[msg.sender] = true;
-        lastHaltedAt[msg.sender] = uint64(block.timestamp);
         emit SettlementHalted(msg.sender);
     }
 
@@ -281,10 +277,10 @@ contract AdManager is EscrowBase, IAdManager {
     function finalizeCancel(OrderParams calldata params) external nonReentrant whenNotPaused {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
         _requireFinalizable(orderHash);
-        // #422 rule 3: when the co-signed payout was denied while the window was open, the cancel
-        // waits for the order chain's SETTLED evidence to be anchorable and presented, so a maker
-        // paid on the other chain cannot also take the lock back.
-        if (_coSignDenied(params, claims[orderHash].openedAt)) {
+        // #422 rule 3: when the co-signed payout was denied, the cancel waits for the order chain's
+        // SETTLED evidence to be anchorable and presented, so a maker paid on the other chain cannot
+        // also take the lock back.
+        if (_coSignDenied(params, orderHash)) {
             _requireReached(_claimedWindowEnd(orderHash) + _evidenceGrace(params.orderChainId));
         }
 
@@ -338,6 +334,13 @@ contract AdManager is EscrowBase, IAdManager {
         if (!windowOver) revert Escrow__DisputeNotResolved(orderHash);
         // No ruling means the fallback: a mutual refund, the unified primitive's terminal (D4).
         if (outcome == Dispute.Outcome.None) outcome = Dispute.Outcome.MutualRefund;
+        // #422 rule 3, this door too: every outcome but MakerForfeit hands the lock back to the maker,
+        // so a denied payout waits the evidence grace past the challenge deadline (review F1).
+        if (outcome != Dispute.Outcome.MakerForfeit && _coSignDenied(params, orderHash)) {
+            _requireReached(
+                _disputeManager().effectiveChallengeDeadline(orderHash) + _evidenceGrace(params.orderChainId)
+            );
+        }
 
         Ad storage ad = ads[params.adId];
         uint256 adAmount = _adAmount(params);
@@ -590,18 +593,28 @@ contract AdManager is EscrowBase, IAdManager {
         if (!keyRegistry.hasUsableSlot(signer)) revert AdManager__SignerNotRegistered(signer);
     }
 
-    /// @dev Was this order's co-signed payout denied by a maker-side lever while its window was open:
-    ///      a halt in force, a halt in force at any point since the claim opened (stamped at or after
-    ///      it, or resumed at or after it), or the order's settlement signer left with no usable
-    ///      registry slot (a full retirement, lever 2; a rotation keeps a usable slot and does not
-    ///      count). No registry wired means no lever 2 to read.
-    function _coSignDenied(OrderParams calldata p, uint64 claimOpenedAt) private view returns (bool) {
+    /// @dev Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force
+    ///      now or at any point at or after the order's deadline (a resume stamp at or after it), a
+    ///      registry kill of the signer since the order was locked (`lastRetiredAt`, stamped only by a
+    ///      shorten to the past, never by a rotation's future date), or the signer left with no
+    ///      usable slot at all. Every reference is one the maker signed (the deadline) or the chain
+    ///      stamped (the lock), never one the maker can choose later. No registry wired means no
+    ///      lever 2 to read.
+    function _coSignDenied(OrderParams calldata p, bytes32 orderHash) private view returns (bool) {
         address maker = ads[p.adId].maker;
-        if (halted[maker] || lastHaltedAt[maker] >= claimOpenedAt || lastResumedAt[maker] >= claimOpenedAt) {
-            return true;
-        }
+        if (halted[maker] || lastResumedAt[maker] >= p.deadline) return true;
         IKeyRegistry registry = keyRegistry;
-        return address(registry) != address(0) && !registry.hasUsableSlot(p.adSettlementSigner);
+        if (address(registry) == address(0)) return false;
+        uint64 killedAt = registry.lastRetiredAt(p.adSettlementSigner);
+        return (killedAt != 0 && killedAt >= _lockedAt(orderHash)) || !registry.hasUsableSlot(p.adSettlementSigner);
+    }
+
+    /// @inheritdoc IAdManager
+    function cancelFinalizesAt(OrderParams calldata params) external view returns (uint256) {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        if (_statusOf(orderHash) != Status.Claimed) return 0;
+        uint256 end = _claimedWindowEnd(orderHash);
+        return _coSignDenied(params, orderHash) ? end + _evidenceGrace(params.orderChainId) : end;
     }
 
     /// @dev How long a denied order's cancel waits past its window: the order chain's anchor delay

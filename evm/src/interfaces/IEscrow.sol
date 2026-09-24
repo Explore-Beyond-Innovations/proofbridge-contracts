@@ -36,11 +36,13 @@ interface IEscrow {
         Resolved
     }
 
-    /// @notice The order's leg on this chain, one slot: its status and the escrow's paused-seconds
-    ///         counter when the leg opened (a pause stops the window's clock, see `pausedSeconds`).
+    /// @notice The order's leg on this chain, one slot: its status, the escrow's paused-seconds
+    ///         counter when the leg opened (a pause stops the window's clock, see `pausedSeconds`),
+    ///         and when it opened (#422: a registry kill since then is a denied payout).
     struct Order {
         Status status;
         uint64 pausedAtOpen;
+        uint64 lockedAt;
     }
 
     /*//////////////////////////////////////////////////////////////

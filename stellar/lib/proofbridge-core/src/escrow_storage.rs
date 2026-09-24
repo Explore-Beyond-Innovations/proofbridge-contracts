@@ -90,6 +90,7 @@ pub fn get_order(env: &Env, order_hash: &BytesN<32>) -> OrderRecord {
         .unwrap_or(OrderRecord {
             status: Status::None,
             paused_at_open: 0,
+            locked_at: 0,
         })
 }
 
@@ -105,6 +106,7 @@ pub fn open_order(env: &Env, order_hash: &BytesN<32>) {
         &OrderRecord {
             status: Status::Open,
             paused_at_open: get_paused_seconds(env),
+            locked_at: env.ledger().timestamp(),
         },
     );
 }
