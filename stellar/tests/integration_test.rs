@@ -3836,12 +3836,8 @@ fn test_422_finalize_cancel_signer_killed_since_the_lock_waits_the_grace() {
     let s = setup();
     let p = locked_ad_order(&s);
     warp(&s, s.env.ledger().timestamp() + 10);
-    let reg = MockKeyRegistryClient::new(&s.env, &s.key_registry);
-    reg.add_slot_expiry(&p.ad_settlement_signer, &s.env.ledger().timestamp());
-    assert!(
-        reg.has_usable_slot(&p.ad_settlement_signer),
-        "a replacement slot is live"
-    );
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .add_slot_expiry(&p.ad_settlement_signer, &s.env.ledger().timestamp());
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER);
@@ -3853,9 +3849,10 @@ fn test_422_finalize_cancel_signer_killed_since_the_lock_waits_the_grace() {
     s.ad_manager.finalize_cancel(&p);
 }
 
-/// A kill before the lock is history: the order was signed under a later slot.
+/// An expiry before the lock is history: the order was signed under a later slot. (The kill itself,
+/// and where its expiry lands, is the real registry's business: the `real_registry` tests below.)
 #[test]
-fn test_422_finalize_cancel_signer_killed_before_the_lock_ordinary_timing() {
+fn test_422_finalize_cancel_expiry_before_the_lock_ordinary_timing() {
     let s = setup();
     warp(&s, s.env.ledger().timestamp() + 10);
     let p = locked_ad_order(&s);
@@ -3928,14 +3925,13 @@ fn test_422_finalize_dispute_maker_forfeit_ignores_the_grace() {
     );
 }
 
-/// Pass 3 residual: a shorten made before the lock, naming a date inside the window, is an expiry
-/// during the order's life like any other.
+/// An expiry anywhere inside `[locked_at, deadline]` is an expiry during the order's life.
 #[test]
-fn test_422_finalize_cancel_pre_lock_shorten_expiring_in_the_window_waits_the_grace() {
+fn test_422_finalize_cancel_expiry_inside_the_interval_waits_the_grace() {
     let s = setup();
     let p = locked_ad_order(&s);
     MockKeyRegistryClient::new(&s.env, &s.key_registry)
-        .add_slot_expiry(&p.ad_settlement_signer, &(p.deadline + 600));
+        .add_slot_expiry(&p.ad_settlement_signer, &(p.deadline - 600));
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER);
@@ -3945,7 +3941,7 @@ fn test_422_finalize_cancel_pre_lock_shorten_expiring_in_the_window_waits_the_gr
     );
 }
 
-/// A rotation whose old slot outlives the cancel puts no expiry in the order's life: ordinary.
+/// A rotation whose old slot outlives the deadline puts no expiry in the order's life: ordinary.
 #[test]
 fn test_422_finalize_cancel_rotation_outliving_the_cancel_ordinary_timing() {
     let s = setup();
@@ -3954,6 +3950,166 @@ fn test_422_finalize_cancel_rotation_outliving_the_cancel_ordinary_timing() {
         .add_slot_expiry(&p.ad_settlement_signer, &(p.deadline + 30 * SUITE_BUFFER));
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// D15: the interval closes at the signed deadline, inclusive — an expiry in its second counts.
+#[test]
+fn test_422_finalize_cancel_expiry_at_the_deadline_counts() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .add_slot_expiry(&p.ad_settlement_signer, &p.deadline);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// D15: past the deadline no payout was possible, so an expiry there denied nothing — even one
+/// that lands before the finalize call.
+#[test]
+fn test_422_finalize_cancel_expiry_after_the_deadline_ordinary_timing() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .add_slot_expiry(&p.ad_settlement_signer, &(p.deadline + 1));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+// --- #422 D14: the denial read off the REAL registry -------------------------
+//
+// The mock restates the registry's predicate, so it proves wiring and nothing about what the
+// registry stores. These run the escrow against `bls_key_registry` itself, with the vector maker's
+// slots, and use the retirement the protocol actually sends: `set_valid_until(.., 1)`.
+
+/// The real registry with two of the vector maker's slots (a kill of one leaves `has_usable_slot`
+/// true: the state the attack needs), the escrow pointed at it, and the ad signed by that account.
+fn real_registry_signer(
+    s: &TestSetup,
+) -> (
+    bls_key_registry_contract::Client<'static>,
+    BytesN<32>,
+    bls_key_registry_contract::OwnerAuth,
+) {
+    // The suite's clock starts at 0 — next to the very date a kill names. Start in 2023 instead.
+    warp(s, 1_700_000_000);
+    let (client, account, owner) = real_registry_with_vector_maker(s);
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
+    let hexv =
+        |v: &serde_json::Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
+    let r = &vectors["slots"]["makerOnStellarTestnet"]["registrations"][1];
+    let auth = bls_key_registry_contract::OwnerAuth::Stellar(owner);
+    client.register(
+        &account,
+        &auth,
+        &BytesN::from_array(&s.env, &hexv(&r["pkNative"]).try_into().unwrap()),
+        &BytesN::from_array(&s.env, &hexv(&r["pop"]).try_into().unwrap()),
+        &1,
+    );
+    s.ad_manager.set_key_registry(&client.address);
+    let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
+    s.ad_manager.set_settlement_signer(&ad_id, &account);
+    (client, account, auth)
+}
+
+fn lock_signed_by(s: &TestSetup, account: &BytesN<32>) -> ad_manager_contract::OrderParams {
+    let mut params = ad_manager_order_params(&s.env, &s.tp);
+    params.ad_settlement_signer = account.clone();
+    s.ad_manager.lock_for_order(&params);
+    params
+}
+
+/// Pass 4 (c41-F3): the standard kill after the lock, a second slot still live. The stored expiry
+/// says 1970; the slot died at the kill, inside the order's life.
+#[test]
+fn test_422_real_registry_kill_after_the_lock_waits_the_grace() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    client.set_valid_until(&account, &auth, &0, &1);
+    assert!(
+        client.has_usable_slot(&account),
+        "the second slot keeps the identity usable"
+    );
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// A kill before the lock is history: the order was co-signed under the other slot.
+#[test]
+fn test_422_real_registry_kill_before_the_lock_ordinary_timing() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    client.set_valid_until(&account, &auth, &0, &1);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// A shorten made before the lock, naming a date inside the window: the slot dies at the date.
+#[test]
+fn test_422_real_registry_shorten_before_the_lock_naming_a_date_inside_waits_the_grace() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p_preview = ad_manager_order_params(&s.env, &s.tp);
+    client.set_valid_until(&account, &auth, &0, &(p_preview.deadline - 600));
+    warp(&s, s.env.ledger().timestamp() + 10);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// D15 at the boundary: a kill in the deadline's own second counts; one second later it does not.
+#[test]
+fn test_422_real_registry_kill_at_the_deadline_counts() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    client.set_valid_until(&account, &auth, &0, &1);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+#[test]
+fn test_422_real_registry_kill_after_the_deadline_ordinary_timing() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + 1);
+    client.set_valid_until(&account, &auth, &0, &1);
     warp(&s, p.deadline + SUITE_BUFFER);
     s.ad_manager.finalize_cancel(&p);
 }
