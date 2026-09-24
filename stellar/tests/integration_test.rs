@@ -4319,6 +4319,33 @@ fn test_422_finalize_dispute_fallback_waits_the_grace_when_halted() {
     assert_eq!(ad_status(&s), ad_manager_contract::Status::Resolved);
 }
 
+/// c41-J: a pause between the lock and the filing extends the bridger's unlock on this leg; the
+/// dispute's floor must carry it too, or the fallback ends the order while the payout is valid.
+#[test]
+fn test_j_finalize_dispute_fallback_carries_a_pause_before_the_filing() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let order_hash = s.ad_manager.hash_order(&p);
+    s.ad_manager.pause();
+    warp(&s, s.env.ledger().timestamp() + 3 * 3_600);
+    s.ad_manager.unpause();
+    s.ad_manager
+        .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    let until = dm.effective_challenge_deadline(&order_hash);
+    assert_eq!(
+        until,
+        p.deadline + SUITE_BUFFER + 3 * 3_600,
+        "the floor carries the pause since the lock"
+    );
+
+    warp(&s, p.deadline + SUITE_BUFFER + 1); // the old floor: the unlock is still open here
+    assert!(s.ad_manager.try_finalize_dispute(&p).is_err());
+    warp(&s, until + 1);
+    s.ad_manager.finalize_dispute(&p);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Resolved);
+}
+
 /// Not halted: the fallback finalizes at the challenge deadline as before.
 #[test]
 fn test_422_finalize_dispute_fallback_ordinary_timing_when_not_denied() {

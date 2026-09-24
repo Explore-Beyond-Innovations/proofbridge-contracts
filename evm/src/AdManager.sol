@@ -412,8 +412,8 @@ contract AdManager is EscrowBase, IAdManager {
         uint64 deadline,
         uint64 buffer
     ) internal {
-        Status s = _orders[orderHash].status;
-        if (s != Status.Open && s != Status.Claimed) revert Escrow__NotDisputable(orderHash, s);
+        Order storage o = _orders[orderHash];
+        if (o.status != Status.Open && o.status != Status.Claimed) revert Escrow__NotDisputable(orderHash, o.status);
 
         // Order matters, and it is the cheap half of keeping the two contracts in step. The module
         // call is the fallible step — an unset route, an underfunded bond — so it runs *before* this
@@ -422,10 +422,13 @@ contract AdManager is EscrowBase, IAdManager {
         // would instead leave it `Disputed` with no record, which is an order nobody can finalize.
         // The invariant "Disputed here implies a record there" is what `Dispute.t.sol` asserts over
         // arbitrary call sequences; this ordering is what makes the bad direction unreachable.
+        // c41-J: the module adds every second paused past this snapshot, so passing the order's own
+        // (from the lock, not the filing) makes its floor the primary's `_windowEnd` to the second —
+        // a pause between lock and filing extends the unlock and the dispute alike.
         _disputeManager().openDispute{value: msg.value}(
-            orderHash, amount, peerChainId, msg.sender, evidence, deadline, buffer, pausedSeconds
+            orderHash, amount, peerChainId, msg.sender, evidence, deadline, buffer, o.pausedAtOpen
         );
-        _orders[orderHash].status = Status.Disputed;
+        o.status = Status.Disputed;
     }
 
     /// @dev The order's two parties, as this chain knows them: whoever it would pay. Filing and

@@ -349,7 +349,10 @@ pub fn open_dispute(
         evidence,
         &deadline,
         &buffer,
-        &storage::get_paused_seconds(env),
+        // c41-J: the module adds every second paused past this snapshot, so the order's own (from
+        // the lock, not the filing) makes its floor the primary's window end to the second — a pause
+        // between lock and filing extends the unlock and the dispute alike.
+        &storage::get_order(env, order_hash).paused_at_open,
     );
     storage::set_order_status(env, order_hash, Status::Disputed);
     Ok(bond)
