@@ -85,6 +85,9 @@ jobs:
       - name: Install Node dependencies
         run: pnpm install --frozen-lockfile
 
+      # stellar/deploy is type-checked in the monorepo's copy of this workflow: it depends on
+      # @proofbridge/deployment-manifest, which this repo's workspace does not carry.
+
       # --optimize (bare flag on the pinned v28.0.0 CLI) opts the build into
       # wasm-opt, so the metered/deployed bytes are optimized. On a CLI compiled
       # without the optimize feature the flag is rejected and the build fails

@@ -377,6 +377,22 @@ impl DisputeManagerContract {
         storage::is_escrow(&env, &escrow)
     }
 
+    /// Who holds the admin role, or `None` before `initialize`. The deploy CLI's `handover --verify`
+    /// reads this to record acceptance (#424); every other admin-bearing contract already had one.
+    pub fn get_admin(env: Env) -> Option<Address> {
+        storage::get_admin(&env)
+    }
+
+    /// The arbiter `set_arbiter` installed, `None` before it (#424: read by the deploy CLI).
+    pub fn get_arbiter(env: Env) -> Option<Address> {
+        storage::get_arbiter(&env)
+    }
+
+    /// The fee pool `set_protocol_fee_pool` installed, `None` before it (#424: same reader).
+    pub fn get_protocol_fee_pool(env: Env) -> Option<Address> {
+        storage::get_fee_pool(&env)
+    }
+
     /// The dispute parameters for a peer route. `None` = disputes are not configured for it, which
     /// the filing path treats as fail-closed.
     pub fn dispute_params(env: Env, chain_id: u128) -> Option<DisputeParams> {

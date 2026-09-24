@@ -52,12 +52,21 @@ pnpm --filter @proofbridge/stellar-deploy cli link \
   --peer ../../evm/deployments/11155111.json
 ```
 
+### `handover --to <G…>` / `handover --verify`
+
+Every contract is initialized with the source account as admin. `handover --to` nominates the
+real admin on every admin-bearing contract (the same six as on EVM) over `transfer_admin` /
+`accept_admin`; the nominee calls `accept_admin` on each, and `handover --verify` records it.
+The contracts expose no pending admin, so a second `handover` re-nominates the same key: safe,
+not silent. After the handover, `deploy` and `link` describe admin-only calls as the
+`stellar contract invoke` lines the admin has to run, send nothing, and exit 2.
+
 ## Environment
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `STELLAR_NETWORK` | `testnet` | Name of the `stellar network` profile to use |
-| `STELLAR_SOURCE_ACCOUNT` | `admin` | `stellar keys` identity that signs deploys |
+| `STELLAR_SOURCE_ACCOUNT` | `admin` | `stellar keys` identity that signs deploys, and the admin until `handover` |
 | `STELLAR_WASM_DIR` | `contracts/stellar/target/wasm32v1-none/release` | Build artifacts |
 | `STELLAR_DEPOSIT_VK` | `proof_circuits/deposits/target/vk` | Verifier key for `Verifier.initialize` |
 | `STELLAR_DEPLOYMENTS_DIR` | `contracts/stellar/deployments` | Manifest output dir |

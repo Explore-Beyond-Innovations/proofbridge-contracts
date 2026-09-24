@@ -50,13 +50,33 @@ pnpm --filter @proofbridge/evm-deploy cli link \
   --peer ../../stellar/deployments/1000001.json
 ```
 
+### `handover --to <address>` / `handover --verify`
+
+Every contract is deployed with the deployer as admin. `handover --to` nominates the real admin (a
+multisig, in production) on every admin-bearing contract — `MerkleManager`, `AdManager`,
+`OrderPortal`, `BLSKeyRegistry`, `RootAnchor`, `DisputeManager` — over the two-step
+`transferAdmin` / `acceptAdmin`, and records `pending` in the manifest. The nominee then calls
+`acceptAdmin()` on each, and `handover --verify` reads the chain and records `current`.
+
+```
+pnpm --filter @proofbridge/evm-deploy cli handover --to 0x…
+# ...the nominee accepts on all six...
+pnpm --filter @proofbridge/evm-deploy cli handover --verify
+```
+
+After the handover, `deploy` and `link` read `admin()` on every contract they configure before the
+first transaction. A call to a contract whose admin is no longer the signer is **described**
+(target, function, arguments, calldata) for the admin to make, not sent, not recorded, and the
+command exits 2. A contract deployed fresh after the handover has the deployer as admin, is wired
+in that run, and needs its own `handover`.
+
 ## Environment
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `EVM_RPC_URL` | *required* | JSON-RPC endpoint |
-| `EVM_ADMIN_PRIVATE_KEY` | *required* | Deployer + initial admin |
-| `ADMIN` | deployer | Overrides the contract admin address |
+| `EVM_ADMIN_PRIVATE_KEY` | *required* | Deployer, and the admin until `handover` |
+| `ADMIN` | — | **No longer read.** The deployer is always the admin at deploy time (deploy and link are admin-only); `deploy` refuses it if set to anyone else. Hand over afterwards with `handover` (#424). |
 | `CHAIN_NAME` | `evm-<chainId>` | Human-readable name in the manifest |
 | `DEPLOY_ENV` | `local` | Logical env tag (`local`/`testnet`/`mainnet`) |
 | `GIT_COMMIT` | `unknown` | Commit sha stamped into `meta.commit` |

@@ -1,6 +1,17 @@
 import * as fs from "fs";
 import { ethers } from "ethers";
-import { MANAGER_ROLE, connect, envOrDefault, requireEnv } from "./common.js";
+import {
+  ADMIN_BEARING,
+  Acting,
+  MANAGER_ROLE,
+  adminBlockFromChain,
+  adminsOf,
+  connect,
+  envOrDefault,
+  foreignAdmins,
+  requireEnv,
+  type DescribedCall,
+} from "./common.js";
 import {
   contractFactory,
   contractFactoryLinked,
@@ -26,7 +37,12 @@ export interface DeployCoreOptions {
   env?: string;
   /** Commit sha stamped into the manifest. Defaults to GIT_COMMIT or "unknown". */
   commit?: string;
-  /** Admin address. Defaults to $ADMIN or deployer. */
+  /**
+   * Refused unless it is the deployer (#424). Every contract is deployed with the deployer as admin,
+   * because deploy and link make admin-only calls from that key; the real admin is nominated
+   * afterwards by `handover`. Kept so a caller naming one gets the refusal rather than a silent
+   * ignore.
+   */
   admin?: string;
   /** wNativeToken branding. Defaults: Wrapped Native / WNATIVE / 18. */
   wNative?: { name?: string; symbol?: string; decimals?: number };
@@ -38,6 +54,8 @@ export interface DeployCoreOptions {
 
 export interface DeployCoreResult {
   manifestPath: string;
+  /** Admin-only calls the signer could not make (the admin was handed over); empty when all sent. */
+  described: DescribedCall[];
   chainId: bigint;
   contracts: {
     verifier: string;
@@ -102,7 +120,17 @@ async function deployCoreRun(
     address: deployer,
   } = await connect(rpcUrl, privateKey);
 
-  const admin = opts.admin ?? envOrDefault("ADMIN", deployer);
+  // The deployer is the admin at deploy time, always. A named ADMIN used to be the constructor
+  // argument, and every admin-only wiring call from the deployer then reverted, twelve contracts in.
+  const namedAdmin = opts.admin ?? process.env.ADMIN;
+  if (namedAdmin && namedAdmin.toLowerCase() !== deployer.toLowerCase()) {
+    throw new Error(
+      `deploy-core: ADMIN=${namedAdmin} is not the deployer ${deployer}. Every contract is deployed with the deployer as admin ` +
+        `(deploy and link are admin-only); hand over afterwards with \`handover --to ${namedAdmin}\` ` +
+        `(deploy-contracts.sh --handover with HANDOVER_ADMIN set). Nothing was sent.`,
+    );
+  }
+  const admin = deployer;
   const env = opts.env ?? envOrDefault("DEPLOY_ENV", "local");
   const commit = opts.commit ?? envOrDefault("GIT_COMMIT", "unknown");
   const chainName =
@@ -120,7 +148,7 @@ async function deployCoreRun(
   const existing = reuse ? await loadOrNull(outPath) : null;
 
   console.log(`[evm-deploy] chain=${chainName} (id=${chainId}) env=${env}`);
-  console.log(`[evm-deploy] deployer=${deployer} admin=${admin}`);
+  console.log(`[evm-deploy] deployer=${deployer} (admin until handover)`);
   if (existing) {
     console.log(`[evm-deploy] reusing addresses from ${outPath}`);
   }
@@ -160,6 +188,8 @@ async function deployCoreRun(
   // ...and so is what depends on the chain. The manifest is a claim; the chain is the fact.
   const reusedAgentPolicy = existing?.contracts.agentPolicy?.address;
   let reusedAgentCodec = existing?.contracts.agentPolicyCodec?.address;
+  let foreign: string[] = [];
+  let heldAdmins: Awaited<ReturnType<typeof adminsOf>> = [];
   if (existing) {
     const provider = signer.provider!;
     const entries = Object.entries(existing.contracts)
@@ -182,6 +212,15 @@ async function deployCoreRun(
         `${outPath} names ${codeless.length} of ${entries.length} contract(s) with no code on chain ${chainId}:\n    ${codeless.join("\n    ")}\n  ${advice}`,
       );
     }
+
+    // Who holds admin on what is reused. After a handover the deployer is not the admin, and every
+    // admin-only wiring call below is described for the admin instead of sent (#424).
+    const reusedAdminBearing = ADMIN_BEARING.flatMap(([key, artifact]) => {
+      const address = existing.contracts[key]?.address;
+      return address ? [{ label: artifact, artifact, address }] : [];
+    });
+    heldAdmins = await adminsOf(reusedAdminBearing, (a, f, n) => attachContract(a, f, n, signer));
+    foreign = foreignAdmins(deployer, heldAdmins, "evm-deploy");
 
     // A reused pre-2.3c AdManager has no `keyRegistry()`, and the wiring below cannot do without it.
     try {
@@ -237,6 +276,9 @@ async function deployCoreRun(
       }
     }
   }
+
+  // Per contract: what this run deploys has the deployer as admin and is always wired now (H1).
+  const acting = new Acting(foreign, nonces, "wire");
 
   async function deployIfMissing(
     label: string,
@@ -438,9 +480,7 @@ async function deployCoreRun(
         console.log(`  [skip] DisputeManager.${fn} already ${value}`);
         continue;
       }
-      const tx = await dm.getFunction(fn)(value, { nonce: nonces.next() });
-      await tx.wait();
-      console.log(`  [deploy] DisputeManager.${fn}(${value})`);
+      await acting.call(dm, "DisputeManager", fn, [value], `DisputeManager.${fn}(${value})`);
     }
   }
 
@@ -472,25 +512,29 @@ async function deployCoreRun(
   );
 
   // ── wire the escrows as the registry's revoke guards ──────────────
-  // Re-set every run (idempotent); guards only gate key revocation/rotation.
+  // Re-set every run (idempotent); guards only gate key revocation/rotation. Whether this can be
+  // sent was decided up front; a revert here is a failure, not a warning.
   {
-    const registry = attachContract(
-      blsKeyRegistryAddr,
-      "BLSKeyRegistry",
-      "BLSKeyRegistry",
-      signer,
-    );
-    const setGuards = registry.getFunction("setPositionGuards");
-    try {
-      // Estimate before taking a nonce: a revert here (signer not the registry admin) must not
-      // leave a gap the next tx.wait() hangs on.
-      await setGuards.estimateGas([adManagerAddr, orderPortalAddr]);
-      const tx = await setGuards([adManagerAddr, orderPortalAddr], { nonce: nonces.next() });
-      await tx.wait();
-      console.log(`  [wire] BLSKeyRegistry.setPositionGuards([AdManager, OrderPortal])`);
-    } catch (err) {
-      console.warn(
-        `  [wire] setPositionGuards FAILED (signer may not be registry admin): ${err}`,
+    const registry = attachContract(blsKeyRegistryAddr, "BLSKeyRegistry", "BLSKeyRegistry", signer);
+    // `positionGuards` is a public array with no length getter: read by index until it reverts.
+    const want = [adManagerAddr, orderPortalAddr].map((a) => a.toLowerCase());
+    const have: string[] = [];
+    for (let i = 0; ; i++) {
+      try {
+        have.push(String(await registry.getFunction("positionGuards")(i)).toLowerCase());
+      } catch {
+        break;
+      }
+    }
+    if (have.length === want.length && have.every((g, i) => g === want[i])) {
+      console.log(`  [skip] BLSKeyRegistry.setPositionGuards already [AdManager, OrderPortal]`);
+    } else {
+      await acting.call(
+        registry,
+        "BLSKeyRegistry",
+        "setPositionGuards",
+        [[adManagerAddr, orderPortalAddr]],
+        `BLSKeyRegistry.setPositionGuards([AdManager, OrderPortal])`,
       );
     }
   }
@@ -513,46 +557,24 @@ async function deployCoreRun(
     if (cur.toLowerCase() === blsKeyRegistryAddr.toLowerCase()) {
       console.log(`  [skip] AdManager.setKeyRegistry already set`);
     } else {
-      const setKeyRegistry = adManager.getFunction("setKeyRegistry");
-      try {
-        await setKeyRegistry.estimateGas(blsKeyRegistryAddr);
-      } catch (err) {
-        throw new Error(
-          `AdManager.setKeyRegistry(${blsKeyRegistryAddr}) would revert (signer not the AdManager admin?): ${err}`,
-        );
-      }
-      const tx = await setKeyRegistry(blsKeyRegistryAddr, { nonce: nonces.next() });
-      await tx.wait();
-      console.log(`  [wire] AdManager.setKeyRegistry(${blsKeyRegistryAddr})`);
+      await acting.call(adManager, "AdManager", "setKeyRegistry", [blsKeyRegistryAddr], `AdManager.setKeyRegistry(${blsKeyRegistryAddr})`);
     }
   }
 
-  // ── grant MANAGER_ROLE to AdManager + OrderPortal ─────────────────
-  // Re-granted every run (idempotent); caught in case admin is a multisig that'll grant out of band.
-  const merkleManager = attachContract(
-    merkleManagerAddr,
-    "MerkleManager",
-    "MerkleManager",
-    signer,
-  );
+  // ── grant MANAGER_ROLE to AdManager + OrderPortal + Registrar ─────
+  // Check-first, like every other wire: a role already held is not granted again, and whether a
+  // grant can be sent at all was decided up front.
+  const merkleManager = attachContract(merkleManagerAddr, "MerkleManager", "MerkleManager", signer);
   for (const { name, addr } of [
     { name: "AdManager", addr: adManagerAddr },
     { name: "OrderPortal", addr: orderPortalAddr },
     { name: "Registrar", addr: registrarAddr },
   ]) {
-    try {
-      const tx = await merkleManager.getFunction("grantRole")(
-        MANAGER_ROLE,
-        addr,
-        { nonce: nonces.next() },
-      );
-      await tx.wait();
-      console.log(`  [grant] MANAGER_ROLE → ${name}`);
-    } catch (err) {
-      console.warn(
-        `  [grant] MANAGER_ROLE → ${name} FAILED (signer may lack DEFAULT_ADMIN_ROLE): ${err}`,
-      );
+    if (await merkleManager.getFunction("hasRole")(MANAGER_ROLE, addr)) {
+      console.log(`  [skip] MANAGER_ROLE → ${name} already granted`);
+      continue;
     }
+    await acting.call(merkleManager, "MerkleManager", "grantRole", [MANAGER_ROLE, addr], `MANAGER_ROLE → ${name}`);
   }
 
   const manifest = buildManifest({
@@ -588,13 +610,26 @@ async function deployCoreRun(
     rootAnchorConfig: existing?.contracts.rootAnchor
       ? existing.rootAnchorConfig
       : { signers: anchorSigners, threshold: anchorThreshold, anchorDelays: {} },
+    // Who holds admin, from what the chain answered for the reused contracts; the deployer for a
+    // fresh deploy. `handover` moves it.
+    admin: adminBlockFromChain(existing?.admin, heldAdmins, deployer, "evm-deploy"),
   });
 
   await writeManifest(outPath, manifest);
   console.log(`[evm-deploy] wrote manifest → ${outPath}`);
+  acting.report();
+  if (foreign.length > 0 && run.deployed.length > 0) {
+    // Deployed after a handover: wired now, with the deployer as admin, and not yet handed over.
+    const holder = heldAdmins.find((h) => h.admin.toLowerCase() !== deployer.toLowerCase())?.admin ?? "<admin>";
+    console.warn(
+      `[evm-deploy] ${run.deployed.length} contract(s) deployed in this run (${run.deployed.map((d) => d.label).join(", ")}) have the deployer as admin ` +
+        `while the rest were handed over; run \`handover --to ${holder}\` to hand them over too.`,
+    );
+  }
 
   return {
     manifestPath: outPath,
+    described: acting.described,
     chainId,
     contracts: {
       verifier: verifierAddr,

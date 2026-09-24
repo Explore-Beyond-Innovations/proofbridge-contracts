@@ -6,7 +6,8 @@ import {
   duplicatePairKeys,
 } from "@proofbridge/deployment-manifest";
 import { DEFAULT_STELLAR_CHAIN_ID } from "./common.js";
-import { invokeContract } from "./stellar-cli.js";
+import { Acting, getAddress, invokeContract, type DescribedCall } from "./stellar-cli.js";
+import { adminsOf, foreignAdmins } from "./handover.js";
 import { manifestPath, writeManifest } from "./manifest.js";
 
 export interface StellarLinkOptions {
@@ -30,6 +31,8 @@ export interface StellarLinkResult {
   peerChainId: string;
   chainTxs: number;
   routeTxs: number;
+  /** Calls the source account could not make because the admin was handed over; empty when all sent. */
+  described: DescribedCall[];
 }
 
 /** Wires set_chain + set_token_route on this chain's AdManager + OrderPortal from the peer manifest. Idempotent. */
@@ -57,6 +60,14 @@ export async function link(
   );
 
   const peerChainId = peer.chain.chainId;
+
+  // Who holds admin on the four contracts link configures, read before anything is sent; a call
+  // to one handed over is described, not sent (#424). A section of the manifest is written only
+  // when its value is on chain — already there, or sent by this run — so a described call leaves
+  // the section it would have set as it was.
+  const held = adminsOf(local.contracts, ["adManager", "orderPortal", "rootAnchor", "disputeManager"]);
+  const acting = new Acting(foreignAdmins(getAddress(), held, "stellar-link"), "link");
+  const record = async () => writeManifest(localPath, local);
 
   // ── Chain-level linking ────────────────────────────────────────────
   // Stellar CLI takes bytes without the `0x` prefix.
@@ -87,35 +98,17 @@ export async function link(
   if (chainAlreadySet(local.contracts.adManager.address, "order_portal", peer.contracts.orderPortal.addressBytes32)) {
     console.log(`  [skip] AdManager.set_chain(${peerChainId}) already set`);
   } else {
-    invokeContract(local.contracts.adManager.address, "set_chain", [
-      "--order_chain_id",
-      peerChainId,
-      "--order_portal",
-      stripHex(peer.contracts.orderPortal.addressBytes32),
-      "--supported",
-      "true",
-    ]);
-    chainTxs++;
-    console.log(
-      `  [link] AdManager.set_chain(${peerChainId}, peerOrderPortal=${peer.contracts.orderPortal.address})`,
-    );
+    if (acting.call(local.contracts.adManager.address, "AdManager", "set_chain",
+      ["--order_chain_id", peerChainId, "--order_portal", stripHex(peer.contracts.orderPortal.addressBytes32), "--supported", "true"],
+      `AdManager.set_chain(${peerChainId}, peerOrderPortal=${peer.contracts.orderPortal.address})`)) chainTxs++;
   }
 
   if (chainAlreadySet(local.contracts.orderPortal.address, "ad_manager", peer.contracts.adManager.addressBytes32)) {
     console.log(`  [skip] OrderPortal.set_chain(${peerChainId}) already set`);
   } else {
-    invokeContract(local.contracts.orderPortal.address, "set_chain", [
-      "--ad_chain_id",
-      peerChainId,
-      "--ad_manager",
-      stripHex(peer.contracts.adManager.addressBytes32),
-      "--supported",
-      "true",
-    ]);
-    chainTxs++;
-    console.log(
-      `  [link] OrderPortal.set_chain(${peerChainId}, peerAdManager=${peer.contracts.adManager.address})`,
-    );
+    if (acting.call(local.contracts.orderPortal.address, "OrderPortal", "set_chain",
+      ["--ad_chain_id", peerChainId, "--ad_manager", stripHex(peer.contracts.adManager.addressBytes32), "--supported", "true"],
+      `OrderPortal.set_chain(${peerChainId}, peerAdManager=${peer.contracts.adManager.address})`)) chainTxs++;
   }
 
   // ── Root-auth module (module C) ───────────────────────────────────
@@ -131,16 +124,8 @@ export async function link(
       ["AdManager", local.contracts.adManager.address],
       ["OrderPortal", local.contracts.orderPortal.address],
     ] as const) {
-      invokeContract(escrow, "set_root_verifier", [
-        "--chain_id",
-        peerChainId,
-        "--module",
-        verifierEntry.address,
-      ]);
-      chainTxs++;
-      console.log(
-        `  [link] ${name}.set_root_verifier(${peerChainId}, ${verifierEntry.address}) - BLS gate ENFORCED for peer roots`,
-      );
+      if (acting.call(escrow, name, "set_root_verifier", ["--chain_id", peerChainId, "--module", verifierEntry.address],
+        `${name}.set_root_verifier(${peerChainId}, ${verifierEntry.address}) - BLS gate ENFORCED for peer roots`)) chainTxs++;
     }
   } else {
     console.log(
@@ -166,21 +151,17 @@ export async function link(
       ["--source_chain_id", peerChainId],
       { send: false },
     ).trim();
-    if (cur.replace(/"/g, "") === delay) {
+    let onChain = cur.replace(/"/g, "") === delay;
+    if (onChain) {
       console.log(`  [skip] RootAnchor.set_anchor_delay(${peerChainId}) already ${delay}s`);
     } else {
-      invokeContract(local.contracts.rootAnchor.address, "set_anchor_delay", [
-        "--source_chain_id",
-        peerChainId,
-        "--delay",
-        delay,
-      ]);
-      chainTxs++;
-      console.log(`  [link] RootAnchor.set_anchor_delay(${peerChainId}, ${delay}s)`);
+      onChain = acting.call(local.contracts.rootAnchor.address, "RootAnchor", "set_anchor_delay",
+        ["--source_chain_id", peerChainId, "--delay", delay], `RootAnchor.set_anchor_delay(${peerChainId}, ${delay}s)`);
+      if (onChain) chainTxs++;
     }
-    if (local.rootAnchorConfig) {
+    if (onChain && local.rootAnchorConfig) {
       local.rootAnchorConfig.anchorDelays[peerChainId] = delay;
-      await writeManifest(localPath, local);
+      await record();
     }
   } else {
     console.log("  [link] no RootAnchor in the local manifest; redeploy core to add the notary");
@@ -226,6 +207,7 @@ export async function link(
         return false;
       }
     };
+    let onChain = true;
     for (const [name, escrow] of [
       ["AdManager", local.contracts.adManager.address],
       ["OrderPortal", local.contracts.orderPortal.address],
@@ -234,19 +216,14 @@ export async function link(
         console.log(`  [skip] ${name}.set_route_timing(${peerChainId}) already set`);
         continue;
       }
-      invokeContract(escrow, "set_route_timing", [
-        "--chain_id",
-        peerChainId,
-        "--timing",
-        timingArg,
-      ]);
-      chainTxs++;
-      console.log(
-        `  [link] ${name}.set_route_timing(${peerChainId}, minWindow=${timing.minWindow}s buffer=${timing.buffer}s margin=${timing.margin}s longBackstop=${timing.longBackstop}s claimStagger=${timing.claimStagger}s)`,
-      );
+      if (acting.call(escrow, name, "set_route_timing", ["--chain_id", peerChainId, "--timing", timingArg],
+        `${name}.set_route_timing(${peerChainId}, minWindow=${timing.minWindow}s buffer=${timing.buffer}s margin=${timing.margin}s longBackstop=${timing.longBackstop}s claimStagger=${timing.claimStagger}s)`)) chainTxs++;
+      else onChain = false;
     }
-    local.routeTiming[peerChainId] = timing;
-    await writeManifest(localPath, local);
+    if (onChain) {
+      local.routeTiming[peerChainId] = timing;
+      await record();
+    }
   }
   if (local.contracts.rootAnchor) {
     const anchorAddr = local.contracts.rootAnchor.address;
@@ -267,9 +244,7 @@ export async function link(
         console.log(`  [skip] ${name}.set_root_anchor already ${anchorAddr}`);
         continue;
       }
-      invokeContract(escrow, "set_root_anchor", ["--anchor", anchorAddr]);
-      chainTxs++;
-      console.log(`  [link] ${name}.set_root_anchor(${anchorAddr}) - evidence paths live`);
+      if (acting.call(escrow, name, "set_root_anchor", ["--anchor", anchorAddr], `${name}.set_root_anchor(${anchorAddr}) - evidence paths live`)) chainTxs++;
     }
   } else {
     console.log("  [link] no RootAnchor in the local manifest; the escrows' evidence paths stay fail-closed");
@@ -297,16 +272,12 @@ export async function link(
       if (readOne(escrow, "get_dispute_manager", []) === moduleAddr) {
         console.log(`  [skip] ${name}.set_dispute_manager already ${moduleAddr}`);
       } else {
-        invokeContract(escrow, "set_dispute_manager", ["--manager", moduleAddr]);
-        chainTxs++;
-        console.log(`  [link] ${name}.set_dispute_manager(${moduleAddr})`);
+        if (acting.call(escrow, name, "set_dispute_manager", ["--manager", moduleAddr], `${name}.set_dispute_manager(${moduleAddr})`)) chainTxs++;
       }
       if (readOne(moduleAddr, "is_escrow", ["--escrow", escrow]) === true) {
         console.log(`  [skip] DisputeManager.set_escrow(${name}) already allowed`);
       } else {
-        invokeContract(moduleAddr, "set_escrow", ["--escrow", escrow, "--allowed", "true"]);
-        chainTxs++;
-        console.log(`  [link] DisputeManager.set_escrow(${name}=${escrow}, true)`);
+        if (acting.call(moduleAddr, "DisputeManager", "set_escrow", ["--escrow", escrow, "--allowed", "true"], `DisputeManager.set_escrow(${name}=${escrow}, true)`)) chainTxs++;
       }
     }
 
@@ -337,22 +308,18 @@ export async function link(
       BigInt(cur.challenge_period ?? -1) === challengePeriod &&
       BigInt(cur.bond_floor ?? -1) === BigInt(params.bondFloor) &&
       Number(cur.bond_bps ?? -1) === params.bondBps;
-    if (same) {
+    let onChain = same;
+    if (onChain) {
       console.log(`  [skip] DisputeManager.set_dispute_params(${peerChainId}) already set`);
     } else {
-      invokeContract(moduleAddr, "set_dispute_params", [
-        "--chain_id",
-        peerChainId,
-        "--params",
-        paramsArg,
-      ]);
-      chainTxs++;
-      console.log(
-        `  [link] DisputeManager.set_dispute_params(${peerChainId}, challengePeriod=${params.challengePeriod}s bondFloor=${params.bondFloor} bondBps=${params.bondBps})`,
-      );
+      onChain = acting.call(moduleAddr, "DisputeManager", "set_dispute_params", ["--chain_id", peerChainId, "--params", paramsArg],
+        `DisputeManager.set_dispute_params(${peerChainId}, challengePeriod=${params.challengePeriod}s bondFloor=${params.bondFloor} bondBps=${params.bondBps})`);
+      if (onChain) chainTxs++;
     }
-    local.disputeParams[peerChainId] = params;
-    await writeManifest(localPath, local);
+    if (onChain) {
+      local.disputeParams[peerChainId] = params;
+      await record();
+    }
   } else {
     console.log("  [link] no DisputeManager in the local manifest; disputes stay unavailable on this chain");
   }
@@ -389,39 +356,25 @@ export async function link(
       continue;
     }
 
-    invokeContract(local.contracts.adManager.address, "set_token_route", [
-      "--ad_token",
-      stripHex(localTok.addressBytes32),
-      "--order_token",
-      stripHex(peerTok.addressBytes32),
-      "--order_chain_id",
-      peerChainId,
-    ]);
-    routeTxs++;
-
-    invokeContract(local.contracts.orderPortal.address, "set_token_route", [
-      "--order_token",
-      stripHex(localTok.addressBytes32),
-      "--ad_chain_id",
-      peerChainId,
-      "--ad_token",
-      stripHex(peerTok.addressBytes32),
-    ]);
-    routeTxs++;
-
-    console.log(
-      `  [link] route "${localTok.pairKey}": ${localTok.symbol} ↔ ${peerTok.symbol}`,
-    );
+    if (acting.call(local.contracts.adManager.address, "AdManager", "set_token_route",
+      ["--ad_token", stripHex(localTok.addressBytes32), "--order_token", stripHex(peerTok.addressBytes32), "--order_chain_id", peerChainId],
+      `AdManager.set_token_route("${localTok.pairKey}")`)) routeTxs++;
+    if (acting.call(local.contracts.orderPortal.address, "OrderPortal", "set_token_route",
+      ["--order_token", stripHex(localTok.addressBytes32), "--ad_chain_id", peerChainId, "--ad_token", stripHex(peerTok.addressBytes32)],
+      `OrderPortal.set_token_route("${localTok.pairKey}")`)) routeTxs++;
+    console.log(`  [link] route "${localTok.pairKey}": ${localTok.symbol} ↔ ${peerTok.symbol}`);
   }
 
   console.log(
-    `[stellar-link] done: ${chainTxs} chain tx(s), ${routeTxs} route tx(s)`,
+    `[stellar-link] done: ${chainTxs} chain tx(s), ${routeTxs} route tx(s)${acting.described.length ? `, ${acting.described.length} described` : ""}`,
   );
+  acting.report();
   return {
     localChainId: local.chain.chainId,
     peerChainId: peer.chain.chainId,
     chainTxs,
     routeTxs,
+    described: acting.described,
   };
 }
 

@@ -437,6 +437,12 @@ impl BlsKeyRegistry {
     pub fn admin(env: Env) -> Address {
         storage::get_admin(&env)
     }
+
+    /// The revoke guards `set_position_guards` installed, empty before any. The deploy CLI reads
+    /// this so a redeploy sends `set_position_guards` only when it would change something (#424).
+    pub fn position_guards(env: Env) -> Vec<Address> {
+        storage::get_guards(&env).unwrap_or_else(|| Vec::new(&env))
+    }
 }
 
 // =============================================================================

@@ -525,6 +525,25 @@ fn only_the_escrow_that_opened_a_dispute_may_settle_it() {
         .is_err());
 }
 
+/// The handover reads who the admin is (#424): the deployer until the nominee accepts, the nominee
+/// after, and never anyone else in between.
+#[test]
+fn get_admin_follows_the_two_step_handover() {
+    let f = fixture();
+    assert_eq!(f.client.get_admin(), Some(f.admin.clone()));
+
+    let multisig = Address::generate(&f.env);
+    f.client.transfer_admin(&multisig);
+    assert_eq!(
+        f.client.get_admin(),
+        Some(f.admin.clone()),
+        "nominated, not yet accepted"
+    );
+
+    f.client.accept_admin();
+    assert_eq!(f.client.get_admin(), Some(multisig));
+}
+
 #[test]
 fn the_admin_is_not_the_arbiter() {
     let f = fixture();
@@ -535,4 +554,19 @@ fn the_admin_is_not_the_arbiter() {
         f.client.try_set_escrow(&stranger, &true).is_ok(),
         "admin may"
     );
+}
+
+#[test]
+fn arbiter_and_fee_pool_views_follow_their_setters() {
+    let f = fixture();
+    assert_eq!(f.client.get_arbiter(), Some(f.arbiter.clone()));
+    assert_eq!(f.client.get_protocol_fee_pool(), Some(f.fee_pool.clone()));
+    for _ in 0..2 {
+        let arbiter = Address::generate(&f.env);
+        let pool = Address::generate(&f.env);
+        f.client.set_arbiter(&arbiter);
+        f.client.set_protocol_fee_pool(&pool);
+        assert_eq!(f.client.get_arbiter(), Some(arbiter));
+        assert_eq!(f.client.get_protocol_fee_pool(), Some(pool));
+    }
 }

@@ -1099,3 +1099,12 @@ fn sep53_registers_and_revokes_by_detached_signature() {
     );
     assert!(client.try_commitment_at(&account, &0).is_err());
 }
+
+#[test]
+fn position_guards_view_follows_set_position_guards() {
+    let (env, client, _) = setup();
+    assert_eq!(client.position_guards().len(), 0);
+    let guard = Address::generate(&env);
+    client.set_position_guards(&soroban_sdk::vec![&env, guard.clone()]);
+    assert_eq!(client.position_guards(), soroban_sdk::vec![&env, guard]);
+}
