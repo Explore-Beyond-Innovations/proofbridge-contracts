@@ -11,8 +11,10 @@ pragma solidity ^0.8.34;
 ///      on chain.
 interface IKeyRegistry {
     function hasUsableSlot(bytes32 account) external view returns (bool);
-    /// @notice When `account` last shortened a slot to the past (a kill, never a rotation's future
-    ///         date); 0 if never. The escrow's cancel grace reads it (#422): a kill since the order
-    ///         was locked means the co-signed payout was denied.
-    function lastRetiredAt(bytes32 account) external view returns (uint64);
+    /// @notice When `account` last shortened any slot, whatever date the shorten named; 0 if never.
+    ///         The escrow's cancel grace reads it (#422): a shorten since the order was locked is
+    ///         treated as a denied payout. A rotation made while an order is open over-includes
+    ///         (D11) — its cancel waits the grace — because one stamp cannot say which slot died
+    ///         when against an order the registry does not know, and every finer rule had a bypass.
+    function lastShortenedAt(bytes32 account) external view returns (uint64);
 }

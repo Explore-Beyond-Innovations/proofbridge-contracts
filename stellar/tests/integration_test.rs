@@ -1923,16 +1923,16 @@ impl MockKeyRegistry {
             .unwrap_or(false)
     }
 
-    pub fn set_last_retired_at(env: Env, account: BytesN<32>, at: u64) {
+    pub fn set_last_shortened_at(env: Env, account: BytesN<32>, at: u64) {
         env.storage()
             .instance()
-            .set(&(soroban_sdk::symbol_short!("retired"), account), &at);
+            .set(&(soroban_sdk::symbol_short!("shorten"), account), &at);
     }
 
-    pub fn last_retired_at(env: Env, account: BytesN<32>) -> u64 {
+    pub fn last_shortened_at(env: Env, account: BytesN<32>) -> u64 {
         env.storage()
             .instance()
-            .get(&(soroban_sdk::symbol_short!("retired"), account))
+            .get(&(soroban_sdk::symbol_short!("shorten"), account))
             .unwrap_or(0)
     }
 }
@@ -3829,7 +3829,7 @@ fn test_422_finalize_cancel_signer_killed_since_the_lock_waits_the_grace() {
     let p = locked_ad_order(&s);
     warp(&s, s.env.ledger().timestamp() + 10);
     let reg = MockKeyRegistryClient::new(&s.env, &s.key_registry);
-    reg.set_last_retired_at(&p.ad_settlement_signer, &s.env.ledger().timestamp());
+    reg.set_last_shortened_at(&p.ad_settlement_signer, &s.env.ledger().timestamp());
     assert!(
         reg.has_usable_slot(&p.ad_settlement_signer),
         "a replacement slot is live"
@@ -3852,11 +3852,64 @@ fn test_422_finalize_cancel_signer_killed_before_the_lock_ordinary_timing() {
     warp(&s, s.env.ledger().timestamp() + 10);
     let p = locked_ad_order(&s);
     MockKeyRegistryClient::new(&s.env, &s.key_registry)
-        .set_last_retired_at(&p.ad_settlement_signer, &(s.env.ledger().timestamp() - 1));
+        .set_last_shortened_at(&p.ad_settlement_signer, &(s.env.ledger().timestamp() - 1));
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER);
     s.ad_manager.finalize_cancel(&p);
+}
+
+/// The boundary is the lock's own second: a shorten stamped then counts (`>=`).
+#[test]
+fn test_422_finalize_cancel_signer_killed_in_the_locks_second_counts() {
+    let s = setup();
+    warp(&s, s.env.ledger().timestamp() + 10);
+    let p = locked_ad_order(&s);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .set_last_shortened_at(&p.ad_settlement_signer, &s.env.ledger().timestamp());
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// Review F5: an anchor that cannot answer `anchor_delay` refuses the denied finalize outright.
+#[test]
+fn test_422_finalize_cancel_unreadable_anchor_refuses() {
+    let s = setup();
+    // The mock registry has no `anchor_delay`: wiring it as the anchor makes the read fail.
+    s.ad_manager.set_root_anchor(&s.key_registry);
+    let p = locked_ad_order(&s);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + 30 * SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::AnchorDelayUnreadable))
+    );
+}
+
+/// MakerForfeit pays the counterparty anyway, so it is the one outcome the grace does not gate.
+#[test]
+fn test_422_finalize_dispute_maker_forfeit_ignores_the_grace() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let order_hash = s.ad_manager.hash_order(&p);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    s.ad_manager
+        .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    dm.resolve_dispute(
+        &order_hash,
+        &dispute_manager_contract::DisputeOutcome::MakerForfeit,
+    );
+    warp_past_dispute_window(&s, &dm, &order_hash);
+    s.ad_manager.finalize_dispute(&p);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Resolved);
 }
 
 /// The view the relayer's janitor asks: 0 before a claim, the window end after, plus the grace once

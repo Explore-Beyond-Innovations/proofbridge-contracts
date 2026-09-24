@@ -338,11 +338,9 @@ impl BlsKeyRegistry {
 
         slot.valid_until = valid_until;
         storage::set_slot(&env, &account, slot_id, &slot);
-        // A kill (to now or the past), not a rotation's future date: the escrows' cancel grace
-        // reads this stamp (#422).
-        if valid_until <= env.ledger().timestamp() {
-            storage::set_last_retired_at(&env, &account, env.ledger().timestamp());
-        }
+        // Every shorten stamps, whatever date it named (#422 D11): a shorten to one second ahead
+        // kills a slot inside a window as surely as one to the past.
+        storage::set_last_shortened_at(&env, &account, env.ledger().timestamp());
         events::SlotValidUntilSet {
             account,
             slot_id,
@@ -403,13 +401,13 @@ impl BlsKeyRegistry {
         Ok(slot.commitment)
     }
 
-    /// True iff at least one live slot is usable now (the "is registered" check for 2.3c).
-    /// When `account` last shortened a slot to the past (a kill, never a rotation's future date);
-    /// 0 if never. The escrows' cancel grace reads it (#422).
-    pub fn last_retired_at(env: Env, account: BytesN<32>) -> u64 {
-        storage::get_last_retired_at(&env, &account)
+    /// When `account` last shortened any slot, whatever date it named; 0 if never. The escrows'
+    /// cancel grace reads it (#422, D11: every shorten counts).
+    pub fn last_shortened_at(env: Env, account: BytesN<32>) -> u64 {
+        storage::get_last_shortened_at(&env, &account)
     }
 
+    /// True iff at least one live slot is usable now (the "is registered" check for 2.3c).
     pub fn has_usable_slot(env: Env, account: BytesN<32>) -> bool {
         let now = env.ledger().timestamp();
         storage::get_entry(&env, &account)

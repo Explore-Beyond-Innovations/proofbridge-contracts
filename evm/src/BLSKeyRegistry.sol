@@ -54,9 +54,9 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
 
     mapping(bytes32 => RegistryEntry) private entries;
 
-    /// @notice When `account` last shortened a slot to the past (a kill, never a rotation's future
-    ///         date); 0 if never. The escrows' cancel grace reads it (#422, `IKeyRegistry`).
-    mapping(bytes32 account => uint64) public lastRetiredAt;
+    /// @notice When `account` last shortened any slot; 0 if never. The escrows' cancel grace reads
+    ///         it (#422, `IKeyRegistry`, D11: every shorten counts, whatever date it named).
+    mapping(bytes32 account => uint64) public lastShortenedAt;
 
     mapping(bytes32 => uint256) public nonceOf;
     /// Any commitment that ever held a slot for the account can never re-enter one.
@@ -236,9 +236,9 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         );
 
         slot.validUntil = validUntil;
-        // A kill (to now or the past), not a rotation's future date: the escrows' cancel grace
-        // reads this stamp (#422).
-        if (validUntil <= block.timestamp) lastRetiredAt[account] = uint64(block.timestamp);
+        // Every shorten stamps, whatever date it named (#422 D11): a shorten to one second ahead
+        // kills a slot inside a window as surely as one to the past.
+        lastShortenedAt[account] = uint64(block.timestamp);
         emit SlotValidUntilSet(account, slotId, validUntil);
     }
 

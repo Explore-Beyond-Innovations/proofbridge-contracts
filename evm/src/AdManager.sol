@@ -55,7 +55,8 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @notice The maker's settlement halt (#422). While set, the co-signed `unlock` of every order
     ///         against every ad this maker owns is refused. Custody-authorized, instant both ways,
-    ///         never pause-gated. Read by `unlock` and `finalizeCancel` only: every evidence path
+    ///         never pause-gated. Read by `unlock`, by the cancel doors (`finalizeCancel`,
+    ///         `finalizeDispute`) for their grace, and by `cancelFinalizesAt`: every evidence path
     ///         ignores it, so a halt can delay a payout but never keep both sides.
     mapping(address maker => bool) public halted;
 
@@ -594,19 +595,20 @@ contract AdManager is EscrowBase, IAdManager {
     }
 
     /// @dev Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force
-    ///      now or at any point at or after the order's deadline (a resume stamp at or after it), a
-    ///      registry kill of the signer since the order was locked (`lastRetiredAt`, stamped only by a
-    ///      shorten to the past, never by a rotation's future date), or the signer left with no
-    ///      usable slot at all. Every reference is one the maker signed (the deadline) or the chain
-    ///      stamped (the lock), never one the maker can choose later. No registry wired means no
-    ///      lever 2 to read.
+    ///      now or at any point at or after the order's deadline (a resume stamp at or after it), any
+    ///      shorten of the signer's slots since the order was locked (`lastShortenedAt`, D11: a
+    ///      rotation over-includes, a kill to any date never slips through), or the signer left with
+    ///      no usable slot at all. Every reference is one the maker signed (the deadline) or the
+    ///      chain stamped (the lock), never one the maker can choose later. No registry wired means
+    ///      no lever 2 to read.
     function _coSignDenied(OrderParams calldata p, bytes32 orderHash) private view returns (bool) {
         address maker = ads[p.adId].maker;
         if (halted[maker] || lastResumedAt[maker] >= p.deadline) return true;
         IKeyRegistry registry = keyRegistry;
         if (address(registry) == address(0)) return false;
-        uint64 killedAt = registry.lastRetiredAt(p.adSettlementSigner);
-        return (killedAt != 0 && killedAt >= _lockedAt(orderHash)) || !registry.hasUsableSlot(p.adSettlementSigner);
+        uint64 shortenedAt = registry.lastShortenedAt(p.adSettlementSigner);
+        return
+            (shortenedAt != 0 && shortenedAt >= _lockedAt(orderHash)) || !registry.hasUsableSlot(p.adSettlementSigner);
     }
 
     /// @inheritdoc IAdManager

@@ -15,9 +15,9 @@ contract MockKeyRegistry is IKeyRegistry {
         return usable[account];
     }
 
-    mapping(bytes32 => uint64) public lastRetiredAt;
+    mapping(bytes32 => uint64) public lastShortenedAt;
 
-    function setLastRetiredAt(bytes32 account, uint64 at) external {
-        lastRetiredAt[account] = at;
+    function setLastShortenedAt(bytes32 account, uint64 at) external {
+        lastShortenedAt[account] = at;
     }
 }

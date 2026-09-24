@@ -5,6 +5,9 @@ import {TestField} from "test/utils/TestField.sol";
 
 import {IEscrow} from "src/interfaces/IEscrow.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
+import {IRootAnchor} from "src/interfaces/IRootAnchor.sol";
+import {Dispute} from "src/libraries/Dispute.sol";
+import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
 import {AdManagerCancellationTest} from "./Cancellation.t.sol";
 import {DisputeTest} from "./Dispute.t.sol";
 
@@ -186,12 +189,12 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
-    /// Review F3: a kill of the signer's slot since the lock is a denied payout even when a
+    /// Review F3: a shorten of the signer's slots since the lock is a denied payout even when a
     /// replacement slot keeps `hasUsableSlot` true.
     function test_finalizeCancel_signerKilledSinceTheLock_waitsTheGrace() public {
         (IAdManager.OrderParams memory p,) = _lock(14);
         vm.warp(block.timestamp + 10);
-        keyRegistry.setLastRetiredAt(p.adSettlementSigner, uint64(block.timestamp));
+        keyRegistry.setLastShortenedAt(p.adSettlementSigner, uint64(block.timestamp));
         assertTrue(keyRegistry.hasUsableSlot(p.adSettlementSigner), "a replacement slot is live");
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
@@ -205,9 +208,34 @@ contract SettlementHaltTest is AdManagerCancellationTest {
     function test_finalizeCancel_signerKilledBeforeTheLock_ordinaryTiming() public {
         vm.warp(block.timestamp + 10);
         (IAdManager.OrderParams memory p,) = _lock(15);
-        keyRegistry.setLastRetiredAt(p.adSettlementSigner, uint64(block.timestamp - 1));
+        keyRegistry.setLastShortenedAt(p.adSettlementSigner, uint64(block.timestamp - 1));
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
+        adManager.finalizeCancel(p);
+    }
+
+    /// The boundary is the lock's own second: a shorten stamped then counts (`>=`).
+    function test_finalizeCancel_signerKilledInTheLocksSecond_counts() public {
+        vm.warp(block.timestamp + 10);
+        (IAdManager.OrderParams memory p,) = _lock(17);
+        keyRegistry.setLastShortenedAt(p.adSettlementSigner, uint64(block.timestamp));
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+    }
+
+    /// Review F5: an anchor that cannot answer `anchorDelay` refuses the denied finalize outright —
+    /// a long wait, never a shorter one.
+    function test_finalizeCancel_unreadableAnchor_refuses() public {
+        address noAnchorDelay = address(new MockRootVerifier(true));
+        vm.prank(admin);
+        adManager.setRootAnchor(IRootAnchor(noAnchorDelay));
+        (IAdManager.OrderParams memory p,) = _lock(18);
+        _halt();
+        _claim(p);
+        vm.warp(p.deadline + 2 days);
+        vm.expectRevert();
         adManager.finalizeCancel(p);
     }
 
@@ -319,7 +347,10 @@ contract SettlementHaltDisputeTest is DisputeTest {
         vm.prank(maker);
         adManager.haltSettlement();
         _file(p, maker);
-        uint256 until_ = dm.effectiveChallengeDeadline(h);
+        // The module's window, from the fixture's own constants: max(filed + CHALLENGE, deadline + buffer).
+        uint256 filed = block.timestamp;
+        uint256 until_ = filed + CHALLENGE > p.deadline + 30 minutes ? filed + CHALLENGE : p.deadline + 30 minutes;
+        assertEq(dm.effectiveChallengeDeadline(h), until_, "the fixture's arithmetic matches the module's");
         vm.warp(until_ + 1);
         // buffer 30 min, anchor wired with no delay: the grace is the buffer.
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, until_ + 30 minutes));
@@ -327,6 +358,22 @@ contract SettlementHaltDisputeTest is DisputeTest {
         vm.warp(until_ + 30 minutes);
         adManager.finalizeDispute(p);
         assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
+    }
+
+    /// MakerForfeit pays the counterparty anyway, so it is the one outcome the grace does not gate:
+    /// an arbiter's ruling finalizes at the challenge deadline, halted or not.
+    function test_finalizeDispute_makerForfeit_ignoresTheGrace() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(23);
+        vm.prank(maker);
+        adManager.haltSettlement();
+        _file(p, maker);
+        vm.prank(arbiter);
+        dm.resolveDispute(h, Dispute.Outcome.MakerForfeit);
+        _warpPastWindow(h);
+        uint256 before = adToken.balanceOf(recipient);
+        adManager.finalizeDispute(p);
+        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
+        assertEq(adToken.balanceOf(recipient) - before, 60 ether, "the counterparty is paid");
     }
 
     /// Not halted: the fallback finalizes at the challenge deadline as before.

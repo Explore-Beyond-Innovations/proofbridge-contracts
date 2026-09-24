@@ -358,8 +358,6 @@ impl DisputeManagerContract {
         storage::get_dispute(&env, &order_hash).is_some()
     }
 
-    /// The challenge deadline in real time: the recorded one plus every second this module has been
-    /// paused since the dispute opened.
     /// The challenge deadline in real time from the escrow's own pause counter, for the escrow
     /// mid-call (#422): the same arithmetic as `effective_challenge_deadline`, without reading back
     /// into the caller.
@@ -376,6 +374,8 @@ impl DisputeManagerContract {
         }
     }
 
+    /// The challenge deadline in real time: the recorded one plus every second this module has been
+    /// paused since the dispute opened.
     pub fn effective_challenge_deadline(env: Env, order_hash: BytesN<32>) -> u64 {
         match storage::get_dispute(&env, &order_hash) {
             None => 0,

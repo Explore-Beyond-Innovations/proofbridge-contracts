@@ -108,7 +108,7 @@ pub trait RootAnchorInterface {
 #[contractclient(name = "KeyRegistryClient")]
 pub trait KeyRegistryInterface {
     fn has_usable_slot(env: Env, account: BytesN<32>) -> bool;
-    fn last_retired_at(env: Env, account: BytesN<32>) -> u64;
+    fn last_shortened_at(env: Env, account: BytesN<32>) -> u64;
 }
 
 // =============================================================================
@@ -362,10 +362,10 @@ pub fn has_usable_slot(env: &Env, registry: &Address, account: &BytesN<32>) -> b
     KeyRegistryClient::new(env, registry).has_usable_slot(account)
 }
 
-/// When `account` last shortened a slot to the past (a kill, never a rotation's future date); 0 if
-/// never. The escrows' cancel grace reads it (#422).
-pub fn last_retired_at(env: &Env, registry: &Address, account: &BytesN<32>) -> u64 {
-    KeyRegistryClient::new(env, registry).last_retired_at(account)
+/// When `account` last shortened any slot, whatever date it named; 0 if never. The escrows' cancel
+/// grace reads it (#422, D11: every shorten counts).
+pub fn last_shortened_at(env: &Env, registry: &Address, account: &BytesN<32>) -> u64 {
+    KeyRegistryClient::new(env, registry).last_shortened_at(account)
 }
 
 /// The dispute's challenge deadline in real time (#422: the cancel grace counts from it). The

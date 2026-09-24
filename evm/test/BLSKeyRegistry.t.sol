@@ -311,6 +311,20 @@ contract BLSKeyRegistryTest is Test {
         assertEq(registry.nonceOf(account), nonceBefore); // nonce-free
     }
 
+    /// #422 D11: every shorten stamps the account with its own time, whatever date it named —
+    /// a rotation to the future as much as a kill — and a register stamps nothing.
+    function test_setValidUntilStampsEveryShorten() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        registerSlot("makerOnSepolia", 0);
+        assertEq(registry.lastShortenedAt(account), 0, "registering is not a shorten");
+        vm.warp(block.timestamp + 7);
+        setValidUntil("makerOnSepolia", 0, false); // the grace date, still in the future
+        assertEq(registry.lastShortenedAt(account), uint64(block.timestamp), "a future date stamps too");
+        vm.warp(block.timestamp + 5);
+        setValidUntil("makerOnSepolia", 0, true); // a kill
+        assertEq(registry.lastShortenedAt(account), uint64(block.timestamp), "the stamp moves forward");
+    }
+
     function test_setValidUntilGraceBoundary() public {
         bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
         registerSlot("makerOnSepolia", 0);
