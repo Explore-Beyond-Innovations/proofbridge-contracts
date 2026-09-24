@@ -1109,30 +1109,29 @@ fn position_guards_view_follows_set_position_guards() {
     assert_eq!(client.position_guards(), soroban_sdk::vec![&env, guard]);
 }
 
-/// #422 D11: every shorten stamps the account with its own time, whatever date it named — a
-/// rotation to the future as much as a kill — and a register stamps nothing.
+/// #422 D12: the escrow's question, answered directly — did any slot expire in [from, to].
 #[test]
-fn set_valid_until_stamps_every_shorten() {
+fn any_slot_expired_within_reads_the_slots_expiries() {
     let (env, client, v) = setup();
     let account = slot_account(&env, &v, MAKER);
     register_slot(&env, &client, &v, MAKER, 0);
-    assert_eq!(
-        client.last_shortened_at(&account),
-        0,
-        "registering is not a shorten"
+    assert!(
+        !client.any_slot_expired_within(&account, &0, &u64::MAX),
+        "no expiry: never"
     );
-    env.ledger().set_timestamp(T0 + 7);
     set_valid_until(&env, &client, &v, MAKER, 0, false);
-    assert_eq!(
-        client.last_shortened_at(&account),
-        T0 + 7,
-        "a future date stamps too"
+    let g = grace_ts(&v);
+    assert!(
+        client.any_slot_expired_within(&account, &g, &g),
+        "the boundary is inclusive"
     );
-    env.ledger().set_timestamp(T0 + 12);
-    set_valid_until(&env, &client, &v, MAKER, 0, true);
-    assert_eq!(
-        client.last_shortened_at(&account),
-        T0 + 12,
-        "the stamp moves forward"
+    assert!(client.any_slot_expired_within(&account, &(g - 100), &(g + 100)));
+    assert!(
+        !client.any_slot_expired_within(&account, &(g + 1), &(g + 100)),
+        "after: no"
+    );
+    assert!(
+        !client.any_slot_expired_within(&account, &0, &(g - 1)),
+        "before: no"
     );
 }

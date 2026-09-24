@@ -596,8 +596,9 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @dev Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force
     ///      now or at any point at or after the order's deadline (a resume stamp at or after it), any
-    ///      shorten of the signer's slots since the order was locked (`lastShortenedAt`, D11: a
-    ///      rotation over-includes, a kill to any date never slips through), or the signer left with
+    ///      of the signer's registry slots expiring during the order's life (`anySlotExpiredWithin`,
+    ///      D12: a kill, a near-future shorten and a pre-lock shorten naming a date in the window all
+    ///      count; a rotation whose old slot outlives the cancel does not), or the signer left with
     ///      no usable slot at all. Every reference is one the maker signed (the deadline) or the
     ///      chain stamped (the lock), never one the maker can choose later. No registry wired means
     ///      no lever 2 to read.
@@ -606,9 +607,8 @@ contract AdManager is EscrowBase, IAdManager {
         if (halted[maker] || lastResumedAt[maker] >= p.deadline) return true;
         IKeyRegistry registry = keyRegistry;
         if (address(registry) == address(0)) return false;
-        uint64 shortenedAt = registry.lastShortenedAt(p.adSettlementSigner);
-        return
-            (shortenedAt != 0 && shortenedAt >= _lockedAt(orderHash)) || !registry.hasUsableSlot(p.adSettlementSigner);
+        return registry.anySlotExpiredWithin(p.adSettlementSigner, _lockedAt(orderHash), uint64(block.timestamp))
+            || !registry.hasUsableSlot(p.adSettlementSigner);
     }
 
     /// @inheritdoc IAdManager

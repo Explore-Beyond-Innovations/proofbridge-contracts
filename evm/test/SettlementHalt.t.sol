@@ -189,12 +189,12 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
-    /// Review F3: a shorten of the signer's slots since the lock is a denied payout even when a
+    /// Review F3: a slot of the signer dying since the lock is a denied payout even when a
     /// replacement slot keeps `hasUsableSlot` true.
     function test_finalizeCancel_signerKilledSinceTheLock_waitsTheGrace() public {
         (IAdManager.OrderParams memory p,) = _lock(14);
         vm.warp(block.timestamp + 10);
-        keyRegistry.setLastShortenedAt(p.adSettlementSigner, uint64(block.timestamp));
+        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(block.timestamp));
         assertTrue(keyRegistry.hasUsableSlot(p.adSettlementSigner), "a replacement slot is live");
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
@@ -204,24 +204,45 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
-    /// A kill before the lock is history: the order was signed under a later slot.
+    /// A slot that died before the lock is history: the order was signed under a later slot.
     function test_finalizeCancel_signerKilledBeforeTheLock_ordinaryTiming() public {
         vm.warp(block.timestamp + 10);
         (IAdManager.OrderParams memory p,) = _lock(15);
-        keyRegistry.setLastShortenedAt(p.adSettlementSigner, uint64(block.timestamp - 1));
+        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(block.timestamp - 1));
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
         adManager.finalizeCancel(p);
     }
 
-    /// The boundary is the lock's own second: a shorten stamped then counts (`>=`).
+    /// The boundary is the lock's own second: a slot expiring then counts (`>=`).
     function test_finalizeCancel_signerKilledInTheLocksSecond_counts() public {
         vm.warp(block.timestamp + 10);
         (IAdManager.OrderParams memory p,) = _lock(17);
-        keyRegistry.setLastShortenedAt(p.adSettlementSigner, uint64(block.timestamp));
+        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(block.timestamp));
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+    }
+
+    /// Pass 3 residual: a shorten made before the lock, naming a date inside the window, is an
+    /// expiry during the order's life like any other. The stamp rule missed it; the expiry rule
+    /// does not.
+    function test_finalizeCancel_preLockShorten_expiringInTheWindow_waitsTheGrace() public {
+        (IAdManager.OrderParams memory p,) = _lock(19);
+        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(p.deadline + 10 minutes));
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+    }
+
+    /// A rotation whose old slot outlives the cancel puts no expiry in the order's life: ordinary.
+    function test_finalizeCancel_rotationOutlivingTheCancel_ordinaryTiming() public {
+        (IAdManager.OrderParams memory p,) = _lock(20);
+        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(p.deadline + 2 days));
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
         adManager.finalizeCancel(p);
     }
 
@@ -235,7 +256,7 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         _halt();
         _claim(p);
         vm.warp(p.deadline + 2 days);
-        vm.expectRevert();
+        vm.expectRevert(bytes(""));
         adManager.finalizeCancel(p);
     }
 

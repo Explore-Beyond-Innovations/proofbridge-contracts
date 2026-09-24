@@ -108,7 +108,7 @@ pub trait RootAnchorInterface {
 #[contractclient(name = "KeyRegistryClient")]
 pub trait KeyRegistryInterface {
     fn has_usable_slot(env: Env, account: BytesN<32>) -> bool;
-    fn last_shortened_at(env: Env, account: BytesN<32>) -> u64;
+    fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool;
 }
 
 // =============================================================================
@@ -362,10 +362,16 @@ pub fn has_usable_slot(env: &Env, registry: &Address, account: &BytesN<32>) -> b
     KeyRegistryClient::new(env, registry).has_usable_slot(account)
 }
 
-/// When `account` last shortened any slot, whatever date it named; 0 if never. The escrows' cancel
-/// grace reads it (#422, D11: every shorten counts).
-pub fn last_shortened_at(env: &Env, registry: &Address, account: &BytesN<32>) -> u64 {
-    KeyRegistryClient::new(env, registry).last_shortened_at(account)
+/// Did any of `account`'s slots expire in `[from, to]` (#422 D12). The escrows' cancel grace asks
+/// it over the order's life, `[locked_at, now]`.
+pub fn any_slot_expired_within(
+    env: &Env,
+    registry: &Address,
+    account: &BytesN<32>,
+    from: u64,
+    to: u64,
+) -> bool {
+    KeyRegistryClient::new(env, registry).any_slot_expired_within(account, &from, &to)
 }
 
 /// The dispute's challenge deadline in real time (#422: the cancel grace counts from it). The

@@ -311,18 +311,17 @@ contract BLSKeyRegistryTest is Test {
         assertEq(registry.nonceOf(account), nonceBefore); // nonce-free
     }
 
-    /// #422 D11: every shorten stamps the account with its own time, whatever date it named —
-    /// a rotation to the future as much as a kill — and a register stamps nothing.
-    function test_setValidUntilStampsEveryShorten() public {
+    /// #422 D12: the escrow's question, answered directly — did any slot expire in [from, to].
+    function test_anySlotExpiredWithin() public {
         bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
         registerSlot("makerOnSepolia", 0);
-        assertEq(registry.lastShortenedAt(account), 0, "registering is not a shorten");
-        vm.warp(block.timestamp + 7);
-        setValidUntil("makerOnSepolia", 0, false); // the grace date, still in the future
-        assertEq(registry.lastShortenedAt(account), uint64(block.timestamp), "a future date stamps too");
-        vm.warp(block.timestamp + 5);
-        setValidUntil("makerOnSepolia", 0, true); // a kill
-        assertEq(registry.lastShortenedAt(account), uint64(block.timestamp), "the stamp moves forward");
+        assertFalse(registry.anySlotExpiredWithin(account, 0, type(uint64).max), "no expiry: never");
+        setValidUntil("makerOnSepolia", 0, false);
+        uint64 g = graceTs();
+        assertTrue(registry.anySlotExpiredWithin(account, g, g), "the boundary is inclusive");
+        assertTrue(registry.anySlotExpiredWithin(account, g - 100, g + 100));
+        assertFalse(registry.anySlotExpiredWithin(account, g + 1, g + 100), "after it: no");
+        assertFalse(registry.anySlotExpiredWithin(account, 0, g - 1), "before it: no");
     }
 
     function test_setValidUntilGraceBoundary() public {

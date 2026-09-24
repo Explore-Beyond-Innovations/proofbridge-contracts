@@ -10,8 +10,6 @@ const KEY_GUARD: Symbol = symbol_short!("guard");
 const KEY_PAUSED: Symbol = symbol_short!("paused");
 /// Pending admin for the two-step handover.
 const KEY_PENDADM: Symbol = symbol_short!("pendadm");
-/// (KEY_SHORTEN, account) -> u64: when the account last shortened any slot (#422 D11).
-const KEY_SHORTEN: Symbol = symbol_short!("shorten");
 
 /// (KEY_ENTRY, account) -> RegistryEntry
 const KEY_ENTRY: Symbol = symbol_short!("entry");
@@ -188,19 +186,4 @@ pub fn set_pending_admin(env: &Env, admin: &Address) {
 
 pub fn clear_pending_admin(env: &Env) {
     env.storage().instance().remove(&KEY_PENDADM);
-}
-
-// ---- the shorten stamp (#422) ----
-
-pub fn get_last_shortened_at(env: &Env, account: &BytesN<32>) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&(KEY_SHORTEN, account.clone()))
-        .unwrap_or(0)
-}
-
-pub fn set_last_shortened_at(env: &Env, account: &BytesN<32>, at: u64) {
-    let key = (KEY_SHORTEN, account.clone());
-    env.storage().persistent().set(&key, &at);
-    proofbridge_core::ttl::extend_persistent(env, &key);
 }

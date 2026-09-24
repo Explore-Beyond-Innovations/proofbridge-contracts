@@ -1923,17 +1923,25 @@ impl MockKeyRegistry {
             .unwrap_or(false)
     }
 
-    pub fn set_last_shortened_at(env: Env, account: BytesN<32>, at: u64) {
-        env.storage()
+    /// A (fake) slot of `account` expiring at `valid_until`, for `any_slot_expired_within`.
+    pub fn add_slot_expiry(env: Env, account: BytesN<32>, valid_until: u64) {
+        let key = (soroban_sdk::symbol_short!("expiry"), account);
+        let mut v: soroban_sdk::Vec<u64> = env
+            .storage()
             .instance()
-            .set(&(soroban_sdk::symbol_short!("shorten"), account), &at);
+            .get(&key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        v.push_back(valid_until);
+        env.storage().instance().set(&key, &v);
     }
 
-    pub fn last_shortened_at(env: Env, account: BytesN<32>) -> u64 {
-        env.storage()
+    pub fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool {
+        let v: soroban_sdk::Vec<u64> = env
+            .storage()
             .instance()
-            .get(&(soroban_sdk::symbol_short!("shorten"), account))
-            .unwrap_or(0)
+            .get(&(soroban_sdk::symbol_short!("expiry"), account))
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        v.iter().any(|vu| vu != 0 && vu >= from && vu <= to)
     }
 }
 
@@ -3829,7 +3837,7 @@ fn test_422_finalize_cancel_signer_killed_since_the_lock_waits_the_grace() {
     let p = locked_ad_order(&s);
     warp(&s, s.env.ledger().timestamp() + 10);
     let reg = MockKeyRegistryClient::new(&s.env, &s.key_registry);
-    reg.set_last_shortened_at(&p.ad_settlement_signer, &s.env.ledger().timestamp());
+    reg.add_slot_expiry(&p.ad_settlement_signer, &s.env.ledger().timestamp());
     assert!(
         reg.has_usable_slot(&p.ad_settlement_signer),
         "a replacement slot is live"
@@ -3852,7 +3860,7 @@ fn test_422_finalize_cancel_signer_killed_before_the_lock_ordinary_timing() {
     warp(&s, s.env.ledger().timestamp() + 10);
     let p = locked_ad_order(&s);
     MockKeyRegistryClient::new(&s.env, &s.key_registry)
-        .set_last_shortened_at(&p.ad_settlement_signer, &(s.env.ledger().timestamp() - 1));
+        .add_slot_expiry(&p.ad_settlement_signer, &(s.env.ledger().timestamp() - 1));
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER);
@@ -3866,7 +3874,7 @@ fn test_422_finalize_cancel_signer_killed_in_the_locks_second_counts() {
     warp(&s, s.env.ledger().timestamp() + 10);
     let p = locked_ad_order(&s);
     MockKeyRegistryClient::new(&s.env, &s.key_registry)
-        .set_last_shortened_at(&p.ad_settlement_signer, &s.env.ledger().timestamp());
+        .add_slot_expiry(&p.ad_settlement_signer, &s.env.ledger().timestamp());
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER);
@@ -3908,8 +3916,46 @@ fn test_422_finalize_dispute_maker_forfeit_ignores_the_grace() {
         &dispute_manager_contract::DisputeOutcome::MakerForfeit,
     );
     warp_past_dispute_window(&s, &dm, &order_hash);
+    let recipient = account_addr(&s, &s.tp.order_recipient);
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let before = token.balance(&recipient);
     s.ad_manager.finalize_dispute(&p);
     assert_eq!(ad_status(&s), ad_manager_contract::Status::Resolved);
+    assert_eq!(
+        token.balance(&recipient),
+        before + s.tp.amount as i128,
+        "the counterparty is paid, grace or no grace"
+    );
+}
+
+/// Pass 3 residual: a shorten made before the lock, naming a date inside the window, is an expiry
+/// during the order's life like any other.
+#[test]
+fn test_422_finalize_cancel_pre_lock_shorten_expiring_in_the_window_waits_the_grace() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .add_slot_expiry(&p.ad_settlement_signer, &(p.deadline + 600));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// A rotation whose old slot outlives the cancel puts no expiry in the order's life: ordinary.
+#[test]
+fn test_422_finalize_cancel_rotation_outliving_the_cancel_ordinary_timing() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .add_slot_expiry(&p.ad_settlement_signer, &(p.deadline + 30 * SUITE_BUFFER));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
 }
 
 /// The view the relayer's janitor asks: 0 before a claim, the window end after, plus the grace once

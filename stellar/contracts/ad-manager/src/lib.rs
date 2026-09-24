@@ -1330,11 +1330,12 @@ impl AdManagerContract {
     }
 
     /// Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force now
-    /// or at any point at or after the order's deadline (a resume stamp at or after it), any shorten
-    /// of the signer's slots since the order was locked (`last_shortened_at`, D11: a rotation
-    /// over-includes, a kill to any date never slips through), or the signer left with no usable
-    /// slot at all. Every reference is one the maker signed (the deadline) or the chain stamped
-    /// (the lock), never one the maker can choose later. No registry wired means no lever 2 to read.
+    /// or at any point at or after the order's deadline (a resume stamp at or after it), any of the
+    /// signer's registry slots expiring during the order's life (`any_slot_expired_within`, D12: a
+    /// kill, a near-future shorten and a pre-lock shorten naming a date in the window all count; a
+    /// rotation whose old slot outlives the cancel does not), or the signer left with no usable slot
+    /// at all. Every reference is one the maker signed (the deadline) or the chain stamped (the
+    /// lock), never one the maker can choose later. No registry wired means no lever 2 to read.
     fn co_sign_denied(
         env: &Env,
         maker: &Address,
@@ -1351,10 +1352,13 @@ impl AdManagerContract {
         };
         let signer = &params.ad_settlement_signer;
         let locked_at = storage::get_order(env, order_hash).locked_at;
-        let shortened_at =
-            proofbridge_core::cross_contract::last_shortened_at(env, &registry, signer);
-        (shortened_at != 0 && shortened_at >= locked_at)
-            || !proofbridge_core::cross_contract::has_usable_slot(env, &registry, signer)
+        proofbridge_core::cross_contract::any_slot_expired_within(
+            env,
+            &registry,
+            signer,
+            locked_at,
+            env.ledger().timestamp(),
+        ) || !proofbridge_core::cross_contract::has_usable_slot(env, &registry, signer)
     }
 
     /// How long a denied order's cancel waits past its window: the order chain's anchor delay (the

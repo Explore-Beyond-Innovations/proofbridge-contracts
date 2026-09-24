@@ -54,10 +54,6 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
 
     mapping(bytes32 => RegistryEntry) private entries;
 
-    /// @notice When `account` last shortened any slot; 0 if never. The escrows' cancel grace reads
-    ///         it (#422, `IKeyRegistry`, D11: every shorten counts, whatever date it named).
-    mapping(bytes32 account => uint64) public lastShortenedAt;
-
     mapping(bytes32 => uint256) public nonceOf;
     /// Any commitment that ever held a slot for the account can never re-enter one.
     mapping(bytes32 => mapping(bytes32 => bool)) public usedCommitment;
@@ -236,9 +232,6 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         );
 
         slot.validUntil = validUntil;
-        // Every shorten stamps, whatever date it named (#422 D11): a shorten to one second ahead
-        // kills a slot inside a window as surely as one to the past.
-        lastShortenedAt[account] = uint64(block.timestamp);
         emit SlotValidUntilSet(account, slotId, validUntil);
     }
 
@@ -314,6 +307,16 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         for (uint256 i = 0; i < e.liveSlots.length; i++) {
             uint64 vu = e.slots[e.liveSlots[i]].validUntil;
             if (vu == 0 || block.timestamp < vu) return true;
+        }
+        return false;
+    }
+
+    /// @notice Did any of `account`'s slots expire in `[from, to]` (#422 D12, `IKeyRegistry`).
+    function anySlotExpiredWithin(bytes32 account, uint64 from, uint64 to) external view returns (bool) {
+        RegistryEntry storage e = entries[account];
+        for (uint256 i = 0; i < e.liveSlots.length; i++) {
+            uint64 vu = e.slots[e.liveSlots[i]].validUntil;
+            if (vu != 0 && vu >= from && vu <= to) return true;
         }
         return false;
     }

@@ -338,9 +338,6 @@ impl BlsKeyRegistry {
 
         slot.valid_until = valid_until;
         storage::set_slot(&env, &account, slot_id, &slot);
-        // Every shorten stamps, whatever date it named (#422 D11): a shorten to one second ahead
-        // kills a slot inside a window as surely as one to the past.
-        storage::set_last_shortened_at(&env, &account, env.ledger().timestamp());
         events::SlotValidUntilSet {
             account,
             slot_id,
@@ -401,10 +398,19 @@ impl BlsKeyRegistry {
         Ok(slot.commitment)
     }
 
-    /// When `account` last shortened any slot, whatever date it named; 0 if never. The escrows'
-    /// cancel grace reads it (#422, D11: every shorten counts).
-    pub fn last_shortened_at(env: Env, account: BytesN<32>) -> u64 {
-        storage::get_last_shortened_at(&env, &account)
+    /// Did any of `account`'s slots expire in `[from, to]` (#422 D12). The escrows' cancel grace
+    /// asks it over the order's life: a slot the order may have been co-signed under died while
+    /// it was open — killed to now, shortened to a moment ahead, or shortened before the lock to
+    /// a date inside the window. A rotation whose old slot outlives the cancel puts no expiry in
+    /// the interval. Slots pruned 30 days past their expiry are forgotten; no order lives that long.
+    pub fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool {
+        storage::get_entry(&env, &account)
+            .live
+            .iter()
+            .any(|slot_id| {
+                matches!(storage::get_slot(&env, &account, slot_id),
+                Some(s) if s.valid_until != 0 && s.valid_until >= from && s.valid_until <= to)
+            })
     }
 
     /// True iff at least one live slot is usable now (the "is registered" check for 2.3c).
