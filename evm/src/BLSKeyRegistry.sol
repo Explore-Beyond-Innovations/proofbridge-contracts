@@ -55,6 +55,9 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
     mapping(bytes32 => RegistryEntry) private entries;
 
     mapping(bytes32 => uint256) public nonceOf;
+    /// #422 D14: when each slot's expiry was last set. A shorten naming a past date (our own kill
+    /// names `1`) stopped the slot at the shorten, not at the date; `_expiredAt` reads the later of the two.
+    mapping(bytes32 => mapping(uint32 => uint64)) private shortenedAt;
     /// Any commitment that ever held a slot for the account can never re-enter one.
     mapping(bytes32 => mapping(bytes32 => bool)) public usedCommitment;
 
@@ -232,6 +235,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         );
 
         slot.validUntil = validUntil;
+        shortenedAt[account][slotId] = uint64(block.timestamp);
         emit SlotValidUntilSet(account, slotId, validUntil);
     }
 
@@ -247,6 +251,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
 
         for (uint256 i = 0; i < e.liveSlots.length; i++) {
             delete e.slots[e.liveSlots[i]];
+            delete shortenedAt[account][e.liveSlots[i]];
         }
         delete e.liveSlots;
         nonceOf[account] = nonce + 1;
@@ -266,14 +271,24 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         usedCommitment[account][commitment] = true;
     }
 
-    /// Drops every slot past validUntil + GRACE_PERIOD (swap-remove; order is not meaningful).
+    /// When the slot stopped being usable: `0` while unbounded, else the later of the date its last
+    /// shorten named and the moment of that shorten (#422 D14).
+    function _expiredAt(bytes32 account, uint32 id) private view returns (uint64) {
+        uint64 vu = entries[account].slots[id].validUntil;
+        if (vu == 0) return 0;
+        uint64 at = shortenedAt[account][id];
+        return at > vu ? at : vu;
+    }
+
+    /// Drops every slot past its expiry + GRACE_PERIOD (swap-remove; order is not meaningful).
     function _prune(bytes32 account, RegistryEntry storage e) private {
         uint256 i = 0;
         while (i < e.liveSlots.length) {
             uint32 id = e.liveSlots[i];
-            uint64 vu = e.slots[id].validUntil;
+            uint64 vu = _expiredAt(account, id);
             if (vu != 0 && block.timestamp > uint256(vu) + GRACE_PERIOD) {
                 delete e.slots[id];
+                delete shortenedAt[account][id];
                 e.liveSlots[i] = e.liveSlots[e.liveSlots.length - 1];
                 e.liveSlots.pop();
                 emit SlotPruned(account, id);
@@ -311,11 +326,11 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         return false;
     }
 
-    /// @notice Did any of `account`'s slots expire in `[from, to]` (#422 D12, `IKeyRegistry`).
+    /// @notice Did any of `account`'s slots expire in `[from, to]` (#422 D12/D14, `IKeyRegistry`).
     function anySlotExpiredWithin(bytes32 account, uint64 from, uint64 to) external view returns (bool) {
         RegistryEntry storage e = entries[account];
         for (uint256 i = 0; i < e.liveSlots.length; i++) {
-            uint64 vu = e.slots[e.liveSlots[i]].validUntil;
+            uint64 vu = _expiredAt(account, e.liveSlots[i]);
             if (vu != 0 && vu >= from && vu <= to) return true;
         }
         return false;

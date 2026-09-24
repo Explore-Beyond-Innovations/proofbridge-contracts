@@ -338,6 +338,7 @@ impl BlsKeyRegistry {
 
         slot.valid_until = valid_until;
         storage::set_slot(&env, &account, slot_id, &slot);
+        storage::set_shortened_at(&env, &account, slot_id, env.ledger().timestamp());
         events::SlotValidUntilSet {
             account,
             slot_id,
@@ -398,18 +399,19 @@ impl BlsKeyRegistry {
         Ok(slot.commitment)
     }
 
-    /// Did any of `account`'s slots expire in `[from, to]` (#422 D12). The escrows' cancel grace
-    /// asks it over the order's life: a slot the order may have been co-signed under died while
-    /// it was open — killed to now, shortened to a moment ahead, or shortened before the lock to
-    /// a date inside the window. A rotation whose old slot outlives the cancel puts no expiry in
-    /// the interval. Slots pruned 30 days past their expiry are forgotten; no order lives that long.
+    /// Did any of `account`'s slots expire in `[from, to]` (#422 D12/D14). The escrows' cancel grace
+    /// asks it over the order's life as a payout, `[locked_at, deadline]`: a slot the order may have
+    /// been co-signed under died while it was open. A slot expires at the later of the date its
+    /// shorten named and the moment of the shorten (a kill names `1`), so a kill, a near-future
+    /// shorten and a pre-lock shorten naming a date inside the window all count; a rotation whose
+    /// old slot outlives the deadline does not. Slots pruned 30 days past that expiry are forgotten.
     pub fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool {
         storage::get_entry(&env, &account)
             .live
             .iter()
             .any(|slot_id| {
-                matches!(storage::get_slot(&env, &account, slot_id),
-                Some(s) if s.valid_until != 0 && s.valid_until >= from && s.valid_until <= to)
+                let vu = expired_at(&env, &account, slot_id);
+                vu != 0 && vu >= from && vu <= to
             })
     }
 
@@ -574,13 +576,27 @@ fn add_slot(
     Ok(slot_id)
 }
 
-/// Drops every slot past valid_until + GRACE_PERIOD (order of `live` is not meaningful).
+/// When the slot stopped being usable: `0` while unbounded, else the later of the date its last
+/// shorten named and the moment of that shorten (#422 D14: our own kill names `1`).
+fn expired_at(env: &Env, account: &BytesN<32>, slot_id: u32) -> u64 {
+    match storage::get_slot(env, account, slot_id) {
+        Some(s) if s.valid_until != 0 => s
+            .valid_until
+            .max(storage::get_shortened_at(env, account, slot_id)),
+        _ => 0,
+    }
+}
+
+/// Drops every slot past its expiry + GRACE_PERIOD (order of `live` is not meaningful).
 fn prune(env: &Env, account: &BytesN<32>, entry: &mut storage::RegistryEntry) {
     let now = env.ledger().timestamp();
     let mut kept = Vec::new(env);
     for slot_id in entry.live.iter() {
         let prunable = match storage::get_slot(env, account, slot_id) {
-            Some(s) => s.valid_until != 0 && now > s.valid_until.saturating_add(GRACE_PERIOD),
+            Some(_) => {
+                let vu = expired_at(env, account, slot_id);
+                vu != 0 && now > vu.saturating_add(GRACE_PERIOD)
+            }
             None => true,
         };
         if prunable {

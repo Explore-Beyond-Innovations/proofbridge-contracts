@@ -11,11 +11,12 @@ pragma solidity ^0.8.34;
 ///      on chain.
 interface IKeyRegistry {
     function hasUsableSlot(bytes32 account) external view returns (bool);
-    /// @notice Did any of `account`'s slots expire in `[from, to]` (#422 D12). The escrow's cancel
-    ///         grace asks it over the order's life, `[lockedAt, now]`: a slot the order may have
-    ///         been co-signed under died while it was open, whether killed to now, shortened to a
-    ///         moment ahead, or shortened before the lock to a date inside the window. A rotation
-    ///         whose old slot outlives the cancel puts no expiry in the interval. Slots pruned 30
-    ///         days past their expiry are forgotten; no order lives that long.
+    /// @notice Did any of `account`'s slots expire in `[from, to]` (#422 D12/D14). The escrow's
+    ///         cancel grace asks it over the order's life as a payout, `[lockedAt, deadline]`: a
+    ///         slot the order may have been co-signed under died while it was open. A slot expires
+    ///         at the later of the date its shorten named and the moment of the shorten (a kill
+    ///         names `1`), so a kill, a near-future shorten and a pre-lock shorten naming a date
+    ///         inside the window all count; a rotation whose old slot outlives the deadline does
+    ///         not. Slots pruned 30 days past that expiry are forgotten; no order lives that long.
     function anySlotExpiredWithin(bytes32 account, uint64 from, uint64 to) external view returns (bool);
 }

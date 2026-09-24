@@ -607,7 +607,9 @@ contract AdManager is EscrowBase, IAdManager {
         if (halted[maker] || lastResumedAt[maker] >= p.deadline) return true;
         IKeyRegistry registry = keyRegistry;
         if (address(registry) == address(0)) return false;
-        return registry.anySlotExpiredWithin(p.adSettlementSigner, _lockedAt(orderHash), uint64(block.timestamp))
+        // D15: the order's life as a payout ends at its signed deadline; an expiry past it denied
+        // nothing, and a fixed interval keeps finalize monotone.
+        return registry.anySlotExpiredWithin(p.adSettlementSigner, _lockedAt(orderHash), uint64(p.deadline))
             || !registry.hasUsableSlot(p.adSettlementSigner);
     }
 

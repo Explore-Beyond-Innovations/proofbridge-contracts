@@ -10,6 +10,10 @@ import {Dispute} from "src/libraries/Dispute.sol";
 import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
 import {AdManagerCancellationTest} from "./Cancellation.t.sol";
 import {DisputeTest} from "./Dispute.t.sol";
+import {stdJson} from "forge-std/StdJson.sol";
+import {IKeyRegistry} from "src/interfaces/IKeyRegistry.sol";
+import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
+import {BLSKeyRegistry} from "src/BLSKeyRegistry.sol";
 
 /*//////////////////////////////////////////////////////////////
           #422 — the maker's settlement halt (F1 residual)
@@ -195,7 +199,6 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         (IAdManager.OrderParams memory p,) = _lock(14);
         vm.warp(block.timestamp + 10);
         keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(block.timestamp));
-        assertTrue(keyRegistry.hasUsableSlot(p.adSettlementSigner), "a replacement slot is live");
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
@@ -204,11 +207,32 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
-    /// A slot that died before the lock is history: the order was signed under a later slot.
-    function test_finalizeCancel_signerKilledBeforeTheLock_ordinaryTiming() public {
+    /// An expiry before the lock is history: the order was signed under a later slot. (The kill
+    /// itself, and where its expiry lands, is the real registry's business: `SettlementHaltRealRegistryTest`.)
+    function test_finalizeCancel_expiryBeforeTheLock_ordinaryTiming() public {
         vm.warp(block.timestamp + 10);
         (IAdManager.OrderParams memory p,) = _lock(15);
         keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(block.timestamp - 1));
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        adManager.finalizeCancel(p);
+    }
+
+    /// D15: the interval closes at the signed deadline, inclusive — an expiry in its second counts.
+    function test_finalizeCancel_expiryAtTheDeadline_counts() public {
+        (IAdManager.OrderParams memory p,) = _lock(21);
+        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(p.deadline));
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+    }
+
+    /// D15: past the deadline no payout was possible, so an expiry there denied nothing — even one
+    /// that lands before the finalize call.
+    function test_finalizeCancel_expiryAfterTheDeadline_ordinaryTiming() public {
+        (IAdManager.OrderParams memory p,) = _lock(22);
+        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(p.deadline + 1));
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
         adManager.finalizeCancel(p);
@@ -225,19 +249,17 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
-    /// Pass 3 residual: a shorten made before the lock, naming a date inside the window, is an
-    /// expiry during the order's life like any other. The stamp rule missed it; the expiry rule
-    /// does not.
-    function test_finalizeCancel_preLockShorten_expiringInTheWindow_waitsTheGrace() public {
+    /// An expiry anywhere inside `[lockedAt, deadline]` is an expiry during the order's life.
+    function test_finalizeCancel_expiryInsideTheInterval_waitsTheGrace() public {
         (IAdManager.OrderParams memory p,) = _lock(19);
-        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(p.deadline + 10 minutes));
+        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(p.deadline - 10 minutes));
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
         adManager.finalizeCancel(p);
     }
 
-    /// A rotation whose old slot outlives the cancel puts no expiry in the order's life: ordinary.
+    /// A rotation whose old slot outlives the deadline puts no expiry in the order's life: ordinary.
     function test_finalizeCancel_rotationOutlivingTheCancel_ordinaryTiming() public {
         (IAdManager.OrderParams memory p,) = _lock(20);
         keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(p.deadline + 2 days));
@@ -407,3 +429,167 @@ contract SettlementHaltDisputeTest is DisputeTest {
     }
 }
 
+/*//////////////////////////////////////////////////////////////
+      #422 D14 — the denial read off the REAL registry
+//////////////////////////////////////////////////////////////*/
+
+/// The mock above restates the registry's predicate, so it proves wiring and nothing about what the
+/// registry stores. These run the escrow against `BLSKeyRegistry` itself, with the vector maker's
+/// slots, and use the retirement the protocol actually sends: `setValidUntil(.., 1)`.
+contract SettlementHaltRealRegistryTest is AdManagerCancellationTest {
+    using stdJson for string;
+
+    uint256 constant VECTOR_CHAIN_ID = 11155111;
+    address constant REGISTRY = 0x1111111111111111111111111111111111111111;
+
+    string internal v;
+    BLSKeyRegistry internal registry;
+    bytes32 internal account;
+
+    /// Per test, not in `setUp`: the inherited suites keep running against the mock.
+    function _realRegistry() internal {
+        // Foundry's clock starts at second 1 — the very date a kill names. Start in 2023 instead.
+        vm.warp(1_700_000_000);
+        v = vm.readFile("../test-vectors/bls-encodings.json");
+        BLSKeyRegistry impl = new BLSKeyRegistry(address(this));
+        vm.etch(REGISTRY, address(impl).code);
+        vm.store(REGISTRY, bytes32(0), bytes32(uint256(uint160(address(this)))));
+        registry = BLSKeyRegistry(REGISTRY);
+        account = v.readBytes32(".slots.makerOnSepolia.account");
+        // Two slots, so a kill of one leaves `hasUsableSlot` true: the state the attack needs.
+        _registerSlot(0);
+        _registerSlot(1);
+        vm.prank(admin);
+        adManager.setKeyRegistry(IKeyRegistry(REGISTRY));
+    }
+
+    /*//////////////////////////// vector helpers ////////////////////////////*/
+
+    function _sep53(string memory path) internal view returns (IBLSKeyRegistry.OwnerAuth memory) {
+        bytes memory data = abi.encode(
+            uint256(v.readBytes32(string.concat(path, ".scl.r"))),
+            uint256(v.readBytes32(string.concat(path, ".scl.s"))),
+            uint256(v.readBytes32(string.concat(path, ".scl.edX"))),
+            uint256(v.readBytes32(string.concat(path, ".scl.edY")))
+        );
+        return IBLSKeyRegistry.OwnerAuth(IBLSKeyRegistry.Scheme.Sep53, data);
+    }
+
+    /// The vector digests bind the Sepolia chain id; the escrow keeps the runtime one.
+    modifier onVectorChain() {
+        uint256 cid = block.chainid;
+        vm.chainId(VECTOR_CHAIN_ID);
+        _;
+        vm.chainId(cid);
+    }
+
+    function _registerSlot(uint256 i) internal onVectorChain {
+        string memory path = string.concat(".slots.makerOnSepolia.registrations[", vm.toString(i), "]");
+        registry.register(
+            account,
+            _sep53(string.concat(path, ".ownerSig")),
+            v.readBytes(string.concat(path, ".pkNative")),
+            v.readBytes(string.concat(path, ".pop")),
+            i
+        );
+    }
+
+    /// `setValidUntil` vectors: index = slotId*2 + (retire ? 0 : 1); a retire names `1`.
+    function _setValidUntil(uint32 slotId, bool retire) internal onVectorChain {
+        string memory path = string.concat(
+            ".slots.makerOnSepolia.setValidUntil[", vm.toString(uint256(slotId) * 2 + (retire ? 0 : 1)), "].ownerSig"
+        );
+        registry.setValidUntil(account, _sep53(path), slotId, retire ? 1 : _graceTs());
+    }
+
+    function _graceTs() internal view returns (uint64) {
+        return uint64(vm.parseUint(v.readString(".slots.graceTs")));
+    }
+
+    /// An ad whose settlement signer is the vector account, funded, and one lock on it.
+    function _lockAs(uint256 salt) internal returns (IAdManager.OrderParams memory p) {
+        string memory adId = string.concat("422-real-", vm.toString(salt));
+        vm.startPrank(admin);
+        adManager.setPeerEscrow(orderChainId, _b32(orderPortal));
+        adManager.setTokenRoute(address(adToken), orderChainId, _b32(orderToken));
+        vm.stopPrank();
+        vm.startPrank(maker);
+        adToken.approve(address(adManager), initAmt + fundAmt);
+        adManager.createAd(adId, address(adToken), initAmt, orderChainId, _b32(adRecipient), account);
+        adManager.fundAd(adId, fundAmt);
+        vm.stopPrank();
+
+        p = _defaultParams(adId);
+        p.amount = 60 ether;
+        p.salt = salt;
+        p.adSettlementSigner = account;
+        vm.prank(maker);
+        adManager.lockForOrder(p);
+    }
+
+    /*//////////////////////////// the cases ////////////////////////////*/
+
+    /// Pass 4 (c41-F3): the standard kill after the lock, a second slot still live. The stored
+    /// expiry says 1970; the slot died at the kill, inside the order's life.
+    function test_realRegistry_killAfterTheLock_waitsTheGrace() public {
+        _realRegistry();
+        IAdManager.OrderParams memory p = _lockAs(1);
+        vm.warp(block.timestamp + 10);
+        _setValidUntil(0, true);
+        assertTrue(registry.hasUsableSlot(account), "the second slot keeps the identity usable");
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        vm.warp(p.deadline + 60 minutes);
+        adManager.finalizeCancel(p);
+    }
+
+    /// A kill before the lock is history: the order was co-signed under the other slot.
+    function test_realRegistry_killBeforeTheLock_ordinaryTiming() public {
+        _realRegistry();
+        vm.warp(block.timestamp + 10);
+        _setValidUntil(0, true);
+        vm.warp(block.timestamp + 10);
+        IAdManager.OrderParams memory p = _lockAs(2);
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        adManager.finalizeCancel(p);
+    }
+
+    /// A shorten made before the lock, naming a date inside the window: the slot dies at the date.
+    function test_realRegistry_shortenBeforeTheLockNamingADateInside_waitsTheGrace() public {
+        _realRegistry();
+        vm.warp(_graceTs() - 12 hours);
+        _setValidUntil(0, false);
+        vm.warp(block.timestamp + 10);
+        IAdManager.OrderParams memory p = _lockAs(3);
+        assertTrue(_graceTs() > block.timestamp && _graceTs() < p.deadline, "the date is inside");
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+    }
+
+    /// D15 at the boundary: a kill in the deadline's own second counts; one second later it does not.
+    function test_realRegistry_killAtTheDeadline_counts() public {
+        _realRegistry();
+        IAdManager.OrderParams memory p = _lockAs(4);
+        vm.warp(p.deadline);
+        _setValidUntil(0, true);
+        adManager.claimCancel(p);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+    }
+
+    function test_realRegistry_killAfterTheDeadline_ordinaryTiming() public {
+        _realRegistry();
+        IAdManager.OrderParams memory p = _lockAs(5);
+        _claim(p);
+        vm.warp(p.deadline + 1);
+        _setValidUntil(0, true);
+        vm.warp(p.deadline + 30 minutes);
+        adManager.finalizeCancel(p);
+    }
+}
