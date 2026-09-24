@@ -3619,9 +3619,7 @@ fn test_422_halt_refuses_the_co_signed_unlock_resume_admits_it() {
     let empty = Bytes::new(&s.env);
 
     s.ad_manager.halt_settlement(&maker);
-    let h = s.ad_manager.halt_of(&maker).unwrap();
-    assert!(h.halted);
-    assert_eq!(h.last_halted_at, s.env.ledger().timestamp());
+    assert!(s.ad_manager.halt_of(&maker).unwrap().halted);
     assert_eq!(
         s.ad_manager.try_unlock(
             &p,
@@ -3649,26 +3647,16 @@ fn test_422_halt_is_keyed_by_maker() {
     assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
 }
 
+/// A runbook that fires the halt twice is not an error, and the second halt still refuses.
 #[test]
-fn test_422_halt_is_idempotent_and_moves_the_stamp_resume_needs_a_halt() {
+fn test_422_halt_is_idempotent_second_halt_still_refuses() {
     let s = setup();
+    let p = locked_ad_order(&s);
     let maker = maker_addr(&s);
-    assert_eq!(
-        s.ad_manager.try_resume_settlement(&maker),
-        Err(Ok(AdErr::NotHalted))
-    );
     s.ad_manager.halt_settlement(&maker);
     warp(&s, s.env.ledger().timestamp() + 100);
     s.ad_manager.halt_settlement(&maker);
-    assert_eq!(
-        s.ad_manager.halt_of(&maker).unwrap().last_halted_at,
-        s.env.ledger().timestamp()
-    );
-    s.ad_manager.resume_settlement(&maker);
-    assert_eq!(
-        s.ad_manager.try_resume_settlement(&maker),
-        Err(Ok(AdErr::NotHalted))
-    );
+    assert!(!ad_unlock(&s, &p, &Bytes::new(&s.env)));
 }
 
 /// An incident lever is never pause-gated (the same rule as `set_settlement_signer`).

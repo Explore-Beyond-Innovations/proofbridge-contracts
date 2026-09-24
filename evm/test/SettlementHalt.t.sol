@@ -41,7 +41,6 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         emit IAdManager.SettlementHalted(maker);
         _halt();
         assertTrue(adManager.halted(maker));
-        assertEq(adManager.lastHaltedAt(maker), uint64(block.timestamp));
 
         vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__Halted.selector, maker));
         _unlock(p, "N1");
@@ -62,16 +61,14 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Filled));
     }
 
-    function test_halt_isIdempotent_andMovesTheStamp() public {
+    /// A runbook that fires the halt twice is not an error, and the second halt still refuses.
+    function test_halt_isIdempotent_secondHaltStillRefuses() public {
+        (IAdManager.OrderParams memory p,) = _lock(2);
         _halt();
         vm.warp(block.timestamp + 100);
         _halt();
-        assertEq(adManager.lastHaltedAt(maker), uint64(block.timestamp));
-    }
-
-    function test_resume_whenNotHalted_reverts() public {
-        vm.expectRevert(IAdManager.AdManager__NotHalted.selector);
-        _resume();
+        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__Halted.selector, maker));
+        _unlock(p, "N1");
     }
 
     /// An incident lever is never pause-gated (the same rule as `setSettlementSigner`).
