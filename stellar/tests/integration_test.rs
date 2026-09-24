@@ -3602,6 +3602,268 @@ fn test_t54_present_settled_settles_a_claimed_primary_no_nullifier() {
     );
 }
 
+// --- #422: the maker's settlement halt (F1 residual) --------------------------------------
+// One custody-key transaction stops the co-signed payout of every open order against the maker's
+// ads; evidence still pays; a denied order's cancel waits the evidence grace (the buffer alone with
+// no anchor wired, anchor delay + buffer with one).
+
+fn maker_addr(s: &TestSetup) -> Address {
+    s.ad_manager.get_ad(&ad_id(&s)).unwrap().maker
+}
+
+#[test]
+fn test_422_halt_refuses_the_co_signed_unlock_resume_admits_it() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let maker = maker_addr(&s);
+    let empty = Bytes::new(&s.env);
+
+    s.ad_manager.halt_settlement(&maker);
+    let h = s.ad_manager.halt_of(&maker).unwrap();
+    assert!(h.halted);
+    assert_eq!(h.last_halted_at, s.env.ledger().timestamp());
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &p,
+            &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &empty,
+        ),
+        Err(Ok(AdErr::Halted))
+    );
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Open, "nothing moved");
+
+    s.ad_manager.resume_settlement(&maker);
+    assert!(!s.ad_manager.halt_of(&maker).unwrap().halted);
+    assert!(ad_unlock(&s, &p, &empty));
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+}
+
+#[test]
+fn test_422_halt_is_keyed_by_maker() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let someone = Address::generate(&s.env);
+    s.ad_manager.halt_settlement(&someone);
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+}
+
+#[test]
+fn test_422_halt_is_idempotent_and_moves_the_stamp_resume_needs_a_halt() {
+    let s = setup();
+    let maker = maker_addr(&s);
+    assert_eq!(
+        s.ad_manager.try_resume_settlement(&maker),
+        Err(Ok(AdErr::NotHalted))
+    );
+    s.ad_manager.halt_settlement(&maker);
+    warp(&s, s.env.ledger().timestamp() + 100);
+    s.ad_manager.halt_settlement(&maker);
+    assert_eq!(
+        s.ad_manager.halt_of(&maker).unwrap().last_halted_at,
+        s.env.ledger().timestamp()
+    );
+    s.ad_manager.resume_settlement(&maker);
+    assert_eq!(
+        s.ad_manager.try_resume_settlement(&maker),
+        Err(Ok(AdErr::NotHalted))
+    );
+}
+
+/// An incident lever is never pause-gated (the same rule as `set_settlement_signer`).
+#[test]
+fn test_422_halt_and_resume_work_while_paused() {
+    let s = setup();
+    let maker = maker_addr(&s);
+    s.ad_manager.pause();
+    s.ad_manager.halt_settlement(&maker);
+    s.ad_manager.resume_settlement(&maker);
+}
+
+/// Rule 2: a halted maker's counterparty is still paid on an anchored SETTLED leaf.
+#[test]
+fn test_422_present_settled_ignores_the_halt() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = locked_ad_order(&s);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+    warp(&s, p.deadline + 600);
+    s.ad_manager.present_settled(&p, &root, &proof);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+    assert_eq!(ad_locked(&s), 0);
+}
+
+/// Halted before the claim: the cancel waits the grace (the buffer, with no anchor wired).
+#[test]
+fn test_422_finalize_cancel_halted_since_before_the_claim_waits_the_grace() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    warp(&s, p.deadline + 2 * SUITE_BUFFER - 1);
+    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+    assert_eq!(ad_locked(&s), 0, "the lock is released after the grace");
+}
+
+/// Halted after the claim opened and resumed before the window ended: still denied.
+#[test]
+fn test_422_finalize_cancel_halted_then_resumed_after_the_claim_still_waits() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let maker = maker_addr(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + 600);
+    s.ad_manager.halt_settlement(&maker);
+    warp(&s, p.deadline + 1200);
+    s.ad_manager.resume_settlement(&maker);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// A halt lifted before the claim opened never denied this window: ordinary timing.
+#[test]
+fn test_422_finalize_cancel_halt_lifted_before_the_claim_ordinary_timing() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let maker = maker_addr(&s);
+    s.ad_manager.halt_settlement(&maker);
+    warp(&s, s.env.ledger().timestamp() + 1);
+    s.ad_manager.resume_settlement(&maker);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+    assert_eq!(ad_locked(&s), 0);
+}
+
+/// A halt in the same second the claim opened counts (the safe direction of `>=`).
+#[test]
+fn test_422_finalize_cancel_halt_in_the_claims_second_counts() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+}
+
+/// With an anchor wired the grace is its delay for the order chain plus the buffer.
+#[test]
+fn test_422_finalize_cancel_grace_is_anchor_delay_plus_buffer() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    anchor.set_anchor_delay(&s.tp.order_chain_id, &7_200u64);
+    let p = locked_ad_order(&s);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER + 7_200);
+    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    warp(&s, p.deadline + SUITE_BUFFER + 7_200 + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// Lever 2: the signer fully retired in the registry is a denied payout too (the one-sided
+/// retirement race that exists today, closed by the same grace).
+#[test]
+fn test_422_finalize_cancel_signer_with_no_usable_slot_waits_the_grace() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry).set(&p.ad_settlement_signer, &false);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// The grace stacks on a pause the same way the window does.
+#[test]
+fn test_422_finalize_cancel_grace_stacks_on_a_pause() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    s.ad_manager.pause();
+    warp(&s, p.deadline + 900);
+    s.ad_manager.unpause();
+    // 900 s paused: the window ends at +buffer+900, the grace at +2*buffer+900.
+    warp(&s, p.deadline + 2 * SUITE_BUFFER + 900 - 1);
+    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    warp(&s, p.deadline + 2 * SUITE_BUFFER + 900);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// T-06: a locked, co-signed order stops settling after one custody-key transaction, cannot be
+/// cancelled inside the grace, and reaches `Cancelled` with the CANCEL leaf and the counter cleared
+/// after it.
+#[test]
+fn test_t06_halted_order_stops_settling_and_still_terminates() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let balance = s.ad_manager.get_ad(&ad_id(&s)).unwrap().balance;
+    assert_eq!(ad_leaves(&s), 1, "the ORDER leaf");
+    let empty = Bytes::new(&s.env);
+
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    assert!(!ad_unlock(&s, &p, &empty));
+
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(s.ad_manager.try_finalize_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    // The window's last second (inclusive): still the halt that refuses; a second later the cutoff.
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &p,
+            &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &empty,
+        ),
+        Err(Ok(AdErr::Halted))
+    );
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &p,
+            &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &empty,
+        ),
+        Err(Ok(AdErr::OrderExpired))
+    );
+
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Cancelled);
+    assert_eq!(ad_leaves(&s), 2, "the CANCEL leaf");
+    assert_eq!(ad_locked(&s), 0);
+    assert_eq!(
+        s.ad_manager.get_ad(&ad_id(&s)).unwrap().balance,
+        balance,
+        "the ad keeps its funds"
+    );
+    assert_eq!(signer_in_flight(&s), 0);
+}
+
 /// D3: not window-gated — accepted on an Open order before the deadline.
 #[test]
 fn test_present_settled_on_open_before_deadline() {

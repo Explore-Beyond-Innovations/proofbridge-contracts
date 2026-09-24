@@ -40,7 +40,9 @@ contract OrderPortalUnlockGas is OrderPortalGateTest {
 }
 
 contract AdManagerUnlockGas is AdManagerGateTest {
-    uint256 constant AD_MANAGER_UNLOCK_ESCROW_GAS_CEILING = 82_000;
+    // Re-baselined for #422: the maker's halt flag is one cold SLOAD on this path (80,649 → 83,442
+    // measured), and the previous ceiling had only ~1.7% left over the drifted baseline.
+    uint256 constant AD_MANAGER_UNLOCK_ESCROW_GAS_CEILING = 91_000;
 
     // Escrow-settlement path ONLY: metered through MockRootVerifier(true) with an
     // empty cosig, so it excludes the BLS aggregate-verify. A real AdManager unlock

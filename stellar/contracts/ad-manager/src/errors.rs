@@ -140,6 +140,10 @@ pub enum AdManagerError {
     /// A public input at or above the field prime (2.3h, residual 9). Refused here as defence in
     /// depth — both shipped verifiers already reject one.
     NonCanonicalInput = 65,
+    /// The order's maker has halted settlement (#422); only evidence can pay this order now.
+    Halted = 66,
+    /// `resume_settlement` with no halt in force.
+    NotHalted = 67,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for AdManagerError {

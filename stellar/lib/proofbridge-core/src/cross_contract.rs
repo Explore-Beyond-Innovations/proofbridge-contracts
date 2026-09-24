@@ -99,6 +99,7 @@ pub trait RootVerifierInterface {
 pub trait RootAnchorInterface {
     fn is_anchored(env: Env, source_chain_id: u128, root: BytesN<32>) -> bool;
     fn anchored_at(env: Env, source_chain_id: u128, root: BytesN<32>) -> u64;
+    fn anchor_delay(env: Env, source_chain_id: u128) -> u64;
 }
 
 /// The one registry read the escrows make (2.3c D2): a live, unexpired key slot.
@@ -333,6 +334,16 @@ pub fn is_root_valid(
 /// True iff the anchor module has notarized `root` for `source_chain_id` and its delay has passed.
 /// A failed call (a mis-wired address, a trap) is a typed `false`, never a host error on the
 /// consumer's refund path.
+/// The route's anchor delay for `source_chain_id`: the floor before a root from there is usable
+/// here. Read by the primary's cancel grace (#422); 0 when the anchor cannot answer.
+pub fn anchor_delay(env: &Env, anchor: &Address, source_chain_id: u128) -> u64 {
+    RootAnchorClient::new(env, anchor)
+        .try_anchor_delay(&source_chain_id)
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or(0)
+}
+
 pub fn is_anchored(env: &Env, anchor: &Address, source_chain_id: u128, root: &BytesN<32>) -> bool {
     matches!(
         RootAnchorClient::new(env, anchor).try_is_anchored(&source_chain_id, root),

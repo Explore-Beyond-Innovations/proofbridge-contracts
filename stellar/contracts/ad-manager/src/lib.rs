@@ -50,7 +50,7 @@ use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String};
 
 pub use errors::AdManagerError;
 pub use types::{
-    Ad, ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, DisputeOutcome, OrderParams,
+    Ad, ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, DisputeOutcome, Halt, OrderParams,
     OrderRecord, RouteTiming, Status, NATIVE_TOKEN_ADDRESS,
 };
 
@@ -380,6 +380,51 @@ impl AdManagerContract {
     }
 
     /// Re-point an ad's settlement signer. Custody-authorized, callable at any time — including
+    /// Stop the co-signed payout of every open order against every ad `maker` owns (#422, the
+    /// custody key's brake on what its agent already co-signed). Instant, never pause-gated,
+    /// idempotent (the stamp moves each time, which only lengthens a cancel's wait). Evidence paths
+    /// are untouched: an order the counterparty can prove settled on the order chain is still paid
+    /// here, and a halted order's cancel waits an evidence grace so that proof always has time.
+    pub fn halt_settlement(env: Env, maker: Address) -> Result<(), AdManagerError> {
+        maker.require_auth();
+        storage::set_halt(
+            &env,
+            &maker,
+            &Halt {
+                halted: true,
+                last_halted_at: env.ledger().timestamp(),
+            },
+        );
+        events::SettlementHalted {
+            maker: maker.clone(),
+        }
+        .publish(&env);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Lift the maker's halt; co-signed payouts resume in the same ledger.
+    pub fn resume_settlement(env: Env, maker: Address) -> Result<(), AdManagerError> {
+        maker.require_auth();
+        let mut halt = storage::get_halt(&env, &maker).ok_or(AdManagerError::NotHalted)?;
+        if !halt.halted {
+            return Err(AdManagerError::NotHalted);
+        }
+        halt.halted = false;
+        storage::set_halt(&env, &maker, &halt);
+        events::SettlementResumed {
+            maker: maker.clone(),
+        }
+        .publish(&env);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// The maker's halt record, `None` if they never halted.
+    pub fn halt_of(env: Env, maker: Address) -> Option<Halt> {
+        storage::get_halt(&env, &maker)
+    }
+
     /// with locks in flight: an open order settles against the signer frozen in its own hash,
     /// never against this field (design 01 §1.5, the third kill lever).
     pub fn set_settlement_signer(
@@ -652,6 +697,13 @@ impl AdManagerContract {
         if env.ledger().timestamp() > cutoff {
             return Err(AdManagerError::OrderExpired);
         }
+        // #422: the maker's halt refuses the co-signed payout; evidence (`present_settled`) still
+        // pays. After the cutoff, as on EVM, so the two chains refuse in the same order. The ad is
+        // the entry `pay_from_ad` loads again below; the host reads it once.
+        let ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
+        if Self::is_halted(&env, &ad.maker) {
+            return Err(AdManagerError::Halted);
+        }
 
         // Gate 2 - root authenticity (BLS co-signature). Mandatory: unlock is
         // impossible until the route's verifier module is configured.
@@ -856,6 +908,14 @@ impl AdManagerContract {
 
         let ad_amount = Self::ad_amount(&params)?;
         let mut ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
+        // #422 rule 3: when the co-signed payout was denied while the window was open, the cancel
+        // waits for the order chain's SETTLED evidence to be anchorable and presented, so a maker
+        // paid on the other chain cannot also take the lock back.
+        if Self::co_sign_denied(&env, &ad.maker, &params, &order_hash) {
+            let end = Self::window_end(&env, &order_hash, 0, buffer);
+            let grace = Self::evidence_grace(&env, params.order_chain_id, buffer);
+            Self::require_reached(&env, end.saturating_add(grace))?;
+        }
         ad.locked -= ad_amount;
         storage::set_ad(&env, &params.ad_id, &ad);
 
@@ -1223,6 +1283,48 @@ impl AdManagerContract {
 
     fn window_end(env: &Env, order_hash: &BytesN<32>, deadline: u64, buffer: u64) -> u64 {
         ops::window_end(env, order_hash, deadline, buffer)
+    }
+
+    /// Is the maker's halt in force.
+    fn is_halted(env: &Env, maker: &Address) -> bool {
+        storage::get_halt(env, maker).map_or(false, |h| h.halted)
+    }
+
+    /// Was this order's co-signed payout denied by a maker-side lever while its window was open: a
+    /// halt in force, a halt at or after the claim opened (resumed since or not), or the order's
+    /// settlement signer left with no usable registry slot (a full retirement, lever 2; a rotation
+    /// keeps a usable slot and does not count). No registry wired means no lever 2 to read.
+    fn co_sign_denied(
+        env: &Env,
+        maker: &Address,
+        params: &OrderParams,
+        order_hash: &BytesN<32>,
+    ) -> bool {
+        if let Some(h) = storage::get_halt(env, maker) {
+            let opened_at = storage::get_claim(env, order_hash).map_or(u64::MAX, |c| c.opened_at);
+            if h.halted || h.last_halted_at >= opened_at {
+                return true;
+            }
+        }
+        match storage::get_key_registry(env) {
+            Some(registry) => !proofbridge_core::cross_contract::has_usable_slot(
+                env,
+                &registry,
+                &params.ad_settlement_signer,
+            ),
+            None => false,
+        }
+    }
+
+    /// How long a denied order's cancel waits past its window: the order chain's anchor delay (the
+    /// floor before a SETTLED root from there is usable here) plus the route's buffer (the allowance
+    /// the route already gives a presenter for anchor cadence and submission). With no anchor wired
+    /// there is no evidence path either; the buffer alone then bounds the wait.
+    fn evidence_grace(env: &Env, order_chain_id: u128, buffer: u64) -> u64 {
+        let delay = storage::get_root_anchor(env).map_or(0, |a| {
+            proofbridge_core::cross_contract::anchor_delay(env, &a, order_chain_id)
+        });
+        delay.saturating_add(buffer)
     }
 
     fn require_finalizable(

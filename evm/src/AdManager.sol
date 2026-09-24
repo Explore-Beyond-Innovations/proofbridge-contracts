@@ -5,6 +5,7 @@ import {EscrowBase} from "./escrow/EscrowBase.sol";
 import {IAdManager} from "./interfaces/IAdManager.sol";
 import {IDisputeManager} from "./interfaces/IDisputeManager.sol";
 import {IKeyRegistry} from "./interfaces/IKeyRegistry.sol";
+import {IRootAnchor} from "./interfaces/IRootAnchor.sol";
 import {IVerifier} from "./interfaces/IVerifier.sol";
 import {IMerkleManager} from "./interfaces/IMerkleManager.sol";
 import {IwNativeToken} from "./wNativeToken.sol";
@@ -51,6 +52,17 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @notice Ads by id. `maker == address(0)` means the id is free.
     mapping(string adId => Ad) public ads;
+
+    /// @notice The maker's settlement halt (#422). While set, the co-signed `unlock` of every order
+    ///         against every ad this maker owns is refused. Custody-authorized, instant both ways,
+    ///         never pause-gated. Read by `unlock` and `finalizeCancel` only: every evidence path
+    ///         ignores it, so a halt can delay a payout but never keep both sides.
+    mapping(address maker => bool) public halted;
+
+    /// @notice When `maker` last halted. `finalizeCancel` treats a halt at or after the claim opened
+    ///         as a denied payout even if it was resumed since: the resume may have come after the
+    ///         presentation cutoff, when it could no longer help the counterparty.
+    mapping(address maker => uint64) public lastHaltedAt;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -148,6 +160,25 @@ contract AdManager is EscrowBase, IAdManager {
         emit AdWithdrawn(adId, msg.sender, amount, ad.balance);
     }
 
+    /**
+     * @inheritdoc IAdManager
+     * @dev Custody-authorized and never pause-gated, like `setSettlementSigner`: an incident lever
+     *      must not be freezable. Idempotent, so a runbook that fires it twice is not an error; the
+     *      stamp moves each time, which only ever lengthens a cancel's wait.
+     */
+    function haltSettlement() external nonReentrant {
+        halted[msg.sender] = true;
+        lastHaltedAt[msg.sender] = uint64(block.timestamp);
+        emit SettlementHalted(msg.sender);
+    }
+
+    /// @inheritdoc IAdManager
+    function resumeSettlement() external nonReentrant {
+        if (!halted[msg.sender]) revert AdManager__NotHalted();
+        halted[msg.sender] = false;
+        emit SettlementResumed(msg.sender);
+    }
+
     /// @inheritdoc IAdManager
     function closeAd(string calldata adId, address to) external nonReentrant whenNotPaused {
         Ad storage ad = _getAdOwned(adId, msg.sender);
@@ -201,6 +232,10 @@ contract AdManager is EscrowBase, IAdManager {
         // D2: the co-signed unlock is the presentation — valid through the window, minus the margin.
         _requireNotPast(_presentationCutoff(orderHash, params));
         _requireSettleable(orderHash, nullifierHash);
+        // #422: the maker's halt refuses the co-signed payout; evidence (`presentSettled`) still pays.
+        // One cold read of the maker's flag on the metered path (~2.4k; UnlockGas re-baselined).
+        address maker = ads[params.adId].maker;
+        if (halted[maker]) revert AdManager__Halted(maker);
         // Gate 2 — root authenticity (the co-signed root); mandatory, reverts NoRootVerifier when unwired.
         _requireRootValid(
             params.orderChainId,
@@ -242,6 +277,12 @@ contract AdManager is EscrowBase, IAdManager {
     function finalizeCancel(OrderParams calldata params) external nonReentrant whenNotPaused {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
         _requireFinalizable(orderHash);
+        // #422 rule 3: when the co-signed payout was denied while the window was open, the cancel
+        // waits for the order chain's SETTLED evidence to be anchorable and presented, so a maker
+        // paid on the other chain cannot also take the lock back.
+        if (_coSignDenied(params, claims[orderHash].openedAt)) {
+            _requireReached(_claimedWindowEnd(orderHash) + _evidenceGrace(params.orderChainId));
+        }
 
         Ad storage ad = ads[params.adId];
         uint256 adAmount = _adAmount(params);
@@ -543,6 +584,27 @@ contract AdManager is EscrowBase, IAdManager {
         if (address(keyRegistry) == address(0)) revert AdManager__NoKeyRegistry();
         if (signer == bytes32(0)) revert AdManager__SettlementSignerZero();
         if (!keyRegistry.hasUsableSlot(signer)) revert AdManager__SignerNotRegistered(signer);
+    }
+
+    /// @dev Was this order's co-signed payout denied by a maker-side lever while its window was open:
+    ///      a halt in force, a halt at or after the claim opened (resumed since or not), or the order's
+    ///      settlement signer left with no usable registry slot (a full retirement, lever 2; a rotation
+    ///      keeps a usable slot and does not count). No registry wired means no lever 2 to read.
+    function _coSignDenied(OrderParams calldata p, uint64 claimOpenedAt) private view returns (bool) {
+        address maker = ads[p.adId].maker;
+        if (halted[maker] || lastHaltedAt[maker] >= claimOpenedAt) return true;
+        IKeyRegistry registry = keyRegistry;
+        return address(registry) != address(0) && !registry.hasUsableSlot(p.adSettlementSigner);
+    }
+
+    /// @dev How long a denied order's cancel waits past its window: the order chain's anchor delay
+    ///      (the floor before a SETTLED root from there is usable here) plus the route's buffer (the
+    ///      allowance the route already gives a presenter for anchor cadence and submission). With no
+    ///      anchor wired there is no evidence path either; the buffer alone then bounds the wait.
+    function _evidenceGrace(uint256 orderChainId) private view returns (uint256) {
+        IRootAnchor anchor = rootAnchor;
+        uint256 delay = address(anchor) == address(0) ? 0 : anchor.anchorDelay(orderChainId);
+        return delay + _timing(orderChainId).buffer;
     }
 
     /// @dev Load an ad and assert `maker` owns it.
