@@ -374,8 +374,9 @@ impl DisputeManagerContract {
         }
     }
 
-    /// The challenge deadline in real time: the recorded one plus every second this module has been
-    /// paused since the dispute opened.
+    /// The challenge deadline in real time: the recorded one plus every second the *escrow* has been
+    /// paused past the snapshot the filing carried — the order's own, from its lock, so the floor
+    /// is the escrow's window end to the second (D10, c41-J).
     pub fn effective_challenge_deadline(env: Env, order_hash: BytesN<32>) -> u64 {
         match storage::get_dispute(&env, &order_hash) {
             None => 0,

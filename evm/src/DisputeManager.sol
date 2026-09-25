@@ -300,7 +300,8 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
 
     /**
      * @notice The challenge deadline in real time: the recorded one plus every second the *escrow*
-     *         has been paused since the dispute opened (D10).
+     *         has been paused past the snapshot the filing carried — the order's own, from its
+     *         lock, so the floor is the escrow's window end to the second (D10, c41-J).
      * @dev The escrow's counter, not one of this contract's own. A pause matters here for exactly
      *      one reason — it stops the parties presenting evidence — and presentation is gated by the
      *      escrow. A pause clock on this module would be a second, unrelated number that happened

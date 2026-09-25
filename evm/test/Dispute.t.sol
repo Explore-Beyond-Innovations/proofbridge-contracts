@@ -217,7 +217,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         assertEq(until_, p.deadline + 30 minutes + 3 hours, "the floor carries the pause since the lock");
 
         vm.warp(p.deadline + 30 minutes + 1); // the old floor: the unlock is still open here
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeNotResolved.selector, h));
         adManager.finalizeDispute(p);
         vm.warp(until_ + 1);
         adManager.finalizeDispute(p);
