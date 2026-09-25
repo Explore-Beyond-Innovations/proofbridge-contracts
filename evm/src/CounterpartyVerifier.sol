@@ -19,7 +19,8 @@ contract CounterpartyVerifier is IRootVerifier {
         bytes32 adChainRoot;
     }
 
-    /// metadata = abi.encode(settlementSigner, bridger, moduleData): slot 0 is the order's adSettlementSigner.
+    /// metadata = abi.encode(settlementSigner, bridger, orderHash, moduleData): what the escrow vouches for.
+    /// Slot 0 is the order's adSettlementSigner; orderHash is the order being unlocked (#433).
     /// moduleData = abi.encode(version, auth, signerSlotId, bridgerSlotId, pkSigner, pkBridger, aggSig)
     uint8 public constant METADATA_VERSION = 2;
 
@@ -33,8 +34,8 @@ contract CounterpartyVerifier is IRootVerifier {
     }
 
     function isRootValid(uint256 sourceChainId, bytes32 root, bytes calldata metadata) external view returns (bool) {
-        (bytes32 settlementSigner, bytes32 bridger, bytes memory moduleData) =
-            abi.decode(metadata, (bytes32, bytes32, bytes));
+        (bytes32 settlementSigner, bytes32 bridger, bytes32 orderHash, bytes memory moduleData) =
+            abi.decode(metadata, (bytes32, bytes32, bytes32, bytes));
         // Version is the first word; check it before decoding a layout that may not be ours.
         if (!isCurrentVersion(moduleData)) return false;
         (
@@ -48,6 +49,9 @@ contract CounterpartyVerifier is IRootVerifier {
         ) = abi.decode(moduleData, (uint8, SettlementAuth, uint32, uint32, bytes, bytes, bytes));
 
         if (pkSigner.length != 128 || pkBridger.length != 128 || aggSig.length != 256) return false;
+        // #433: the parties co-signed one order. A signature over another order between the same two
+        // parties, under the same roots, is not consent to this one.
+        if (auth.orderHash != orderHash) return false;
 
         if (sourceChainId == auth.orderChainId) {
             if (root != auth.orderChainRoot) return false;

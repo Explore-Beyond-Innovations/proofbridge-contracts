@@ -13,7 +13,7 @@ contract Slot0RootVerifier is IRootVerifier {
     }
 
     function isRootValid(uint256, bytes32, bytes calldata metadata) external view returns (bool) {
-        (bytes32 slot0,,) = abi.decode(metadata, (bytes32, bytes32, bytes));
+        (bytes32 slot0,,,) = abi.decode(metadata, (bytes32, bytes32, bytes32, bytes));
         return slot0 == expected;
     }
 }

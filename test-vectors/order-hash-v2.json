@@ -8,7 +8,7 @@
     "domainSeparator": "0x30be5c0eff57121410bcfb088c479028b3b8059112c22dff7e7b55f1b3927d7d",
     "fieldOrder": "the 15 T1 fields in their original order, then deadline (word 16), then adSettlementSigner (word 17) — appended so existing Soroban offset writes are untouched; struct_hash buffer [u8; 512] → [u8; 576]",
     "widthInvariant": "amount/chainIds ≤ u128 (rejected wider, both chains); salt is full u256 (Soroban salt → U256); deadline ≤ u64; see `rejects`",
-    "envelope": "escrow → verifier metadata = (slot0, slot1, cosigData); slot 0 = params.adSettlementSigner (NOT adCreator) at all four call sites; the verifier resolves slot 0's settlement key (design/01 §1.8)",
+    "envelope": "escrow → verifier metadata = (slot0, slot1, orderHash, cosigData) (#433: the verifier requires the signed auth to name orderHash); slot 0 = params.adSettlementSigner (NOT adCreator) at all four call sites; the verifier resolves slot 0's settlement key (design/01 §1.8)",
     "classification": "account32 with 12 leading zero bytes = left-padded EVM address, else native 32-byte key — the publisher's home-chain rule",
     "settlementSignerEncoding": {
       "rule": "an EVM settlement signer enters the order hash as toBytes32(address) (12 zero bytes || 20-byte address); the split-case-evm-signer vector's adSettlementSigner is exactly account32",

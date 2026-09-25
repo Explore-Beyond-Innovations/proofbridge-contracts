@@ -6,6 +6,7 @@ import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 import {BLSKeyRegistry} from "../src/BLSKeyRegistry.sol";
 import {CounterpartyVerifier} from "../src/CounterpartyVerifier.sol";
+import {CoSign} from "test/utils/CoSign.sol";
 
 /// Vector-driven tests; the Soroban verifier suite consumes the same JSON.
 contract CounterpartyVerifierTest is Test {
@@ -75,6 +76,11 @@ contract CounterpartyVerifierTest is Test {
         );
     }
 
+    /// The order the vector auth was signed over; the envelope carries it as the escrow would (#433).
+    function signedOrderHash() internal view returns (bytes32) {
+        return v.readBytes32(".settlement.auth.orderHash");
+    }
+
     function metadata() internal view returns (bytes memory) {
         return metadataWith(v.readBytes(".keys.makerBls.pk.eip2537"), v.readBytes(".settlement.aggSig.eip2537"));
     }
@@ -99,7 +105,7 @@ contract CounterpartyVerifierTest is Test {
         bytes memory moduleData = abi.encode(
             uint8(2), auth, makerSlot, bridgerSlot, pkMaker, v.readBytes(".keys.bridgerBls.pk.eip2537"), aggSig
         );
-        return abi.encode(maker, bridger, moduleData);
+        return abi.encode(maker, bridger, signedOrderHash(), moduleData);
     }
 
     // ---- maker slot helpers (slots.makerOnSepolia: sep53 owner, registrations[i] at nonce i) ----
@@ -177,7 +183,11 @@ contract CounterpartyVerifierTest is Test {
             v.readBytes(".keys.bridgerBls.pk.eip2537"),
             v.readBytes(".settlement.aggSig.eip2537")
         );
-        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, moduleData)));
+        assertFalse(
+            verifier.isRootValid(
+                orderChainId, orderChainRoot, abi.encode(maker, bridger, signedOrderHash(), moduleData)
+            )
+        );
     }
 
     /// A v1-layout blob (no slot ids) must return false, not revert with empty data.
@@ -196,8 +206,12 @@ contract CounterpartyVerifierTest is Test {
             v.readBytes(".keys.bridgerBls.pk.eip2537"),
             v.readBytes(".settlement.aggSig.eip2537")
         );
-        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, v1)));
-        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, hex"")));
+        assertFalse(
+            verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, signedOrderHash(), v1))
+        );
+        assertFalse(
+            verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, signedOrderHash(), hex""))
+        );
     }
 
     // =========================================================================
@@ -300,8 +314,40 @@ contract CounterpartyVerifierTest is Test {
         );
         assertFalse(
             verifier.isRootValid(
-                orderChainId, bytes32(uint256(orderChainRoot) ^ 1), abi.encode(maker, bridger, moduleData)
+                orderChainId,
+                bytes32(uint256(orderChainRoot) ^ 1),
+                abi.encode(maker, bridger, signedOrderHash(), moduleData)
             )
         );
+    }
+
+    // ---- #433: the co-signature binds the order ----
+
+    /// The helper the unlock fixtures use must be the real signing, not a lookalike: signed over the
+    /// vector's own auth it reproduces the vector's aggregate byte for byte.
+    function test_coSignHelperReproducesTheVectorAggregate() public view {
+        bytes memory agg = CoSign.aggregate(v, CoSign.authFor(v, signedOrderHash()));
+        assertEq(agg, v.readBytes(".settlement.aggSig.eip2537"));
+    }
+
+    /// A valid co-signature over one order is not consent to another: the envelope names the order
+    /// the escrow is unlocking, and the auth must name the same one.
+    function test_envelopeOrderHashDiffersFromTheAuth_fails() public view {
+        bytes memory moduleData = abi.encode(
+            uint8(2),
+            CoSign.authFor(v, signedOrderHash()),
+            uint32(0),
+            uint32(0),
+            v.readBytes(".keys.makerBls.pk.eip2537"),
+            v.readBytes(".keys.bridgerBls.pk.eip2537"),
+            v.readBytes(".settlement.aggSig.eip2537")
+        );
+        bytes32 other = keccak256("another order");
+        assertTrue(
+            verifier.isRootValid(
+                orderChainId, orderChainRoot, abi.encode(maker, bridger, signedOrderHash(), moduleData)
+            )
+        );
+        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, other, moduleData)));
     }
 }

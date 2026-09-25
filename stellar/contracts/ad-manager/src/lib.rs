@@ -745,6 +745,7 @@ impl AdManagerContract {
             &target_root,
             &params.ad_settlement_signer,
             &params.bridger,
+            &order_hash,
             &cosig_data,
         ) {
             return Err(AdManagerError::RootNotValid);

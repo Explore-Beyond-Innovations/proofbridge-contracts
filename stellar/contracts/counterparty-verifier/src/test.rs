@@ -16,7 +16,9 @@ const VECTORS: &str = include_str!("../../../../test-vectors/bls-encodings.json"
 const REGISTRY_ID: [u8; 32] = [0x22; 32];
 const CHAIN_ID: u128 = 1_000_002;
 const T0: u64 = 1_700_000_000;
-const METADATA_LEN: usize = 585;
+const METADATA_LEN: usize = 617;
+/// The layout before #433: no envelope order hash.
+const OLD_METADATA_LEN: usize = 585;
 
 fn vectors() -> serde_json::Value {
     serde_json::from_str(VECTORS).unwrap()
@@ -105,6 +107,7 @@ impl Setup {
     }
 
     /// Both parties' settlement keys sit in slot 0; the slot hints are calldata, not hash-bound.
+    /// The envelope's order hash is the vector auth's own: the order the escrow would be unlocking.
     fn metadata_slots(
         &self,
         maker_slot: u32,
@@ -112,6 +115,27 @@ impl Setup {
         pk_maker: &[u8],
         agg_sig: &[u8],
     ) -> Bytes {
+        let order_hash = hexval(&self.v["settlement"]["auth"]["orderHash"]);
+        let out = self.raw_metadata(
+            maker_slot,
+            bridger_slot,
+            pk_maker,
+            agg_sig,
+            Some(&order_hash),
+        );
+        assert_eq!(out.len(), METADATA_LEN);
+        Bytes::from_slice(&self.env, &out)
+    }
+
+    /// The envelope and module data as raw bytes; `envelope_order_hash: None` is the pre-#433 layout.
+    fn raw_metadata(
+        &self,
+        maker_slot: u32,
+        bridger_slot: u32,
+        pk_maker: &[u8],
+        agg_sig: &[u8],
+        envelope_order_hash: Option<&[u8]>,
+    ) -> std::vec::Vec<u8> {
         let v = &self.v;
         let auth = &v["settlement"]["auth"];
         let mut out = std::vec::Vec::new();
@@ -121,6 +145,9 @@ impl Setup {
         out.extend_from_slice(&hexval(
             &v["registration"]["bridgerOnStellarTestnet"]["account"],
         ));
+        if let Some(h) = envelope_order_hash {
+            out.extend_from_slice(h);
+        }
         out.push(2u8);
         out.extend_from_slice(&self.order_chain_id.to_be_bytes());
         out.extend_from_slice(&self.ad_chain_id.to_be_bytes());
@@ -132,8 +159,7 @@ impl Setup {
         out.extend_from_slice(pk_maker);
         out.extend_from_slice(&hexval(&v["keys"]["bridgerBls"]["pk"]["uncompressed"]));
         out.extend_from_slice(agg_sig);
-        assert_eq!(out.len(), METADATA_LEN);
-        Bytes::from_slice(&self.env, &out)
+        out
     }
 
     fn registry(&self) -> BlsKeyRegistryClient<'static> {
@@ -241,11 +267,48 @@ fn wrong_version_fails() {
     let m = s.metadata();
     let mut raw = [0u8; METADATA_LEN];
     m.copy_into_slice(&mut raw);
-    raw[64] = 1; // the retired v1 layout
+    raw[96] = 1; // the retired v1 layout
     let m2 = Bytes::from_slice(&s.env, &raw);
     assert!(!s
         .verifier
         .is_root_valid(&s.order_chain_id, &s.order_chain_root, &m2));
+}
+
+/// #433: the co-signature names one order. An escrow unlocking any other order puts that order's
+/// hash in the envelope, and the verifier must refuse even though keys, roots and signature all hold.
+#[test]
+fn envelope_order_hash_not_the_signed_one_fails() {
+    let s = setup();
+    let m = s.metadata();
+    let mut raw = [0u8; METADATA_LEN];
+    m.copy_into_slice(&mut raw);
+    raw[64..96].copy_from_slice(&[0x42u8; 32]); // another order
+    let m2 = Bytes::from_slice(&s.env, &raw);
+    assert!(!s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &m2));
+    // Control: the same bytes with the signed order hash back in place verify.
+    assert!(s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &m));
+}
+
+/// #433: the pre-binding layout (no envelope order hash) is refused outright, never misread.
+#[test]
+fn old_layout_without_the_order_hash_fails() {
+    let s = setup();
+    let raw = s.raw_metadata(
+        0,
+        0,
+        &hexval(&s.v["keys"]["makerBls"]["pk"]["uncompressed"]),
+        &hexval(&s.v["settlement"]["aggSig"]["uncompressed"]),
+        None,
+    );
+    assert_eq!(raw.len(), OLD_METADATA_LEN);
+    let m = Bytes::from_slice(&s.env, &raw);
+    assert!(!s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &m));
 }
 
 #[test]
@@ -306,10 +369,10 @@ fn tampered_root_in_auth_fails() {
     let m = s.metadata();
     let mut raw = [0u8; METADATA_LEN];
     m.copy_into_slice(&mut raw);
-    raw[160] ^= 0x01; // last byte of order_chain_root (offset 129..161)
+    raw[192] ^= 0x01; // last byte of order_chain_root (offset 161..193)
     let m2 = Bytes::from_slice(&s.env, &raw);
     let mut tampered = [0u8; 32];
-    tampered.copy_from_slice(&raw[129..161]);
+    tampered.copy_from_slice(&raw[161..193]);
     let tampered_root = BytesN::from_array(&s.env, &tampered);
     // root matches the (tampered) auth, but the aggSig was made over the real one
     assert!(!s

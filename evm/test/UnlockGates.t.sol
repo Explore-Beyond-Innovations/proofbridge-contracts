@@ -15,6 +15,7 @@ import {BLSKeyRegistry} from "src/BLSKeyRegistry.sol";
 import {CounterpartyVerifier} from "src/CounterpartyVerifier.sol";
 import {RootVerifierRegistry} from "src/libraries/RootVerifierRegistry.sol";
 import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
+import {CoSign} from "test/utils/CoSign.sol";
 
 abstract contract GateVectors {
     uint256 constant VECTOR_CHAIN_ID = 11155111;
@@ -145,6 +146,44 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         assertFalse(adManager.hasOpenPositions(signer));
     }
 
+    /// Two locks on one ad whose settlement signer and bridger are the registered vector parties.
+    function _lockTwoVectorOrders()
+        internal
+        returns (IAdManager.OrderParams memory x, IAdManager.OrderParams memory y)
+    {
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, address(cVerifier));
+        bytes32 signer = vjson.readBytes32(".registration.makerOnSepolia.account");
+        test_fundAd_makerOnly();
+        keyRegistry.set(signer, true);
+        vm.prank(maker);
+        adManager.setSettlementSigner(lastAdId, signer);
+        x = _defaultParams(lastAdId);
+        x.amount = 60 ether;
+        x.salt = 5001;
+        x.adSettlementSigner = signer;
+        x.bridger = vjson.readBytes32(".registration.bridgerOnSepolia.account");
+        y = _defaultParams(lastAdId);
+        y.amount = 60 ether;
+        y.salt = 5002;
+        y.adSettlementSigner = signer;
+        y.bridger = x.bridger;
+        vm.startPrank(maker);
+        adManager.lockForOrder(x);
+        adManager.lockForOrder(y);
+        vm.stopPrank();
+    }
+
+    /// #433: two orders between the same parties under the same signed roots. A co-signature over
+    /// X is not consent to Y: `unlock(Y)` is refused, `unlock(X)` settles.
+    function test_433_cosigOverAnotherOrder_isRefused() public {
+        (IAdManager.OrderParams memory x, IAdManager.OrderParams memory y) = _lockTwoVectorOrders();
+        bytes memory cosigX = CoSign.moduleDataFor(vjson, adManager.hashOrderPublic(x));
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, orderChainId, vOrderRoot));
+        adManager.unlock(y, TestField.fe("NY"), vOrderRoot, hex"", cosigX);
+        adManager.unlock(x, TestField.fe("NX"), vOrderRoot, hex"", cosigX);
+    }
+
     function test_inFlight_tracksLockAndUnlock() public {
         test_fundAd_makerOnly();
         (IAdManager.OrderParams memory p, bytes32 orderHash) =
@@ -224,8 +263,33 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
         portal.unlock(gp, TestField.fe("NG"), targetRoot, hex"", cosig);
     }
 
+    /// Both vector parties' co-signature over `p` itself (#433: the auth must name this order).
+    function _cosigFor(IOrderPortal.OrderParams memory p) internal view returns (bytes memory) {
+        return CoSign.moduleDataFor(vjson, portal.hashOrderPublic(p));
+    }
+
     function test_gate2_realModule_fullCosig_unlocks() public {
-        _unlockAsVectorParties(address(cVerifier), vOrderRoot, _cosigData());
+        _prepareUnlock(address(cVerifier), vOrderRoot);
+        portal.unlock(gp, TestField.fe("NG"), vOrderRoot, hex"", _cosigFor(gp));
+    }
+
+    /// #433: two orders between the same parties under the same signed roots. A co-signature over
+    /// X is not consent to Y: `unlock(Y)` is refused, `unlock(X)` settles.
+    function test_433_cosigOverAnotherOrder_isRefused() public {
+        _prepareUnlock(address(cVerifier), vOrderRoot);
+        IOrderPortal.OrderParams memory x = gp;
+        IOrderPortal.OrderParams memory y = gp; // a second copy, not an alias of x
+        y.salt = x.salt + 1;
+        orderToken.mint(vBridger, y.amount);
+        vm.startPrank(vBridger);
+        orderToken.approve(address(portal), y.amount);
+        portal.createOrder(y);
+        vm.stopPrank();
+
+        bytes memory cosigX = _cosigFor(x);
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, vOrderRoot));
+        portal.unlock(y, TestField.fe("NY"), vOrderRoot, hex"", cosigX);
+        portal.unlock(x, TestField.fe("NX"), vOrderRoot, hex"", cosigX);
     }
 
     function test_gate2_mockFalse_reverts() public {

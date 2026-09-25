@@ -241,7 +241,7 @@ contract AdManager is EscrowBase, IAdManager {
         _requireRootValid(
             params.orderChainId,
             targetRoot,
-            RequestAuth.rootEnvelope(params.adSettlementSigner, params.bridger, cosigData)
+            RequestAuth.rootEnvelope(params.adSettlementSigner, params.bridger, orderHash, cosigData)
         );
         _requireDepositProof(orderHash, nullifierHash, targetRoot, proof, _PUBLIC_INPUT_SIDE_AD);
 

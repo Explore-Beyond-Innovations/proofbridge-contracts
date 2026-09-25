@@ -312,8 +312,11 @@ pub fn registration_subject(
 // RootVerifier Helpers
 // =============================================================================
 
-/// The root verifier's envelope: `settlement_signer(32) || bridger(32) || cosig_data`. Slot 0 is the
-/// account whose settlement key the verifier resolves: the order's `ad_settlement_signer`.
+/// The root verifier's envelope: `settlement_signer(32) || bridger(32) || order_hash(32) ||
+/// cosig_data`, what the escrow vouches for. Slot 0 is the account whose settlement key the verifier
+/// resolves (the order's `ad_settlement_signer`); `order_hash` is the order being unlocked, which the
+/// co-signed auth must name (#433).
+#[allow(clippy::too_many_arguments)]
 pub fn is_root_valid(
     env: &Env,
     module: &Address,
@@ -321,10 +324,12 @@ pub fn is_root_valid(
     root: &BytesN<32>,
     settlement_signer: &BytesN<32>,
     bridger: &BytesN<32>,
+    order_hash: &BytesN<32>,
     cosig_data: &Bytes,
 ) -> bool {
     let mut metadata = Bytes::from_slice(env, &settlement_signer.to_array());
     metadata.extend_from_slice(&bridger.to_array());
+    metadata.extend_from_slice(&order_hash.to_array());
     metadata.append(cosig_data);
     RootVerifierClient::new(env, module).is_root_valid(&source_chain_id, root, &metadata)
 }

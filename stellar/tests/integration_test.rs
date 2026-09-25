@@ -6517,3 +6517,236 @@ fn t25_assert_leaf(got: Option<u32>, want: &str, name: &str, leg: &str) {
         );
     }
 }
+
+// --- #433: the co-signature binds the order ----------------------------------
+//
+// The vectors' aggregate signature is over a synthetic order hash, so a real-verifier unlock of a
+// fixture order needs a co-signature over that order's own hash. `cosign` produces it with the
+// vector parties' BLS secret keys, exactly as the verifier rebuilds the message; the first test
+// proves it by reproducing the vector's aggregate byte for byte.
+
+/// A registry that answers `commitment_at` for the fixture's own accounts, so the real verifier
+/// resolves the vector keys for them (registration and PoP are E1's business, not this one's).
+#[soroban_sdk::contract]
+pub struct AccountKeyRegistry;
+
+#[soroban_sdk::contractimpl]
+impl AccountKeyRegistry {
+    pub fn set(env: Env, account: BytesN<32>, commitment: BytesN<32>) {
+        env.storage().instance().set(&account, &commitment);
+    }
+
+    pub fn commitment_at(env: Env, account: BytesN<32>, _slot_id: u32) -> BytesN<32> {
+        env.storage().instance().get(&account).unwrap()
+    }
+}
+
+struct CoSignAuth {
+    order_chain_id: u128,
+    ad_chain_id: u128,
+    order_hash: [u8; 32],
+    order_chain_root: [u8; 32],
+    ad_chain_root: [u8; 32],
+}
+
+fn vector_json() -> serde_json::Value {
+    serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap()
+}
+
+fn vhex(v: &serde_json::Value) -> std::vec::Vec<u8> {
+    hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap()
+}
+
+fn pad32(x: u128) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[16..].copy_from_slice(&x.to_be_bytes());
+    out
+}
+
+/// SETTLE_TAG ‖ pad32(orderChainId) ‖ pad32(adChainId) ‖ orderHash ‖ orderChainRoot ‖ adChainRoot.
+fn settlement_preimage(env: &Env, a: &CoSignAuth) -> Bytes {
+    let tag = env
+        .crypto()
+        .keccak256(&Bytes::from_slice(env, b"ProofBridge.Settlement.v1"))
+        .to_bytes();
+    let mut p = Bytes::from_slice(env, &tag.to_array());
+    p.extend_from_slice(&pad32(a.order_chain_id));
+    p.extend_from_slice(&pad32(a.ad_chain_id));
+    p.extend_from_slice(&a.order_hash);
+    p.extend_from_slice(&a.order_chain_root);
+    p.extend_from_slice(&a.ad_chain_root);
+    p
+}
+
+/// The aggregate of both vector parties' signatures over `a`.
+fn cosign_aggregate(env: &Env, a: &CoSignAuth) -> [u8; 192] {
+    use soroban_sdk::crypto::bls12_381::Fr;
+    let v = vector_json();
+    let bls = env.crypto().bls12_381();
+    let msg = bls.hash_to_g2(
+        &settlement_preimage(env, a),
+        &Bytes::from_slice(env, b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_"),
+    );
+    let sk = |who: &str| {
+        let b: [u8; 32] = vhex(&v["keys"][who]["sk"]).try_into().unwrap();
+        Fr::from_bytes(BytesN::from_array(env, &b))
+    };
+    let sig_m = bls.g2_mul(&msg, &sk("makerBls"));
+    let sig_b = bls.g2_mul(&msg, &sk("bridgerBls"));
+    bls.g2_add(&sig_m, &sig_b).to_bytes().to_array()
+}
+
+/// The module data (521 bytes) the relayer would hand an escrow for `a`.
+fn cosign(env: &Env, a: &CoSignAuth) -> Bytes {
+    let v = vector_json();
+    let mut c = std::vec![2u8];
+    c.extend_from_slice(&a.order_chain_id.to_be_bytes());
+    c.extend_from_slice(&a.ad_chain_id.to_be_bytes());
+    c.extend_from_slice(&a.order_hash);
+    c.extend_from_slice(&a.order_chain_root);
+    c.extend_from_slice(&a.ad_chain_root);
+    c.extend_from_slice(&0u32.to_be_bytes());
+    c.extend_from_slice(&0u32.to_be_bytes());
+    c.extend_from_slice(&vhex(&v["keys"]["makerBls"]["pk"]["uncompressed"]));
+    c.extend_from_slice(&vhex(&v["keys"]["bridgerBls"]["pk"]["uncompressed"]));
+    c.extend_from_slice(&cosign_aggregate(env, a));
+    assert_eq!(c.len(), 521);
+    Bytes::from_slice(env, &c)
+}
+
+#[test]
+fn test_433_cosign_helper_reproduces_the_vector_aggregate() {
+    let env = Env::default();
+    let v = vector_json();
+    let auth = &v["settlement"]["auth"];
+    let a = CoSignAuth {
+        order_chain_id: auth["orderChainId"].as_str().unwrap().parse().unwrap(),
+        ad_chain_id: auth["adChainId"].as_str().unwrap().parse().unwrap(),
+        order_hash: vhex(&auth["orderHash"]).try_into().unwrap(),
+        order_chain_root: vhex(&auth["orderChainRoot"]).try_into().unwrap(),
+        ad_chain_root: vhex(&auth["adChainRoot"]).try_into().unwrap(),
+    };
+    let mut pre = [0u8; 192];
+    settlement_preimage(&env, &a).copy_into_slice(&mut pre);
+    assert_eq!(
+        pre.to_vec(),
+        vhex(&v["settlement"]["preimage"]),
+        "the preimage"
+    );
+    assert_eq!(
+        cosign_aggregate(&env, &a).to_vec(),
+        vhex(&v["settlement"]["aggSig"]["uncompressed"]),
+        "the aggregate signature"
+    );
+}
+
+/// The fixture order's co-signature under both fixture roots, and both escrows wired to the real
+/// verifier over a registry that resolves the fixture's parties to the vector keys.
+fn wire_real_verifier_for_fixture(s: &TestSetup) -> Bytes {
+    let v = vector_json();
+    let registry = s.env.register(AccountKeyRegistry, ());
+    let reg = AccountKeyRegistryClient::new(&s.env, &registry);
+    let commit = |who: &str| {
+        s.env
+            .crypto()
+            .keccak256(&Bytes::from_slice(
+                &s.env,
+                &vhex(&v["keys"][who]["pk"]["uncompressed"]),
+            ))
+            .to_bytes()
+    };
+    let p = ad_manager_order_params(&s.env, &s.tp);
+    reg.set(&p.ad_settlement_signer, &commit("makerBls"));
+    reg.set(&p.bridger, &commit("bridgerBls"));
+
+    let module = s.env.register(counterparty_verifier_contract::WASM, ());
+    counterparty_verifier_contract::Client::new(&s.env, &module).initialize(&registry);
+    s.ad_manager
+        .set_root_verifier(&s.tp.order_chain_id, &module);
+    s.order_portal.set_root_verifier(&s.tp.ad_chain_id, &module);
+
+    cosign(
+        &s.env,
+        &CoSignAuth {
+            order_chain_id: s.tp.order_chain_id,
+            ad_chain_id: s.tp.ad_chain_id,
+            order_hash: s.tp.order_hash,
+            order_chain_root: s.tp.order_root,
+            ad_chain_root: s.tp.ad_root,
+        },
+    )
+}
+
+/// #433 on the primary: a co-signature over order X does not unlock order Y between the same
+/// parties under the same signed roots, and does unlock X.
+#[test]
+fn test_433_ad_manager_cosig_for_one_order_does_not_unlock_another() {
+    let s = setup();
+    let cosig_x = wire_real_verifier_for_fixture(&s);
+    let x = locked_ad_order(&s);
+    // Liquidity for the second lock.
+    TokenContractClient::new(&s.env, &s.ad_token_addr)
+        .mint(&maker_addr(&s), &(s.tp.amount as i128));
+    s.ad_manager
+        .fund_ad(&SorobanString::from_str(&s.env, &s.tp.ad_id), &s.tp.amount);
+    let mut y = ad_manager_order_params(&s.env, &s.tp);
+    y.salt = soroban_sdk::U256::from_u128(&s.env, s.tp.salt + 1);
+    s.ad_manager.lock_for_order(&y);
+
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &y,
+            &bytes32_to_bytesn(&s.env, &[0x07; 32]),
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &cosig_x,
+        ),
+        Err(Ok(ad_manager_contract::AdManagerError::RootNotValid)),
+        "a co-signature over X is not consent to Y"
+    );
+    assert!(ad_unlock(&s, &x, &cosig_x), "and it does settle X");
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+}
+
+/// #433 on the follower: the same, on the maker's claim of the bridger's deposit.
+#[test]
+fn test_433_order_portal_cosig_for_one_order_does_not_unlock_another() {
+    let s = setup();
+    let cosig_x = wire_real_verifier_for_fixture(&s);
+    let bridger_addr = {
+        let strkey = stellar_strkey::ed25519::PublicKey(s.tp.bridger).to_string();
+        Address::from_string(&SorobanString::from_str(&s.env, &strkey))
+    };
+    TokenContractClient::new(&s.env, &s.order_token_addr)
+        .mint(&bridger_addr, &(s.tp.amount as i128 * 10));
+    let x = order_portal_order_params(&s.env, &s.tp);
+    s.order_portal.create_order(&x);
+    let mut y = order_portal_order_params(&s.env, &s.tp);
+    y.salt = soroban_sdk::U256::from_u128(&s.env, s.tp.salt + 1);
+    s.order_portal.create_order(&y);
+
+    assert_eq!(
+        s.order_portal.try_unlock(
+            &y,
+            &bytes32_to_bytesn(&s.env, &[0x07; 32]),
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
+            &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
+            &cosig_x,
+        ),
+        Err(Ok(order_portal_contract::OrderPortalError::RootNotValid)),
+        "a co-signature over X is not consent to Y"
+    );
+    s.order_portal.unlock(
+        &x,
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
+        &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
+        &cosig_x,
+    );
+    assert_eq!(
+        s.order_portal
+            .get_order_status(&bytes32_to_bytesn(&s.env, &s.tp.order_hash)),
+        order_portal_contract::Status::Filled,
+        "and it does settle X"
+    );
+}

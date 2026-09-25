@@ -28,7 +28,7 @@ contract OrderPortalUnlockGas is OrderPortalGateTest {
     // canonical baseline for the shared verify cost on both escrows.
     function test_orderPortalUnlockGas() public {
         _prepareUnlock(address(cVerifier), vOrderRoot);
-        bytes memory cosig = _cosigData();
+        bytes memory cosig = _cosigFor(gp);
 
         uint256 g0 = gasleft();
         portal.unlock(gp, TestField.fe("NG"), vOrderRoot, hex"", cosig);
