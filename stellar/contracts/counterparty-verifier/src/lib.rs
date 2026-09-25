@@ -35,8 +35,8 @@ const SETTLE_TAG: [u8; 32] = [
 ];
 
 const METADATA_VERSION: u8 = 2;
-/// settlement_signer(32) || bridger(32) || moduleData: version(1) || chainIds(2*16)
-/// || orderHash/roots(3*32) || slotIds(2*4) || pks(2*96) || aggSig(192)
+/// settlement_signer(32) || bridger(32) || order_hash(32) (#433) || moduleData: version(1) ||
+/// chainIds(2*16) || orderHash/roots(3*32) || slotIds(2*4) || pks(2*96) || aggSig(192) = 617
 const METADATA_LEN: u32 = 617;
 
 const KEY_INIT: Symbol = symbol_short!("init");

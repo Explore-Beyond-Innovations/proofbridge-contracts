@@ -54,8 +54,8 @@ library CoSign {
         returns (CounterpartyVerifier.SettlementAuth memory)
     {
         return CounterpartyVerifier.SettlementAuth({
-            orderChainId: 11155111,
-            adChainId: 1_000_002,
+            orderChainId: stdJson.readUint(vjson, ".settlement.auth.orderChainId"),
+            adChainId: stdJson.readUint(vjson, ".settlement.auth.adChainId"),
             orderHash: orderHash,
             orderChainRoot: stdJson.readBytes32(vjson, ".settlement.auth.orderChainRoot"),
             adChainRoot: stdJson.readBytes32(vjson, ".settlement.auth.adChainRoot")
