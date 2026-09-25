@@ -99,7 +99,9 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         _requireNotPast(params.deadline - _timing(params.adChainId).claimStagger);
         // Gate 2 — root authenticity (the co-signed root); mandatory, reverts NoRootVerifier when unwired.
         _requireRootValid(
-            params.adChainId, targetRoot, RequestAuth.rootEnvelope(params.adSettlementSigner, params.bridger, cosigData)
+            params.adChainId,
+            targetRoot,
+            RequestAuth.rootEnvelope(params.adSettlementSigner, params.bridger, orderHash, cosigData)
         );
         _requireDepositProof(orderHash, nullifierHash, targetRoot, proof, _PUBLIC_INPUT_SIDE_ORDER);
 
