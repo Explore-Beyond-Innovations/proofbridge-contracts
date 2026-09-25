@@ -1220,7 +1220,8 @@ fn escrow_params(e: &Escrow, amount: u128) -> OrderParams {
         salt: soroban_sdk::U256::from_u128(&e.env, 42),
         order_decimals: 7,
         ad_decimals: 7,
-        deadline: 4_102_444_800,
+        // #453: inside the escrow's 7-day order window.
+        deadline: T0 + 86_400,
         ad_settlement_signer: address_to_bytes32(&e.env, &e.account),
     }
 }

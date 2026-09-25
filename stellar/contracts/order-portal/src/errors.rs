@@ -134,6 +134,8 @@ pub enum OrderPortalError {
     /// A public input at or above the field prime (2.3h, residual 9). Refused here as defence in
     /// depth — both shipped verifiers already reject one.
     NonCanonicalInput = 89,
+    /// #453: the deadline is past `now + MAX_ORDER_WINDOW`.
+    DeadlineTooFar = 90,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
@@ -175,6 +177,7 @@ impl From<proofbridge_core::escrow_ops::Fault> for OrderPortalError {
             ContractPaused => OrderPortalError::ContractPaused,
             NoRouteTiming => OrderPortalError::NoRouteTiming,
             DeadlineTooSoon => OrderPortalError::DeadlineTooSoon,
+            DeadlineTooFar => OrderPortalError::DeadlineTooFar,
             TooEarly => OrderPortalError::TooEarly,
             NotClaimable => OrderPortalError::NotClaimable,
             NotClaimed => OrderPortalError::NotClaimed,

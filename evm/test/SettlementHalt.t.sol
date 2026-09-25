@@ -479,6 +479,11 @@ abstract contract RealRegistryFixture is AdManagerTest {
 
     /// An ad whose settlement signer is the vector account, funded, and one lock on it.
     function _lockAs(uint256 salt) internal returns (IAdManager.OrderParams memory p) {
+        return _lockAsUntil(salt, 0);
+    }
+
+    /// `_lockAs` with a chosen deadline (`0` keeps the default).
+    function _lockAsUntil(uint256 salt, uint256 deadline) internal returns (IAdManager.OrderParams memory p) {
         string memory adId = string.concat("422-real-", vm.toString(salt));
         vm.startPrank(admin);
         adManager.setPeerEscrow(orderChainId, _b32(orderPortal));
@@ -494,6 +499,7 @@ abstract contract RealRegistryFixture is AdManagerTest {
         p.amount = 60 ether;
         p.salt = salt;
         p.adSettlementSigner = account;
+        if (deadline != 0) p.deadline = deadline;
         vm.prank(maker);
         adManager.lockForOrder(p);
     }
@@ -642,6 +648,49 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+    }
+
+    /// #453 D4: the budget. An order's last protected moment is at most `MAX_ORDER_WINDOW + buffer`
+    /// (the window end) plus `anchorDelay + buffer` (the evidence grace) after its lock; that has to
+    /// fall inside the registry's memory of a dead slot, with room left for pauses.
+    function test_453_theOrderSpanFitsTheRegistryMemory() public {
+        _realRegistry();
+        uint256 span = uint256(RouteTiming.MAX_ORDER_WINDOW) + 2 * uint256(RouteTiming.MAX_BUFFER)
+            + uint256(anchor.MAX_ANCHOR_DELAY());
+        assertLt(span, uint256(registry.GRACE_PERIOD()), "order span must stay under the registry's grace");
+    }
+
+    /// #453 D4: at the full span (a 7-day order, a 1-day buffer, a 7-day anchor delay) a slot killed
+    /// right after the lock is still in the registry one second before the cancel's grace ends, even
+    /// when the maker registers at the cap to force a prune. So the cancel still waits.
+    function test_453_realRegistry_aKillOutlivesTheFullOrderSpan() public {
+        _realRegistry();
+        for (uint256 i = 2; i < 5; i++) {
+            _registerSlot(i);
+        }
+        address[] memory guards = new address[](1);
+        guards[0] = address(adManager);
+        registry.setPositionGuards(guards);
+        uint64 maxBuffer = RouteTiming.MAX_BUFFER;
+        _setTiming(RouteTiming.Timing(0, maxBuffer, 0, maxBuffer, 0));
+        _wireAnchor();
+        uint64 delay = anchor.MAX_ANCHOR_DELAY();
+        vm.prank(admin);
+        anchor.setAnchorDelay(orderChainId, delay);
+
+        IAdManager.OrderParams memory p = _lockAsUntil(20, block.timestamp + RouteTiming.MAX_ORDER_WINDOW);
+        vm.warp(block.timestamp + 1);
+        _setValidUntil(0, true);
+        _claim(p);
+        uint256 protectedUntil = p.deadline + maxBuffer + delay + maxBuffer;
+
+        vm.warp(protectedUntil - 1);
+        vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
+        _registerSlot(5);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, protectedUntil));
+        adManager.finalizeCancel(p);
+        vm.warp(protectedUntil);
         adManager.finalizeCancel(p);
     }
 

@@ -1191,10 +1191,12 @@ dependencies = [
 name = "proofbridge-stellar"
 version = "0.1.0"
 dependencies = [
+ "bls-key-registry",
  "ed25519-dalek",
  "hex",
  "proofbridge-core",
  "rand",
+ "root-anchor",
  "serde",
  "serde_json",
  "sha3 0.11.0",

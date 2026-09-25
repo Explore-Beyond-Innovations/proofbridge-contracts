@@ -207,6 +207,35 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         adManager.lockForOrder(p);
     }
 
+    /// #453: a lock accepts a deadline at most `MAX_ORDER_WINDOW` out, to the second.
+    function test_453_lock_refusesDeadlinePastTheOrderWindow() public {
+        test_fundAd_makerOnly();
+        IAdManager.OrderParams memory p = _defaultParams(lastAdId);
+        uint256 maxAllowed = block.timestamp + RouteTiming.MAX_ORDER_WINDOW;
+        p.deadline = maxAllowed + 1;
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DeadlineTooFar.selector, p.deadline, maxAllowed));
+        adManager.lockForOrder(p);
+
+        p.deadline = maxAllowed;
+        vm.prank(maker);
+        adManager.lockForOrder(p);
+    }
+
+    /// #453: the buffer and the minimum window have ceilings; each cap itself is accepted.
+    function test_453_setRouteTiming_upperBounds() public {
+        uint64 maxBuffer = RouteTiming.MAX_BUFFER;
+        uint64 maxWindow = RouteTiming.MAX_ORDER_WINDOW;
+        vm.startPrank(admin);
+        vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(1)));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, maxBuffer + 1, 0, maxBuffer + 1, 0));
+        vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(5)));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(maxWindow + 1, 1 hours, 0, 1 days, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, maxBuffer, 0, maxBuffer, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(maxWindow, 1 hours, 0, 1 days, 0));
+        vm.stopPrank();
+    }
+
     function test_T45_cancelNeverLocked_onlyNoneAtDeadline_appendsLeaf() public {
         test_fundAd_makerOnly();
         IAdManager.OrderParams memory p = _defaultParams(lastAdId);
@@ -780,6 +809,22 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         vm.expectRevert(
             abi.encodeWithSelector(IEscrow.Escrow__DeadlineTooSoon.selector, p.deadline, block.timestamp + 1 hours)
         );
+        portal.createOrder(p);
+        vm.stopPrank();
+    }
+
+    /// #453: the order chain caps the same way, so a bridger cannot create an order the maker can
+    ///      never lock.
+    function test_453_create_refusesDeadlinePastTheOrderWindow() public {
+        _wireRoute();
+        IOrderPortal.OrderParams memory p = _defaultParams();
+        uint256 maxAllowed = block.timestamp + RouteTiming.MAX_ORDER_WINDOW;
+        p.deadline = maxAllowed + 1;
+        vm.startPrank(bridger);
+        orderToken.approve(address(portal), p.amount);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DeadlineTooFar.selector, p.deadline, maxAllowed));
+        portal.createOrder(p);
+        p.deadline = maxAllowed;
         portal.createOrder(p);
         vm.stopPrank();
     }
