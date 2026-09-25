@@ -22,9 +22,9 @@ interface IEscrow {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Order lifecycle. `None` is "never seen on this chain"; `Filled` and `Cancelled` are
-     *         terminal; `Claimed` is a presentation window (2.3e); `Disputed` / `Resolved` are
-     *         reserved for 2.3g so it never renumbers.
+     * @notice Order lifecycle. `None` is "never seen on this chain"; `Filled`, `Cancelled` and
+     *         `Resolved` are terminal; `Claimed` is a presentation window (2.3e); `Disputed` is an
+     *         open dispute on the primary leg and `Resolved` its finalized end (2.3g).
      */
     enum Status {
         None,

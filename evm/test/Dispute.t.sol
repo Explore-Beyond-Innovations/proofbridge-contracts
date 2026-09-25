@@ -189,18 +189,35 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(7);
         _file(p, filer);
 
-        vm.expectRevert();
+        uint256 until_ = dm.effectiveChallengeDeadline(h);
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__ChallengeOpen.selector, until_));
         dm.claimDispute(h);
 
         // The challenge period alone is NOT enough: the order still has time on its own clock, and
         // no dispute path may complete before `deadline + buffer` (D3, T-50). This is the bug that
         // let any filer cancel a week-long order an hour after filing.
         vm.warp(block.timestamp + CHALLENGE + 1);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__ChallengeOpen.selector, until_));
         dm.claimDispute(h);
 
         _warpPastWindow(h);
         dm.claimDispute(h); // now allowed
+    }
+
+    /// #452: once the arbiter rules, the no-ruling fallback is refused with its own error, even
+    /// after the ruling's window has passed.
+    function test_claimAfterARulingIsAlreadyRuled() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(31);
+        _file(p, filer);
+        vm.prank(arbiter);
+        dm.resolveDispute(h, Dispute.Outcome.MutualRefund);
+
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__AlreadyRuled.selector, h));
+        dm.claimDispute(h);
+
+        _warpPastWindow(h);
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__AlreadyRuled.selector, h));
+        dm.claimDispute(h);
     }
 
     /// c41-J: a pause between the lock and the filing extends the bridger's unlock on this leg; the

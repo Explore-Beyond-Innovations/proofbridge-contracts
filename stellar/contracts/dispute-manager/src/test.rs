@@ -306,16 +306,37 @@ fn the_fallback_waits_out_the_challenge_period() {
     let f = fixture();
     let h = hash(&f.env, 7);
     file(&f, &h, 100_000);
-    assert!(f.client.try_claim_dispute(&h).is_err());
+    assert_eq!(
+        f.client.try_claim_dispute(&h),
+        Err(Ok(Error::ChallengeOpen))
+    );
 
     // The challenge period alone is NOT enough: the order still has time on its own clock, and no
     // dispute path may complete before `deadline + buffer` (D3, T-50). This is the bug that let a
     // filer cancel a week-long order an hour after filing.
     f.env.ledger().with_mut(|l| l.timestamp += CHALLENGE + 1);
-    assert!(f.client.try_claim_dispute(&h).is_err());
+    assert_eq!(
+        f.client.try_claim_dispute(&h),
+        Err(Ok(Error::ChallengeOpen))
+    );
 
     warp_past_window(&f, &h);
     f.client.claim_dispute(&h);
+}
+
+/// #452: once the arbiter rules, the no-ruling fallback is refused with its own error, even after
+/// the ruling's window has passed.
+#[test]
+fn a_claim_after_a_ruling_is_already_ruled() {
+    let f = fixture();
+    let h = hash(&f.env, 31);
+    file(&f, &h, 100_000);
+    f.client.resolve_dispute(&h, &DisputeOutcome::MutualRefund);
+
+    assert_eq!(f.client.try_claim_dispute(&h), Err(Ok(Error::AlreadyRuled)));
+
+    warp_past_window(&f, &h);
+    assert_eq!(f.client.try_claim_dispute(&h), Err(Ok(Error::AlreadyRuled)));
 }
 
 /// B1: the window floors at the order's own deadline plus the route buffer, so a short challenge
