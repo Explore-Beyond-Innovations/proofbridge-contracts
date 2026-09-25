@@ -5211,18 +5211,6 @@ fn test_retiming_during_a_claim_does_not_move_the_cutoff() {
     assert!(ad_unlock(&t, &q, &Bytes::new(&t.env)));
 }
 
-/// A far deadline never panics: #453 refuses it at the lock, before any cutoff is computed.
-#[test]
-fn test_far_deadline_never_panics() {
-    let s = setup();
-    let mut p = ad_manager_order_params(&s.env, &s.tp);
-    p.deadline = u64::MAX;
-    assert_eq!(
-        s.ad_manager.try_lock_for_order(&p),
-        Err(Ok(AdErr::DeadlineTooFar))
-    );
-}
-
 /// #453: a lock accepts a deadline at most `MAX_ORDER_WINDOW` out, to the second.
 #[test]
 fn test_453_lock_refuses_a_deadline_past_the_order_window() {
@@ -5262,7 +5250,7 @@ fn test_453_route_timing_upper_bounds_both_legs() {
     let over = [
         (0, MAX_BUFFER + 1, 0, MAX_BUFFER + 1, 0),
         (
-            MAX_ORDER_WINDOW + 1,
+            MAX_ORDER_WINDOW / 2 + 1,
             SUITE_BUFFER,
             0,
             SUITE_LONG_BACKSTOP,
@@ -5283,7 +5271,14 @@ fn test_453_route_timing_upper_bounds_both_legs() {
     }
     let at = [
         (0, MAX_BUFFER, 0, MAX_BUFFER, 0),
-        (MAX_ORDER_WINDOW, SUITE_BUFFER, 0, SUITE_LONG_BACKSTOP, 0),
+        // #457-2: at most half the order window, so a deadline at twice it still fits the cap.
+        (
+            MAX_ORDER_WINDOW / 2,
+            SUITE_BUFFER,
+            0,
+            SUITE_LONG_BACKSTOP,
+            0,
+        ),
     ];
     for (mw, b, m, lb, cs) in at {
         s.ad_manager

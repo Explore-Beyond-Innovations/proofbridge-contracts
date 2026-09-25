@@ -230,9 +230,10 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(1)));
         adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, maxBuffer + 1, 0, maxBuffer + 1, 0));
         vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(5)));
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(maxWindow + 1, 1 hours, 0, 1 days, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(maxWindow / 2 + 1, 1 hours, 0, 1 days, 0));
         adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, maxBuffer, 0, maxBuffer, 0));
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(maxWindow, 1 hours, 0, 1 days, 0));
+        // #457-2: at most half the order window, so a deadline at twice it still fits the cap.
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(maxWindow / 2, 1 hours, 0, 1 days, 0));
         vm.stopPrank();
     }
 
