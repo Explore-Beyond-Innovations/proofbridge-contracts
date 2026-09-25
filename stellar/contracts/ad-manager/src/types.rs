@@ -77,3 +77,13 @@ pub struct OrderParams {
     /// The account whose settlement key co-signs for the maker (envelope slot 0); hashed
     pub ad_settlement_signer: BytesN<32>,
 }
+
+/// A maker's settlement halt (#422): `halted` refuses the co-signed unlock of every order against
+/// the maker's ads; `last_resumed_at` lets a cancel tell whether the halt was in force at any point
+/// at or after the order's deadline (still in force, or resumed at or after it).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Halt {
+    pub halted: bool,
+    pub last_resumed_at: u64,
+}

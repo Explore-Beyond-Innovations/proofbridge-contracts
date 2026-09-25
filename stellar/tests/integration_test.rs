@@ -1922,6 +1922,27 @@ impl MockKeyRegistry {
             .get(&(soroban_sdk::symbol_short!("usable"), account))
             .unwrap_or(false)
     }
+
+    /// A (fake) slot of `account` expiring at `valid_until`, for `any_slot_expired_within`.
+    pub fn add_slot_expiry(env: Env, account: BytesN<32>, valid_until: u64) {
+        let key = (soroban_sdk::symbol_short!("expiry"), account);
+        let mut v: soroban_sdk::Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        v.push_back(valid_until);
+        env.storage().instance().set(&key, &v);
+    }
+
+    pub fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool {
+        let v: soroban_sdk::Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&(soroban_sdk::symbol_short!("expiry"), account))
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        v.iter().any(|vu| vu != 0 && vu >= from && vu <= to)
+    }
 }
 
 fn other_account(env: &Env, tag: u8) -> BytesN<32> {
@@ -3600,6 +3621,861 @@ fn test_t54_present_settled_settles_a_claimed_primary_no_nullifier() {
         s.ad_manager.try_present_settled(&p, &root, &proof),
         Err(Ok(AdErr::NotClaimable))
     );
+}
+
+// --- #422: the maker's settlement halt (F1 residual) --------------------------------------
+// One custody-key transaction stops the co-signed payout of every open order against the maker's
+// ads; evidence still pays; a denied order's cancel waits the evidence grace (the buffer alone with
+// no anchor wired, anchor delay + buffer with one).
+
+fn maker_addr(s: &TestSetup) -> Address {
+    s.ad_manager.get_ad(&ad_id(&s)).unwrap().maker
+}
+
+#[test]
+fn test_422_halt_refuses_the_co_signed_unlock_resume_admits_it() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let maker = maker_addr(&s);
+    let empty = Bytes::new(&s.env);
+
+    s.ad_manager.halt_settlement(&maker);
+    assert!(s.ad_manager.halt_of(&maker).unwrap().halted);
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &p,
+            &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &empty,
+        ),
+        Err(Ok(AdErr::Halted))
+    );
+    assert_eq!(
+        ad_status(&s),
+        ad_manager_contract::Status::Open,
+        "nothing moved"
+    );
+
+    s.ad_manager.resume_settlement(&maker);
+    assert!(!s.ad_manager.halt_of(&maker).unwrap().halted);
+    assert!(ad_unlock(&s, &p, &empty));
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+}
+
+#[test]
+fn test_422_halt_is_keyed_by_maker() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let someone = Address::generate(&s.env);
+    s.ad_manager.halt_settlement(&someone);
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+}
+
+/// A runbook that fires the halt twice is not an error, and the second halt still refuses.
+#[test]
+fn test_422_halt_is_idempotent_second_halt_still_refuses() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let maker = maker_addr(&s);
+    s.ad_manager.halt_settlement(&maker);
+    warp(&s, s.env.ledger().timestamp() + 100);
+    s.ad_manager.halt_settlement(&maker);
+    assert!(!ad_unlock(&s, &p, &Bytes::new(&s.env)));
+}
+
+/// An incident lever is never pause-gated (the same rule as `set_settlement_signer`).
+#[test]
+fn test_422_halt_and_resume_work_while_paused() {
+    let s = setup();
+    let maker = maker_addr(&s);
+    s.ad_manager.pause();
+    s.ad_manager.halt_settlement(&maker);
+    s.ad_manager.resume_settlement(&maker);
+}
+
+/// Rule 2: a halted maker's counterparty is still paid on an anchored SETTLED leaf.
+#[test]
+fn test_422_present_settled_ignores_the_halt() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = locked_ad_order(&s);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+    warp(&s, p.deadline + 600);
+    s.ad_manager.present_settled(&p, &root, &proof);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+    assert_eq!(ad_locked(&s), 0);
+}
+
+/// Halted before the claim: the cancel waits the grace (the buffer, with no anchor wired).
+#[test]
+fn test_422_finalize_cancel_halted_since_before_the_claim_waits_the_grace() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER - 1);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+    assert_eq!(ad_locked(&s), 0, "the lock is released after the grace");
+}
+
+/// Halted after the deadline and resumed before the window ended: still denied.
+#[test]
+fn test_422_finalize_cancel_halted_then_resumed_after_the_deadline_still_waits() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let maker = maker_addr(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + 600);
+    s.ad_manager.halt_settlement(&maker);
+    warp(&s, p.deadline + 1200);
+    s.ad_manager.resume_settlement(&maker);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// Halted from before the deadline and resumed only at the window's last second: the halt covered
+/// the whole window, so the payout was denied and the cancel waits.
+#[test]
+fn test_422_finalize_cancel_halted_through_the_window_resumed_at_the_end_still_waits() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let maker = maker_addr(&s);
+    s.ad_manager.halt_settlement(&maker);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER - 1);
+    s.ad_manager.resume_settlement(&maker);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// A halt lifted before the deadline never denied this window: ordinary timing.
+#[test]
+fn test_422_finalize_cancel_halt_lifted_before_the_deadline_ordinary_timing() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let maker = maker_addr(&s);
+    s.ad_manager.halt_settlement(&maker);
+    warp(&s, p.deadline - 1);
+    s.ad_manager.resume_settlement(&maker);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+    assert_eq!(ad_locked(&s), 0);
+}
+
+/// The boundary is the deadline itself: a resume in the deadline's second counts (`>=`).
+#[test]
+fn test_422_finalize_cancel_resume_in_the_deadlines_second_counts() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let maker = maker_addr(&s);
+    s.ad_manager.halt_settlement(&maker);
+    warp(&s, p.deadline);
+    s.ad_manager.resume_settlement(&maker);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// Review F2: the claim's open time was the maker's to pick. A maker who halts through the cutoff,
+/// resumes, and opens and finalizes the claim in the same ledger still waits.
+#[test]
+fn test_422_finalize_cancel_late_claim_cannot_skip_the_grace() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let maker = maker_addr(&s);
+    s.ad_manager.halt_settlement(&maker);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.resume_settlement(&maker);
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// Review F3: a kill of the signer's slot since the lock is a denied payout even when a replacement
+/// slot keeps `has_usable_slot` true.
+#[test]
+fn test_422_finalize_cancel_signer_killed_since_the_lock_waits_the_grace() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .add_slot_expiry(&p.ad_settlement_signer, &s.env.ledger().timestamp());
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// The boundary is the lock's own second: a shorten stamped then counts (`>=`).
+#[test]
+fn test_422_finalize_cancel_signer_killed_in_the_locks_second_counts() {
+    let s = setup();
+    warp(&s, s.env.ledger().timestamp() + 10);
+    let p = locked_ad_order(&s);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .add_slot_expiry(&p.ad_settlement_signer, &s.env.ledger().timestamp());
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// Review F5: an anchor that cannot answer `anchor_delay` refuses the denied finalize outright.
+#[test]
+fn test_422_finalize_cancel_unreadable_anchor_refuses() {
+    let s = setup();
+    // The mock registry has no `anchor_delay`: wiring it as the anchor makes the read fail.
+    s.ad_manager.set_root_anchor(&s.key_registry);
+    let p = locked_ad_order(&s);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + 30 * SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::AnchorDelayUnreadable))
+    );
+}
+
+/// MakerForfeit pays the counterparty anyway, so it is the one outcome the grace does not gate.
+#[test]
+fn test_422_finalize_dispute_maker_forfeit_ignores_the_grace() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let order_hash = s.ad_manager.hash_order(&p);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    s.ad_manager
+        .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    dm.resolve_dispute(
+        &order_hash,
+        &dispute_manager_contract::DisputeOutcome::MakerForfeit,
+    );
+    warp_past_dispute_window(&s, &dm, &order_hash);
+    let recipient = account_addr(&s, &s.tp.order_recipient);
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let before = token.balance(&recipient);
+    s.ad_manager.finalize_dispute(&p);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Resolved);
+    assert_eq!(
+        token.balance(&recipient),
+        before + s.tp.amount as i128,
+        "the counterparty is paid, grace or no grace"
+    );
+}
+
+/// An expiry anywhere inside `[locked_at, deadline]` is an expiry during the order's life.
+#[test]
+fn test_422_finalize_cancel_expiry_inside_the_interval_waits_the_grace() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .add_slot_expiry(&p.ad_settlement_signer, &(p.deadline - 600));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// A rotation whose old slot outlives the deadline puts no expiry in the order's life: ordinary.
+#[test]
+fn test_422_finalize_cancel_rotation_outliving_the_cancel_ordinary_timing() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .add_slot_expiry(&p.ad_settlement_signer, &(p.deadline + 30 * SUITE_BUFFER));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+// --- #422 D14: the denial read off the REAL registry -------------------------
+//
+// The mock restates the registry's predicate, so it proves wiring and nothing about what the
+// registry stores. These run the escrow against `bls_key_registry` itself, with the vector maker's
+// slots, and use the retirement the protocol actually sends: `set_valid_until(.., 1)`.
+
+/// The real registry with two of the vector maker's slots (a kill of one leaves `has_usable_slot`
+/// true: the state the attack needs), the escrow pointed at it, and the ad signed by that account.
+fn real_registry_signer(
+    s: &TestSetup,
+) -> (
+    bls_key_registry_contract::Client<'static>,
+    BytesN<32>,
+    bls_key_registry_contract::OwnerAuth,
+) {
+    // The suite's clock starts at 0 — next to the very date a kill names. Start in 2023 instead.
+    warp(s, 1_700_000_000);
+    let (client, account, owner) = real_registry_with_vector_maker(s);
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
+    let hexv =
+        |v: &serde_json::Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
+    let r = &vectors["slots"]["makerOnStellarTestnet"]["registrations"][1];
+    let auth = bls_key_registry_contract::OwnerAuth::Stellar(owner);
+    client.register(
+        &account,
+        &auth,
+        &BytesN::from_array(&s.env, &hexv(&r["pkNative"]).try_into().unwrap()),
+        &BytesN::from_array(&s.env, &hexv(&r["pop"]).try_into().unwrap()),
+        &1,
+    );
+    s.ad_manager.set_key_registry(&client.address);
+    let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
+    s.ad_manager.set_settlement_signer(&ad_id, &account);
+    (client, account, auth)
+}
+
+fn lock_signed_by(s: &TestSetup, account: &BytesN<32>) -> ad_manager_contract::OrderParams {
+    let mut params = ad_manager_order_params(&s.env, &s.tp);
+    params.ad_settlement_signer = account.clone();
+    s.ad_manager.lock_for_order(&params);
+    params
+}
+
+/// Pass 4 (c41-F3): the standard kill after the lock, a second slot still live. The stored expiry
+/// says 1970; the slot died at the kill, inside the order's life.
+#[test]
+fn test_422_real_registry_kill_after_the_lock_waits_the_grace() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    client.set_valid_until(&account, &auth, &0, &1);
+    assert!(
+        client.has_usable_slot(&account),
+        "the second slot keeps the identity usable"
+    );
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// A kill before the lock is history: the order was co-signed under the other slot.
+#[test]
+fn test_422_real_registry_kill_before_the_lock_ordinary_timing() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    client.set_valid_until(&account, &auth, &0, &1);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// A shorten made before the lock, naming a date inside the window: the slot dies at the date.
+#[test]
+fn test_422_real_registry_shorten_before_the_lock_naming_a_date_inside_waits_the_grace() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p_preview = ad_manager_order_params(&s.env, &s.tp);
+    client.set_valid_until(&account, &auth, &0, &(p_preview.deadline - 600));
+    warp(&s, s.env.ledger().timestamp() + 10);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// D15 at the boundary: a kill in the deadline's own second counts; one second later it does not.
+#[test]
+fn test_422_real_registry_kill_at_the_deadline_counts() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    client.set_valid_until(&account, &auth, &0, &1);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// D16: past the presentation cutoff (window end − margin; margin 0 here) the co-signed payout
+/// could not land, so a kill there denies nothing.
+#[test]
+fn test_422_real_registry_kill_after_the_cutoff_ordinary_timing() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    client.set_valid_until(&account, &auth, &0, &1);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// Pass 5 (PoC e): the co-signed unlock is accepted until the cutoff, not the deadline. A kill in
+/// the gap blocks the payout, so the cancel waits.
+#[test]
+fn test_422_real_registry_kill_between_the_deadline_and_the_cutoff_waits_the_grace() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + 600);
+    client.set_valid_until(&account, &auth, &0, &1);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// Pass 5 (PoC f): a shorten naming a date in the gap is the same denial by another route.
+#[test]
+fn test_422_real_registry_shorten_naming_a_date_in_the_gap_waits_the_grace() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    client.set_valid_until(&account, &auth, &0, &(p.deadline + 600));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// Pass 5 (PoC h/h2): a slot that died inside the window, re-killed to `1` after it, still reads
+/// as dying inside it (D14b).
+#[test]
+fn test_422_real_registry_re_kill_after_the_window_keeps_the_in_window_expiry() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    client.set_valid_until(&account, &auth, &0, &(p.deadline - 600));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    client.set_valid_until(&account, &auth, &0, &1);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// D16 at the boundary, under a margin so the cutoff and the window end differ: a kill in the
+/// cutoff's own second counts, the next second does not.
+#[test]
+fn test_422_real_registry_kill_at_the_cutoff_counts() {
+    let s = setup();
+    s.ad_manager.set_route_timing(
+        &s.tp.order_chain_id,
+        &ad_timing(3_600, SUITE_BUFFER, 300, SUITE_LONG_BACKSTOP, 0),
+    );
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER - 300);
+    client.set_valid_until(&account, &auth, &0, &1);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// D17a: a kill, an at-cap registration and a lock in the same second. The prune must not run in
+/// the expiry's own second, or the lock's-second kill the design counts is forgotten.
+#[test]
+fn test_422_real_registry_same_second_kill_prune_and_lock_still_waits_the_grace() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
+    let hexv =
+        |v: &serde_json::Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
+    let reg = |i: usize| {
+        let r = &vectors["slots"]["makerOnStellarTestnet"]["registrations"][i];
+        client.try_register(
+            &account,
+            &auth,
+            &BytesN::from_array(&s.env, &hexv(&r["pkNative"]).try_into().unwrap()),
+            &BytesN::from_array(&s.env, &hexv(&r["pop"]).try_into().unwrap()),
+            &(i as u64),
+        )
+    };
+    for i in 2..5 {
+        assert!(reg(i).is_ok());
+    }
+    client.set_position_guards(&soroban_sdk::vec![&s.env, s.ad_manager.address.clone()]);
+    client.set_valid_until(&account, &auth, &0, &1);
+    assert_eq!(
+        reg(5),
+        Err(Ok(bls_key_registry_contract::RegistryError::RegistryFull)),
+        "not prunable in the kill's own second"
+    );
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// The view the relayer's janitor plans around must carry the same bound as the door.
+#[test]
+fn test_422_real_registry_cancel_finalizes_at_reads_the_grace_for_a_kill_in_the_gap() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + 600);
+    client.set_valid_until(&account, &auth, &0, &1);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER,
+        "window end + grace"
+    );
+}
+
+#[test]
+fn test_422_real_registry_kill_just_past_the_cutoff_ordinary_timing() {
+    let s = setup();
+    s.ad_manager.set_route_timing(
+        &s.tp.order_chain_id,
+        &ad_timing(3_600, SUITE_BUFFER, 300, SUITE_LONG_BACKSTOP, 0),
+    );
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER - 300 + 1);
+    client.set_valid_until(&account, &auth, &0, &1);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// Pass 5 (PoC g): the dispute door runs to the effective challenge deadline, past the cancel's
+/// cutoff. A kill in between blocks the payout the module still accepts, so the fallback waits.
+#[test]
+fn test_422_real_registry_kill_before_the_challenge_deadline_fallback_waits_the_grace() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    let order_hash = s.ad_manager.hash_order(&p);
+    // Filed late enough that the challenge period outruns the cancel window.
+    warp(&s, p.deadline - 3_600);
+    s.ad_manager
+        .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    let until = dm.effective_challenge_deadline(&order_hash);
+    assert!(
+        until > p.deadline + SUITE_BUFFER,
+        "the dispute door outlives the cancel cutoff"
+    );
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    client.set_valid_until(&account, &auth, &0, &1);
+    warp(&s, until + 1);
+    assert_eq!(
+        s.ad_manager.try_finalize_dispute(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, until + SUITE_BUFFER);
+    s.ad_manager.finalize_dispute(&p);
+    assert_eq!(
+        s.ad_manager.get_order_status(&order_hash),
+        ad_manager_contract::Status::Resolved
+    );
+}
+
+#[test]
+fn test_422_real_registry_kill_after_the_challenge_deadline_fallback_ordinary_timing() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    let order_hash = s.ad_manager.hash_order(&p);
+    warp(&s, p.deadline - 3_600);
+    s.ad_manager
+        .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    let until = dm.effective_challenge_deadline(&order_hash);
+    warp(&s, until + 1);
+    client.set_valid_until(&account, &auth, &0, &1);
+    s.ad_manager.finalize_dispute(&p);
+    assert_eq!(
+        s.ad_manager.get_order_status(&order_hash),
+        ad_manager_contract::Status::Resolved
+    );
+}
+
+/// The view the relayer's janitor asks: 0 before a claim, the window end after, plus the grace once
+/// the payout is denied.
+#[test]
+fn test_422_cancel_finalizes_at_reports_the_grace() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    assert_eq!(s.ad_manager.cancel_finalizes_at(&p), 0);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + SUITE_BUFFER
+    );
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+    assert_eq!(s.ad_manager.cancel_finalizes_at(&p), 0, "terminal");
+}
+
+/// Review F1: the dispute fallback is a door too. Every outcome but MakerForfeit hands the lock back
+/// to the maker, so a denied payout waits the grace past the challenge deadline.
+#[test]
+fn test_422_finalize_dispute_fallback_waits_the_grace_when_halted() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let order_hash = s.ad_manager.hash_order(&p);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    s.ad_manager
+        .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    let until = dm.effective_challenge_deadline(&order_hash);
+    warp(&s, until + 1);
+    // No anchor wired here: the grace is the buffer.
+    assert_eq!(
+        s.ad_manager.try_finalize_dispute(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, until + SUITE_BUFFER);
+    s.ad_manager.finalize_dispute(&p);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Resolved);
+}
+
+/// c41-J: a pause between the lock and the filing extends the bridger's unlock on this leg; the
+/// dispute's floor must carry it too, or the fallback ends the order while the payout is valid.
+#[test]
+fn test_j_finalize_dispute_fallback_carries_a_pause_before_the_filing() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let order_hash = s.ad_manager.hash_order(&p);
+    s.ad_manager.pause();
+    warp(&s, s.env.ledger().timestamp() + 3 * 3_600);
+    s.ad_manager.unpause();
+    s.ad_manager
+        .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    let until = dm.effective_challenge_deadline(&order_hash);
+    assert_eq!(
+        until,
+        p.deadline + SUITE_BUFFER + 3 * 3_600,
+        "the floor carries the pause since the lock"
+    );
+
+    warp(&s, p.deadline + SUITE_BUFFER + 1); // the old floor: the unlock is still open here
+    assert_eq!(
+        s.ad_manager.try_finalize_dispute(&p),
+        Err(Ok(AdErr::DisputeNotResolved))
+    );
+    warp(&s, until + 1);
+    s.ad_manager.finalize_dispute(&p);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Resolved);
+}
+
+/// Not halted: the fallback finalizes at the challenge deadline as before.
+#[test]
+fn test_422_finalize_dispute_fallback_ordinary_timing_when_not_denied() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let order_hash = s.ad_manager.hash_order(&p);
+    s.ad_manager
+        .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    warp_past_dispute_window(&s, &dm, &order_hash);
+    s.ad_manager.finalize_dispute(&p);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Resolved);
+}
+
+/// With an anchor wired the grace is its delay for the order chain plus the buffer.
+#[test]
+fn test_422_finalize_cancel_grace_is_anchor_delay_plus_buffer() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    anchor.set_anchor_delay(&s.tp.order_chain_id, &7_200u64);
+    let p = locked_ad_order(&s);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER + 7_200);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + SUITE_BUFFER + 7_200 + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// Lever 2: the signer fully retired in the registry is a denied payout too (the one-sided
+/// retirement race that exists today, closed by the same grace).
+#[test]
+fn test_422_finalize_cancel_signer_with_no_usable_slot_waits_the_grace() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry).set(&p.ad_settlement_signer, &false);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// The grace stacks on a pause the same way the window does.
+#[test]
+fn test_422_finalize_cancel_grace_stacks_on_a_pause() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    s.ad_manager.pause();
+    warp(&s, p.deadline + 900);
+    s.ad_manager.unpause();
+    // 900 s paused: the window ends at +buffer+900, the grace at +2*buffer+900.
+    warp(&s, p.deadline + 2 * SUITE_BUFFER + 900 - 1);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER + 900);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// T-06: a locked, co-signed order stops settling after one custody-key transaction, cannot be
+/// cancelled inside the grace, and reaches `Cancelled` with the CANCEL leaf and the counter cleared
+/// after it.
+#[test]
+fn test_t06_halted_order_stops_settling_and_still_terminates() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let balance = s.ad_manager.get_ad(&ad_id(&s)).unwrap().balance;
+    assert_eq!(ad_leaves(&s), 1, "the ORDER leaf");
+    let empty = Bytes::new(&s.env);
+
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    assert!(!ad_unlock(&s, &p, &empty));
+
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    // The window's last second (inclusive): still the halt that refuses; a second later the cutoff.
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &p,
+            &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &empty,
+        ),
+        Err(Ok(AdErr::Halted))
+    );
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &p,
+            &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &empty,
+        ),
+        Err(Ok(AdErr::OrderExpired))
+    );
+
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Cancelled);
+    assert_eq!(ad_leaves(&s), 2, "the CANCEL leaf");
+    assert_eq!(ad_locked(&s), 0);
+    assert_eq!(
+        s.ad_manager.get_ad(&ad_id(&s)).unwrap().balance,
+        balance,
+        "the ad keeps its funds"
+    );
+    assert_eq!(signer_in_flight(&s), 0);
 }
 
 /// D3: not window-gated — accepted on an Open order before the deadline.

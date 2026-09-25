@@ -80,6 +80,20 @@ pub struct SettlementSignerSet {
     pub next: BytesN<32>,
 }
 
+/// The maker halted the co-signed payout of every order against their ads (#422).
+#[contractevent(topics = ["halt"], data_format = "single-value")]
+pub struct SettlementHalted {
+    #[topic]
+    pub maker: Address,
+}
+
+/// The maker lifted their halt.
+#[contractevent(topics = ["resume"], data_format = "single-value")]
+pub struct SettlementResumed {
+    #[topic]
+    pub maker: Address,
+}
+
 #[contractevent(topics = ["ad_fund"], data_format = "vec")]
 pub struct AdFunded {
     #[topic]

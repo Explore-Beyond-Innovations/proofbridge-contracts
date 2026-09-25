@@ -8,7 +8,7 @@
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol};
 
 use crate::errors::AdManagerError;
-use crate::types::{Ad, ChainInfo, ContractConfig};
+use crate::types::{Ad, ChainInfo, ContractConfig, Halt};
 
 pub use proofbridge_core::escrow_storage::*;
 
@@ -20,6 +20,8 @@ const KEY_ADS: Symbol = symbol_short!("ads");
 const KEY_AD_IDS: Symbol = symbol_short!("adids");
 /// The key registry consulted when an ad's settlement signer is set (2.3c D2).
 const KEY_KEYREG: Symbol = symbol_short!("keyreg");
+/// Prefix for a maker's settlement halt (#422).
+const KEY_HALT: Symbol = symbol_short!("halt");
 
 /// The config, or this contract's own `NotInitialized`.
 pub fn get_config(env: &Env) -> Result<ContractConfig, AdManagerError> {
@@ -96,4 +98,22 @@ pub fn set_key_registry(env: &Env, registry: &Address) {
 
 pub fn get_key_registry(env: &Env) -> Option<Address> {
     env.storage().instance().get(&KEY_KEYREG)
+}
+
+// ── the settlement halt (#422) ────────────────────────────────────────────
+
+/// A maker's halt, absent until they first halt. `last_resumed_at` survives a resume: the cancel
+/// grace treats a halt in force at any point at or after the order's deadline as a denied payout.
+pub fn get_halt(env: &Env, maker: &Address) -> Option<Halt> {
+    let key = (KEY_HALT, maker.clone());
+    env.storage().persistent().get(&key)
+}
+
+/// Written on every halt and resume; the entry's TTL is extended each time, like every other entry a
+/// lever depends on. An archived entry is restored on access (protocol 23+), so a halt survives
+/// archival; the TTL is only extended on write.
+pub fn set_halt(env: &Env, maker: &Address, halt: &Halt) {
+    let key = (KEY_HALT, maker.clone());
+    env.storage().persistent().set(&key, halt);
+    proofbridge_core::ttl::extend_persistent(env, &key);
 }

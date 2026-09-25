@@ -753,6 +753,23 @@ fn wrong_selector_rejected() {
     expect_err(agent_check(&f, &ctxs), AccountError::ActionNotAllowed);
 }
 
+/// #422: the settlement halt and its resume are the custody key's, never the agent's.
+#[test]
+fn agent_cannot_halt_or_resume_settlement() {
+    let f = fixture();
+    for name in ["halt_settlement", "resume_settlement"] {
+        let ctxs = vec![
+            &f.env,
+            Context::Contract(ContractContext {
+                contract: f.target.clone(),
+                fn_name: Symbol::new(&f.env, name),
+                args: vec![&f.env],
+            }),
+        ];
+        expect_err(agent_check(&f, &ctxs), AccountError::ActionNotAllowed);
+    }
+}
+
 #[test]
 fn bad_args_fail_closed() {
     let f = fixture();

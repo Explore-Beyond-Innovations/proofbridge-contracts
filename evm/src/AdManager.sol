@@ -5,6 +5,7 @@ import {EscrowBase} from "./escrow/EscrowBase.sol";
 import {IAdManager} from "./interfaces/IAdManager.sol";
 import {IDisputeManager} from "./interfaces/IDisputeManager.sol";
 import {IKeyRegistry} from "./interfaces/IKeyRegistry.sol";
+import {IRootAnchor} from "./interfaces/IRootAnchor.sol";
 import {IVerifier} from "./interfaces/IVerifier.sol";
 import {IMerkleManager} from "./interfaces/IMerkleManager.sol";
 import {IwNativeToken} from "./wNativeToken.sol";
@@ -51,6 +52,19 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @notice Ads by id. `maker == address(0)` means the id is free.
     mapping(string adId => Ad) public ads;
+
+    /// @notice The maker's settlement halt (#422). While set, the co-signed `unlock` of every order
+    ///         against every ad this maker owns is refused. Custody-authorized, instant both ways,
+    ///         never pause-gated. Read by `unlock`, by the cancel doors (`finalizeCancel`,
+    ///         `finalizeDispute`) for their grace, and by `cancelFinalizesAt`: every evidence path
+    ///         ignores it, so a halt can delay a payout but never keep both sides.
+    mapping(address maker => bool) public halted;
+
+    /// @notice When `maker` last resumed. A halt in force at any point at or after an order's
+    ///         deadline is a denied payout even if it was resumed since: either it is still in force,
+    ///         or this stamp is at or after the deadline. The deadline is signed into the order, so
+    ///         nothing the maker does later moves the reference (#422 review, F2).
+    mapping(address maker => uint64) public lastResumedAt;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -148,6 +162,24 @@ contract AdManager is EscrowBase, IAdManager {
         emit AdWithdrawn(adId, msg.sender, amount, ad.balance);
     }
 
+    /**
+     * @inheritdoc IAdManager
+     * @dev Custody-authorized and never pause-gated, like `setSettlementSigner`: an incident lever
+     *      must not be freezable. Idempotent, so a runbook that fires it twice is not an error.
+     */
+    function haltSettlement() external nonReentrant {
+        halted[msg.sender] = true;
+        emit SettlementHalted(msg.sender);
+    }
+
+    /// @inheritdoc IAdManager
+    function resumeSettlement() external nonReentrant {
+        if (!halted[msg.sender]) revert AdManager__NotHalted();
+        halted[msg.sender] = false;
+        lastResumedAt[msg.sender] = uint64(block.timestamp);
+        emit SettlementResumed(msg.sender);
+    }
+
     /// @inheritdoc IAdManager
     function closeAd(string calldata adId, address to) external nonReentrant whenNotPaused {
         Ad storage ad = _getAdOwned(adId, msg.sender);
@@ -201,6 +233,10 @@ contract AdManager is EscrowBase, IAdManager {
         // D2: the co-signed unlock is the presentation — valid through the window, minus the margin.
         _requireNotPast(_presentationCutoff(orderHash, params));
         _requireSettleable(orderHash, nullifierHash);
+        // #422: the maker's halt refuses the co-signed payout; evidence (`presentSettled`) still pays.
+        // One cold read of the maker's flag on the metered path (~2.4k; UnlockGas re-baselined).
+        address maker = ads[params.adId].maker;
+        if (halted[maker]) revert AdManager__Halted(maker);
         // Gate 2 — root authenticity (the co-signed root); mandatory, reverts NoRootVerifier when unwired.
         _requireRootValid(
             params.orderChainId,
@@ -242,6 +278,12 @@ contract AdManager is EscrowBase, IAdManager {
     function finalizeCancel(OrderParams calldata params) external nonReentrant whenNotPaused {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
         _requireFinalizable(orderHash);
+        // #422 rule 3: when the co-signed payout was denied, the cancel waits for the order chain's
+        // SETTLED evidence to be anchorable and presented, so a maker paid on the other chain cannot
+        // also take the lock back.
+        if (_coSignDenied(params, orderHash, _presentationCutoff(orderHash, params))) {
+            _requireReached(_claimedWindowEnd(orderHash) + _evidenceGrace(params.orderChainId));
+        }
 
         Ad storage ad = ads[params.adId];
         uint256 adAmount = _adAmount(params);
@@ -293,6 +335,14 @@ contract AdManager is EscrowBase, IAdManager {
         if (!windowOver) revert Escrow__DisputeNotResolved(orderHash);
         // No ruling means the fallback: a mutual refund, the unified primitive's terminal (D4).
         if (outcome == Dispute.Outcome.None) outcome = Dispute.Outcome.MutualRefund;
+        // #422 rule 3, this door too: every outcome but MakerForfeit hands the lock back to the maker,
+        // so a denied payout waits the evidence grace past the challenge deadline (review F1).
+        if (outcome != Dispute.Outcome.MakerForfeit) {
+            uint256 until = _disputeManager().effectiveChallengeDeadline(orderHash);
+            if (_coSignDenied(params, orderHash, until)) {
+                _requireReached(until + _evidenceGrace(params.orderChainId));
+            }
+        }
 
         Ad storage ad = ads[params.adId];
         uint256 adAmount = _adAmount(params);
@@ -362,8 +412,8 @@ contract AdManager is EscrowBase, IAdManager {
         uint64 deadline,
         uint64 buffer
     ) internal {
-        Status s = _orders[orderHash].status;
-        if (s != Status.Open && s != Status.Claimed) revert Escrow__NotDisputable(orderHash, s);
+        Order storage o = _orders[orderHash];
+        if (o.status != Status.Open && o.status != Status.Claimed) revert Escrow__NotDisputable(orderHash, o.status);
 
         // Order matters, and it is the cheap half of keeping the two contracts in step. The module
         // call is the fallible step — an unset route, an underfunded bond — so it runs *before* this
@@ -372,10 +422,13 @@ contract AdManager is EscrowBase, IAdManager {
         // would instead leave it `Disputed` with no record, which is an order nobody can finalize.
         // The invariant "Disputed here implies a record there" is what `Dispute.t.sol` asserts over
         // arbitrary call sequences; this ordering is what makes the bad direction unreachable.
+        // c41-J: the module adds every second paused past this snapshot, so passing the order's own
+        // (from the lock, not the filing) makes its floor the primary's `_windowEnd` to the second —
+        // a pause between lock and filing extends the unlock and the dispute alike.
         _disputeManager().openDispute{value: msg.value}(
-            orderHash, amount, peerChainId, msg.sender, evidence, deadline, buffer, pausedSeconds
+            orderHash, amount, peerChainId, msg.sender, evidence, deadline, buffer, o.pausedAtOpen
         );
-        _orders[orderHash].status = Status.Disputed;
+        o.status = Status.Disputed;
     }
 
     /// @dev The order's two parties, as this chain knows them: whoever it would pay. Filing and
@@ -543,6 +596,46 @@ contract AdManager is EscrowBase, IAdManager {
         if (address(keyRegistry) == address(0)) revert AdManager__NoKeyRegistry();
         if (signer == bytes32(0)) revert AdManager__SettlementSignerZero();
         if (!keyRegistry.hasUsableSlot(signer)) revert AdManager__SignerNotRegistered(signer);
+    }
+
+    /// @dev Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force
+    ///      now or at any point at or after the order's deadline (a resume stamp at or after it), any
+    ///      of the signer's registry slots expiring during the order's life (`anySlotExpiredWithin`,
+    ///      D12: a kill, a near-future shorten and a pre-lock shorten naming a date in the window all
+    ///      count; a rotation whose old slot outlives the cancel does not), or the signer left with
+    ///      no usable slot at all. Every reference is one the maker signed (the deadline) or the
+    ///      chain stamped (the lock), never one the maker can choose later. No registry wired means
+    ///      no lever 2 to read.
+    function _coSignDenied(OrderParams calldata p, bytes32 orderHash, uint256 until) private view returns (bool) {
+        address maker = ads[p.adId].maker;
+        if (halted[maker] || lastResumedAt[maker] >= p.deadline) return true;
+        IKeyRegistry registry = keyRegistry;
+        if (address(registry) == address(0)) return false;
+        // D16: the order's life as a payout ends at the payout's own cutoff — the presentation cutoff
+        // for a cancel, the challenge deadline for a dispute — which the caller passes in. An expiry
+        // past it denied nothing; the bound moves only with a pause, which delays finalize as much.
+        return registry.anySlotExpiredWithin(p.adSettlementSigner, _lockedAt(orderHash), uint64(until))
+            || !registry.hasUsableSlot(p.adSettlementSigner);
+    }
+
+    /// @inheritdoc IAdManager
+    function cancelFinalizesAt(OrderParams calldata params) external view returns (uint256) {
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        if (_statusOf(orderHash) != Status.Claimed) return 0;
+        uint256 end = _claimedWindowEnd(orderHash);
+        return _coSignDenied(params, orderHash, _presentationCutoff(orderHash, params))
+            ? end + _evidenceGrace(params.orderChainId)
+            : end;
+    }
+
+    /// @dev How long a denied order's cancel waits past its window: the order chain's anchor delay
+    ///      (the floor before a SETTLED root from there is usable here) plus the route's buffer (the
+    ///      allowance the route already gives a presenter for anchor cadence and submission). With no
+    ///      anchor wired there is no evidence path either; the buffer alone then bounds the wait.
+    function _evidenceGrace(uint256 orderChainId) private view returns (uint256) {
+        IRootAnchor anchor = rootAnchor;
+        uint256 delay = address(anchor) == address(0) ? 0 : anchor.anchorDelay(orderChainId);
+        return delay + _timing(orderChainId).buffer;
     }
 
     /// @dev Load an ad and assert `maker` owns it.

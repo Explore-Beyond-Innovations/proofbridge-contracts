@@ -77,6 +77,10 @@ interface IAdManager is IEscrow {
     event KeyRegistrySet(address indexed registry);
     /// @notice A maker re-pointed an ad's settlement signer (the third kill lever).
     event SettlementSignerSet(string indexed adId, bytes32 previous, bytes32 next);
+    /// @notice The maker halted the co-signed payout of every order against their ads (#422).
+    event SettlementHalted(address indexed maker);
+    /// @notice The maker lifted their halt.
+    event SettlementResumed(address indexed maker);
     event AdFunded(string indexed adId, address indexed maker, uint256 amount, uint256 newBalance);
     event AdWithdrawn(string indexed adId, address indexed maker, uint256 amount, uint256 newBalance);
     event AdClosed(string indexed adId, address indexed maker);
@@ -113,6 +117,9 @@ interface IAdManager is IEscrow {
     error AdManager__SettlementSignerZero();
     error AdManager__SignerNotRegistered(bytes32 signer);
     error AdManager__SettlementSignerMismatch(bytes32 expected, bytes32 provided);
+    /// @notice The order's maker has halted settlement; only evidence can pay this order now.
+    error AdManager__Halted(address maker);
+    error AdManager__NotHalted();
 
     /*//////////////////////////////////////////////////////////////
                                  FUNCTIONS
@@ -129,6 +136,25 @@ interface IAdManager is IEscrow {
         bytes32 settlementSigner
     ) external payable;
     function setSettlementSigner(string calldata adId, bytes32 identity) external;
+
+    /**
+     * @notice Stop the co-signed payout of every open order against every ad the caller owns (#422,
+     *         the custody key's brake on what its agent already co-signed). Instant, never
+     *         pause-gated, idempotent. Evidence paths are untouched: an order the counterparty can
+     *         prove settled on the order chain is still paid here, and a halted order's cancel waits
+     *         an evidence grace so that proof always has time to land.
+     */
+    function haltSettlement() external;
+
+    /// @notice Lift the caller's halt; co-signed payouts resume in the same block.
+    function resumeSettlement() external;
+
+    /**
+     * @notice When a claimed cancel really finalizes: the claim window's end plus the evidence grace
+     *         when the co-signed payout was denied (#422). 0 when the order is not `Claimed`. The
+     *         relayer's janitor asks this instead of computing the clock itself.
+     */
+    function cancelFinalizesAt(OrderParams calldata params) external view returns (uint256);
     function fundAd(string calldata adId, uint256 amount) external payable;
     function withdrawFromAd(string calldata adId, uint256 amount, address to) external;
     function closeAd(string calldata adId, address to) external;

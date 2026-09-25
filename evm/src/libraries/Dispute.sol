@@ -56,9 +56,10 @@ library Dispute {
         ///      escrow's paused seconds once; storing an already-adjusted value here would let a
         ///      later read adjust it twice.
         uint64 challengeDeadline;
-        /// @dev The *escrow's* paused-seconds counter when the dispute opened (D10). The escrow's,
-        ///      not this contract's: a pause is what stops someone presenting, and it is the escrow
-        ///      that gates presentation.
+        /// @dev The *escrow's* paused-seconds counter as of the order's lock (D10, c41-J: the
+        ///      filing carries the order's own snapshot, so the deadline counts every pause the
+        ///      unlock's cutoff counts). The escrow's, not this contract's: a pause is what stops
+        ///      someone presenting, and it is the escrow that gates presentation.
         uint64 pausedAtOpen;
         bytes32 initiatorEvidence;
         bytes32 responderEvidence;

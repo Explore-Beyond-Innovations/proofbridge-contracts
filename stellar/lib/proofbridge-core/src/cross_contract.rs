@@ -65,6 +65,7 @@ pub trait DisputeManagerInterface {
     ) -> (crate::types::DisputeOutcome, bool, Option<Address>);
     fn initiator_of(env: Env, order_hash: BytesN<32>) -> Option<Address>;
     fn is_disputed(env: Env, order_hash: BytesN<32>) -> bool;
+    fn challenge_deadline_of(env: Env, order_hash: BytesN<32>, escrow_paused_seconds: u64) -> u64;
 }
 
 /// The one thing the dispute module reads back off an escrow: its pause clock (2.3g D10).
@@ -99,6 +100,7 @@ pub trait RootVerifierInterface {
 pub trait RootAnchorInterface {
     fn is_anchored(env: Env, source_chain_id: u128, root: BytesN<32>) -> bool;
     fn anchored_at(env: Env, source_chain_id: u128, root: BytesN<32>) -> u64;
+    fn anchor_delay(env: Env, source_chain_id: u128) -> u64;
 }
 
 /// The one registry read the escrows make (2.3c D2): a live, unexpired key slot.
@@ -106,6 +108,7 @@ pub trait RootAnchorInterface {
 #[contractclient(name = "KeyRegistryClient")]
 pub trait KeyRegistryInterface {
     fn has_usable_slot(env: Env, account: BytesN<32>) -> bool;
+    fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool;
 }
 
 // =============================================================================
@@ -330,6 +333,16 @@ pub fn is_root_valid(
 // RootAnchor Helpers
 // =============================================================================
 
+/// The route's anchor delay for `source_chain_id`: the floor before a root from there is usable
+/// here. Read by the primary's cancel grace (#422); `None` when the anchor cannot answer, which the
+/// caller turns into a refusal — never a shorter wait.
+pub fn anchor_delay(env: &Env, anchor: &Address, source_chain_id: u128) -> Option<u64> {
+    RootAnchorClient::new(env, anchor)
+        .try_anchor_delay(&source_chain_id)
+        .ok()
+        .and_then(|r| r.ok())
+}
+
 /// True iff the anchor module has notarized `root` for `source_chain_id` and its delay has passed.
 /// A failed call (a mis-wired address, a trap) is a typed `false`, never a host error on the
 /// consumer's refund path.
@@ -347,4 +360,29 @@ pub fn is_anchored(env: &Env, anchor: &Address, source_chain_id: u128, root: &By
 /// True iff `account` holds at least one live, unexpired key slot in the registry.
 pub fn has_usable_slot(env: &Env, registry: &Address, account: &BytesN<32>) -> bool {
     KeyRegistryClient::new(env, registry).has_usable_slot(account)
+}
+
+/// Did any of `account`'s slots expire in `[from, to]` (#422 D12). The escrows' cancel grace asks
+/// it over the order's life, `[locked_at, now]`.
+pub fn any_slot_expired_within(
+    env: &Env,
+    registry: &Address,
+    account: &BytesN<32>,
+    from: u64,
+    to: u64,
+) -> bool {
+    KeyRegistryClient::new(env, registry).any_slot_expired_within(account, &from, &to)
+}
+
+/// The dispute's challenge deadline in real time (#422: the cancel grace counts from it). The
+/// escrow passes its own pause counter, as for `outcome_of`: the module cannot read back into the
+/// escrow that is calling it.
+pub fn challenge_deadline_of(
+    env: &Env,
+    manager: &Address,
+    order_hash: &BytesN<32>,
+    escrow_paused_seconds: u64,
+) -> u64 {
+    DisputeManagerClient::new(env, manager)
+        .challenge_deadline_of(order_hash, &escrow_paused_seconds)
 }

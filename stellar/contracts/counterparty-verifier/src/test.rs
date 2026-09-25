@@ -370,7 +370,9 @@ fn t02_retired_then_pruned_slot_fails() {
     for i in 1..5 {
         s.register_maker_slot(i);
     }
-    s.register_maker_slot(5); // at cap: prunes slot 0 (1 + 30 days < now)
+    // #422 D14: the kill expired the slot at the kill, not in 1970; it is prunable 30 days later.
+    s.env.ledger().set_timestamp(T0 + 30 * 86_400 + 1);
+    s.register_maker_slot(5); // at cap: prunes slot 0
     assert_eq!(s.registry().lookup(&s.maker_account(), &0), None);
     assert!(!s
         .verifier

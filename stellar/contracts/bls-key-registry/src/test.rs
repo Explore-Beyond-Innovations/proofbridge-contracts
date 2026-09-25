@@ -152,6 +152,11 @@ fn busy_guard(env: &Env, client: &BlsKeyRegistryClient) {
     client.set_position_guards(&soroban_sdk::vec![env, guard]);
 }
 
+fn idle_guard(env: &Env, client: &BlsKeyRegistryClient) {
+    let guard = env.register(IdleGuard, ());
+    client.set_position_guards(&soroban_sdk::vec![env, guard]);
+}
+
 // =============================================================================
 // Happy paths
 // =============================================================================
@@ -372,6 +377,17 @@ impl MockGuard {
     }
 }
 
+/// A wired guard that reports no positions.
+#[contract]
+pub struct IdleGuard;
+
+#[contractimpl]
+impl IdleGuard {
+    pub fn has_open_positions(_env: Env, _account: BytesN<32>) -> bool {
+        false
+    }
+}
+
 #[test]
 fn revoke_blocked_while_in_flight() {
     let (env, client, v) = setup();
@@ -535,16 +551,132 @@ fn sixth_slot_reverts_registry_full() {
 fn register_at_cap_prunes_expired_slot() {
     let (env, client, v) = setup();
     let account = slot_account(&env, &v, MAKER);
+    idle_guard(&env, &client);
     for i in 0..5 {
         register_slot(&env, &client, &v, MAKER, i);
     }
-    set_valid_until(&env, &client, &v, MAKER, 2, true); // valid_until = 1, past grace already
+    set_valid_until(&env, &client, &v, MAKER, 2, true); // valid_until = 1, expired at the kill (D14)
     env.ledger().set_timestamp(T0 + 1);
+    // D17: the guard is wired and reports no positions, so no order can need the dead slot's
+    // history — pruned at once.
 
     assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
     assert_eq!(client.lookup(&account, &2), None);
     assert_eq!(client.live_slots(&account).len(), 5);
     assert_eq!(client.next_slot_id(&account), 6);
+}
+
+/// #422 D14: our own retirement names `valid_until = 1`; the slot expired at the kill, not in 1970.
+#[test]
+fn any_slot_expired_within_a_kill_expires_at_the_kill() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    env.ledger().set_timestamp(T0 + 100);
+    set_valid_until(&env, &client, &v, MAKER, 0, true);
+    assert!(
+        client.any_slot_expired_within(&account, &(T0 + 100), &(T0 + 100)),
+        "the kill's own second"
+    );
+    assert!(client.any_slot_expired_within(&account, &(T0 + 50), &(T0 + 150)));
+    assert!(
+        !client.any_slot_expired_within(&account, &0, &(T0 + 99)),
+        "before the kill: no"
+    );
+    assert!(
+        !client.any_slot_expired_within(&account, &(T0 + 101), &u64::MAX),
+        "after it: no"
+    );
+}
+
+/// #422 D14: a shorten made before `from`, naming a date inside `[from, to]`, expires at the date.
+#[test]
+fn any_slot_expired_within_an_early_shorten_expires_at_its_date() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    set_valid_until(&env, &client, &v, MAKER, 0, false); // at T0, naming grace_ts
+    let g = grace_ts(&v);
+    assert!(
+        client.any_slot_expired_within(&account, &(T0 + 1), &g),
+        "the date, not the shorten"
+    );
+    assert!(!client.any_slot_expired_within(&account, &(T0 + 1), &(g - 1)));
+}
+
+/// #422 D17: while a guard reports positions a dead slot keeps its place for the grace — an open
+/// order's cancel may still ask about it — and leaves once the grace is over regardless.
+#[test]
+fn register_at_cap_keeps_a_dead_slot_while_in_flight_until_the_grace() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    busy_guard(&env, &client);
+    for i in 0..5 {
+        register_slot(&env, &client, &v, MAKER, i);
+    }
+    set_valid_until(&env, &client, &v, MAKER, 2, true);
+    env.ledger().set_timestamp(T0 + 1);
+    let r = slot_reg(&v, MAKER, 5);
+    assert_eq!(
+        client.try_register(
+            &account,
+            &owner_for(&env, &v, MAKER, &r["ownerSig"]),
+            &bn::<96>(&env, &r["pkNative"]),
+            &bn::<192>(&env, &r["pop"]),
+            &5,
+        ),
+        Err(Ok(RegistryError::RegistryFull))
+    );
+    env.ledger().set_timestamp(T0 + 30 * 86_400 + 1);
+    assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
+    assert_eq!(client.lookup(&account, &2), None);
+}
+
+/// #422 D17b: with no guard wired there is nobody to ask, so a dead slot keeps its place for the grace.
+#[test]
+fn register_at_cap_no_guard_wired_keeps_a_dead_slot_until_the_grace() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    for i in 0..5 {
+        register_slot(&env, &client, &v, MAKER, i);
+    }
+    set_valid_until(&env, &client, &v, MAKER, 2, true);
+    env.ledger().set_timestamp(T0 + 1);
+    let r = slot_reg(&v, MAKER, 5);
+    assert_eq!(
+        client.try_register(
+            &account,
+            &owner_for(&env, &v, MAKER, &r["ownerSig"]),
+            &bn::<96>(&env, &r["pkNative"]),
+            &bn::<192>(&env, &r["pop"]),
+            &5,
+        ),
+        Err(Ok(RegistryError::RegistryFull))
+    );
+    env.ledger().set_timestamp(T0 + 30 * 86_400 + 1);
+    assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
+    assert_eq!(client.lookup(&account, &2), None);
+}
+
+/// #422 D14b: a shorten on a slot that already died cannot move its death later — a re-kill after
+/// an order's window must not erase an expiry inside it.
+#[test]
+fn set_valid_until_recorded_expiry_only_moves_earlier() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    set_valid_until(&env, &client, &v, MAKER, 0, false); // at T0, naming grace_ts
+    let g = grace_ts(&v);
+    env.ledger().set_timestamp(g + 100);
+    set_valid_until(&env, &client, &v, MAKER, 0, true); // a kill to 1, after the slot died at g
+    assert!(
+        client.any_slot_expired_within(&account, &g, &g),
+        "still died at g"
+    );
+    assert!(
+        !client.any_slot_expired_within(&account, &(g + 1), &u64::MAX),
+        "not at the re-kill"
+    );
 }
 
 /// In-grace slots still count toward the cap and are not pruned.
@@ -1107,4 +1239,31 @@ fn position_guards_view_follows_set_position_guards() {
     let guard = Address::generate(&env);
     client.set_position_guards(&soroban_sdk::vec![&env, guard.clone()]);
     assert_eq!(client.position_guards(), soroban_sdk::vec![&env, guard]);
+}
+
+/// #422 D12: the escrow's question, answered directly — did any slot expire in [from, to].
+#[test]
+fn any_slot_expired_within_reads_the_slots_expiries() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    assert!(
+        !client.any_slot_expired_within(&account, &0, &u64::MAX),
+        "no expiry: never"
+    );
+    set_valid_until(&env, &client, &v, MAKER, 0, false);
+    let g = grace_ts(&v);
+    assert!(
+        client.any_slot_expired_within(&account, &g, &g),
+        "the boundary is inclusive"
+    );
+    assert!(client.any_slot_expired_within(&account, &(g - 100), &(g + 100)));
+    assert!(
+        !client.any_slot_expired_within(&account, &(g + 1), &(g + 100)),
+        "after: no"
+    );
+    assert!(
+        !client.any_slot_expired_within(&account, &0, &(g - 1)),
+        "before: no"
+    );
 }

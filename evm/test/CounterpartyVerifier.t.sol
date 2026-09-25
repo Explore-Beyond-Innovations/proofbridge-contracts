@@ -234,7 +234,9 @@ contract CounterpartyVerifierTest is Test {
         for (uint256 i = 1; i < 5; i++) {
             registerMakerSlot(i);
         }
-        registerMakerSlot(5); // at cap: prunes slot 0 (validUntil 1 + 30 days < now)
+        // #422 D14: the kill expired the slot at the kill, not in 1970; it is prunable 30 days later.
+        vm.warp(T0 + 30 days + 1);
+        registerMakerSlot(5); // at cap: prunes slot 0
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.lookup(maker, 0);
         assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, metadata()));

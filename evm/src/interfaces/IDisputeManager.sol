@@ -29,6 +29,11 @@ interface IDisputeManager {
     /// @notice Who filed, if anyone. Reads no clock, so the escrow can call it mid-transaction.
     function initiatorOf(bytes32 orderHash) external view returns (address);
 
+    /// @notice The challenge deadline in real time (the recorded one plus the escrow's paused
+    ///         seconds past the order's lock-time snapshot, c41-J). The escrow's cancel grace counts
+    ///         from it (#422).
+    function effectiveChallengeDeadline(bytes32 orderHash) external view returns (uint256);
+
     /// @notice Whether a dispute is open on this order at all.
     function isDisputed(bytes32 orderHash) external view returns (bool);
 
@@ -41,8 +46,9 @@ interface IDisputeManager {
      *
      *      The same goes for every other value here. `deadline` and `buffer` are what stop a short
      *      challenge period finalizing a dispute before the order's own deadline (D3, T-50), and
-     *      `escrowPausedSeconds` is the escrow's counter at filing — the module has no pause of its
-     *      own, because the pause that stops someone presenting is the escrow's.
+     *      `escrowPausedSeconds` is the escrow's counter as of the order's lock (c41-J: the same
+     *      snapshot the unlock's cutoff counts from) — the module has no pause of its own, because
+     *      the pause that stops someone presenting is the escrow's.
      * @return bond The bond actually required and taken.
      */
     function openDispute(

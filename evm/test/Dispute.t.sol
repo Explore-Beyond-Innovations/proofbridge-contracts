@@ -203,6 +203,27 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         dm.claimDispute(h); // now allowed
     }
 
+    /// c41-J: a pause between the lock and the filing extends the bridger's unlock on this leg; the
+    /// dispute's floor must carry it too, or the fallback ends the order while the payout is valid.
+    function test_j_fallbackCarriesAPauseBeforeTheFiling() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(30);
+        vm.prank(admin);
+        adManager.pause();
+        vm.warp(block.timestamp + 3 hours);
+        vm.prank(admin);
+        adManager.unpause();
+        _file(p, filer);
+        uint256 until_ = dm.effectiveChallengeDeadline(h);
+        assertEq(until_, p.deadline + 30 minutes + 3 hours, "the floor carries the pause since the lock");
+
+        vm.warp(p.deadline + 30 minutes + 1); // the old floor: the unlock is still open here
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeNotResolved.selector, h));
+        adManager.finalizeDispute(p);
+        vm.warp(until_ + 1);
+        adManager.finalizeDispute(p);
+        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
+    }
+
     /// T-13: `inFlightOf` returns to zero on `Resolved`, as on every other terminal.
     function test_t13_inFlightClearsOnResolved() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(8);

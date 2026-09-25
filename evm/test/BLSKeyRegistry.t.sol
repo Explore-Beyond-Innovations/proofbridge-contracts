@@ -224,13 +224,22 @@ contract BLSKeyRegistryTest is Test {
     }
 
     /// A slot past validUntil + GRACE_PERIOD is pruned to make room; its id is never reissued.
+    function idleGuard() internal {
+        address[] memory guards = new address[](1);
+        guards[0] = address(new ToggleGuard());
+        registry.setPositionGuards(guards);
+    }
+
     function test_registerAtCapPrunesExpiredSlot() public {
         bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        idleGuard();
         for (uint256 i = 0; i < 5; i++) {
             registerSlot("makerOnSepolia", i);
         }
-        setValidUntil("makerOnSepolia", 2, true); // validUntil = 1
-        vm.warp(T0 + 1); // past grace already (1 + 30 days < T0)
+        setValidUntil("makerOnSepolia", 2, true); // validUntil = 1, expired at the kill (D14)
+        vm.warp(T0 + 1);
+        // D17: the guard is wired and reports no positions, so no order can need the dead slot's
+        // history — pruned at once.
 
         vm.expectEmit(true, true, false, true, REGISTRY);
         emit IBLSKeyRegistry.SlotPruned(account, 2);
@@ -240,6 +249,55 @@ contract BLSKeyRegistryTest is Test {
         registry.lookup(account, 2);
         assertEq(registry.liveSlots(account).length, 5);
         assertEq(registry.nextSlotId(account), 6);
+    }
+
+    /// #422 D17: while a guard reports positions a dead slot keeps its place for the grace — an open
+    /// order's cancel may still ask about it — and leaves once the grace is over regardless.
+    function test_registerAtCap_deadSlotKeptWhileInFlight_prunedAfterTheGrace() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        busyGuard();
+        for (uint256 i = 0; i < 5; i++) {
+            registerSlot("makerOnSepolia", i);
+        }
+        setValidUntil("makerOnSepolia", 2, true);
+        vm.warp(T0 + 1);
+        vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
+        registerSlot("makerOnSepolia", 5);
+
+        vm.warp(T0 + 30 days + 1);
+        assertEq(registerSlot("makerOnSepolia", 5), 5);
+        vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
+        registry.lookup(account, 2);
+    }
+
+    /// #422 D17b: with no guard wired there is nobody to ask, so a dead slot keeps its place for the grace.
+    function test_registerAtCap_noGuardWired_deadSlotKeptUntilTheGrace() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        for (uint256 i = 0; i < 5; i++) {
+            registerSlot("makerOnSepolia", i);
+        }
+        setValidUntil("makerOnSepolia", 2, true);
+        vm.warp(T0 + 1);
+        vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
+        registerSlot("makerOnSepolia", 5);
+
+        vm.warp(T0 + 30 days + 1);
+        assertEq(registerSlot("makerOnSepolia", 5), 5);
+        vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
+        registry.lookup(account, 2);
+    }
+
+    /// #422 D14b: a shorten on a slot that already died cannot move its death later — a re-kill
+    /// after an order's window must not erase an expiry inside it.
+    function test_setValidUntil_recordedExpiryOnlyMovesEarlier() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        registerSlot("makerOnSepolia", 0);
+        setValidUntil("makerOnSepolia", 0, false); // at T0, naming graceTs
+        uint64 g = graceTs();
+        vm.warp(g + 100);
+        setValidUntil("makerOnSepolia", 0, true); // a kill to 1, after the slot died at g
+        assertTrue(registry.anySlotExpiredWithin(account, g, g), "still died at g");
+        assertFalse(registry.anySlotExpiredWithin(account, g + 1, type(uint64).max), "not at the re-kill");
     }
 
     /// In-grace slots still count toward the cap and are not pruned.
@@ -309,6 +367,41 @@ contract BLSKeyRegistryTest is Test {
         registry.commitmentAt(account, 0);
         assertEq(registry.lookup(account, 0).validUntil, 1); // history kept
         assertEq(registry.nonceOf(account), nonceBefore); // nonce-free
+    }
+
+    /// #422 D12: the escrow's question, answered directly — did any slot expire in [from, to].
+    function test_anySlotExpiredWithin() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        registerSlot("makerOnSepolia", 0);
+        assertFalse(registry.anySlotExpiredWithin(account, 0, type(uint64).max), "no expiry: never");
+        setValidUntil("makerOnSepolia", 0, false);
+        uint64 g = graceTs();
+        assertTrue(registry.anySlotExpiredWithin(account, g, g), "the boundary is inclusive");
+        assertTrue(registry.anySlotExpiredWithin(account, g - 100, g + 100));
+        assertFalse(registry.anySlotExpiredWithin(account, g + 1, g + 100), "after it: no");
+        assertFalse(registry.anySlotExpiredWithin(account, 0, g - 1), "before it: no");
+    }
+
+    /// #422 D14: our own retirement names `validUntil = 1`; the slot expired at the kill, not in 1970.
+    function test_anySlotExpiredWithin_aKillExpiresAtTheKill() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        registerSlot("makerOnSepolia", 0);
+        vm.warp(T0 + 100);
+        setValidUntil("makerOnSepolia", 0, true);
+        assertTrue(registry.anySlotExpiredWithin(account, T0 + 100, T0 + 100), "the kill's own second");
+        assertTrue(registry.anySlotExpiredWithin(account, T0 + 50, T0 + 150));
+        assertFalse(registry.anySlotExpiredWithin(account, 0, T0 + 99), "before the kill: no");
+        assertFalse(registry.anySlotExpiredWithin(account, T0 + 101, type(uint64).max), "after it: no");
+    }
+
+    /// #422 D14: a shorten made before `from`, naming a date inside `[from, to]`, expires at the date.
+    function test_anySlotExpiredWithin_anEarlyShortenExpiresAtItsDate() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        registerSlot("makerOnSepolia", 0);
+        setValidUntil("makerOnSepolia", 0, false); // at T0, naming graceTs
+        uint64 g = graceTs();
+        assertTrue(registry.anySlotExpiredWithin(account, T0 + 1, g), "the date, not the shorten");
+        assertFalse(registry.anySlotExpiredWithin(account, T0 + 1, g - 1));
     }
 
     function test_setValidUntilGraceBoundary() public {
