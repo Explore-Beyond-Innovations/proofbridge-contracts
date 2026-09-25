@@ -4340,7 +4340,10 @@ fn test_j_finalize_dispute_fallback_carries_a_pause_before_the_filing() {
     );
 
     warp(&s, p.deadline + SUITE_BUFFER + 1); // the old floor: the unlock is still open here
-    assert!(s.ad_manager.try_finalize_dispute(&p).is_err());
+    assert_eq!(
+        s.ad_manager.try_finalize_dispute(&p),
+        Err(Ok(AdErr::DisputeNotResolved))
+    );
     warp(&s, until + 1);
     s.ad_manager.finalize_dispute(&p);
     assert_eq!(ad_status(&s), ad_manager_contract::Status::Resolved);

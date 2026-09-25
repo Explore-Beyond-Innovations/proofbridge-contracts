@@ -100,9 +100,10 @@ pub struct DisputeRecord {
     /// Unadjusted. Every read goes through `effective_challenge_deadline`, which applies the
     /// escrow's paused seconds once; storing an already-adjusted value here would double-count.
     pub challenge_deadline: u64,
-    /// The *escrow's* paused-seconds counter when the dispute opened. The escrow's, not this
-    /// module's: a pause matters because it stops the parties presenting, and presentation is gated
-    /// by the escrow.
+    /// The *escrow's* paused-seconds counter as of the order's lock (c41-J: the filing carries the
+    /// order's own snapshot, so the deadline counts every pause the unlock's cutoff counts). The
+    /// escrow's, not this module's: a pause matters because it stops the parties presenting, and
+    /// presentation is gated by the escrow.
     pub paused_at_open: u64,
     pub initiator_evidence: BytesN<32>,
     pub responder_evidence: BytesN<32>,

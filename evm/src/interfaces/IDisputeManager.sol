@@ -46,8 +46,9 @@ interface IDisputeManager {
      *
      *      The same goes for every other value here. `deadline` and `buffer` are what stop a short
      *      challenge period finalizing a dispute before the order's own deadline (D3, T-50), and
-     *      `escrowPausedSeconds` is the escrow's counter at filing — the module has no pause of its
-     *      own, because the pause that stops someone presenting is the escrow's.
+     *      `escrowPausedSeconds` is the escrow's counter as of the order's lock (c41-J: the same
+     *      snapshot the unlock's cutoff counts from) — the module has no pause of its own, because
+     *      the pause that stops someone presenting is the escrow's.
      * @return bond The bond actually required and taken.
      */
     function openDispute(
