@@ -1349,8 +1349,7 @@ impl AdManagerContract {
     /// signer's registry slots expiring during the order's life as a payout, `[locked_at, until]`
     /// with `until` the payout's own cutoff (`any_slot_expired_within`, D12/D14/D14b/D16: a kill, a
     /// near-future shorten, a pre-lock shorten naming a date in the window and a re-kill after it
-    /// all count; a rotation whose old slot outlives the cutoff does not), or the signer left with no usable slot
-    /// at all. Every reference is one the maker signed (the deadline) or the chain stamped (the
+    /// all count; a rotation whose old slot outlives the cutoff does not). Every reference is one the maker signed (the deadline) or the chain stamped (the
     /// lock), never one the maker can choose later. No registry wired means no lever 2 to read.
     fn co_sign_denied(
         env: &Env,
@@ -1372,10 +1371,11 @@ impl AdManagerContract {
         // D16: the order's life as a payout ends at the payout's own cutoff — the presentation
         // cutoff for a cancel, the challenge deadline for a dispute — which the caller passes in.
         // An expiry past it denied nothing; the bound moves only with a pause, which delays
-        // finalize as much.
+        // finalize as much. #461: no "no usable slot" term — the lock required one, so losing it
+        // by the cutoff is an expiry in the interval already.
         proofbridge_core::cross_contract::any_slot_expired_within(
             env, &registry, signer, locked_at, until,
-        ) || !proofbridge_core::cross_contract::has_usable_slot(env, &registry, signer)
+        )
     }
 
     /// How long a denied order's cancel waits past its window: the order chain's anchor delay (the

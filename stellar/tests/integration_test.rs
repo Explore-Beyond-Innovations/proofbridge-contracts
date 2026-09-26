@@ -4270,6 +4270,50 @@ fn test_422_real_registry_cancel_finalizes_at_reads_the_grace_for_a_kill_in_the_
     );
 }
 
+/// #461: killing every slot after the cutoff denies nothing, and the view does not move.
+#[test]
+fn test_461_real_registry_kill_every_slot_after_the_cutoff_ordinary_timing() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    let before = s.ad_manager.cancel_finalizes_at(&p);
+    assert_eq!(before, p.deadline + SUITE_BUFFER, "plain window end");
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &1, &1);
+    assert!(!client.has_usable_slot(&account), "no usable slot left");
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        before,
+        "the view does not move after the window"
+    );
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// #461: killing the only slot inside the window still waits the grace, through the expiry alone.
+#[test]
+fn test_461_real_registry_kill_the_only_slot_inside_the_window_waits_the_grace() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    client.set_valid_until(&account, &auth, &1, &1);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    client.set_valid_until(&account, &auth, &0, &1);
+    assert!(!client.has_usable_slot(&account), "the only slot is gone");
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
 #[test]
 fn test_422_real_registry_kill_just_past_the_cutoff_ordinary_timing() {
     let s = setup();
@@ -4446,24 +4490,6 @@ fn test_422_finalize_cancel_grace_is_anchor_delay_plus_buffer() {
         Err(Ok(AdErr::TooEarly))
     );
     warp(&s, p.deadline + SUITE_BUFFER + 7_200 + SUITE_BUFFER);
-    s.ad_manager.finalize_cancel(&p);
-}
-
-/// Lever 2: the signer fully retired in the registry is a denied payout too (the one-sided
-/// retirement race that exists today, closed by the same grace).
-#[test]
-fn test_422_finalize_cancel_signer_with_no_usable_slot_waits_the_grace() {
-    let s = setup();
-    let p = locked_ad_order(&s);
-    warp(&s, p.deadline);
-    s.ad_manager.claim_cancel(&p);
-    MockKeyRegistryClient::new(&s.env, &s.key_registry).set(&p.ad_settlement_signer, &false);
-    warp(&s, p.deadline + SUITE_BUFFER);
-    assert_eq!(
-        s.ad_manager.try_finalize_cancel(&p),
-        Err(Ok(AdErr::TooEarly))
-    );
-    warp(&s, p.deadline + 2 * SUITE_BUFFER);
     s.ad_manager.finalize_cancel(&p);
 }
 

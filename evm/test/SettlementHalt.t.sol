@@ -284,19 +284,6 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
-    /// Lever 2: the signer fully retired in the registry is a denied payout too (the one-sided
-    /// retirement race that exists today, closed by the same grace).
-    function test_finalizeCancel_signerWithNoUsableSlot_waitsTheGrace() public {
-        (IAdManager.OrderParams memory p,) = _lock(9);
-        _claim(p);
-        keyRegistry.set(p.adSettlementSigner, false);
-        vm.warp(p.deadline + 30 minutes);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
-        adManager.finalizeCancel(p);
-        vm.warp(p.deadline + 60 minutes);
-        adManager.finalizeCancel(p);
-    }
-
     /// The grace stacks on a pause the same way the window does: paused seconds extend the end.
     function test_finalizeCancel_grace_stacksOnAPause() public {
         (IAdManager.OrderParams memory p,) = _lock(10);
@@ -702,6 +689,38 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         vm.warp(p.deadline + 10 minutes);
         _setValidUntil(0, true);
         assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "window end + grace");
+    }
+
+    /// #461: killing every slot after the cutoff denies nothing, and the view does not move.
+    function test_461_realRegistry_killEverySlotAfterTheCutoff_ordinaryTiming() public {
+        _realRegistry();
+        IAdManager.OrderParams memory p = _lockAs(15);
+        _claim(p);
+        uint256 before = adManager.cancelFinalizesAt(p);
+        assertEq(before, p.deadline + 30 minutes, "plain window end");
+        vm.warp(p.deadline + 30 minutes + 1);
+        _setValidUntil(0, true);
+        _setValidUntil(1, true);
+        assertFalse(registry.hasUsableSlot(account), "no usable slot left");
+        assertEq(adManager.cancelFinalizesAt(p), before, "the view does not move after the window");
+        adManager.finalizeCancel(p);
+    }
+
+    /// #461: killing the only slot inside the window still waits the grace, through the expiry alone.
+    function test_461_realRegistry_killTheOnlySlotInsideTheWindow_waitsTheGrace() public {
+        _realRegistry();
+        _setValidUntil(1, true);
+        vm.warp(block.timestamp + 10);
+        IAdManager.OrderParams memory p = _lockAs(16);
+        vm.warp(block.timestamp + 10);
+        _setValidUntil(0, true);
+        assertFalse(registry.hasUsableSlot(account), "the only slot is gone");
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        vm.warp(p.deadline + 60 minutes);
+        adManager.finalizeCancel(p);
     }
 
     function test_realRegistry_killJustPastTheCutoff_ordinaryTiming() public {
