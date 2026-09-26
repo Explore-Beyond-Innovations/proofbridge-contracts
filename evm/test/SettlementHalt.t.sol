@@ -14,6 +14,7 @@ import {stdJson} from "forge-std/StdJson.sol";
 import {IKeyRegistry} from "src/interfaces/IKeyRegistry.sol";
 import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
 import {BLSKeyRegistry} from "src/BLSKeyRegistry.sol";
+import {CounterpartyVerifier} from "src/CounterpartyVerifier.sol";
 import {RouteTiming} from "src/libraries/RouteTiming.sol";
 import {AdManagerTest} from "./Admanager.t.sol";
 
@@ -471,6 +472,13 @@ abstract contract RealRegistryFixture is AdManagerTest {
 
     /// `_lockAs` with a chosen deadline (`0` keeps the default).
     function _lockAsUntil(uint256 salt, uint256 deadline) internal returns (IAdManager.OrderParams memory p) {
+        p = _orderAs(salt, deadline);
+        vm.prank(maker);
+        adManager.lockForOrder(p);
+    }
+
+    /// The ad and the order params of `_lockAsUntil`, without the lock.
+    function _orderAs(uint256 salt, uint256 deadline) internal returns (IAdManager.OrderParams memory p) {
         string memory adId = string.concat("422-real-", vm.toString(salt));
         vm.startPrank(admin);
         adManager.setPeerEscrow(orderChainId, _b32(orderPortal));
@@ -487,8 +495,6 @@ abstract contract RealRegistryFixture is AdManagerTest {
         p.salt = salt;
         p.adSettlementSigner = account;
         if (deadline != 0) p.deadline = deadline;
-        vm.prank(maker);
-        adManager.lockForOrder(p);
     }
 }
 
@@ -732,6 +738,64 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         _setValidUntil(0, true);
         vm.warp(p.deadline + 30 minutes);
         adManager.finalizeCancel(p);
+    }
+
+    /*//////////////////////// #464: one key registry ////////////////////////*/
+
+    /// The order chain's verifier checks co-signatures against `on`.
+    function _verifierOn(address on) internal {
+        address v = address(new CounterpartyVerifier(on));
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, v);
+    }
+
+    /// #464: no new order while the escrow and the order chain's verifier read different registries.
+    function test_464_splitRefusesTheLock() public {
+        _realRegistry();
+        _verifierOn(address(keyRegistry)); // the verifier reads the mock; the escrow reads REGISTRY
+        IAdManager.OrderParams memory p = _orderAs(20, 0);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAdManager.AdManager__RegistrySplit.selector, orderChainId, REGISTRY, address(keyRegistry)
+            )
+        );
+        vm.prank(maker);
+        adManager.lockForOrder(p);
+    }
+
+    /// #464: the escrow swapped to another registry after the lock; a kill in the verifier's registry
+    /// never reaches the new one, so the split itself denies and the cancel waits the grace.
+    function test_464_splitAfterTheLock_waitsTheGrace() public {
+        _realRegistry();
+        _verifierOn(REGISTRY);
+        IAdManager.OrderParams memory p = _lockAs(21);
+        vm.prank(admin);
+        adManager.setKeyRegistry(IKeyRegistry(address(keyRegistry))); // the mock: no kill on record
+        vm.warp(block.timestamp + 10);
+        _setValidUntil(0, true); // killed where the verifier reads
+        _claim(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "the view waits the grace");
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        vm.warp(p.deadline + 60 minutes);
+        adManager.finalizeCancel(p);
+    }
+
+    /// #464: re-wiring the verifier onto the escrow's registry clears the split; the ordinary rule applies.
+    function test_464_verifierOnTheSameRegistry_clearsTheSplit() public {
+        _realRegistry();
+        _verifierOn(REGISTRY);
+        IAdManager.OrderParams memory p = _lockAs(22);
+        vm.prank(admin);
+        adManager.setKeyRegistry(IKeyRegistry(address(keyRegistry)));
+        _verifierOn(address(keyRegistry));
+        _claim(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 30 minutes, "no split, no kill: ordinary");
+        keyRegistry.set(account, true);
+        IAdManager.OrderParams memory q = _orderAs(23, 0);
+        vm.prank(maker);
+        adManager.lockForOrder(q);
     }
 }
 

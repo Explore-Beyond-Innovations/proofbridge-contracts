@@ -629,6 +629,10 @@ impl AdManagerContract {
         // 2.3e D5: the window bound that makes cancel_never_locked's "no lock can follow the
         // deadline" hold.
         Self::require_min_window(&env, params.order_chain_id, params.deadline)?;
+        // #464: no new order while the order chain's verifier reads another key registry.
+        if Self::registry_split(&env, params.order_chain_id) {
+            return Err(AdManagerError::RegistrySplit);
+        }
 
         // Scale the signed order-chain amount into ad-chain precision for
         // pool accounting and transfers on this chain.
@@ -1351,6 +1355,18 @@ impl AdManagerContract {
     /// near-future shorten, a pre-lock shorten naming a date in the window and a re-kill after it
     /// all count; a rotation whose old slot outlives the cutoff does not). Every reference is one the maker signed (the deadline) or the chain stamped (the
     /// lock), never one the maker can choose later. No registry wired means no lever 2 to read.
+    /// #464: does the order chain's root verifier read a key registry other than this escrow's?
+    /// A verifier that does not answer `registry()` is not a BLS co-signature verifier: no split.
+    fn registry_split(env: &Env, order_chain_id: u128) -> bool {
+        let Some(verifier) = storage::get_root_verifier(env, order_chain_id) else {
+            return false;
+        };
+        match proofbridge_core::cross_contract::verifier_registry(env, &verifier) {
+            Some(theirs) => storage::get_key_registry(env).as_ref() != Some(&theirs),
+            None => false,
+        }
+    }
+
     fn co_sign_denied(
         env: &Env,
         maker: &Address,
@@ -1366,6 +1382,10 @@ impl AdManagerContract {
         let Some(registry) = storage::get_key_registry(env) else {
             return false;
         };
+        // #464: a kill in the verifier's registry never reaches this one; a split always denies.
+        if Self::registry_split(env, params.order_chain_id) {
+            return true;
+        }
         let signer = &params.ad_settlement_signer;
         let locked_at = storage::get_order(env, order_hash).locked_at;
         // D16: the order's life as a payout ends at the payout's own cutoff — the presentation

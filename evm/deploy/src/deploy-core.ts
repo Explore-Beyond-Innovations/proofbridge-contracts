@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import { assertOneRegistry } from "./one-registry.js";
 import { ethers } from "ethers";
 import {
   ADMIN_BEARING,
@@ -418,6 +419,13 @@ async function deployCoreRun(
       await c.deploymentTransaction()?.wait();
       return c as ethers.Contract;
     },
+  );
+  // #464: a reused verifier must read the registry this deploy wires into the AdManager.
+  assertOneRegistry(
+    blsKeyRegistryAddr,
+    await attachContract(counterpartyVerifierAddr, "CounterpartyVerifier", "CounterpartyVerifier", signer)
+      .getFunction("registry")(),
+    "deploy",
   );
 
   // ── RootAnchor (2.3f) + Registrar (2.1b) ───────────────────────────

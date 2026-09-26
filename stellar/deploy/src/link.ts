@@ -6,7 +6,8 @@ import {
   duplicatePairKeys,
 } from "@proofbridge/deployment-manifest";
 import { DEFAULT_STELLAR_CHAIN_ID } from "./common.js";
-import { Acting, getAddress, invokeContract, type DescribedCall } from "./stellar-cli.js";
+import { Acting, getAddress, invokeContract, readView, type DescribedCall } from "./stellar-cli.js";
+import { assertOneRegistry } from "./one-registry.js";
 import { adminsOf, foreignAdmins } from "./handover.js";
 import { manifestPath, writeManifest } from "./manifest.js";
 
@@ -120,6 +121,12 @@ export async function link(
         "link --enforce-bls: local manifest has no counterpartyVerifier - redeploy core first",
       );
     }
+    // #464: never wire a verifier that reads another registry than the AdManager's.
+    assertOneRegistry(
+      String(readView(local.contracts.adManager.address, "key_registry")),
+      String(readView(verifierEntry.address, "registry")),
+      "link",
+    );
     for (const [name, escrow] of [
       ["AdManager", local.contracts.adManager.address],
       ["OrderPortal", local.contracts.orderPortal.address],

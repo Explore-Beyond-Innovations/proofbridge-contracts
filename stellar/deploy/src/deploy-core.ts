@@ -1,4 +1,5 @@
 import * as path from "path";
+import { assertOneRegistry } from "./one-registry.js";
 import { adminBlockFromChain, adminsOf, foreignAdmins, type HeldAdmin } from "./handover.js";
 import {
   DEFAULT_STELLAR_CHAIN_ID,
@@ -201,6 +202,8 @@ export async function deployCore(
   } else {
     console.log(`  [reuse] CounterpartyVerifier: ${counterpartyVerifier}`);
   }
+  // #464: a reused verifier must read the registry this deploy wires into the AdManager.
+  assertOneRegistry(blsKeyRegistry, String(readView(counterpartyVerifier, "registry")), "deploy");
 
   // ── Wire the escrows as the registry's revoke guards (check first, then set) ──
   {

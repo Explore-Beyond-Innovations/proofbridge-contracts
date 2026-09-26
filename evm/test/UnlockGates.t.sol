@@ -50,13 +50,14 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
 
     /// Configures the module and locks an order via the standard helpers.
     function _prepareUnlock(address module, bytes32 targetRoot) internal {
-        vm.prank(admin);
-        adManager.setRootVerifier(orderChainId, module);
-
         test_fundAd_makerOnly();
         (IAdManager.OrderParams memory p, bytes32 orderHash) =
             _openOrder(lastAdId, address(adToken), 60 ether, 999, bridger, recipient);
         gp = p;
+        // Wired after the lock: the real verifier reads REGISTRY, the escrow the mock, and #464
+        // refuses a lock on that split. These tests are about the unlock's gates, which it never reads.
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, module);
     }
 
     function _unlockVia(address module, bytes32 targetRoot, bytes memory cosig) internal {
@@ -151,8 +152,6 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         internal
         returns (IAdManager.OrderParams memory x, IAdManager.OrderParams memory y)
     {
-        vm.prank(admin);
-        adManager.setRootVerifier(orderChainId, address(cVerifier));
         bytes32 signer = vjson.readBytes32(".registration.makerOnSepolia.account");
         test_fundAd_makerOnly();
         keyRegistry.set(signer, true);
@@ -172,6 +171,9 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         adManager.lockForOrder(x);
         adManager.lockForOrder(y);
         vm.stopPrank();
+        // After the locks, as in `_prepareUnlock` (#464).
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, address(cVerifier));
     }
 
     /// #433: two orders between the same parties under the same signed roots. A co-signature over

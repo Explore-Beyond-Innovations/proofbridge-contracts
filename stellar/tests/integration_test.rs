@@ -4292,6 +4292,85 @@ fn test_461_real_registry_kill_every_slot_after_the_cutoff_ordinary_timing() {
     s.ad_manager.finalize_cancel(&p);
 }
 
+/// #464: wire the order chain's root verifier to a real counterparty verifier on `registry`.
+fn verifier_on(s: &TestSetup, registry: &Address) {
+    let module = s.env.register(counterparty_verifier_contract::WASM, ());
+    counterparty_verifier_contract::Client::new(&s.env, &module).initialize(registry);
+    s.ad_manager
+        .set_root_verifier(&s.tp.order_chain_id, &module);
+}
+
+/// #464: no new order while the escrow and the order chain's verifier read different registries.
+#[test]
+fn test_464_split_refuses_the_lock() {
+    let s = setup();
+    let (_client, account, _auth) = real_registry_signer(&s);
+    verifier_on(&s, &s.key_registry); // the verifier reads the mock; the escrow reads the real one
+    let mut params = ad_manager_order_params(&s.env, &s.tp);
+    params.ad_settlement_signer = account.clone();
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&params),
+        Err(Ok(AdErr::RegistrySplit))
+    );
+}
+
+/// #464: the escrow swapped to another registry after the lock; a kill in the verifier's registry
+/// never reaches the new one, so the split itself denies and the cancel waits the grace.
+#[test]
+fn test_464_split_after_the_lock_waits_the_grace() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    verifier_on(&s, &client.address);
+    let p = lock_signed_by(&s, &account);
+    s.ad_manager.set_key_registry(&s.key_registry); // the mock: no kill on record
+    warp(&s, s.env.ledger().timestamp() + 10);
+    client.set_valid_until(&account, &auth, &0, &1); // killed where the verifier reads
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER,
+        "the view waits the grace"
+    );
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// #464: re-wiring the verifier onto the escrow's registry clears the split; the ordinary rule applies.
+#[test]
+fn test_464_verifier_on_the_same_registry_clears_the_split() {
+    let s = setup();
+    let (client, account, _auth) = real_registry_signer(&s);
+    verifier_on(&s, &client.address);
+    let p = lock_signed_by(&s, &account);
+    s.ad_manager.set_key_registry(&s.key_registry);
+    verifier_on(&s, &s.key_registry);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + SUITE_BUFFER,
+        "no split, no kill: ordinary"
+    );
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p); // ordinary timing, and the liquidity is free again
+    MockKeyRegistryClient::new(&s.env, &s.key_registry).set(&account, &true);
+    let mut q = ad_manager_order_params(&s.env, &s.tp);
+    q.ad_settlement_signer = account.clone();
+    q.salt = soroban_sdk::U256::from_u32(&s.env, 464);
+    q.deadline = s.env.ledger().timestamp() + 86_400;
+    let r = s.ad_manager.try_lock_for_order(&q);
+    assert!(
+        r.is_ok(),
+        "a new lock is taken once the split clears: {r:?}"
+    );
+}
+
 /// #461: killing the only slot inside the window still waits the grace, through the expiry alone.
 #[test]
 fn test_461_real_registry_kill_the_only_slot_inside_the_window_waits_the_grace() {
@@ -6703,6 +6782,15 @@ impl AccountKeyRegistry {
     pub fn commitment_at(env: Env, account: BytesN<32>, _slot_id: u32) -> BytesN<32> {
         env.storage().instance().get(&account).unwrap()
     }
+
+    // #464: the escrow reads the same registry as the verifier, so it answers the escrow's two views.
+    pub fn has_usable_slot(env: Env, account: BytesN<32>) -> bool {
+        env.storage().instance().has(&account)
+    }
+
+    pub fn any_slot_expired_within(_env: Env, _account: BytesN<32>, _from: u64, _to: u64) -> bool {
+        false
+    }
 }
 
 struct CoSignAuth {
@@ -6828,6 +6916,8 @@ fn wire_real_verifier_for_fixture(s: &TestSetup) -> Bytes {
     s.ad_manager
         .set_root_verifier(&s.tp.order_chain_id, &module);
     s.order_portal.set_root_verifier(&s.tp.ad_chain_id, &module);
+    // #464: one registry for the escrow and its verifier, or the escrow refuses to lock.
+    s.ad_manager.set_key_registry(&registry);
 
     cosign(
         &s.env,

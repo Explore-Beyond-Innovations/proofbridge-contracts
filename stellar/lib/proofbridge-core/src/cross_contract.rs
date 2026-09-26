@@ -362,6 +362,20 @@ pub fn is_anchored(env: &Env, anchor: &Address, source_chain_id: u128, root: &By
 // KeyRegistry Helpers
 // =============================================================================
 
+/// #464: the registry a root verifier checks co-signatures against, or `None` when it does not
+/// answer `registry()` (not a BLS co-signature verifier, so there is nothing to split).
+pub fn verifier_registry(env: &Env, verifier: &Address) -> Option<Address> {
+    let r = env.try_invoke_contract::<Address, soroban_sdk::Error>(
+        verifier,
+        &soroban_sdk::Symbol::new(env, "registry"),
+        soroban_sdk::Vec::new(env),
+    );
+    match r {
+        Ok(Ok(a)) => Some(a),
+        _ => None,
+    }
+}
+
 /// True iff `account` holds at least one live, unexpired key slot in the registry.
 pub fn has_usable_slot(env: &Env, registry: &Address, account: &BytesN<32>) -> bool {
     KeyRegistryClient::new(env, registry).has_usable_slot(account)

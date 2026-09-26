@@ -199,6 +199,9 @@ contract AdManager is EscrowBase, IAdManager {
         Ad storage ad = _getAdOwned(params.adId, msg.sender);
         orderHash = _validateOrder(ad, params);
         _requireMinWindow(params.orderChainId, params.deadline);
+        // #464: no new order while the order chain's verifier reads another key registry.
+        (bool split, address verifierRegistry) = _registrySplit(params.orderChainId);
+        if (split) revert AdManager__RegistrySplit(params.orderChainId, address(keyRegistry), verifierRegistry);
 
         // The signed amount is in order-chain units; the pool accounts in ad-chain units.
         uint256 adAmount = _adAmount(params);
@@ -611,10 +614,24 @@ contract AdManager is EscrowBase, IAdManager {
         if (halted[maker] || lastResumedAt[maker] >= p.deadline) return true;
         IKeyRegistry registry = keyRegistry;
         if (address(registry) == address(0)) return false;
+        // #464: a kill in the verifier's registry never reaches this one; a split always denies.
+        (bool split,) = _registrySplit(p.orderChainId);
+        if (split) return true;
         // D16: the order's life as a payout ends at the payout's own cutoff — the presentation cutoff
         // for a cancel, the challenge deadline for a dispute — which the caller passes in. An expiry
         // past it denied nothing; the bound moves only with a pause, which delays finalize as much.
         return registry.anySlotExpiredWithin(p.adSettlementSigner, _lockedAt(orderHash), uint64(until));
+    }
+
+    /// @dev #464: does `rootVerifier[chainId]` verify against a registry other than `keyRegistry`?
+    ///      A verifier that does not answer `registry()` is not a BLS co-signature verifier: no split.
+    function _registrySplit(uint256 chainId) private view returns (bool split, address verifierRegistry) {
+        address verifier = address(rootVerifier[chainId]);
+        if (verifier == address(0)) return (false, address(0));
+        (bool ok, bytes memory ret) = verifier.staticcall(abi.encodeWithSignature("registry()"));
+        if (!ok || ret.length != 32) return (false, address(0));
+        verifierRegistry = abi.decode(ret, (address));
+        split = verifierRegistry != address(keyRegistry);
     }
 
     /// @inheritdoc IAdManager

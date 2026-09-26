@@ -7,6 +7,7 @@ import {
 } from "@proofbridge/deployment-manifest";
 import { Acting, adminsOf, connect, foreignAdmins, requireEnv, type DescribedCall } from "./common.js";
 import { attachContract } from "./artifacts.js";
+import { assertOneRegistry } from "./one-registry.js";
 import { manifestPath, writeManifest } from "./manifest.js";
 
 export interface LinkOptions {
@@ -127,6 +128,13 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
         "link --enforce-bls: local manifest has no counterpartyVerifier - redeploy core first",
       );
     }
+    // #464: never wire a verifier that reads another registry than the AdManager's.
+    assertOneRegistry(
+      await adManager.getFunction("keyRegistry")(),
+      await attachContract(verifierEntry.address, "CounterpartyVerifier", "CounterpartyVerifier", signer)
+        .getFunction("registry")(),
+      "link",
+    );
     for (const [name, escrow] of [
       ["AdManager", adManager],
       ["OrderPortal", orderPortal],

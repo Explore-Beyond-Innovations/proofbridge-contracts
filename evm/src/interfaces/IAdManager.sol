@@ -120,6 +120,8 @@ interface IAdManager is IEscrow {
     /// @notice The order's maker has halted settlement; only evidence can pay this order now.
     error AdManager__Halted(address maker);
     error AdManager__NotHalted();
+    /// @notice #464: the order chain's verifier checks co-signatures against a different registry.
+    error AdManager__RegistrySplit(uint256 chainId, address escrowRegistry, address verifierRegistry);
 
     /*//////////////////////////////////////////////////////////////
                                  FUNCTIONS
