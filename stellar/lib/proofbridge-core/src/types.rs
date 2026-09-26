@@ -6,8 +6,8 @@ use soroban_sdk::{contracttype, Address, BytesN};
 // Order Lifecycle
 // =============================================================================
 
-/// Order lifecycle status. `Filled` and `Cancelled` are terminal; `Claimed` is a presentation
-/// window (2.3e); `Disputed` / `Resolved` are reserved for 2.3g so it never renumbers.
+/// Order lifecycle status. `Filled`, `Cancelled` and `Resolved` are terminal; `Claimed` is a
+/// presentation window (2.3e); `Disputed` and `Resolved` are the dispute's states (2.3g).
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -22,9 +22,9 @@ pub enum Status {
     Claimed = 3,
     /// Refunded / released (the primary appends the CANCEL leaf)
     Cancelled = 4,
-    /// Reserved (2.3g)
+    /// A dispute is open on this (primary) leg
     Disputed = 5,
-    /// Reserved (2.3g)
+    /// The dispute finalized (terminal)
     Resolved = 6,
 }
 

@@ -45,4 +45,6 @@ pub enum DisputeManagerError {
     WrongEscrow = 21,
     /// Nothing credited to claim.
     NothingToClaim = 22,
+    /// The arbiter already ruled, so the no-ruling fallback does not apply.
+    AlreadyRuled = 23,
 }

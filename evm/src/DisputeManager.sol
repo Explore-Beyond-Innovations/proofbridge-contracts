@@ -91,7 +91,7 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     error DisputeManager__BondTooSmall(uint256 required, uint256 provided);
     error DisputeManager__ChallengeOpen(uint256 until);
     error DisputeManager__ChallengeClosed(uint256 since);
-    error DisputeManager__WindowOpen(bytes32 orderHash);
+    error DisputeManager__AlreadyRuled(bytes32 orderHash);
     error DisputeManager__NotResponder();
     error DisputeManager__NothingToClaim();
 
@@ -265,7 +265,7 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     /// @dev Permissionless: an unresolved dispute must not depend on the arbiter ever showing up.
     function claimDispute(bytes32 orderHash) external {
         Dispute.Record storage d = _unwindowed(orderHash);
-        if (d.ruling != Dispute.Outcome.None) revert DisputeManager__WindowOpen(orderHash);
+        if (d.ruling != Dispute.Outcome.None) revert DisputeManager__AlreadyRuled(orderHash);
         uint256 until_ = effectiveChallengeDeadline(orderHash);
         if (block.timestamp < until_) revert DisputeManager__ChallengeOpen(until_);
         emit DisputeClaimed(orderHash, uint64(until_));

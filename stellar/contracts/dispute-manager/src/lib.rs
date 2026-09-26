@@ -308,7 +308,7 @@ impl DisputeManagerContract {
     pub fn claim_dispute(env: Env, order_hash: BytesN<32>) -> Result<(), Error> {
         let d = storage::get_dispute(&env, &order_hash).ok_or(Error::NotDisputed)?;
         if d.ruling != DisputeOutcome::None {
-            return Err(Error::ChallengeClosed);
+            return Err(Error::AlreadyRuled);
         }
         let until = Self::effective_challenge_deadline_of(&env, &d);
         if env.ledger().timestamp() < until {
