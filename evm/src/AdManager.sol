@@ -602,10 +602,10 @@ contract AdManager is EscrowBase, IAdManager {
     ///      now or at any point at or after the order's deadline (a resume stamp at or after it), any
     ///      of the signer's registry slots expiring during the order's life (`anySlotExpiredWithin`,
     ///      D12: a kill, a near-future shorten and a pre-lock shorten naming a date in the window all
-    ///      count; a rotation whose old slot outlives the cancel does not), or the signer left with
-    ///      no usable slot at all. Every reference is one the maker signed (the deadline) or the
-    ///      chain stamped (the lock), never one the maker can choose later. No registry wired means
-    ///      no lever 2 to read.
+    ///      count; a rotation whose old slot outlives the cancel does not). Every reference is one
+    ///      the maker signed (the deadline) or the chain stamped (the lock), never one the maker can
+    ///      choose later. No registry wired means no lever 2 to read. #461: no "no usable slot" term —
+    ///      the lock required one, so losing it by the cutoff is an expiry in the interval already.
     function _coSignDenied(OrderParams calldata p, bytes32 orderHash, uint256 until) private view returns (bool) {
         address maker = ads[p.adId].maker;
         if (halted[maker] || lastResumedAt[maker] >= p.deadline) return true;
@@ -614,8 +614,7 @@ contract AdManager is EscrowBase, IAdManager {
         // D16: the order's life as a payout ends at the payout's own cutoff — the presentation cutoff
         // for a cancel, the challenge deadline for a dispute — which the caller passes in. An expiry
         // past it denied nothing; the bound moves only with a pause, which delays finalize as much.
-        return registry.anySlotExpiredWithin(p.adSettlementSigner, _lockedAt(orderHash), uint64(until))
-            || !registry.hasUsableSlot(p.adSettlementSigner);
+        return registry.anySlotExpiredWithin(p.adSettlementSigner, _lockedAt(orderHash), uint64(until));
     }
 
     /// @inheritdoc IAdManager
