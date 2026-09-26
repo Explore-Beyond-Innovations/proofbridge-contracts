@@ -24,6 +24,8 @@ pub enum Fault {
     ContractPaused,
     NoRouteTiming,
     DeadlineTooSoon,
+    /// #453: the deadline is past `now + MAX_ORDER_WINDOW`.
+    DeadlineTooFar,
     TooEarly,
     NotClaimable,
     NotClaimed,
@@ -210,12 +212,17 @@ pub fn timing(env: &Env, chain_id: u128) -> Result<RouteTiming, Fault> {
     storage::get_route_timing(env, chain_id).ok_or(Fault::NoRouteTiming)
 }
 
-/// `deadline >= now + min_window` at every lock/create (2.3e D5): the precondition that makes
-/// "no lock can follow the deadline" hold for `cancel_never_locked`.
+/// `now + min_window <= deadline <= now + MAX_ORDER_WINDOW` at every lock/create. The floor (2.3e
+/// D5) makes "no lock can follow the deadline" hold for `cancel_never_locked`; the ceiling (#453)
+/// keeps the order inside the key registry's memory of a dead slot.
 pub fn require_min_window(env: &Env, chain_id: u128, deadline: u64) -> Result<(), Fault> {
     let t = timing(env, chain_id)?;
-    if deadline < env.ledger().timestamp() + t.min_window {
+    let now = env.ledger().timestamp();
+    if deadline < now + t.min_window {
         return Err(Fault::DeadlineTooSoon);
+    }
+    if deadline > now + crate::timing::MAX_ORDER_WINDOW {
+        return Err(Fault::DeadlineTooFar);
     }
     Ok(())
 }

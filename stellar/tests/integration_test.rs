@@ -11,6 +11,7 @@
 
 extern crate std;
 
+use proofbridge_core::timing::{MAX_BUFFER, MAX_ORDER_WINDOW};
 use serde::Deserialize;
 use soroban_sdk::{
     contract, contractimpl, testutils::Address as _, Address, Bytes, BytesN, Env,
@@ -353,6 +354,8 @@ fn setup_with_verifiers(wire_root_verifiers: bool) -> TestSetup<'static> {
 
 /// 2.3e: the suite's clocks — no window bound, a 30-minute buffer, no margin, a 1-day backstop, no
 /// stagger — the smallest legal set, so every existing lock/create/unlock keeps its shape.
+/// #453: how long before the fixture's deadline the suite's clock starts (inside the 7-day cap).
+const SUITE_START_BEFORE_DEADLINE: u64 = 86_400;
 const SUITE_BUFFER: u64 = 1_800;
 const SUITE_LONG_BACKSTOP: u64 = 86_400;
 
@@ -394,6 +397,13 @@ fn setup_opts(wire_root_verifiers: bool, wire_timing: bool) -> TestSetup<'static
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
     env.cost_estimate().budget().reset_unlimited();
+    // #453: a lock/create accepts a deadline at most 7 days out, and the fixture's deadline is baked
+    // into the proofs, so the suite's clock starts a day before it.
+    {
+        use soroban_sdk::testutils::Ledger;
+        env.ledger()
+            .set_timestamp(tp.deadline - SUITE_START_BEFORE_DEADLINE);
+    }
 
     // Generate admin address
     let admin_addr = Address::generate(&env);
@@ -3954,8 +3964,8 @@ fn real_registry_signer(
     BytesN<32>,
     bls_key_registry_contract::OwnerAuth,
 ) {
-    // The suite's clock starts at 0 — next to the very date a kill names. Start in 2023 instead.
-    warp(s, 1_700_000_000);
+    // The suite's clock starts a day before the fixture's deadline (#453), far from the 1970 date a
+    // kill names, so the registry needs no warp of its own.
     let (client, account, owner) = real_registry_with_vector_maker(s);
     let vectors: serde_json::Value =
         serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
@@ -4184,6 +4194,63 @@ fn test_422_real_registry_same_second_kill_prune_and_lock_still_waits_the_grace(
         s.ad_manager.try_finalize_cancel(&p),
         Err(Ok(AdErr::TooEarly))
     );
+}
+
+/// #453 D4: at the full span (a 7-day order, a 1-day buffer, a 7-day anchor delay) a slot killed
+/// right after the lock is still in the registry one second before the cancel's grace ends, even
+/// when the maker registers at the cap to force a prune. So the cancel still waits.
+#[test]
+fn test_453_real_registry_a_kill_outlives_the_full_order_span() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
+    let hexv =
+        |v: &serde_json::Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
+    let reg = |i: usize| {
+        let r = &vectors["slots"]["makerOnStellarTestnet"]["registrations"][i];
+        client.try_register(
+            &account,
+            &auth,
+            &BytesN::from_array(&s.env, &hexv(&r["pkNative"]).try_into().unwrap()),
+            &BytesN::from_array(&s.env, &hexv(&r["pop"]).try_into().unwrap()),
+            &(i as u64),
+        )
+    };
+    for i in 2..5 {
+        assert!(reg(i).is_ok());
+    }
+    client.set_position_guards(&soroban_sdk::vec![&s.env, s.ad_manager.address.clone()]);
+    s.ad_manager.set_route_timing(
+        &s.tp.order_chain_id,
+        &ad_timing(0, MAX_BUFFER, 0, MAX_BUFFER, 0),
+    );
+    let anchor = wire_anchor(&s);
+    anchor.set_anchor_delay(&s.tp.order_chain_id, &root_anchor::MAX_ANCHOR_DELAY);
+
+    let deadline = s.tp.deadline;
+    warp(&s, deadline - MAX_ORDER_WINDOW);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, s.env.ledger().timestamp() + 1);
+    client.set_valid_until(&account, &auth, &0, &1);
+
+    warp(&s, deadline);
+    s.ad_manager.claim_cancel(&p);
+    let window_end = deadline + MAX_BUFFER;
+    let protected_until = window_end + root_anchor::MAX_ANCHOR_DELAY + MAX_BUFFER;
+
+    warp(&s, protected_until - 1);
+    assert_eq!(
+        reg(5),
+        Err(Ok(bls_key_registry_contract::RegistryError::RegistryFull)),
+        "the killed slot is still remembered"
+    );
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, protected_until);
+    s.ad_manager.finalize_cancel(&p);
 }
 
 /// The view the relayer's janitor plans around must carry the same bound as the door.
@@ -4517,7 +4584,7 @@ fn test_present_settled_gates_anchor_delay_and_domain() {
     );
 
     // A cancel leaf is not a settled leaf: the domain is a contract constant.
-    warp(&s, 3_600);
+    warp(&s, s.env.ledger().timestamp() + 3_600);
     anchor.set_anchor_delay(&s.tp.order_chain_id, &0);
     let (cancel_root, cancel_proof) = cancel_proof(&s);
     notarize(&s, &anchor, s.tp.order_chain_id, &cancel_root);
@@ -4722,7 +4789,7 @@ fn test_t40_refund_by_cancel_gates_anchor_delay_and_domain() {
     );
 
     // A settled leaf cannot refund…
-    warp(&s, 600);
+    warp(&s, s.env.ledger().timestamp() + 600);
     anchor.set_anchor_delay(&s.tp.ad_chain_id, &0);
     let (settled_root, settled) = settled_proof(&s);
     notarize(&s, &anchor, s.tp.ad_chain_id, &settled_root);
@@ -5029,7 +5096,7 @@ fn test_pause_after_the_window_closed_does_not_reopen_it() {
     let u = setup();
     let r = locked_ad_order(&u);
     u.ad_manager.pause();
-    warp(&u, 3_600);
+    warp(&u, u.env.ledger().timestamp() + 3_600);
     u.ad_manager.unpause();
     warp(&u, r.deadline + SUITE_BUFFER + 3_600 + 1);
     assert!(!ad_unlock(&u, &r, &Bytes::new(&u.env)));
@@ -5144,23 +5211,94 @@ fn test_retiming_during_a_claim_does_not_move_the_cutoff() {
     assert!(ad_unlock(&t, &q, &Bytes::new(&t.env)));
 }
 
-/// A far deadline never panics: the cutoffs saturate (EVM computes them in uint256).
+/// #453: a lock accepts a deadline at most `MAX_ORDER_WINDOW` out, to the second.
 #[test]
-fn test_far_deadline_never_panics() {
+fn test_453_lock_refuses_a_deadline_past_the_order_window() {
     let s = setup();
-    let mut p = ad_manager_order_params(&s.env, &s.tp);
-    p.deadline = u64::MAX;
-    s.ad_manager.lock_for_order(&p);
-    // The proof is for the fixture's order (another hash), so the unlock reaches the verifier and fails there.
-    let late = s.ad_manager.try_unlock(
-        &p,
-        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
-        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
-        &Bytes::from_slice(&s.env, PROOF_BRIDGER),
-        &Bytes::new(&s.env),
+    let p = ad_manager_order_params(&s.env, &s.tp);
+    warp(&s, p.deadline - MAX_ORDER_WINDOW - 1);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p),
+        Err(Ok(AdErr::DeadlineTooFar))
     );
-    assert_eq!(late, Err(Ok(AdErr::InvalidProof)));
-    assert_eq!(s.ad_manager.try_claim_cancel(&p), Err(Ok(AdErr::TooEarly)));
+    warp(&s, p.deadline - MAX_ORDER_WINDOW);
+    s.ad_manager.lock_for_order(&p);
+}
+
+/// #453: the order chain caps the same way, so a bridger cannot create an order the maker can
+/// never lock.
+#[test]
+fn test_453_create_refuses_a_deadline_past_the_order_window() {
+    let s = setup();
+    let bridger = account_addr(&s, &s.tp.bridger);
+    TokenContractClient::new(&s.env, &s.order_token_addr).mint(&bridger, &(s.tp.amount as i128));
+    let p = order_portal_order_params(&s.env, &s.tp);
+    warp(&s, p.deadline - MAX_ORDER_WINDOW - 1);
+    assert_eq!(
+        s.order_portal.try_create_order(&p),
+        Err(Ok(OpErr::DeadlineTooFar))
+    );
+    warp(&s, p.deadline - MAX_ORDER_WINDOW);
+    s.order_portal.create_order(&p);
+}
+
+/// #453: the route buffer and the minimum window have ceilings too, on both legs; each cap itself
+/// is accepted.
+#[test]
+fn test_453_route_timing_upper_bounds_both_legs() {
+    let s = setup();
+    let over = [
+        (0, MAX_BUFFER + 1, 0, MAX_BUFFER + 1, 0),
+        (
+            MAX_ORDER_WINDOW / 2 + 1,
+            SUITE_BUFFER,
+            0,
+            SUITE_LONG_BACKSTOP,
+            0,
+        ),
+    ];
+    for (mw, b, m, lb, cs) in over {
+        assert_eq!(
+            s.ad_manager
+                .try_set_route_timing(&s.tp.order_chain_id, &ad_timing(mw, b, m, lb, cs)),
+            Err(Ok(AdErr::InvalidTiming))
+        );
+        assert_eq!(
+            s.order_portal
+                .try_set_route_timing(&s.tp.ad_chain_id, &portal_timing(mw, b, m, lb, cs)),
+            Err(Ok(OpErr::InvalidTiming))
+        );
+    }
+    let at = [
+        (0, MAX_BUFFER, 0, MAX_BUFFER, 0),
+        // #457-2: at most half the order window, so a deadline at twice it still fits the cap.
+        (
+            MAX_ORDER_WINDOW / 2,
+            SUITE_BUFFER,
+            0,
+            SUITE_LONG_BACKSTOP,
+            0,
+        ),
+    ];
+    for (mw, b, m, lb, cs) in at {
+        s.ad_manager
+            .set_route_timing(&s.tp.order_chain_id, &ad_timing(mw, b, m, lb, cs));
+        s.order_portal
+            .set_route_timing(&s.tp.ad_chain_id, &portal_timing(mw, b, m, lb, cs));
+    }
+}
+
+/// #453 D4: the budget. An order's last protected moment is at most `MAX_ORDER_WINDOW + buffer`
+/// (the window end) plus `anchorDelay + buffer` (the evidence grace) after its lock; that has to
+/// fall inside the registry's memory of a dead slot, with room left for pauses.
+#[test]
+fn test_453_the_order_span_fits_the_registry_memory() {
+    let span = MAX_ORDER_WINDOW + 2 * MAX_BUFFER + root_anchor::MAX_ANCHOR_DELAY;
+    assert!(
+        span < bls_key_registry::GRACE_PERIOD,
+        "order span {span}s must stay under the registry's {}s grace",
+        bls_key_registry::GRACE_PERIOD
+    );
 }
 
 // --- timing validation, fail-closed posture, pause ------------------------------------------------

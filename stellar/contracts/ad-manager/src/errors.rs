@@ -146,6 +146,8 @@ pub enum AdManagerError {
     NotHalted = 67,
     /// The wired anchor did not answer `anchor_delay`; a denied order's cancel waits until it does.
     AnchorDelayUnreadable = 68,
+    /// #453: the deadline is past `now + MAX_ORDER_WINDOW`.
+    DeadlineTooFar = 69,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for AdManagerError {
@@ -187,6 +189,7 @@ impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
             ContractPaused => AdManagerError::ContractPaused,
             NoRouteTiming => AdManagerError::NoRouteTiming,
             DeadlineTooSoon => AdManagerError::DeadlineTooSoon,
+            DeadlineTooFar => AdManagerError::DeadlineTooFar,
             TooEarly => AdManagerError::TooEarly,
             NotClaimable => AdManagerError::NotClaimable,
             NotClaimed => AdManagerError::NotClaimed,

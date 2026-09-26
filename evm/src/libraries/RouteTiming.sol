@@ -27,19 +27,27 @@ library RouteTiming {
     /// @notice A presentation window can never be shorter than this.
     uint64 internal constant MIN_BUFFER = 30 minutes;
 
+    /// @notice #453: nor longer than this. With {MAX_ORDER_WINDOW} and the anchor delay's cap it keeps
+    ///         an order's last protected moment inside the key registry's 30-day memory of a dead slot.
+    uint64 internal constant MAX_BUFFER = 1 days;
+
+    /// @notice #453: the longest `deadline − now` a lock/create accepts. `minWindow` is at most half of
+    ///         it, so a deadline at twice the min window (the lock lands after the create) still fits.
+    uint64 internal constant MAX_ORDER_WINDOW = 7 days;
+
     /// @notice `field`: 1 buffer, 2 margin, 3 longBackstop, 4 claimStagger, 5 minWindow.
     error RouteTiming__Invalid(uint8 field);
     error RouteTiming__NotSet(uint256 chainId);
 
-    /// @dev D6 rules: `buffer ≥ MIN_BUFFER`, `margin < buffer`, `longBackstop ≥ buffer`,
+    /// @dev D6 rules: `MIN_BUFFER ≤ buffer ≤ MAX_BUFFER`, `margin < buffer`, `longBackstop ≥ buffer`,
     ///      `claimStagger < minWindow` when the stagger is on (`0` = off, always legal),
-    ///      `minWindow ≥ margin`.
+    ///      `margin ≤ minWindow ≤ MAX_ORDER_WINDOW / 2` (the upper bounds are #453's).
     function validate(Timing calldata t) internal pure {
-        if (t.buffer < MIN_BUFFER) revert RouteTiming__Invalid(1);
+        if (t.buffer < MIN_BUFFER || t.buffer > MAX_BUFFER) revert RouteTiming__Invalid(1);
         if (t.margin >= t.buffer) revert RouteTiming__Invalid(2);
         if (t.longBackstop < t.buffer) revert RouteTiming__Invalid(3);
         if (t.claimStagger != 0 && t.claimStagger >= t.minWindow) revert RouteTiming__Invalid(4);
-        if (t.minWindow < t.margin) revert RouteTiming__Invalid(5);
+        if (t.minWindow < t.margin || t.minWindow > MAX_ORDER_WINDOW / 2) revert RouteTiming__Invalid(5);
     }
 
     /// @dev Load or fail closed. `buffer` is never zero on a validated record.

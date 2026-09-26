@@ -35,8 +35,9 @@ pub use errors::RootAnchorError;
 pub use storage::AnchorRec;
 
 /// Upper bound on a route's delay: keeps `is_anchored` arithmetic trivially safe and an incident
-/// stopgap from becoming a silent brick. 30 days.
-pub const MAX_ANCHOR_DELAY: u64 = 30 * 24 * 60 * 60;
+/// stopgap from becoming a silent brick. 7 days (#453): the escrows' evidence grace adds it to the
+/// route buffer, and the sum must stay inside the key registry's 30-day memory of a dead slot.
+pub const MAX_ANCHOR_DELAY: u64 = 7 * 24 * 60 * 60;
 
 #[contract]
 pub struct RootAnchor;

@@ -93,6 +93,7 @@ interface IEscrow {
     error Escrow__SelfCallOnly();
     /// @notice `deadline` is closer than the route's `minWindow` (2.3e D5).
     error Escrow__DeadlineTooSoon(uint256 deadline, uint256 minAllowed);
+    error Escrow__DeadlineTooFar(uint256 deadline, uint256 maxAllowed);
     /// @notice The clock the caller relies on has not been reached yet.
     error Escrow__TooEarly(uint256 at);
     /// @notice The order is not in a state this path accepts (`Open`, `Claimed`, or `None`, as documented).

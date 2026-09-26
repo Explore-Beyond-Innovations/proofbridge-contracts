@@ -272,11 +272,14 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
         return routeTiming.load(chainId);
     }
 
-    /// @dev `deadline ≥ now + minWindow` at every lock/create (2.3e D5): the precondition that makes
-    ///      `cancelNeverLocked`'s "no lock can follow the deadline" hold.
+    /// @dev `now + minWindow ≤ deadline ≤ now + MAX_ORDER_WINDOW` at every lock/create. The floor
+    ///      (2.3e D5) makes `cancelNeverLocked`'s "no lock can follow the deadline" hold; the ceiling
+    ///      (#453) keeps the order inside the key registry's memory of a dead slot.
     function _requireMinWindow(uint256 chainId, uint256 deadline) internal view {
         uint256 minAllowed = block.timestamp + _timing(chainId).minWindow;
         if (deadline < minAllowed) revert Escrow__DeadlineTooSoon(deadline, minAllowed);
+        uint256 maxAllowed = block.timestamp + RouteTiming.MAX_ORDER_WINDOW;
+        if (deadline > maxAllowed) revert Escrow__DeadlineTooFar(deadline, maxAllowed);
     }
 
     /// @dev Reverts unless `at` has been reached.

@@ -32,8 +32,10 @@ contract RootAnchor is IRootAnchor, TwoStepAdmin, Pausable {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Upper bound on a route's delay: keeps {isAnchored} arithmetic trivially safe and an
-    ///         incident stopgap from becoming a silent brick.
-    uint64 public constant MAX_ANCHOR_DELAY = 30 days;
+    ///         incident stopgap from becoming a silent brick. 7 days (#453): the escrows' evidence grace
+    ///         adds it to the route buffer, and the sum must stay inside the key registry's 30-day
+    ///         memory of a dead slot.
+    uint64 public constant MAX_ANCHOR_DELAY = 7 days;
 
     /*//////////////////////////////////////////////////////////////
                                  TYPES
