@@ -75,6 +75,8 @@ interface IAdManager is IEscrow {
         bytes32 settlementSigner
     );
     event KeyRegistrySet(address indexed registry);
+    /// @notice #465: each `setKeyRegistry` opens a new epoch; an order records the one it locked under.
+    event KeyRegistryEpoch(uint32 indexed epoch, address indexed registry);
     /// @notice A maker re-pointed an ad's settlement signer (the third kill lever).
     event SettlementSignerSet(string indexed adId, bytes32 previous, bytes32 next);
     /// @notice The maker halted the co-signed payout of every order against their ads (#422).

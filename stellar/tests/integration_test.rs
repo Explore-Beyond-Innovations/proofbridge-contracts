@@ -4314,17 +4314,17 @@ fn test_464_split_refuses_the_lock() {
     );
 }
 
-/// #464: the escrow swapped to another registry after the lock; a kill in the verifier's registry
-/// never reaches the new one, so the split itself denies and the cancel waits the grace.
+/// #465: an escrow-only swap after the lock leaves the order on the registry it locked under, which
+/// is still the verifier's; a kill there is read and waits the grace.
 #[test]
-fn test_464_split_after_the_lock_waits_the_grace() {
+fn test_465_escrow_only_swap_the_order_keeps_its_registry_a_kill_waits_the_grace() {
     let s = setup();
     let (client, account, auth) = real_registry_signer(&s);
     verifier_on(&s, &client.address);
     let p = lock_signed_by(&s, &account);
-    s.ad_manager.set_key_registry(&s.key_registry); // the mock: no kill on record
+    s.ad_manager.set_key_registry(&s.key_registry); // live: the mock, no kill on record
     warp(&s, s.env.ledger().timestamp() + 10);
-    client.set_valid_until(&account, &auth, &0, &1); // killed where the verifier reads
+    client.set_valid_until(&account, &auth, &0, &1); // killed in the order's own registry
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     assert_eq!(
@@ -4341,33 +4341,115 @@ fn test_464_split_after_the_lock_waits_the_grace() {
     s.ad_manager.finalize_cancel(&p);
 }
 
-/// #464: re-wiring the verifier onto the escrow's registry clears the split; the ordinary rule applies.
+/// #465: an escrow-only swap and no kill: the order's registry is still the verifier's, so no split
+/// and ordinary timing (under #464 alone this was a forced grace).
 #[test]
-fn test_464_verifier_on_the_same_registry_clears_the_split() {
+fn test_465_escrow_only_swap_no_kill_ordinary_timing() {
     let s = setup();
     let (client, account, _auth) = real_registry_signer(&s);
     verifier_on(&s, &client.address);
     let p = lock_signed_by(&s, &account);
     s.ad_manager.set_key_registry(&s.key_registry);
-    verifier_on(&s, &s.key_registry);
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     assert_eq!(
         s.ad_manager.cancel_finalizes_at(&p),
         p.deadline + SUITE_BUFFER,
-        "no split, no kill: ordinary"
+        "the order's registry still matches"
     );
     warp(&s, p.deadline + SUITE_BUFFER);
-    s.ad_manager.finalize_cancel(&p); // ordinary timing, and the liquidity is free again
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// #465 (review 46-1): a full migration mid-order, the escrow AND the verifier moved to another
+/// registry, cannot erase a kill in the registry the order locked under.
+#[test]
+fn test_465_full_migration_cannot_erase_the_kill() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    verifier_on(&s, &client.address);
+    let p = lock_signed_by(&s, &account);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    client.set_valid_until(&account, &auth, &0, &1); // the kill, in the order's registry
+    s.ad_manager.set_key_registry(&s.key_registry);
+    verifier_on(&s, &s.key_registry); // both now agree on the mock, which never saw the kill
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER + 60); // past the window
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER,
+        "the kill is not erased"
+    );
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// #464/#465: a verifier-only swap after the lock co-signs against keys the order's registry never
+/// sees: a split against the order's snapshot, so the cancel waits the grace.
+#[test]
+fn test_465_verifier_only_swap_waits_the_grace() {
+    let s = setup();
+    let (client, account, _auth) = real_registry_signer(&s);
+    verifier_on(&s, &client.address);
+    let p = lock_signed_by(&s, &account);
+    verifier_on(&s, &s.key_registry);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER,
+        "a split denies"
+    );
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// #464: after a full migration a new order locks on the new pair; the order locked before it keeps
+/// its snapshot and waits the grace (its verifier left its registry).
+#[test]
+fn test_464_full_migration_new_orders_lock_old_order_waits() {
+    let s = setup();
+    let (client, account, _auth) = real_registry_signer(&s);
+    verifier_on(&s, &client.address);
+    let p = lock_signed_by(&s, &account);
+    let order_hash = s.ad_manager.hash_order(&p);
+    let locked_epoch = s.ad_manager.get_order(&order_hash).registry_epoch;
+    s.ad_manager.set_key_registry(&s.key_registry);
+    verifier_on(&s, &s.key_registry);
+    assert_eq!(
+        s.ad_manager.get_order(&order_hash).registry_epoch,
+        locked_epoch,
+        "the order keeps the epoch it locked under"
+    );
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER,
+        "the old order waits"
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p); // frees the ad's liquidity
     MockKeyRegistryClient::new(&s.env, &s.key_registry).set(&account, &true);
     let mut q = ad_manager_order_params(&s.env, &s.tp);
     q.ad_settlement_signer = account.clone();
     q.salt = soroban_sdk::U256::from_u32(&s.env, 464);
     q.deadline = s.env.ledger().timestamp() + 86_400;
     let r = s.ad_manager.try_lock_for_order(&q);
-    assert!(
-        r.is_ok(),
-        "a new lock is taken once the split clears: {r:?}"
+    assert!(r.is_ok(), "a new lock is taken on the new pair: {r:?}");
+    let hq = s.ad_manager.hash_order(&q);
+    assert_eq!(
+        s.ad_manager.get_order(&hq).registry_epoch,
+        locked_epoch + 1,
+        "the new order locks under the new epoch"
     );
 }
 
@@ -4441,6 +4523,30 @@ fn test_422_real_registry_kill_before_the_challenge_deadline_fallback_waits_the_
         s.ad_manager.get_order_status(&order_hash),
         ad_manager_contract::Status::Resolved
     );
+}
+
+/// #465 (review 46-5): the dispute door runs the same rule: a verifier swapped off the order's
+/// registry mid-dispute is a split, and the fallback waits the grace.
+#[test]
+fn test_465_dispute_door_split_waits_the_grace() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let (client, account, _auth) = real_registry_signer(&s);
+    verifier_on(&s, &client.address);
+    let p = lock_signed_by(&s, &account);
+    let order_hash = s.ad_manager.hash_order(&p);
+    warp(&s, p.deadline - 3_600);
+    s.ad_manager
+        .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    let until = dm.effective_challenge_deadline(&order_hash);
+    verifier_on(&s, &s.key_registry);
+    warp(&s, until + 1);
+    assert_eq!(
+        s.ad_manager.try_finalize_dispute(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, until + SUITE_BUFFER);
+    s.ad_manager.finalize_dispute(&p);
 }
 
 #[test]

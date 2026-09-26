@@ -246,7 +246,7 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     ///      lock/create of the same hash reverts.
     function _openOrder(bytes32 orderHash) internal {
         if (_orders[orderHash].status != Status.None) revert Escrow__OrderExists(orderHash);
-        _orders[orderHash] = Order(Status.Open, pausedSeconds, uint64(block.timestamp));
+        _orders[orderHash] = Order(Status.Open, pausedSeconds, uint64(block.timestamp), 0);
     }
 
     /// @dev Append this leg's leaf to the chain's MMR under `domain` (a `LeafDomain` constant).

@@ -7,7 +7,7 @@ import {
 } from "@proofbridge/deployment-manifest";
 import { DEFAULT_STELLAR_CHAIN_ID } from "./common.js";
 import { Acting, getAddress, invokeContract, readView, type DescribedCall } from "./stellar-cli.js";
-import { assertOneRegistry } from "./one-registry.js";
+import { assertOneRegistry, checkPeers, verifierRegistry, type EscrowWiring } from "./one-registry.js";
 import { adminsOf, foreignAdmins } from "./handover.js";
 import { manifestPath, writeManifest } from "./manifest.js";
 
@@ -61,6 +61,7 @@ export async function link(
   );
 
   const peerChainId = peer.chain.chainId;
+  const registryOf = (v: string): string => readView(v, "registry") as string;
 
   // Who holds admin on the four contracts link configures, read before anything is sent; a call
   // to one handed over is described, not sent (#424). A section of the manifest is written only
@@ -121,10 +122,10 @@ export async function link(
         "link --enforce-bls: local manifest has no counterpartyVerifier - redeploy core first",
       );
     }
-    // #464: never wire a verifier that reads another registry than the AdManager's.
+    // #464/#465: never wire a verifier that does not answer registry() or reads another registry.
     assertOneRegistry(
       String(readView(local.contracts.adManager.address, "key_registry")),
-      String(readView(verifierEntry.address, "registry")),
+      verifierRegistry(registryOf, verifierEntry.address, "link"),
       "link",
     );
     for (const [name, escrow] of [
@@ -138,6 +139,28 @@ export async function link(
     console.log(
       "  [link] BLS gate not wired (transitional pre-auth); rerun with --enforce-bls to enable",
     );
+  }
+
+  // #465 (46-2): whatever was wired for this peer, with or without --enforce-bls, reads the
+  // AdManager's registry.
+  {
+    const escrows: EscrowWiring[] = (
+      [
+        ["AdManager", local.contracts.adManager.address],
+        ["OrderPortal", local.contracts.orderPortal.address],
+      ] as const
+    ).map(([name, id]) => ({
+      name,
+      rootVerifier: (peer: string) => (readView(id, "root_verifier", ["--chain_id", peer]) as string | null) ?? null,
+      setRootVerifier: () => false, // link wires above; here it only reads
+    }));
+    checkPeers({
+      escrows,
+      peers: [String(peerChainId)],
+      escrowRegistry: String(readView(local.contracts.adManager.address, "key_registry")),
+      registryOf,
+      where: "link",
+    });
   }
 
   // ── Anchor delay for the peer route (2.3f) ─────────────────────────

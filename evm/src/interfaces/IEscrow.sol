@@ -38,11 +38,14 @@ interface IEscrow {
 
     /// @notice The order's leg on this chain, one slot: its status, the escrow's paused-seconds
     ///         counter when the leg opened (a pause stops the window's clock, see `pausedSeconds`),
-    ///         and when it opened (#422: a registry kill since then is a denied payout).
+    ///         when it opened (#422: a registry kill since then is a denied payout), and on the ad
+    ///         chain the key-registry epoch it was locked under (#465: the denied rule reads that
+    ///         registry, so a later migration cannot erase a kill; 0 on the order portal).
     struct Order {
         Status status;
         uint64 pausedAtOpen;
         uint64 lockedAt;
+        uint32 registryEpoch;
     }
 
     /*//////////////////////////////////////////////////////////////

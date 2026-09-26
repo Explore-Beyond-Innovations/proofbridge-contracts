@@ -7,7 +7,7 @@ import {
 } from "@proofbridge/deployment-manifest";
 import { Acting, adminsOf, connect, foreignAdmins, requireEnv, type DescribedCall } from "./common.js";
 import { attachContract } from "./artifacts.js";
-import { assertOneRegistry } from "./one-registry.js";
+import { assertOneRegistry, checkPeers, verifierRegistry, type EscrowWiring } from "./one-registry.js";
 import { manifestPath, writeManifest } from "./manifest.js";
 
 export interface LinkOptions {
@@ -74,6 +74,8 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
   );
 
   const peerChainId = BigInt(peer.chain.chainId);
+  const registryOf = async (v: string): Promise<string> =>
+    String(await attachContract(v, "CounterpartyVerifier", "CounterpartyVerifier", signer).getFunction("registry")());
   const sameHex = (a: unknown, b: string) =>
     String(a).toLowerCase() === b.toLowerCase();
 
@@ -128,11 +130,10 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
         "link --enforce-bls: local manifest has no counterpartyVerifier - redeploy core first",
       );
     }
-    // #464: never wire a verifier that reads another registry than the AdManager's.
+    // #464/#465: never wire a verifier that does not answer registry() or reads another registry.
     assertOneRegistry(
-      await adManager.getFunction("keyRegistry")(),
-      await attachContract(verifierEntry.address, "CounterpartyVerifier", "CounterpartyVerifier", signer)
-        .getFunction("registry")(),
+      String(await adManager.getFunction("keyRegistry")()),
+      await verifierRegistry(registryOf, verifierEntry.address, "link"),
       "link",
     );
     for (const [name, escrow] of [
@@ -151,6 +152,25 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     console.log(
       "  [link] BLS gate not wired (transitional pre-auth); rerun with --enforce-bls to enable",
     );
+  }
+
+  // #465 (46-2): whatever was wired for this peer, with or without --enforce-bls, reads the
+  // AdManager's registry.
+  {
+    const escrows: EscrowWiring[] = ([["AdManager", adManager], ["OrderPortal", orderPortal]] as const).map(
+      ([name, c]) => ({
+        name,
+        rootVerifier: async (peer: string) => String(await c.getFunction("rootVerifier")(peer)),
+        setRootVerifier: async () => false, // link wires above; here it only reads
+      }),
+    );
+    await checkPeers({
+      escrows,
+      peers: [peerChainId.toString()],
+      escrowRegistry: String(await adManager.getFunction("keyRegistry")()),
+      registryOf,
+      where: "link",
+    });
   }
 
   // ── Anchor delay for the peer route (2.3f) ─────────────────────────

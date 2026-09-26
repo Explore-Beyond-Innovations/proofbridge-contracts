@@ -91,6 +91,7 @@ pub fn get_order(env: &Env, order_hash: &BytesN<32>) -> OrderRecord {
             status: Status::None,
             paused_at_open: 0,
             locked_at: 0,
+            registry_epoch: 0,
         })
 }
 
@@ -98,8 +99,9 @@ pub fn get_order_status(env: &Env, order_hash: &BytesN<32>) -> Status {
     get_order(env, order_hash).status
 }
 
-/// `None → Open`, stamping the pause counter the leg's window is measured from.
-pub fn open_order(env: &Env, order_hash: &BytesN<32>) {
+/// `None → Open`, stamping the pause counter the leg's window is measured from and, on the ad
+/// chain, the key-registry epoch it locks under (#465; the order portal passes 0).
+pub fn open_order(env: &Env, order_hash: &BytesN<32>, registry_epoch: u32) {
     set_order(
         env,
         order_hash,
@@ -107,6 +109,7 @@ pub fn open_order(env: &Env, order_hash: &BytesN<32>) {
             status: Status::Open,
             paused_at_open: get_paused_seconds(env),
             locked_at: env.ledger().timestamp(),
+            registry_epoch,
         },
     );
 }

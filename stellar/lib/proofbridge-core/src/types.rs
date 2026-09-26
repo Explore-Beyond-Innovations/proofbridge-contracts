@@ -126,6 +126,9 @@ pub struct OrderRecord {
     pub paused_at_open: u64,
     /// When the leg opened (#422): a registry kill of the signer since then is a denied payout.
     pub locked_at: u64,
+    /// On the ad chain, the key-registry epoch the order was locked under (#465): the denied rule
+    /// reads that registry, so a later migration cannot erase a kill. 0 on the order portal.
+    pub registry_epoch: u32,
 }
 
 /// The open presentation window on an order (`Claimed` ⇔ a record exists). `paused_at_open` is

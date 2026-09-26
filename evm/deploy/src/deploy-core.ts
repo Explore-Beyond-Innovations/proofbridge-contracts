@@ -1,5 +1,5 @@
 import * as fs from "fs";
-import { assertOneRegistry } from "./one-registry.js";
+import { assertOneRegistry, checkPeers, switchKeyRegistry, verifierRegistry, type EscrowWiring } from "./one-registry.js";
 import { ethers } from "ethers";
 import {
   ADMIN_BEARING,
@@ -420,13 +420,10 @@ async function deployCoreRun(
       return c as ethers.Contract;
     },
   );
-  // #464: a reused verifier must read the registry this deploy wires into the AdManager.
-  assertOneRegistry(
-    blsKeyRegistryAddr,
-    await attachContract(counterpartyVerifierAddr, "CounterpartyVerifier", "CounterpartyVerifier", signer)
-      .getFunction("registry")(),
-    "deploy",
-  );
+  // #464/#465: a reused verifier must answer registry() and read the registry this deploy wires in.
+  const registryOf = async (v: string): Promise<string> =>
+    String(await attachContract(v, "CounterpartyVerifier", "CounterpartyVerifier", signer).getFunction("registry")());
+  assertOneRegistry(blsKeyRegistryAddr, await verifierRegistry(registryOf, counterpartyVerifierAddr, "deploy"), "deploy");
 
   // ── RootAnchor (2.3f) + Registrar (2.1b) ───────────────────────────
   // T2 notary: the publisher key(s) in ANCHOR_PUBLISHER (comma-separated, default
@@ -562,10 +559,40 @@ async function deployCoreRun(
         `AdManager at ${adManagerAddr} has no keyRegistry() (pre-2.3c bytecode?); redeploy it instead of reusing: ${err}`,
       );
     }
+    // #465 (46-2): the peers this AdManager was linked to, as the manifest recorded them.
+    const peers = [
+      ...new Set([
+        ...Object.keys(existing?.routeTiming ?? {}),
+        ...Object.keys(existing?.disputeParams ?? {}),
+        ...Object.keys(existing?.rootAnchorConfig?.anchorDelays ?? {}),
+      ]),
+    ];
+    const escrows: EscrowWiring[] = [
+      ["AdManager", adManagerAddr],
+      ["OrderPortal", orderPortalAddr],
+    ].map(([name, addr]) => {
+      const c = attachContract(addr, name, name, signer);
+      return {
+        name,
+        rootVerifier: async (peer: string) => String(await c.getFunction("rootVerifier")(peer)),
+        setRootVerifier: (peer: string, v: string) =>
+          acting.call(c, name, "setRootVerifier", [peer, v], `${name}.setRootVerifier(${peer}, ${v})`),
+      };
+    });
     if (cur.toLowerCase() === blsKeyRegistryAddr.toLowerCase()) {
       console.log(`  [skip] AdManager.setKeyRegistry already set`);
+      await checkPeers({ escrows, peers, escrowRegistry: blsKeyRegistryAddr, registryOf, where: "deploy" });
     } else {
-      await acting.call(adManager, "AdManager", "setKeyRegistry", [blsKeyRegistryAddr], `AdManager.setKeyRegistry(${blsKeyRegistryAddr})`);
+      // #465: the peers move to the verifier on the new registry first, then the registry; never a split.
+      await switchKeyRegistry({
+        escrows,
+        peers,
+        newRegistry: blsKeyRegistryAddr,
+        newVerifier: counterpartyVerifierAddr,
+        registryOf,
+        setKeyRegistry: () =>
+          acting.call(adManager, "AdManager", "setKeyRegistry", [blsKeyRegistryAddr], `AdManager.setKeyRegistry(${blsKeyRegistryAddr})`),
+      });
     }
   }
 

@@ -50,6 +50,12 @@ contract AdManager is EscrowBase, IAdManager {
     ///         lock (2.3c D2). Admin-set; unset means those paths fail closed.
     IKeyRegistry public keyRegistry;
 
+    /// @notice #465: the key-registry history. `setKeyRegistry` opens epoch `registryEpoch` with the
+    ///         new registry; a lock stamps the current epoch on the order, and its denied rule reads
+    ///         `registryAt[that epoch]`, so a registry migration mid-order cannot erase a kill.
+    uint32 public registryEpoch;
+    mapping(uint32 epoch => IKeyRegistry) public registryAt;
+
     /// @notice Ads by id. `maker == address(0)` means the id is free.
     mapping(string adId => Ad) public ads;
 
@@ -82,7 +88,11 @@ contract AdManager is EscrowBase, IAdManager {
     function setKeyRegistry(IKeyRegistry registry) external onlyAdmin {
         if (address(registry) == address(0)) revert Escrow__ZeroAddress();
         keyRegistry = registry;
+        uint32 epoch = registryEpoch + 1;
+        registryEpoch = epoch;
+        registryAt[epoch] = registry;
         emit KeyRegistrySet(address(registry));
+        emit KeyRegistryEpoch(epoch, address(registry));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -200,7 +210,7 @@ contract AdManager is EscrowBase, IAdManager {
         orderHash = _validateOrder(ad, params);
         _requireMinWindow(params.orderChainId, params.deadline);
         // #464: no new order while the order chain's verifier reads another key registry.
-        (bool split, address verifierRegistry) = _registrySplit(params.orderChainId);
+        (bool split, address verifierRegistry) = _registrySplit(params.orderChainId, address(keyRegistry));
         if (split) revert AdManager__RegistrySplit(params.orderChainId, address(keyRegistry), verifierRegistry);
 
         // The signed amount is in order-chain units; the pool accounts in ad-chain units.
@@ -208,6 +218,8 @@ contract AdManager is EscrowBase, IAdManager {
         if (adAmount > ad.balance - ad.locked) revert Escrow__InsufficientLiquidity();
 
         _openOrder(orderHash);
+        // #465: the registry this order is judged against, whatever is wired later.
+        _orders[orderHash].registryEpoch = registryEpoch;
         ad.locked += adAmount;
         // 2.3c D1: count the settlement identity this escrow's unlock will verify — the ad's signer,
         // asserted equal to `params.adSettlementSigner` in `_validateOrder` (and owned by the maker
@@ -612,10 +624,12 @@ contract AdManager is EscrowBase, IAdManager {
     function _coSignDenied(OrderParams calldata p, bytes32 orderHash, uint256 until) private view returns (bool) {
         address maker = ads[p.adId].maker;
         if (halted[maker] || lastResumedAt[maker] >= p.deadline) return true;
-        IKeyRegistry registry = keyRegistry;
+        // #465: the registry the order was locked under, not the live one: a migration mid-order
+        // would otherwise read a registry that never saw the kill.
+        IKeyRegistry registry = registryAt[_orders[orderHash].registryEpoch];
         if (address(registry) == address(0)) return false;
-        // #464: a kill in the verifier's registry never reaches this one; a split always denies.
-        (bool split,) = _registrySplit(p.orderChainId);
+        // #464: a verifier on another registry co-signs against keys this one never sees: deny.
+        (bool split,) = _registrySplit(p.orderChainId, address(registry));
         if (split) return true;
         // D16: the order's life as a payout ends at the payout's own cutoff — the presentation cutoff
         // for a cancel, the challenge deadline for a dispute — which the caller passes in. An expiry
@@ -623,15 +637,19 @@ contract AdManager is EscrowBase, IAdManager {
         return registry.anySlotExpiredWithin(p.adSettlementSigner, _lockedAt(orderHash), uint64(until));
     }
 
-    /// @dev #464: does `rootVerifier[chainId]` verify against a registry other than `keyRegistry`?
+    /// @dev #464: does `rootVerifier[chainId]` verify against a registry other than `expected`?
     ///      A verifier that does not answer `registry()` is not a BLS co-signature verifier: no split.
-    function _registrySplit(uint256 chainId) private view returns (bool split, address verifierRegistry) {
+    function _registrySplit(uint256 chainId, address expected)
+        private
+        view
+        returns (bool split, address verifierRegistry)
+    {
         address verifier = address(rootVerifier[chainId]);
         if (verifier == address(0)) return (false, address(0));
         (bool ok, bytes memory ret) = verifier.staticcall(abi.encodeWithSignature("registry()"));
         if (!ok || ret.length != 32) return (false, address(0));
         verifierRegistry = abi.decode(ret, (address));
-        split = verifierRegistry != address(keyRegistry);
+        split = verifierRegistry != expected;
     }
 
     /// @inheritdoc IAdManager
