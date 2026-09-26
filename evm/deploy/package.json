@@ -19,7 +19,8 @@
     "cli": "tsx bin/cli.ts",
     "deploy": "tsx bin/cli.ts deploy",
     "link": "tsx bin/cli.ts link",
-    "deploy-test-tokens": "tsx bin/cli.ts deploy-test-tokens"
+    "deploy-test-tokens": "tsx bin/cli.ts deploy-test-tokens",
+    "test": "tsx --test test/*.spec.ts"
   },
   "dependencies": {
     "@proofbridge/deployment-manifest": "workspace:*",

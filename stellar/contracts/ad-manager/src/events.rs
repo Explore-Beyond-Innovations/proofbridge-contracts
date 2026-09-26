@@ -71,6 +71,13 @@ pub struct KeyRegistrySet {
     pub registry: Address,
 }
 
+/// #465: each `set_key_registry` opens a new epoch; an order records the one it locked under.
+#[contractevent(topics = ["keyreg_epoch"], data_format = "vec")]
+pub struct KeyRegistryEpoch {
+    pub epoch: u32,
+    pub registry: Address,
+}
+
 /// A maker re-pointed an ad's settlement signer — the third kill lever (2.3c D3).
 #[contractevent(topics = ["signer_set"], data_format = "vec")]
 pub struct SettlementSignerSet {

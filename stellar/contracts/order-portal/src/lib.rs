@@ -180,6 +180,12 @@ impl OrderPortalContract {
         Ok(())
     }
 
+    /// The root verifier wired for `chain_id`, if any (#465: the deploy CLIs read it to refuse a
+    /// registry split).
+    pub fn root_verifier(env: Env, chain_id: u128) -> Option<Address> {
+        storage::get_root_verifier(&env, chain_id)
+    }
+
     /// Set the termination clocks for a peer chain (2.3e D6). Validated; unset fails closed.
     pub fn set_route_timing(
         env: Env,
@@ -332,7 +338,7 @@ impl OrderPortalContract {
             LEAF_DOMAIN_AD,
         )?;
 
-        storage::open_order(&env, &order_hash);
+        storage::open_order(&env, &order_hash, 0);
         // 2.3c D1: count only the party this escrow authenticated (the bridger). The maker is
         // counted by the ad-manager that authenticated them.
         storage::set_in_flight(

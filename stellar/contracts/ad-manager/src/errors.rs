@@ -148,6 +148,8 @@ pub enum AdManagerError {
     AnchorDelayUnreadable = 68,
     /// #453: the deadline is past `now + MAX_ORDER_WINDOW`.
     DeadlineTooFar = 69,
+    /// #464: the order chain's verifier checks co-signatures against a different key registry.
+    RegistrySplit = 70,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for AdManagerError {

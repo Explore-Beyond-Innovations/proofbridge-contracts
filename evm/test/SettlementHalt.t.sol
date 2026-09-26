@@ -14,6 +14,7 @@ import {stdJson} from "forge-std/StdJson.sol";
 import {IKeyRegistry} from "src/interfaces/IKeyRegistry.sol";
 import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
 import {BLSKeyRegistry} from "src/BLSKeyRegistry.sol";
+import {CounterpartyVerifier} from "src/CounterpartyVerifier.sol";
 import {RouteTiming} from "src/libraries/RouteTiming.sol";
 import {AdManagerTest} from "./Admanager.t.sol";
 
@@ -471,6 +472,13 @@ abstract contract RealRegistryFixture is AdManagerTest {
 
     /// `_lockAs` with a chosen deadline (`0` keeps the default).
     function _lockAsUntil(uint256 salt, uint256 deadline) internal returns (IAdManager.OrderParams memory p) {
+        p = _orderAs(salt, deadline);
+        vm.prank(maker);
+        adManager.lockForOrder(p);
+    }
+
+    /// The ad and the order params of `_lockAsUntil`, without the lock.
+    function _orderAs(uint256 salt, uint256 deadline) internal returns (IAdManager.OrderParams memory p) {
         string memory adId = string.concat("422-real-", vm.toString(salt));
         vm.startPrank(admin);
         adManager.setPeerEscrow(orderChainId, _b32(orderPortal));
@@ -487,8 +495,6 @@ abstract contract RealRegistryFixture is AdManagerTest {
         p.salt = salt;
         p.adSettlementSigner = account;
         if (deadline != 0) p.deadline = deadline;
-        vm.prank(maker);
-        adManager.lockForOrder(p);
     }
 }
 
@@ -733,6 +739,117 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         vm.warp(p.deadline + 30 minutes);
         adManager.finalizeCancel(p);
     }
+
+    /*//////////////////////// #464: one key registry ////////////////////////*/
+
+    /// The order chain's verifier checks co-signatures against `on`.
+    function _verifierOn(address on) internal {
+        address v = address(new CounterpartyVerifier(on));
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, v);
+    }
+
+    /// #464: no new order while the escrow and the order chain's verifier read different registries.
+    function test_464_splitRefusesTheLock() public {
+        _realRegistry();
+        _verifierOn(address(keyRegistry)); // the verifier reads the mock; the escrow reads REGISTRY
+        IAdManager.OrderParams memory p = _orderAs(20, 0);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAdManager.AdManager__RegistrySplit.selector, orderChainId, REGISTRY, address(keyRegistry)
+            )
+        );
+        vm.prank(maker);
+        adManager.lockForOrder(p);
+    }
+
+    /// #465: an escrow-only swap after the lock leaves the order on the registry it locked under,
+    /// which is still the verifier's; a kill there is read and waits the grace.
+    function test_465_escrowOnlySwap_theOrderKeepsItsRegistry_aKillWaitsTheGrace() public {
+        _realRegistry();
+        _verifierOn(REGISTRY);
+        IAdManager.OrderParams memory p = _lockAs(21);
+        vm.prank(admin);
+        adManager.setKeyRegistry(IKeyRegistry(address(keyRegistry))); // live: the mock, no kill on record
+        vm.warp(block.timestamp + 10);
+        _setValidUntil(0, true); // killed in the order's own registry
+        _claim(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "the view waits the grace");
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        vm.warp(p.deadline + 60 minutes);
+        adManager.finalizeCancel(p);
+    }
+
+    /// #465: an escrow-only swap and no kill: the order's registry is still the verifier's, so no
+    /// split and ordinary timing (under #464 alone this was a forced grace).
+    function test_465_escrowOnlySwap_noKill_ordinaryTiming() public {
+        _realRegistry();
+        _verifierOn(REGISTRY);
+        IAdManager.OrderParams memory p = _lockAs(24);
+        vm.prank(admin);
+        adManager.setKeyRegistry(IKeyRegistry(address(keyRegistry)));
+        _claim(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 30 minutes, "the order's registry still matches");
+        vm.warp(p.deadline + 30 minutes);
+        adManager.finalizeCancel(p);
+    }
+
+    /// #465 (review 46-1, the PoC): a full migration mid-order — the escrow AND the verifier moved to
+    /// another registry — cannot erase a kill in the registry the order locked under.
+    function test_465_fullMigration_cannotEraseTheKill() public {
+        _realRegistry();
+        _verifierOn(REGISTRY);
+        IAdManager.OrderParams memory p = _lockAs(25);
+        vm.warp(block.timestamp + 10);
+        _setValidUntil(0, true); // the kill, in the order's registry
+        vm.startPrank(admin);
+        adManager.setKeyRegistry(IKeyRegistry(address(keyRegistry)));
+        vm.stopPrank();
+        _verifierOn(address(keyRegistry)); // both now agree on the mock, which never saw the kill
+        _claim(p);
+        vm.warp(p.deadline + 31 minutes); // past the window: the reviewer's PoC read +30 here
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "the kill is not erased");
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        vm.warp(p.deadline + 60 minutes);
+        adManager.finalizeCancel(p);
+    }
+
+    /// #464/#465: a verifier-only swap after the lock co-signs against keys the order's registry never
+    /// sees: a split against the order's snapshot, so the cancel waits the grace.
+    function test_465_verifierOnlySwap_waitsTheGrace() public {
+        _realRegistry();
+        _verifierOn(REGISTRY);
+        IAdManager.OrderParams memory p = _lockAs(26);
+        _verifierOn(address(keyRegistry));
+        _claim(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "a split denies");
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+    }
+
+    /// #464: after a full migration, a new order locks on the new pair and is judged against it; the
+    /// order locked before it keeps its snapshot and waits the grace (the verifier left its registry).
+    function test_464_fullMigration_newOrdersLock_oldOrderWaits() public {
+        _realRegistry();
+        _verifierOn(REGISTRY);
+        IAdManager.OrderParams memory p = _lockAs(22);
+        uint32 before = adManager.registryEpoch();
+        vm.prank(admin);
+        adManager.setKeyRegistry(IKeyRegistry(address(keyRegistry)));
+        _verifierOn(address(keyRegistry));
+        assertEq(adManager.registryEpoch(), before + 1, "the swap opened one epoch");
+        assertEq(address(adManager.registryAt(before + 1)), address(keyRegistry), "holding the new registry");
+        _claim(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "the old order waits");
+        keyRegistry.set(account, true);
+        IAdManager.OrderParams memory q = _orderAs(23, 0);
+        vm.prank(maker);
+        adManager.lockForOrder(q); // the new order locks on the new pair
+    }
 }
 
 /// Pass 5 (PoC g): the dispute door runs to the effective challenge deadline, past the cancel's
@@ -759,6 +876,28 @@ contract SettlementHaltDisputeRealRegistryTest is RealRegistryFixture, DisputeTe
         vm.warp(until_ + 30 minutes);
         adManager.finalizeDispute(p);
         assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
+    }
+
+    /// #465 (review 46-5): the dispute door runs the same rule: a verifier swapped off the order's
+    /// registry mid-dispute is a split, and the fallback waits the grace.
+    function test_465_disputeDoor_splitWaitsTheGrace() public {
+        _realRegistry();
+        address v = address(new CounterpartyVerifier(REGISTRY));
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, v);
+        IAdManager.OrderParams memory p = _lockAs(13);
+        bytes32 h = adManager.hashOrderPublic(p);
+        vm.warp(p.deadline - 1 hours);
+        _file(p, maker);
+        uint256 until_ = dm.effectiveChallengeDeadline(h);
+        address w = address(new CounterpartyVerifier(address(keyRegistry)));
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, w);
+        vm.warp(until_ + 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, until_ + 30 minutes));
+        adManager.finalizeDispute(p);
+        vm.warp(until_ + 30 minutes);
+        adManager.finalizeDispute(p);
     }
 
     function test_realRegistry_killAfterTheChallengeDeadline_fallbackOrdinaryTiming() public {

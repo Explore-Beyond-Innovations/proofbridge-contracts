@@ -20,6 +20,9 @@ const KEY_ADS: Symbol = symbol_short!("ads");
 const KEY_AD_IDS: Symbol = symbol_short!("adids");
 /// The key registry consulted when an ad's settlement signer is set (2.3c D2).
 const KEY_KEYREG: Symbol = symbol_short!("keyreg");
+/// #465: the current key-registry epoch, and the registry each epoch opened with.
+const KEY_REGEPOCH: Symbol = symbol_short!("regepoch");
+const KEY_REGAT: Symbol = symbol_short!("regat");
 /// Prefix for a maker's settlement halt (#422).
 const KEY_HALT: Symbol = symbol_short!("halt");
 
@@ -92,8 +95,23 @@ pub fn set_ad_id_used(env: &Env, ad_id: &String) {
 
 // ── the key registry (2.3c) ──────────────────────────────────────────────
 
-pub fn set_key_registry(env: &Env, registry: &Address) {
+/// Sets the live registry and opens a new epoch with it (#465); returns the epoch.
+pub fn set_key_registry(env: &Env, registry: &Address) -> u32 {
     env.storage().instance().set(&KEY_KEYREG, registry);
+    let epoch = get_registry_epoch(env) + 1;
+    env.storage().instance().set(&KEY_REGEPOCH, &epoch);
+    env.storage().instance().set(&(KEY_REGAT, epoch), registry);
+    epoch
+}
+
+/// The current key-registry epoch; 0 before any registry was set.
+pub fn get_registry_epoch(env: &Env) -> u32 {
+    env.storage().instance().get(&KEY_REGEPOCH).unwrap_or(0)
+}
+
+/// The registry epoch `epoch` opened with, if any.
+pub fn get_registry_at(env: &Env, epoch: u32) -> Option<Address> {
+    env.storage().instance().get(&(KEY_REGAT, epoch))
 }
 
 pub fn get_key_registry(env: &Env) -> Option<Address> {
