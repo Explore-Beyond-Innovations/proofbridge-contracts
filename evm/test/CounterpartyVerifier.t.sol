@@ -100,10 +100,11 @@ contract CounterpartyVerifierTest is Test {
             adChainId: adChainId,
             orderHash: v.readBytes32(".settlement.auth.orderHash"),
             orderChainRoot: orderChainRoot,
-            adChainRoot: adChainRoot
+            adChainRoot: adChainRoot,
+            makerKeyCommitment: v.readBytes32(".settlement.auth.makerKeyCommitment")
         });
         bytes memory moduleData = abi.encode(
-            uint8(2), auth, makerSlot, bridgerSlot, pkMaker, v.readBytes(".keys.bridgerBls.pk.eip2537"), aggSig
+            uint8(3), auth, makerSlot, bridgerSlot, pkMaker, v.readBytes(".keys.bridgerBls.pk.eip2537"), aggSig
         );
         return abi.encode(maker, bridger, signedOrderHash(), moduleData);
     }
@@ -172,7 +173,8 @@ contract CounterpartyVerifierTest is Test {
             adChainId: adChainId,
             orderHash: v.readBytes32(".settlement.auth.orderHash"),
             orderChainRoot: orderChainRoot,
-            adChainRoot: adChainRoot
+            adChainRoot: adChainRoot,
+            makerKeyCommitment: v.readBytes32(".settlement.auth.makerKeyCommitment")
         });
         bytes memory moduleData = abi.encode(
             uint8(1),
@@ -197,7 +199,8 @@ contract CounterpartyVerifierTest is Test {
             adChainId: adChainId,
             orderHash: v.readBytes32(".settlement.auth.orderHash"),
             orderChainRoot: orderChainRoot,
-            adChainRoot: adChainRoot
+            adChainRoot: adChainRoot,
+            makerKeyCommitment: v.readBytes32(".settlement.auth.makerKeyCommitment")
         });
         bytes memory v1 = abi.encode(
             uint8(1),
@@ -301,10 +304,11 @@ contract CounterpartyVerifierTest is Test {
             adChainId: adChainId,
             orderHash: v.readBytes32(".settlement.auth.orderHash"),
             orderChainRoot: bytes32(uint256(orderChainRoot) ^ 1),
-            adChainRoot: adChainRoot
+            adChainRoot: adChainRoot,
+            makerKeyCommitment: v.readBytes32(".settlement.auth.makerKeyCommitment")
         });
         bytes memory moduleData = abi.encode(
-            uint8(2),
+            uint8(3),
             auth,
             uint32(0),
             uint32(0),
@@ -321,6 +325,45 @@ contract CounterpartyVerifierTest is Test {
         );
     }
 
+    // ---- #469: the co-signed message names the maker's key ----
+
+    /// A v2-layout blob (no makerKeyCommitment in the auth) must return false by its version.
+    function test_v2LayoutBlobFails() public view {
+        // The five-word auth of v2 abi-encodes as five inline words; version 2 in front.
+        bytes memory v2 = abi.encode(
+            uint8(2),
+            orderChainId,
+            adChainId,
+            signedOrderHash(),
+            orderChainRoot,
+            adChainRoot,
+            uint32(0),
+            uint32(0),
+            v.readBytes(".keys.makerBls.pk.eip2537"),
+            v.readBytes(".keys.bridgerBls.pk.eip2537"),
+            v.readBytes(".settlement.aggSig.eip2537")
+        );
+        assertFalse(
+            verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, signedOrderHash(), v2))
+        );
+    }
+
+    /// The bridger's half aggregated with another live maker key: the pairing holds, the slot is
+    /// live and its commitment matches the key used, the roots and order are right — and it must
+    /// still fail, because the signed auth names a different maker key. The control shows the
+    /// golden pair keeps verifying in the same registry state.
+    function test_rePairedUnderAnotherMakerKeyFails() public {
+        uint32 altSlot = registerMakerSlot(1);
+        bytes memory rePaired = metadataSlots(
+            altSlot,
+            0,
+            v.readBytes(".settlement.rePaired.pkAlt.eip2537"),
+            v.readBytes(".settlement.rePaired.aggSig.eip2537")
+        );
+        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, rePaired));
+        assertTrue(verifier.isRootValid(orderChainId, orderChainRoot, metadata()));
+    }
+
     // ---- #433: the co-signature binds the order ----
 
     /// The helper the unlock fixtures use must be the real signing, not a lookalike: signed over the
@@ -334,7 +377,7 @@ contract CounterpartyVerifierTest is Test {
     /// the escrow is unlocking, and the auth must name the same one.
     function test_envelopeOrderHashDiffersFromTheAuth_fails() public view {
         bytes memory moduleData = abi.encode(
-            uint8(2),
+            uint8(3),
             CoSign.authFor(v, signedOrderHash()),
             uint32(0),
             uint32(0),

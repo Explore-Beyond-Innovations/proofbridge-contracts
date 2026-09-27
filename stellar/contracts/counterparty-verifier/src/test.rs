@@ -16,9 +16,9 @@ const VECTORS: &str = include_str!("../../../../test-vectors/bls-encodings.json"
 const REGISTRY_ID: [u8; 32] = [0x22; 32];
 const CHAIN_ID: u128 = 1_000_002;
 const T0: u64 = 1_700_000_000;
-const METADATA_LEN: usize = 617;
-/// The layout before #433: no envelope order hash.
-const OLD_METADATA_LEN: usize = 585;
+const METADATA_LEN: usize = 649;
+/// The layout before #469: no maker key commitment in the auth.
+const V2_METADATA_LEN: usize = 617;
 
 fn vectors() -> serde_json::Value {
     serde_json::from_str(VECTORS).unwrap()
@@ -148,12 +148,13 @@ impl Setup {
         if let Some(h) = envelope_order_hash {
             out.extend_from_slice(h);
         }
-        out.push(2u8);
+        out.push(3u8);
         out.extend_from_slice(&self.order_chain_id.to_be_bytes());
         out.extend_from_slice(&self.ad_chain_id.to_be_bytes());
         out.extend_from_slice(&hexval(&auth["orderHash"]));
         out.extend_from_slice(&hexval(&auth["orderChainRoot"]));
         out.extend_from_slice(&hexval(&auth["adChainRoot"]));
+        out.extend_from_slice(&hexval(&auth["makerKeyCommitment"]));
         out.extend_from_slice(&maker_slot.to_be_bytes());
         out.extend_from_slice(&bridger_slot.to_be_bytes());
         out.extend_from_slice(pk_maker);
@@ -272,6 +273,11 @@ fn wrong_version_fails() {
     assert!(!s
         .verifier
         .is_root_valid(&s.order_chain_id, &s.order_chain_root, &m2));
+    raw[96] = 2; // v2: an auth that does not name the maker key (#469)
+    let m3 = Bytes::from_slice(&s.env, &raw);
+    assert!(!s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &m3));
 }
 
 /// #433: the co-signature names one order. An escrow unlocking any other order puts that order's
@@ -304,11 +310,56 @@ fn old_layout_without_the_order_hash_fails() {
         &hexval(&s.v["settlement"]["aggSig"]["uncompressed"]),
         None,
     );
-    assert_eq!(raw.len(), OLD_METADATA_LEN);
+    assert_eq!(raw.len(), METADATA_LEN - 32);
     let m = Bytes::from_slice(&s.env, &raw);
     assert!(!s
         .verifier
         .is_root_valid(&s.order_chain_id, &s.order_chain_root, &m));
+}
+
+/// #469: the v2 layout (envelope, but no maker key commitment in the auth) is refused by length,
+/// never misread as v3 with shifted fields. Built from the v3 blob: drop the 32-byte field at
+/// offset 225 and stamp the v2 version byte.
+#[test]
+fn v2_layout_without_the_maker_key_fails() {
+    let s = setup();
+    let mut raw = s.raw_metadata(
+        0,
+        0,
+        &hexval(&s.v["keys"]["makerBls"]["pk"]["uncompressed"]),
+        &hexval(&s.v["settlement"]["aggSig"]["uncompressed"]),
+        Some(&hexval(&s.v["settlement"]["auth"]["orderHash"])),
+    );
+    assert_eq!(raw.len(), METADATA_LEN);
+    raw.drain(225..257);
+    raw[96] -= 1;
+    assert_eq!(raw.len(), V2_METADATA_LEN);
+    let m = Bytes::from_slice(&s.env, &raw);
+    assert!(!s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &m));
+}
+
+/// #469: the bridger's half aggregated with another live maker key. The pairing holds, the slot is
+/// live and its commitment matches the key used, the roots and order are right — and it must still
+/// fail, because the signed auth names a different maker key. The control keeps the golden pair
+/// verifying in the same registry state.
+#[test]
+fn re_paired_under_another_maker_key_fails() {
+    let s = setup();
+    let alt = s.register_maker_slot(1);
+    let re_paired = s.metadata_slots(
+        alt,
+        0,
+        &hexval(&s.v["settlement"]["rePaired"]["pkAlt"]["uncompressed"]),
+        &hexval(&s.v["settlement"]["rePaired"]["aggSig"]["uncompressed"]),
+    );
+    assert!(!s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &re_paired));
+    assert!(s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &s.metadata()));
 }
 
 #[test]

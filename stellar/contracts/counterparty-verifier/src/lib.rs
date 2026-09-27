@@ -34,10 +34,11 @@ const SETTLE_TAG: [u8; 32] = [
     0x90, 0x91, 0x51, 0x65, 0xc3, 0x07, 0x5b, 0x0d, 0x77, 0x65, 0xff, 0x24, 0x7a, 0x04, 0x6d, 0xf5,
 ];
 
-const METADATA_VERSION: u8 = 2;
+const METADATA_VERSION: u8 = 3;
 /// settlement_signer(32) || bridger(32) || order_hash(32) (#433) || moduleData: version(1) ||
-/// chainIds(2*16) || orderHash/roots(3*32) || slotIds(2*4) || pks(2*96) || aggSig(192) = 617
-const METADATA_LEN: u32 = 617;
+/// chainIds(2*16) || orderHash/roots(3*32) || makerKeyCommitment(32) (#469) || slotIds(2*4) ||
+/// pks(2*96) || aggSig(192) = 649
+const METADATA_LEN: u32 = 649;
 
 const KEY_INIT: Symbol = symbol_short!("init");
 const KEY_REGISTRY: Symbol = symbol_short!("registry");
@@ -101,6 +102,11 @@ impl CounterpartyVerifier {
         {
             return false;
         }
+        // #469: the bridger signed for one maker key. The bridger's half aggregated with any other
+        // live key of the maker's is a valid pairing but not consent; only the named key settles.
+        if m.maker_key_commitment != settlement_key_commitment(&env, &m.pk_signer) {
+            return false;
+        }
 
         verify_aggregate(&env, &m)
     }
@@ -112,6 +118,7 @@ struct Metadata {
     order_hash: BytesN<32>,
     order_chain_root: BytesN<32>,
     ad_chain_root: BytesN<32>,
+    maker_key_commitment: BytesN<32>,
     settlement_signer: BytesN<32>,
     bridger: BytesN<32>,
     envelope_order_hash: BytesN<32>,
@@ -125,8 +132,8 @@ struct Metadata {
 impl Metadata {
     /// Envelope: settlement_signer(0) || bridger(32) || order_hash(64) (#433), then the module data:
     /// version(96) || orderChainId(97) || adChainId(113) || orderHash(129) || orderChainRoot(161) ||
-    /// adChainRoot(193) || signerSlotId(225) || bridgerSlotId(229) || pkSigner(233) ||
-    /// pkBridger(329) || aggSig(425)
+    /// adChainRoot(193) || makerKeyCommitment(225) (#469) || signerSlotId(257) || bridgerSlotId(261) ||
+    /// pkSigner(265) || pkBridger(361) || aggSig(457)
     fn decode(env: &Env, b: &Bytes) -> Metadata {
         Metadata {
             settlement_signer: BytesN::from_array(env, &arr::<32>(b, 0)),
@@ -137,11 +144,12 @@ impl Metadata {
             order_hash: BytesN::from_array(env, &arr::<32>(b, 129)),
             order_chain_root: BytesN::from_array(env, &arr::<32>(b, 161)),
             ad_chain_root: BytesN::from_array(env, &arr::<32>(b, 193)),
-            signer_slot_id: u32::from_be_bytes(arr::<4>(b, 225)),
-            bridger_slot_id: u32::from_be_bytes(arr::<4>(b, 229)),
-            pk_signer: BytesN::from_array(env, &arr::<96>(b, 233)),
-            pk_bridger: BytesN::from_array(env, &arr::<96>(b, 329)),
-            agg_sig: BytesN::from_array(env, &arr::<192>(b, 425)),
+            maker_key_commitment: BytesN::from_array(env, &arr::<32>(b, 225)),
+            signer_slot_id: u32::from_be_bytes(arr::<4>(b, 257)),
+            bridger_slot_id: u32::from_be_bytes(arr::<4>(b, 261)),
+            pk_signer: BytesN::from_array(env, &arr::<96>(b, 265)),
+            pk_bridger: BytesN::from_array(env, &arr::<96>(b, 361)),
+            agg_sig: BytesN::from_array(env, &arr::<192>(b, 457)),
         }
     }
 }
@@ -173,6 +181,19 @@ fn commitment_matches(
     }
 }
 
+/// #469: the maker key named inside the signed message — keccak256 of the key's EIP-2537
+/// encoding (16 zero bytes ‖ x ‖ 16 zero bytes ‖ y), so the value is the same on every chain.
+/// The registry's own commitment here is over the 96-byte form and is not this value.
+fn settlement_key_commitment(env: &Env, pk: &BytesN<96>) -> BytesN<32> {
+    let raw = pk.to_array();
+    let mut enc = [0u8; 128];
+    enc[16..64].copy_from_slice(&raw[0..48]);
+    enc[80..128].copy_from_slice(&raw[48..96]);
+    env.crypto()
+        .keccak256(&Bytes::from_slice(env, &enc))
+        .to_bytes()
+}
+
 /// e(pkM + pkB, H(preimage)) == e(G1, aggSig)
 fn verify_aggregate(env: &Env, m: &Metadata) -> bool {
     let bls = env.crypto().bls12_381();
@@ -188,13 +209,14 @@ fn verify_aggregate(env: &Env, m: &Metadata) -> bool {
     );
     let agg_sig = G2Affine::from_bytes(m.agg_sig.clone());
 
-    // SETTLE_TAG || orderChainId(32) || adChainId(32) || orderHash || roots — 192 B
+    // SETTLE_TAG || orderChainId(32) || adChainId(32) || orderHash || roots || makerKeyCommitment — 224 B
     let mut preimage = Bytes::from_slice(env, &SETTLE_TAG);
     preimage.extend_from_slice(&pad32_u128(m.order_chain_id));
     preimage.extend_from_slice(&pad32_u128(m.ad_chain_id));
     preimage.extend_from_slice(&m.order_hash.to_array());
     preimage.extend_from_slice(&m.order_chain_root.to_array());
     preimage.extend_from_slice(&m.ad_chain_root.to_array());
+    preimage.extend_from_slice(&m.maker_key_commitment.to_array());
 
     let dst = Bytes::from_slice(env, DST_SIG.as_bytes());
     let msg_g2 = bls.hash_to_g2(&preimage, &dst);

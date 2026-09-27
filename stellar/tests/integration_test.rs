@@ -1003,7 +1003,7 @@ fn test_gate2_real_module_rejects_root_outside_signed_auth() {
     let hexv =
         |v: &serde_json::Value| hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap();
     let auth = &vectors["settlement"]["auth"];
-    let mut cosig = std::vec![2u8]; // metadata v2
+    let mut cosig = std::vec![3u8]; // metadata v3 (#469)
     let ocid: u128 = auth["orderChainId"].as_str().unwrap().parse().unwrap();
     let acid: u128 = auth["adChainId"].as_str().unwrap().parse().unwrap();
     cosig.extend_from_slice(&ocid.to_be_bytes());
@@ -1011,6 +1011,7 @@ fn test_gate2_real_module_rejects_root_outside_signed_auth() {
     cosig.extend_from_slice(&hexv(&auth["orderHash"]));
     cosig.extend_from_slice(&hexv(&auth["orderChainRoot"]));
     cosig.extend_from_slice(&hexv(&auth["adChainRoot"]));
+    cosig.extend_from_slice(&hexv(&auth["makerKeyCommitment"]));
     cosig.extend_from_slice(&0u32.to_be_bytes()); // maker slot id
     cosig.extend_from_slice(&0u32.to_be_bytes()); // bridger slot id
     cosig.extend_from_slice(&hexv(&vectors["keys"]["makerBls"]["pk"]["uncompressed"]));
@@ -6921,7 +6922,17 @@ fn pad32(x: u128) -> [u8; 32] {
     out
 }
 
-/// SETTLE_TAG ‖ pad32(orderChainId) ‖ pad32(adChainId) ‖ orderHash ‖ orderChainRoot ‖ adChainRoot.
+/// #469: every integration co-sign pairs with the vector maker key (`keys.makerBls`); the named
+/// key is keccak256 of its EIP-2537 form, taken from the vector.
+fn maker_key_commitment() -> [u8; 32] {
+    let v = vector_json();
+    vhex(&v["settlement"]["auth"]["makerKeyCommitment"])
+        .try_into()
+        .unwrap()
+}
+
+/// SETTLE_TAG ‖ pad32(orderChainId) ‖ pad32(adChainId) ‖ orderHash ‖ orderChainRoot ‖ adChainRoot ‖
+/// makerKeyCommitment (#469).
 fn settlement_preimage(env: &Env, a: &CoSignAuth) -> Bytes {
     let tag = env
         .crypto()
@@ -6933,6 +6944,7 @@ fn settlement_preimage(env: &Env, a: &CoSignAuth) -> Bytes {
     p.extend_from_slice(&a.order_hash);
     p.extend_from_slice(&a.order_chain_root);
     p.extend_from_slice(&a.ad_chain_root);
+    p.extend_from_slice(&maker_key_commitment());
     p
 }
 
@@ -6954,21 +6966,22 @@ fn cosign_aggregate(env: &Env, a: &CoSignAuth) -> [u8; 192] {
     bls.g2_add(&sig_m, &sig_b).to_bytes().to_array()
 }
 
-/// The module data (521 bytes) the relayer would hand an escrow for `a`.
+/// The module data (553 bytes, v3) the relayer would hand an escrow for `a`.
 fn cosign(env: &Env, a: &CoSignAuth) -> Bytes {
     let v = vector_json();
-    let mut c = std::vec![2u8];
+    let mut c = std::vec![3u8];
     c.extend_from_slice(&a.order_chain_id.to_be_bytes());
     c.extend_from_slice(&a.ad_chain_id.to_be_bytes());
     c.extend_from_slice(&a.order_hash);
     c.extend_from_slice(&a.order_chain_root);
     c.extend_from_slice(&a.ad_chain_root);
+    c.extend_from_slice(&maker_key_commitment());
     c.extend_from_slice(&0u32.to_be_bytes());
     c.extend_from_slice(&0u32.to_be_bytes());
     c.extend_from_slice(&vhex(&v["keys"]["makerBls"]["pk"]["uncompressed"]));
     c.extend_from_slice(&vhex(&v["keys"]["bridgerBls"]["pk"]["uncompressed"]));
     c.extend_from_slice(&cosign_aggregate(env, a));
-    assert_eq!(c.len(), 521);
+    assert_eq!(c.len(), 553);
     Bytes::from_slice(env, &c)
 }
 
@@ -6984,7 +6997,7 @@ fn test_433_cosign_helper_reproduces_the_vector_aggregate() {
         order_chain_root: vhex(&auth["orderChainRoot"]).try_into().unwrap(),
         ad_chain_root: vhex(&auth["adChainRoot"]).try_into().unwrap(),
     };
-    let mut pre = [0u8; 192];
+    let mut pre = [0u8; 224]; // #469: the preimage names the maker key
     settlement_preimage(&env, &a).copy_into_slice(&mut pre);
     assert_eq!(
         pre.to_vec(),

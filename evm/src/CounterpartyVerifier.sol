@@ -17,12 +17,15 @@ contract CounterpartyVerifier is IRootVerifier {
         bytes32 orderHash;
         bytes32 orderChainRoot;
         bytes32 adChainRoot;
+        /// #469: keccak256 of the maker key's EIP-2537 encoding — the one maker key this message pairs with.
+        bytes32 makerKeyCommitment;
     }
 
     /// metadata = abi.encode(settlementSigner, bridger, orderHash, moduleData): what the escrow vouches for.
     /// Slot 0 is the order's adSettlementSigner; orderHash is the order being unlocked (#433).
-    /// moduleData = abi.encode(version, auth, signerSlotId, bridgerSlotId, pkSigner, pkBridger, aggSig)
-    uint8 public constant METADATA_VERSION = 2;
+    /// moduleData = abi.encode(version, auth, signerSlotId, bridgerSlotId, pkSigner, pkBridger, aggSig);
+    /// v3's auth names the maker key (#469).
+    uint8 public constant METADATA_VERSION = 3;
 
     bytes32 private constant SETTLE_TAG = keccak256("ProofBridge.Settlement.v1");
     string public constant DST_SIG = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
@@ -67,6 +70,9 @@ contract CounterpartyVerifier is IRootVerifier {
         ) {
             return false;
         }
+        // #469: the bridger signed for one maker key. The bridger's half aggregated with any other
+        // live key of the maker's is a valid pairing but not consent; only the named key settles.
+        if (auth.makerKeyCommitment != keccak256(pkSigner)) return false;
         return verifyAggregate(auth, pkSigner, pkBridger, aggSig);
     }
 
@@ -91,7 +97,8 @@ contract CounterpartyVerifier is IRootVerifier {
             bytes32(auth.adChainId),
             auth.orderHash,
             auth.orderChainRoot,
-            auth.adChainRoot
+            auth.adChainRoot,
+            auth.makerKeyCommitment
         );
         return BLS.verifyAggregate(pkSigner, pkBridger, BLS.hashToG2(preimage, bytes(DST_SIG)), aggSig);
     }
