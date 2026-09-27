@@ -81,6 +81,10 @@ export interface BuildStellarManifestInput {
   disputeParams?: Record<string, DisputeParams>;
   /** Who holds admin (#424): the source account until `handover`; preserved across redeploys. */
   admin?: AdminHandover;
+  /** Wasm installed for operators to instantiate (C-4). */
+  wasmHashes?: { agentAccount?: string };
+  /** The VK hash and circuits commit this deploy carries (C-20). */
+  vk?: { vkSha256?: string; circuitsCommit?: string };
 }
 
 export function buildManifest(
@@ -129,11 +133,14 @@ export function buildManifest(
     routeTiming: input.routeTiming ?? {},
     disputeParams: input.disputeParams ?? {},
     ...(input.admin ? { admin: input.admin } : {}),
+    ...(input.wasmHashes?.agentAccount ? { wasmHashes: { agentAccount: input.wasmHashes.agentAccount } } : {}),
     meta: {
       deployedAt: new Date().toISOString(),
       deployer: input.deployer,
       commit: input.commit,
       env: input.env,
+      ...(input.vk?.vkSha256 ? { vkSha256: input.vk.vkSha256 } : {}),
+      ...(input.vk?.circuitsCommit ? { circuitsCommit: input.vk.circuitsCommit } : {}),
     },
   };
   return ChainDeploymentManifestSchema.parse(m);

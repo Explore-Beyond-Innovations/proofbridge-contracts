@@ -4,7 +4,7 @@
 // Usage:
 //   stellar-deploy deploy             [--out <manifest-path>] [--chain-id <n>]
 //   stellar-deploy deploy-test-tokens [--out <manifest-path>] [--chain-id <n>]
-//   stellar-deploy link --peer <peer-manifest> [--in <local-manifest>] [--enforce-bls]
+//   stellar-deploy link --peer <peer-manifest> [--in <local-manifest>]
 //   stellar-deploy handover --to <G...> | --verify   [--in <manifest-path>] [--chain-id <n>]
 //
 // Reads the `stellar` CLI environment:
@@ -57,7 +57,6 @@ async function main(): Promise<void> {
         peerManifest: peer,
         localManifest: parseFlag(rest, "--in"),
         localChainId: parseChainId(rest),
-        enforceBls: rest.includes("--enforce-bls"),
       });
       if (r.described.length) process.exit(2);
       return;

@@ -23,6 +23,7 @@ export interface LinkOptions {
    * gate on every unlock referencing the peer chain - only enable once the
    * relayer submits real cosigData. Default false (transitional pre-auth).
    */
+  /** Ignored: the root gate is always wired. Kept so old callers still parse. */
   enforceBls?: boolean;
 }
 
@@ -121,13 +122,13 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
   }
 
   // ── Root-auth module (module C) ───────────────────────────────────
-  const enforceBls =
-    opts.enforceBls ?? process.env.ENFORCE_BLS === "true";
-  if (enforceBls) {
+  // Always wired: pre-auth is gone (1.5i), so an escrow with no root verifier for a peer can never
+  // settle an unlock from it. `--enforce-bls` / ENFORCE_BLS are accepted and ignored.
+  {
     const verifierEntry = local.contracts.counterpartyVerifier;
     if (!verifierEntry) {
       throw new Error(
-        "link --enforce-bls: local manifest has no counterpartyVerifier - redeploy core first",
+        "link: local manifest has no counterpartyVerifier, so no unlock could settle - redeploy core first",
       );
     }
     // #464/#465: never wire a verifier that does not answer registry() or reads another registry.
@@ -148,13 +149,9 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
       if (await acting.call(escrow, name, "setRootVerifier", [peerChainId, verifierEntry.address],
         `${name}.setRootVerifier(${peerChainId}, ${verifierEntry.address}) - BLS gate ENFORCED for peer roots`)) chainTxs++;
     }
-  } else {
-    console.log(
-      "  [link] BLS gate not wired (transitional pre-auth); rerun with --enforce-bls to enable",
-    );
   }
 
-  // #465 (46-2): whatever was wired for this peer, with or without --enforce-bls, reads the
+  // #465 (46-2): whatever was wired for this peer, reads the
   // AdManager's registry.
   {
     const escrows: EscrowWiring[] = ([["AdManager", adManager], ["OrderPortal", orderPortal]] as const).map(

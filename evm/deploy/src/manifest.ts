@@ -55,6 +55,8 @@ export function tokenEntry(tok: EvmTokenInput): TokenEntry {
 }
 
 export interface BuildManifestInput {
+  /** The VK hash and circuits commit this deploy carries (C-20). */
+  vk?: { vkSha256?: string; circuitsCommit?: string };
   chainName: string;
   chainId: bigint;
   env: string;
@@ -148,6 +150,8 @@ export function buildManifest(
       deployer: input.deployer,
       commit: input.commit,
       env: input.env,
+      ...(input.vk?.vkSha256 ? { vkSha256: input.vk.vkSha256 } : {}),
+      ...(input.vk?.circuitsCommit ? { circuitsCommit: input.vk.circuitsCommit } : {}),
     },
   };
   return ChainDeploymentManifestSchema.parse(manifest);

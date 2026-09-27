@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import * as path from "path";
 import { allPeers, assertOneRegistry, checkPeers, switchKeyRegistry, verifierRegistry, type EscrowWiring } from "./one-registry.js";
 import { ethers } from "ethers";
 import {
@@ -12,7 +13,10 @@ import {
   foreignAdmins,
   requireEnv,
   type DescribedCall,
+  evmRoot,
 } from "./common.js";
+import { namedOutsideLocal, requireDeployEnv } from "./deploy-env.js";
+import { assertReusedVk, vkRecord } from "./vk.js";
 import {
   contractFactory,
   contractFactoryLinked,
@@ -132,7 +136,7 @@ async function deployCoreRun(
     );
   }
   const admin = deployer;
-  const env = opts.env ?? envOrDefault("DEPLOY_ENV", "local");
+  const env = requireDeployEnv(opts.env);
   const commit = opts.commit ?? envOrDefault("GIT_COMMIT", "unknown");
   const chainName =
     opts.chainName ?? envOrDefault("CHAIN_NAME", `evm-${chainId}`);
@@ -160,7 +164,8 @@ async function deployCoreRun(
   if (!Number.isInteger(wDec) || wDec < 0 || wDec > 255) {
     throw new Error(`deploy-core: WNATIVE_DECIMALS must be an integer 0..255, got ${wDec}`);
   }
-  const anchorSigners = envOrDefault("ANCHOR_PUBLISHER", admin)
+  // Outside local the notary is named: after handover the deploy key must not stay the sole anchor signer.
+  const anchorSigners = namedOutsideLocal("ANCHOR_PUBLISHER", env, admin)
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
@@ -175,8 +180,8 @@ async function deployCoreRun(
   }
   // The arbiter must not be the admin (2.3g D6): its whole containment is that it cannot pause an
   // escrow, re-route tokens or re-point the anchor. Outside a local deploy both roles are explicit.
-  const arbiterAddr = disputeRole("DISPUTE_ARBITER", env, admin);
-  const feePoolAddr = disputeRole("DISPUTE_FEE_POOL", env, admin);
+  const arbiterAddr = namedOutsideLocal("DISPUTE_ARBITER", env, admin);
+  const feePoolAddr = namedOutsideLocal("DISPUTE_FEE_POOL", env, admin);
   for (const a of [arbiterAddr, feePoolAddr]) {
     if (!ethers.isAddress(a)) throw new Error(`deploy-core: not an address: ${a} (DISPUTE_ARBITER / DISPUTE_FEE_POOL)`);
   }
@@ -299,6 +304,15 @@ async function deployCoreRun(
   }
 
   // ── core contracts ────────────────────────────────────────────────
+  // The bundle's VK (the release job checks Verifier.sol bakes it). A reused Verifier must have been
+  // deployed from the same one: the chain cannot say, so the manifest's record is compared (C-20).
+  const vkRec = vkRecord(
+    process.env.EVENT_VK ?? process.env.STELLAR_EVENT_VK ?? path.join(evmRoot(), "..", "..", "proof_circuits", "events", "target", "vk"),
+  );
+  if (existing?.contracts.verifier.address) {
+    const r = assertReusedVk("evm-deploy Verifier", vkRec.vkSha256, existing.meta.vkSha256);
+    if (r === "unknown") console.warn("[evm-deploy] reused Verifier: its VK could not be compared (no recorded hash); check it matches the bundle");
+  }
   const verifierAddr = await deployIfMissing(
     "Verifier",
     existing?.contracts.verifier.address,
@@ -616,6 +630,7 @@ async function deployCoreRun(
   }
 
   const manifest = buildManifest({
+    vk: vkRec,
     chainName,
     chainId,
     env,
@@ -688,16 +703,6 @@ async function deployCoreRun(
   };
 }
 
-/// A dispute role address from env. Local deploys fall back to the admin so a dev stack works out of
-/// the box; everywhere else it must be named, like every other dispute parameter.
-function disputeRole(name: string, env: string, fallback: string): string {
-  const v = process.env[name];
-  if (v) return v;
-  if (env === "local") return fallback;
-  throw new Error(
-    `deploy-core: ${name} is unset for env=${env}; set it or deploy with DEPLOY_ENV=local`,
-  );
-}
 
 /// Does this address answer as the agent policy module: validator and hook, and not an executor?
 async function isAgentPolicyModule(address: string, signer: ethers.Wallet): Promise<boolean> {

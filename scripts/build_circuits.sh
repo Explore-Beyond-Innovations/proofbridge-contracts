@@ -53,6 +53,28 @@ install_bb() {
   if [ -n "${GITHUB_PATH:-}" ]; then echo "$HOME/.bb/bin" >> "$GITHUB_PATH"; fi
 }
 
+# ── the pins are enforced, not just installed ───────────────────────
+# A nargo or bb already on PATH skips the install above, and a different version writes a different
+# VK: the EVM Verifier bakes one, the Soroban verifier is given another, and one chain then refuses
+# every proof. PROOFBRIDGE_ALLOW_TOOLCHAIN_DRIFT=1 builds anyway (never for a release or a deploy).
+
+check_pins() {
+  local nv bv
+  nv="$(nargo --version 2>/dev/null | sed -n 's/^nargo version = //p' | head -1)"
+  bv="$(bb --version 2>/dev/null | tr -d 'v[:space:]')"
+  local bad=""
+  [[ "$nv" == "$NOIR_VERSION" ]] || bad="nargo ${nv:-<none>} (pinned $NOIR_VERSION)"
+  [[ "$bv" == "${BB_VERSION#v}" ]] || bad="${bad:+$bad, }bb ${bv:-<none>} (pinned ${BB_VERSION#v})"
+  if [[ -n "$bad" ]]; then
+    if [[ "${PROOFBRIDGE_ALLOW_TOOLCHAIN_DRIFT:-}" == "1" ]]; then
+      echo "warning: toolchain drift: $bad; the VK will not match a pinned build" >&2
+    else
+      echo "error: toolchain drift: $bad. Install the pins (noirup -v $NOIR_VERSION; bb $BB_VERSION) or set PROOFBRIDGE_ALLOW_TOOLCHAIN_DRIFT=1 for a throwaway build." >&2
+      exit 1
+    fi
+  fi
+}
+
 # ── flatten bb output directories ───────────────────────────────────
 
 flatten_artifacts() {
@@ -136,6 +158,7 @@ done
 
 install_nargo
 install_bb
+check_pins
 
 if [[ -f "$TARGET_PATH/Nargo.toml" ]]; then
   # Single circuit directory

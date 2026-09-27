@@ -1,3 +1,4 @@
+import { stellarChainIdOrLocal } from "./deploy-env.js";
 import {
   readManifest,
   type ChainDeploymentManifest,
@@ -5,7 +6,6 @@ import {
   type DisputeParams,
   duplicatePairKeys,
 } from "@proofbridge/deployment-manifest";
-import { DEFAULT_STELLAR_CHAIN_ID } from "./common.js";
 import { Acting, getAddress, invokeContract, readView, type DescribedCall } from "./stellar-cli.js";
 import { assertOneRegistry, linkCheckStep, verifierRegistry } from "./one-registry.js";
 import { stellarEscrowChain } from "./escrow-chain.js";
@@ -17,7 +17,7 @@ export interface StellarLinkOptions {
   localManifest?: string;
   /** Path to the peer chain's manifest. Required. */
   peerManifest: string;
-  /** Override local chain id (rarely needed — defaults to 1000001). */
+  /** Override local chain id (else STELLAR_CHAIN_ID, else the local id 1000001). */
   localChainId?: bigint;
   /**
    * Wire the local CounterpartyVerifier as the root-auth module for the peer
@@ -25,6 +25,7 @@ export interface StellarLinkOptions {
    * gate on every unlock referencing the peer chain - only enable once the
    * relayer submits real cosig_data. Default false (transitional pre-auth).
    */
+  /** Ignored: the root gate is always wired. Kept so old callers still parse. */
   enforceBls?: boolean;
 }
 
@@ -41,7 +42,7 @@ export interface StellarLinkResult {
 export async function link(
   opts: StellarLinkOptions,
 ): Promise<StellarLinkResult> {
-  const chainId = opts.localChainId ?? DEFAULT_STELLAR_CHAIN_ID;
+  const chainId = stellarChainIdOrLocal(opts.localChainId);
   const localPath = opts.localManifest ?? manifestPath(chainId);
   const local = await readManifest(localPath);
   const peer = await readManifest(opts.peerManifest);
@@ -115,12 +116,13 @@ export async function link(
   }
 
   // ── Root-auth module (module C) ───────────────────────────────────
-  const enforceBls = opts.enforceBls ?? process.env.ENFORCE_BLS === "true";
-  if (enforceBls) {
+  // Always wired: pre-auth is gone (1.5i), so an escrow with no root verifier for a peer can never
+  // settle an unlock from it. `--enforce-bls` / ENFORCE_BLS are accepted and ignored.
+  {
     const verifierEntry = local.contracts.counterpartyVerifier;
     if (!verifierEntry) {
       throw new Error(
-        "link --enforce-bls: local manifest has no counterpartyVerifier - redeploy core first",
+        "link: local manifest has no counterpartyVerifier, so no unlock could settle - redeploy core first",
       );
     }
     // #464/#465: never wire a verifier that does not answer registry() or reads another registry.
@@ -136,14 +138,10 @@ export async function link(
       if (acting.call(escrow, name, "set_root_verifier", ["--chain_id", peerChainId, "--module", verifierEntry.address],
         `${name}.set_root_verifier(${peerChainId}, ${verifierEntry.address}) - BLS gate ENFORCED for peer roots`)) chainTxs++;
     }
-  } else {
-    console.log(
-      "  [link] BLS gate not wired (transitional pre-auth); rerun with --enforce-bls to enable",
-    );
   }
 
-  // #465 (46-2) / #466: whatever was wired for this peer, or for any peer the escrows list, with or
-  // without --enforce-bls, reads the AdManager's registry. #467 (47-2): the specs test the step, not
+  // #465 (46-2) / #466: whatever was wired for this peer, or for any peer the escrows list, reads
+  // the AdManager's registry. #467 (47-2): the specs test the step, not
   // this call (no Stellar end-to-end harness); keep it.
   linkCheckStep(
     stellarEscrowChain(acting, readView),

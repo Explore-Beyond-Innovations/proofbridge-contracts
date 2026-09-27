@@ -61,6 +61,17 @@ export function deployContract(
   return id;
 }
 
+/**
+ * Install a wasm on the network without instantiating it; returns its hash (hex, no 0x). For
+ * contracts operators instantiate themselves, like the agent account (C-4).
+ */
+export function uploadWasm(wasmPath: string): string {
+  const out = stellar(["contract", "upload", "--wasm", wasmPath, "--source", SOURCE, "--network", NETWORK]);
+  const hash = out.split("\n").filter((l) => l.trim()).pop()?.trim() ?? "";
+  if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error(`unexpected upload output:\n${out}`);
+  return hash;
+}
+
 /** Invoke a contract function. Returns stdout. */
 export function invokeContract(
   contractId: string,
