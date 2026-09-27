@@ -318,31 +318,21 @@ fn old_layout_without_the_order_hash_fails() {
 }
 
 /// #469: the v2 layout (envelope, but no maker key commitment in the auth) is refused by length,
-/// never misread as v3 with shifted fields.
+/// never misread as v3 with shifted fields. Built from the v3 blob: drop the 32-byte field at
+/// offset 225 and stamp the v2 version byte.
 #[test]
 fn v2_layout_without_the_maker_key_fails() {
     let s = setup();
-    let v = &s.v;
-    let auth = &v["settlement"]["auth"];
-    let mut raw = std::vec::Vec::new();
-    raw.extend_from_slice(&hexval(
-        &v["registration"]["makerOnStellarTestnet"]["account"],
-    ));
-    raw.extend_from_slice(&hexval(
-        &v["registration"]["bridgerOnStellarTestnet"]["account"],
-    ));
-    raw.extend_from_slice(&hexval(&auth["orderHash"]));
-    raw.push(2u8);
-    raw.extend_from_slice(&s.order_chain_id.to_be_bytes());
-    raw.extend_from_slice(&s.ad_chain_id.to_be_bytes());
-    raw.extend_from_slice(&hexval(&auth["orderHash"]));
-    raw.extend_from_slice(&hexval(&auth["orderChainRoot"]));
-    raw.extend_from_slice(&hexval(&auth["adChainRoot"]));
-    raw.extend_from_slice(&0u32.to_be_bytes());
-    raw.extend_from_slice(&0u32.to_be_bytes());
-    raw.extend_from_slice(&hexval(&v["keys"]["makerBls"]["pk"]["uncompressed"]));
-    raw.extend_from_slice(&hexval(&v["keys"]["bridgerBls"]["pk"]["uncompressed"]));
-    raw.extend_from_slice(&hexval(&v["settlement"]["aggSig"]["uncompressed"]));
+    let mut raw = s.raw_metadata(
+        0,
+        0,
+        &hexval(&s.v["keys"]["makerBls"]["pk"]["uncompressed"]),
+        &hexval(&s.v["settlement"]["aggSig"]["uncompressed"]),
+        Some(&hexval(&s.v["settlement"]["auth"]["orderHash"])),
+    );
+    assert_eq!(raw.len(), METADATA_LEN);
+    raw.drain(225..257);
+    raw[96] -= 1;
     assert_eq!(raw.len(), V2_METADATA_LEN);
     let m = Bytes::from_slice(&s.env, &raw);
     assert!(!s
