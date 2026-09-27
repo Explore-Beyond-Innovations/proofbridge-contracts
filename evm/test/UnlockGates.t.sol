@@ -313,10 +313,11 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
             adChainId: 1_000_002,
             orderHash: vjson.readBytes32(".settlement.auth.orderHash"),
             orderChainRoot: vOrderRoot,
-            adChainRoot: vjson.readBytes32(".settlement.auth.adChainRoot")
+            adChainRoot: vjson.readBytes32(".settlement.auth.adChainRoot"),
+            makerKeyCommitment: vjson.readBytes32(".settlement.auth.makerKeyCommitment")
         });
         bytes memory cosig = abi.encode(
-            uint8(2),
+            uint8(3),
             auth,
             uint32(0),
             uint32(0),
@@ -421,11 +422,12 @@ function _vectorCosig(string memory vjson) view returns (bytes memory) {
         adChainId: 1_000_002,
         orderHash: stdJson.readBytes32(vjson, ".settlement.auth.orderHash"),
         orderChainRoot: stdJson.readBytes32(vjson, ".settlement.auth.orderChainRoot"),
-        adChainRoot: stdJson.readBytes32(vjson, ".settlement.auth.adChainRoot")
+        adChainRoot: stdJson.readBytes32(vjson, ".settlement.auth.adChainRoot"),
+        makerKeyCommitment: stdJson.readBytes32(vjson, ".settlement.auth.makerKeyCommitment")
     });
-    // metadata v2: both settlement keys sit in slot 0 of the registry
+    // metadata v3: both settlement keys sit in slot 0 of the registry
     return abi.encode(
-        uint8(2),
+        uint8(3),
         auth,
         uint32(0),
         uint32(0),

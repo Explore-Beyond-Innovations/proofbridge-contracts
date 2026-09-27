@@ -16,7 +16,13 @@ library CoSign {
     /// The message point both parties sign: the same preimage `CounterpartyVerifier` verifies.
     function messagePoint(CounterpartyVerifier.SettlementAuth memory a) internal view returns (bytes memory) {
         bytes memory preimage = bytes.concat(
-            SETTLE_TAG, bytes32(a.orderChainId), bytes32(a.adChainId), a.orderHash, a.orderChainRoot, a.adChainRoot
+            SETTLE_TAG,
+            bytes32(a.orderChainId),
+            bytes32(a.adChainId),
+            a.orderHash,
+            a.orderChainRoot,
+            a.adChainRoot,
+            a.makerKeyCommitment
         );
         return BLS.hashToG2(preimage, bytes(DST_SIG));
     }
@@ -58,15 +64,16 @@ library CoSign {
             adChainId: stdJson.readUint(vjson, ".settlement.auth.adChainId"),
             orderHash: orderHash,
             orderChainRoot: stdJson.readBytes32(vjson, ".settlement.auth.orderChainRoot"),
-            adChainRoot: stdJson.readBytes32(vjson, ".settlement.auth.adChainRoot")
+            adChainRoot: stdJson.readBytes32(vjson, ".settlement.auth.adChainRoot"),
+            makerKeyCommitment: stdJson.readBytes32(vjson, ".settlement.auth.makerKeyCommitment")
         });
     }
 
-    /// Module data v2, both settlement keys in slot 0, co-signed over `orderHash`.
+    /// Module data v3, both settlement keys in slot 0, co-signed over `orderHash`.
     function moduleDataFor(string memory vjson, bytes32 orderHash) internal view returns (bytes memory) {
         CounterpartyVerifier.SettlementAuth memory a = authFor(vjson, orderHash);
         return abi.encode(
-            uint8(2),
+            uint8(3),
             a,
             uint32(0),
             uint32(0),
