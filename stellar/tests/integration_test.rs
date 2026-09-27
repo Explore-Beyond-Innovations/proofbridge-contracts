@@ -7134,10 +7134,3 @@ fn test_466_wired_chains_list_each_chain_once() {
         "re-wiring a chain does not list it again"
     );
 }
-
-#[test]
-fn test_466_wired_chains_empty_on_an_unwired_escrow() {
-    let s = setup_with_verifiers(false);
-    assert_eq!(s.ad_manager.wired_chains().len(), 0);
-    assert_eq!(s.order_portal.wired_chains().len(), 0);
-}

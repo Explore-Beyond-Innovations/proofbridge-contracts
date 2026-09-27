@@ -131,7 +131,8 @@ test("466: a hand-wired peer outside the manifest is found and its split refused
   );
 });
 
-test("466: an escrow that cannot list its chains falls back to the manifest's peers", async () => {
+// #467 (47-1): a timeout or rate limit reading the list must not pass the hand-wired split on 999.
+test("467: an escrow whose list cannot be read fails the run", async () => {
   const c = chain({ wired: { "AdManager:999": V_B }, registries: { [V_B]: B }, unlisted: true });
-  assert.deepEqual(await allPeers(["31338"], c.escrows, "deploy"), ["31338"]);
+  await assert.rejects(allPeers(["31338"], c.escrows, "deploy"), /deploy: cannot read AdManager\.wiredChains\(\)/);
 });

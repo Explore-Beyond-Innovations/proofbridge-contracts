@@ -131,11 +131,17 @@ export function allPeers(chain: EscrowChain, ids: EscrowIds, manifestPeers: stri
     ["AdManager", ids.adManager],
     ["OrderPortal", ids.orderPortal],
   ] as const) {
+    // #467 (47-1): a list that cannot be read fails the run; falling back would let a failed read pass a split.
+    let chains: string[];
     try {
-      for (const c of chain.wiredChains(id)) peers.add(String(c));
-    } catch {
-      console.log(`  [${where}] ${name} does not list its wired chains (pre-#466 wasm?); checking the manifest's peers only`);
+      chains = chain.wiredChains(id);
+    } catch (err) {
+      throw new Error(
+        `${where}: cannot read ${name}.wired_chains(), so its wired peers cannot be checked ` +
+          `(an escrow built before #466 must be redeployed): ${(err as Error).message ?? err}`,
+      );
     }
+    for (const c of chains) peers.add(String(c));
   }
   return [...peers];
 }

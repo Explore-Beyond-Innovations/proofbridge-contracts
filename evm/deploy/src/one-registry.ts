@@ -28,17 +28,22 @@ export interface EscrowWiring {
 
 /**
  * #466: the peers to check are the manifest's and every chain an escrow says it wired, so a
- * verifier wired by hand for a peer the manifest never recorded is checked too. An escrow built
- * before #466 has no list; the manifest's peers are then all the CLI knows, and it says so.
+ * verifier wired by hand for a peer the manifest never recorded is checked too. #467 (47-1): a
+ * list that cannot be read fails the run; falling back would let a timeout pass a split.
  */
 export async function allPeers(manifestPeers: string[], escrows: EscrowWiring[], where: string): Promise<string[]> {
   const peers = new Set(manifestPeers.map(String));
   for (const e of escrows) {
+    let chains: string[];
     try {
-      for (const c of await e.wiredChains()) peers.add(String(c));
-    } catch {
-      console.log(`  [${where}] ${e.name} does not list its wired chains (pre-#466 bytecode?); checking the manifest's peers only`);
+      chains = await e.wiredChains();
+    } catch (err) {
+      throw new Error(
+        `${where}: cannot read ${e.name}.wiredChains(), so its wired peers cannot be checked ` +
+          `(an escrow built before #466 must be redeployed): ${(err as Error).message ?? err}`,
+      );
     }
+    for (const c of chains) peers.add(String(c));
   }
   return [...peers];
 }

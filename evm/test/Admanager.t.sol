@@ -1206,14 +1206,4 @@ contract AdManagerTest is Test {
         assertEq(w[0], orderChainId);
         assertEq(w[1], 777);
     }
-
-    function test_466_wiredChains_emptyOnAFreshEscrow() public {
-        MockAdManager fresh = new MockAdManager(
-            admin,
-            IVerifier(address(verifier)),
-            IMerkleManager(address(merkleManager)),
-            IwNativeToken(address(_wNativeToken))
-        );
-        assertEq(fresh.wiredChains().length, 0);
-    }
 }

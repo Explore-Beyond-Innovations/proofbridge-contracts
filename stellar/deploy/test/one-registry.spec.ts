@@ -157,7 +157,11 @@ test("466: deploy switching the registry also re-points a hand-wired peer, befor
   assert.ok(log.includes("AdManager.set_root_verifier(999)"), `the hand-wired peer moved: ${log.join(", ")}`);
 });
 
-test("466: an escrow that cannot list its chains falls back to the manifest's peers", () => {
+// #467 (47-1): a failed read of the list must not pass the hand-wired split on 999.
+test("467: an escrow whose list cannot be read fails the run", () => {
   const { c } = escrowChain({ wired: { [`${AM}:999`]: V_B }, registries: { [V_B]: B }, keyRegistry: A, unlisted: true });
-  deployRegistryStep(c, ids, { registry: A, verifier: V_A, manifestPeers: ["31337"] });
+  assert.throws(
+    () => deployRegistryStep(c, ids, { registry: A, verifier: V_A, manifestPeers: ["31337"] }),
+    /deploy: cannot read AdManager\.wired_chains\(\)/,
+  );
 });

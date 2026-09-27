@@ -232,6 +232,7 @@ export async function deployCore(
         ...Object.keys(existing?.rootAnchorConfig?.anchorDelays ?? {}),
       ]),
     ];
+    // #467 (47-2): the specs test the step, not this call (no Stellar end-to-end harness); keep it.
     deployRegistryStep(stellarEscrowChain(acting, readView), { adManager, orderPortal }, {
       registry: blsKeyRegistry,
       verifier: counterpartyVerifier,

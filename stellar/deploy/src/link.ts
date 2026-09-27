@@ -143,7 +143,8 @@ export async function link(
   }
 
   // #465 (46-2) / #466: whatever was wired for this peer, or for any peer the escrows list, with or
-  // without --enforce-bls, reads the AdManager's registry.
+  // without --enforce-bls, reads the AdManager's registry. #467 (47-2): the specs test the step, not
+  // this call (no Stellar end-to-end harness); keep it.
   linkCheckStep(
     stellarEscrowChain(acting, readView),
     { adManager: local.contracts.adManager.address, orderPortal: local.contracts.orderPortal.address },
