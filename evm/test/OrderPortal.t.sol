@@ -646,4 +646,16 @@ contract OrderPortalTest is Test {
             address(uint160(uint256(p.adRecipient))).balance, balRecipientBefore + p.amount, "recipient not credited"
         );
     }
+
+    /// #466: the order chain's escrow keeps the same list.
+    function test_466_wiredChains_listsEachChainOnce() public {
+        vm.startPrank(admin);
+        portal.setRootVerifier(888, address(new MockRootVerifier(true)));
+        portal.setRootVerifier(adChainId, address(new MockRootVerifier(true)));
+        vm.stopPrank();
+        uint256[] memory w = portal.wiredChains();
+        assertEq(w.length, 2);
+        assertEq(w[0], adChainId);
+        assertEq(w[1], 888);
+    }
 }

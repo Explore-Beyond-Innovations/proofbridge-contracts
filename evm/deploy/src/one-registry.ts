@@ -22,6 +22,25 @@ export interface EscrowWiring {
   rootVerifier(peer: string): Promise<string>;
   /** Resolves true when sent, false when only described (the admin is someone else). */
   setRootVerifier(peer: string, verifier: string): Promise<boolean>;
+  /** #466: every chain the escrow ever wired a root verifier for (`wiredChains()`). */
+  wiredChains(): Promise<string[]>;
+}
+
+/**
+ * #466: the peers to check are the manifest's and every chain an escrow says it wired, so a
+ * verifier wired by hand for a peer the manifest never recorded is checked too. An escrow built
+ * before #466 has no list; the manifest's peers are then all the CLI knows, and it says so.
+ */
+export async function allPeers(manifestPeers: string[], escrows: EscrowWiring[], where: string): Promise<string[]> {
+  const peers = new Set(manifestPeers.map(String));
+  for (const e of escrows) {
+    try {
+      for (const c of await e.wiredChains()) peers.add(String(c));
+    } catch {
+      console.log(`  [${where}] ${e.name} does not list its wired chains (pre-#466 bytecode?); checking the manifest's peers only`);
+    }
+  }
+  return [...peers];
 }
 
 /** #465 (46-4): a verifier the CLI relies on must answer `registry()`; one that does not is named. */

@@ -7,7 +7,8 @@ import {
 } from "@proofbridge/deployment-manifest";
 import { DEFAULT_STELLAR_CHAIN_ID } from "./common.js";
 import { Acting, getAddress, invokeContract, readView, type DescribedCall } from "./stellar-cli.js";
-import { assertOneRegistry, checkPeers, verifierRegistry, type EscrowWiring } from "./one-registry.js";
+import { assertOneRegistry, linkCheckStep, verifierRegistry } from "./one-registry.js";
+import { stellarEscrowChain } from "./escrow-chain.js";
 import { adminsOf, foreignAdmins } from "./handover.js";
 import { manifestPath, writeManifest } from "./manifest.js";
 
@@ -141,27 +142,13 @@ export async function link(
     );
   }
 
-  // #465 (46-2): whatever was wired for this peer, with or without --enforce-bls, reads the
-  // AdManager's registry.
-  {
-    const escrows: EscrowWiring[] = (
-      [
-        ["AdManager", local.contracts.adManager.address],
-        ["OrderPortal", local.contracts.orderPortal.address],
-      ] as const
-    ).map(([name, id]) => ({
-      name,
-      rootVerifier: (peer: string) => (readView(id, "root_verifier", ["--chain_id", peer]) as string | null) ?? null,
-      setRootVerifier: () => false, // link wires above; here it only reads
-    }));
-    checkPeers({
-      escrows,
-      peers: [String(peerChainId)],
-      escrowRegistry: String(readView(local.contracts.adManager.address, "key_registry")),
-      registryOf,
-      where: "link",
-    });
-  }
+  // #465 (46-2) / #466: whatever was wired for this peer, or for any peer the escrows list, with or
+  // without --enforce-bls, reads the AdManager's registry.
+  linkCheckStep(
+    stellarEscrowChain(acting, readView),
+    { adManager: local.contracts.adManager.address, orderPortal: local.contracts.orderPortal.address },
+    String(peerChainId),
+  );
 
   // ── Anchor delay for the peer route (2.3f) ─────────────────────────
   // Seconds an anchor of the peer chain must age before is_anchored is true:

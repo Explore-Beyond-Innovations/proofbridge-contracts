@@ -2,7 +2,7 @@
 // and a switch to a new registry moves the verifiers first. Driven with a fake chain.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assertOneRegistry, checkPeers, switchKeyRegistry, verifierRegistry, type EscrowWiring } from "../src/one-registry.ts";
+import { allPeers, assertOneRegistry, checkPeers, switchKeyRegistry, verifierRegistry, type EscrowWiring } from "../src/one-registry.ts";
 
 const A = "0x1111111111111111111111111111111111111111";
 const B = "0x2222222222222222222222222222222222222222";
@@ -11,7 +11,7 @@ const V_B = "0xbbbb00000000000000000000000000000000000b";
 const ZERO = "0x0000000000000000000000000000000000000000";
 
 /** A fake chain: verifiers → registries, escrows' per-peer wiring, and a log of every write. */
-function chain(opts: { wired: Record<string, string>; registries: Record<string, string>; sticky?: boolean; described?: boolean }) {
+function chain(opts: { wired: Record<string, string>; registries: Record<string, string>; sticky?: boolean; described?: boolean; unlisted?: boolean }) {
   const log: string[] = [];
   const escrows: EscrowWiring[] = ["AdManager", "OrderPortal"].map((name) => ({
     name,
@@ -21,6 +21,11 @@ function chain(opts: { wired: Record<string, string>; registries: Record<string,
       if (opts.described) return false;
       if (!opts.sticky) opts.wired[`${name}:${peer}`] = v; // sticky: the write "succeeds" but nothing changes
       return true;
+    },
+    // #466: every chain wired on this escrow, as `wiredChains()` reports it (unlisted: pre-#466 bytecode).
+    wiredChains: async () => {
+      if (opts.unlisted) throw new Error("execution reverted");
+      return Object.keys(opts.wired).filter((k) => k.startsWith(`${name}:`)).map((k) => k.split(":")[1]);
     },
   }));
   const registryOf = async (v: string) => {
@@ -113,4 +118,20 @@ test("a switch the admin has to send is described, not read back", async () => {
     registryOf: c.registryOf,
     setKeyRegistry: async () => false,
   });
+});
+
+// #466: a verifier wired by hand for a peer the manifest never recorded is checked too.
+test("466: a hand-wired peer outside the manifest is found and its split refused", async () => {
+  const c = chain({ wired: { "AdManager:31338": V_A, "AdManager:999": V_B }, registries: { [V_A]: A, [V_B]: B } });
+  const peers = await allPeers(["31338"], c.escrows, "deploy");
+  assert.deepEqual(peers.sort(), ["31338", "999"]);
+  await assert.rejects(
+    checkPeers({ escrows: c.escrows, peers, escrowRegistry: A, registryOf: c.registryOf, where: "deploy" }),
+    /deploy: AdManager peer 999: registry split/,
+  );
+});
+
+test("466: an escrow that cannot list its chains falls back to the manifest's peers", async () => {
+  const c = chain({ wired: { "AdManager:999": V_B }, registries: { [V_B]: B }, unlisted: true });
+  assert.deepEqual(await allPeers(["31338"], c.escrows, "deploy"), ["31338"]);
 });

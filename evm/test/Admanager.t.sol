@@ -1188,4 +1188,32 @@ contract AdManagerTest is Test {
         assertEq(sweptAmount, totalDeposited - lockAmt, "closeAd swept more than what remained in escrow");
         assertEq(adToken.balanceOf(address(adManager)), 0, "escrow leaked");
     }
+
+    /// #466: the escrow lists every chain it ever wired a root verifier for, once each, in order.
+    function test_466_wiredChains_listsEachChainOnce() public {
+        uint256[] memory w = adManager.wiredChains();
+        assertEq(w.length, 1, "setUp wires the order chain");
+        assertEq(w[0], orderChainId);
+
+        vm.startPrank(admin);
+        adManager.setRootVerifier(777, address(new MockRootVerifier(true)));
+        adManager.setRootVerifier(orderChainId, address(new MockRootVerifier(true)));
+        adManager.setRootVerifier(777, address(0));
+        vm.stopPrank();
+
+        w = adManager.wiredChains();
+        assertEq(w.length, 2, "re-wiring a chain, even to zero, does not list it again");
+        assertEq(w[0], orderChainId);
+        assertEq(w[1], 777);
+    }
+
+    function test_466_wiredChains_emptyOnAFreshEscrow() public {
+        MockAdManager fresh = new MockAdManager(
+            admin,
+            IVerifier(address(verifier)),
+            IMerkleManager(address(merkleManager)),
+            IwNativeToken(address(_wNativeToken))
+        );
+        assertEq(fresh.wiredChains().length, 0);
+    }
 }

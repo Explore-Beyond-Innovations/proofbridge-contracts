@@ -7110,3 +7110,34 @@ fn test_433_order_portal_cosig_for_one_order_does_not_unlock_another() {
         "and it does settle X"
     );
 }
+
+/// #466: each escrow lists every chain it ever wired a root verifier for, once each, in order.
+#[test]
+fn test_466_wired_chains_list_each_chain_once() {
+    let s = setup();
+    assert_eq!(
+        s.ad_manager.wired_chains(),
+        soroban_sdk::vec![&s.env, s.tp.order_chain_id]
+    );
+    assert_eq!(
+        s.order_portal.wired_chains(),
+        soroban_sdk::vec![&s.env, s.tp.ad_chain_id]
+    );
+
+    let other = s.env.register(MockRootVerifier, ());
+    s.ad_manager.set_root_verifier(&777u128, &other);
+    s.ad_manager.set_root_verifier(&s.tp.order_chain_id, &other);
+    s.ad_manager.set_root_verifier(&777u128, &other);
+    assert_eq!(
+        s.ad_manager.wired_chains(),
+        soroban_sdk::vec![&s.env, s.tp.order_chain_id, 777u128],
+        "re-wiring a chain does not list it again"
+    );
+}
+
+#[test]
+fn test_466_wired_chains_empty_on_an_unwired_escrow() {
+    let s = setup_with_verifiers(false);
+    assert_eq!(s.ad_manager.wired_chains().len(), 0);
+    assert_eq!(s.order_portal.wired_chains().len(), 0);
+}

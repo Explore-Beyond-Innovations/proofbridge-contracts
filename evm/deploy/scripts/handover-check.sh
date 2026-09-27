@@ -3,7 +3,8 @@
 # on two Anvils, plus the edges its review found: a contract deployed after the handover is wired
 # and named as needing its own handover; a handover with nothing to do leaves the manifest alone;
 # a deploy on reuse records what the chain says; an unchanged redeploy after the handover is a
-# clean exit 0; --to 0x0 is refused. Run from contracts/evm/deploy with `out/` built. Exit = FAILs.
+# clean exit 0; --to 0x0 is refused; (#466) a verifier on another registry, hand-wired for any
+# peer, is refused by deploy and by link. Run from contracts/evm/deploy with `out/` built. Exit = FAILs.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="${HANDOVER_CHECK_DIR:-$(mktemp -d)}"
@@ -36,6 +37,23 @@ A pnpm -s run deploy > $L/2a.log 2>&1 && B pnpm -s run deploy > $L/2b.log 2>&1 &
 [ "$(adminOf current)" = "$A0" ] && pass "admin.current is the deployer" || fail "admin block: $(node -p "JSON.stringify(require('$MA').admin)")"
 A pnpm -s cli link --peer $MB > $L/2l.log 2>&1; rc=$?; [ $rc -eq 0 ] && ! grep -q "\[describe\]" $L/2l.log && pass "link A→B sent, exit 0" || fail "link A→B exit $rc"
 B pnpm -s cli link --peer $MA > $L/2m.log 2>&1 && pass "link B→A sent" || fail "link B→A"
+
+echo "== 2b. (#466) a verifier on another registry, wired by hand for any peer, is refused by deploy and link"
+RPA=http://127.0.0.1:$PA
+A pnpm -s cli link --peer $MB --enforce-bls > $L/2b0.log 2>&1 && [ "$(cast call --rpc-url $RPA $(addrOf adManager) 'rootVerifier(uint256)(address)' 31338)" = "$(addrOf counterpartyVerifier)" ] && pass "link --enforce-bls wired the good verifier for 31338" || fail "link --enforce-bls: $(grep -m1 -i error $L/2b0.log | cut -c1-120)"
+# A second suite on the same chain, in its own manifest: the CLI links the registry's libraries.
+mkdir -p "$WORK/a2"; env EVM_RPC_URL=$RPA EVM_ADMIN_PRIVATE_KEY=$K0 EVM_DEPLOYMENTS_DIR="$WORK/a2" DEPLOY_ENV=local pnpm -s run deploy > $L/2b-suite2.log 2>&1
+REG2=$(node -p "require('$WORK/a2/31337.json').contracts.blsKeyRegistry.address" 2>/dev/null); BADV=$(node -p "require('$WORK/a2/31337.json').contracts.counterpartyVerifier.address" 2>/dev/null)
+[ -n "$REG2" ] && [ -n "$BADV" ] && [ "$REG2" != "$(addrOf blsKeyRegistry)" ] && [ "$(cast call --rpc-url $RPA $BADV 'registry()(address)')" = "$REG2" ] && pass "a second registry and a verifier on it deployed" || fail "second registry/verifier: REG2=$REG2 BADV=$BADV"
+cast send --rpc-url $RPA --private-key $K0 $(addrOf adManager) 'setRootVerifier(uint256,address)' 999 $BADV > /dev/null 2>&1
+A pnpm -s run deploy > $L/2b1.log 2>&1; rc=$?
+[ $rc -ne 0 ] && grep -q "AdManager peer 999: registry split" $L/2b1.log && pass "(a) deploy refused the hand-wired peer 999 (not in the manifest), exit $rc" || fail "(a) deploy: exit $rc, $(grep -m1 -i 'error\|split' $L/2b1.log | cut -c1-140)"
+cast send --rpc-url $RPA --private-key $K0 $(addrOf adManager) 'setRootVerifier(uint256,address)' 999 $(addrOf counterpartyVerifier) > /dev/null 2>&1
+cast send --rpc-url $RPA --private-key $K0 $(addrOf orderPortal) 'setRootVerifier(uint256,address)' 998 $BADV > /dev/null 2>&1
+A pnpm -s cli link --peer $MB --enforce-bls > $L/2b2.log 2>&1; rc=$?
+[ $rc -ne 0 ] && grep -q "OrderPortal peer 998: registry split" $L/2b2.log && pass "(b) link --enforce-bls refused a split on another listed peer, exit $rc" || fail "(b) link: exit $rc, $(grep -m1 -i 'error\|split' $L/2b2.log | cut -c1-140)"
+cast send --rpc-url $RPA --private-key $K0 $(addrOf orderPortal) 'setRootVerifier(uint256,address)' 998 $(addrOf counterpartyVerifier) > /dev/null 2>&1
+A pnpm -s run deploy > $L/2b3.log 2>&1 && A pnpm -s cli link --peer $MB --enforce-bls > $L/2b4.log 2>&1 && pass "wiring restored: deploy and link pass again" || fail "restore: $(grep -m1 -i 'error\|split' $L/2b3.log $L/2b4.log | cut -c1-140)"
 
 echo "== 3. --to 0x0 is refused; handover to $A1; rerun sends nothing"
 n0=$(nonceA); A pnpm -s cli handover --to 0x0000000000000000000000000000000000000000 > $L/3z.log 2>&1; rc=$?

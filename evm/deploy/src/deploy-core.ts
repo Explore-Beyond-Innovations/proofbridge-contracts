@@ -1,5 +1,5 @@
 import * as fs from "fs";
-import { assertOneRegistry, checkPeers, switchKeyRegistry, verifierRegistry, type EscrowWiring } from "./one-registry.js";
+import { allPeers, assertOneRegistry, checkPeers, switchKeyRegistry, verifierRegistry, type EscrowWiring } from "./one-registry.js";
 import { ethers } from "ethers";
 import {
   ADMIN_BEARING,
@@ -560,7 +560,7 @@ async function deployCoreRun(
       );
     }
     // #465 (46-2): the peers this AdManager was linked to, as the manifest recorded them.
-    const peers = [
+    const manifestPeers = [
       ...new Set([
         ...Object.keys(existing?.routeTiming ?? {}),
         ...Object.keys(existing?.disputeParams ?? {}),
@@ -577,8 +577,11 @@ async function deployCoreRun(
         rootVerifier: async (peer: string) => String(await c.getFunction("rootVerifier")(peer)),
         setRootVerifier: (peer: string, v: string) =>
           acting.call(c, name, "setRootVerifier", [peer, v], `${name}.setRootVerifier(${peer}, ${v})`),
+        wiredChains: async () => (await c.getFunction("wiredChains")()).map((x: bigint) => x.toString()),
       };
     });
+    // #466: and every peer either escrow says it wired, including by hand.
+    const peers = await allPeers(manifestPeers, escrows, "deploy");
     if (cur.toLowerCase() === blsKeyRegistryAddr.toLowerCase()) {
       console.log(`  [skip] AdManager.setKeyRegistry already set`);
       await checkPeers({ escrows, peers, escrowRegistry: blsKeyRegistryAddr, registryOf, where: "deploy" });

@@ -130,6 +130,7 @@ pub fn accept_admin(env: &Env, config: &mut ContractConfig, pending: Address) {
 
 pub fn set_root_verifier(env: &Env, chain_id: u128, module: Address) {
     storage::set_root_verifier(env, chain_id, &module);
+    storage::add_wired_chain(env, chain_id);
     escrow_events::RootVerifierSet { chain_id, module }.publish(env);
 }
 
