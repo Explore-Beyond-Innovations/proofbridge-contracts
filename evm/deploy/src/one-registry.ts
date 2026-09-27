@@ -22,6 +22,30 @@ export interface EscrowWiring {
   rootVerifier(peer: string): Promise<string>;
   /** Resolves true when sent, false when only described (the admin is someone else). */
   setRootVerifier(peer: string, verifier: string): Promise<boolean>;
+  /** #466: every chain the escrow ever wired a root verifier for (`wiredChains()`). */
+  wiredChains(): Promise<string[]>;
+}
+
+/**
+ * #466: the peers to check are the manifest's and every chain an escrow says it wired, so a
+ * verifier wired by hand for a peer the manifest never recorded is checked too. #467 (47-1): a
+ * list that cannot be read fails the run; falling back would let a timeout pass a split.
+ */
+export async function allPeers(manifestPeers: string[], escrows: EscrowWiring[], where: string): Promise<string[]> {
+  const peers = new Set(manifestPeers.map(String));
+  for (const e of escrows) {
+    let chains: string[];
+    try {
+      chains = await e.wiredChains();
+    } catch (err) {
+      throw new Error(
+        `${where}: cannot read ${e.name}.wiredChains(), so its wired peers cannot be checked ` +
+          `(an escrow built before #466 must be redeployed): ${(err as Error).message ?? err}`,
+      );
+    }
+    for (const c of chains) peers.add(String(c));
+  }
+  return [...peers];
 }
 
 /** #465 (46-4): a verifier the CLI relies on must answer `registry()`; one that does not is named. */

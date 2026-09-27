@@ -1,5 +1,6 @@
 import * as path from "path";
-import { assertOneRegistry, checkPeers, switchKeyRegistry, verifierRegistry, type EscrowWiring } from "./one-registry.js";
+import { assertOneRegistry, deployRegistryStep, verifierRegistry } from "./one-registry.js";
+import { stellarEscrowChain } from "./escrow-chain.js";
 import { adminBlockFromChain, adminsOf, foreignAdmins, type HeldAdmin } from "./handover.js";
 import {
   DEFAULT_STELLAR_CHAIN_ID,
@@ -222,40 +223,21 @@ export async function deployCore(
   // create_ad / set_settlement_signer / lock_for_order fail closed until this is set: an
   // ad's settlement signer must hold a live, unexpired key.
   {
-    // #465 (46-2): the peers this AdManager was linked to, as the manifest recorded them.
-    const peers = [
+    // #465 (46-2): the peers this AdManager was linked to, as the manifest recorded them; #466 adds
+    // every chain the escrows list.
+    const manifestPeers = [
       ...new Set([
         ...Object.keys(existing?.routeTiming ?? {}),
         ...Object.keys(existing?.disputeParams ?? {}),
         ...Object.keys(existing?.rootAnchorConfig?.anchorDelays ?? {}),
       ]),
     ];
-    const escrows: EscrowWiring[] = (
-      [
-        ["AdManager", adManager],
-        ["OrderPortal", orderPortal],
-      ] as const
-    ).map(([name, id]) => ({
-      name,
-      rootVerifier: (peer: string) => (readView(id, "root_verifier", ["--chain_id", peer]) as string | null) ?? null,
-      setRootVerifier: (peer: string, v: string) =>
-        acting.call(id, name, "set_root_verifier", ["--chain_id", peer, "--module", v], `${name}.set_root_verifier(${peer}, ${v})`),
-    }));
-    if (readView(adManager, "key_registry") === blsKeyRegistry) {
-      console.log(`  [skip] AdManager.set_key_registry already ${blsKeyRegistry}`);
-      checkPeers({ escrows, peers, escrowRegistry: blsKeyRegistry, registryOf, where: "deploy" });
-    } else {
-      // #465: the peers move to the verifier on the new registry first, then the registry; never a split.
-      switchKeyRegistry({
-        escrows,
-        peers,
-        newRegistry: blsKeyRegistry,
-        newVerifier: counterpartyVerifier,
-        registryOf,
-        setKeyRegistry: () =>
-          acting.call(adManager, "AdManager", "set_key_registry", ["--registry", blsKeyRegistry], `AdManager.set_key_registry(${blsKeyRegistry})`),
-      });
-    }
+    // #467 (47-2): the specs test the step, not this call (no Stellar end-to-end harness); keep it.
+    deployRegistryStep(stellarEscrowChain(acting, readView), { adManager, orderPortal }, {
+      registry: blsKeyRegistry,
+      verifier: counterpartyVerifier,
+      manifestPeers,
+    });
   }
 
   // ── RootAnchor (2.3f) + Registrar (2.1b) ───────────────────────────

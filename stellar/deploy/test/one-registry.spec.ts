@@ -2,7 +2,7 @@
 // and a switch to a new registry moves the verifiers first. Driven with a fake chain, Stellar ids.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assertOneRegistry, checkPeers, switchKeyRegistry, verifierRegistry, type EscrowWiring } from "../src/one-registry.ts";
+import { assertOneRegistry, checkPeers, deployRegistryStep, linkCheckStep, switchKeyRegistry, verifierRegistry, type EscrowChain, type EscrowWiring } from "../src/one-registry.ts";
 
 const A = "CAREGISTRYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const B = "CBREGISTRYBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
@@ -95,4 +95,73 @@ test("a switch to a verifier on another registry writes nothing", () => {
     /deploy: registry split/,
   );
   assert.deepEqual(c.log, []);
+});
+
+// #466: the steps `link` and `deploy-core` call, driven with a fake chain whose escrows list their
+// wired chains, as `wired_chains()` reports them.
+const AM = "CADMANAGERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const OP = "CORDERPORTALAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const ids = { adManager: AM, orderPortal: OP };
+
+function escrowChain(o: { wired: Record<string, string>; registries: Record<string, string>; keyRegistry: string; unlisted?: boolean }) {
+  const log: string[] = [];
+  const c: EscrowChain = {
+    rootVerifier: (escrow, peer) => o.wired[`${escrow}:${peer}`] ?? null,
+    wiredChains: (escrow) => {
+      if (o.unlisted) throw new Error("HostError: Error(WasmVm, MissingValue)"); // pre-#466 wasm
+      return Object.keys(o.wired).filter((k) => k.startsWith(`${escrow}:`)).map((k) => k.split(":")[1]);
+    },
+    registryOf: (v) => {
+      const r = o.registries[v];
+      if (!r) throw new Error("HostError: Error(WasmVm, InvalidAction)");
+      return r;
+    },
+    keyRegistry: () => o.keyRegistry,
+    setRootVerifier: (escrow, name, peer, v) => {
+      log.push(`${name}.set_root_verifier(${peer})`);
+      o.wired[`${escrow}:${peer}`] = v;
+      return true;
+    },
+    setKeyRegistry: (_am, r) => {
+      log.push("AdManager.set_key_registry");
+      o.keyRegistry = r;
+      return true;
+    },
+  };
+  return { c, log };
+}
+
+test("466: link finds a peer wired by hand outside the one it links, and refuses its split", () => {
+  const { c } = escrowChain({ wired: { [`${AM}:31337`]: V_A, [`${AM}:999`]: V_B }, registries: { [V_A]: A, [V_B]: B }, keyRegistry: A });
+  assert.throws(() => linkCheckStep(c, ids, "31337"), /link: AdManager peer 999: registry split/);
+});
+
+test("466: link passes when every listed peer reads the escrow's registry", () => {
+  const { c } = escrowChain({ wired: { [`${AM}:31337`]: V_A, [`${OP}:999`]: V_A }, registries: { [V_A]: A }, keyRegistry: A });
+  linkCheckStep(c, ids, "31337");
+});
+
+test("466: deploy with the registry unchanged checks a hand-wired peer the manifest never recorded", () => {
+  const { c, log } = escrowChain({ wired: { [`${OP}:999`]: V_B }, registries: { [V_A]: A, [V_B]: B }, keyRegistry: A });
+  assert.throws(
+    () => deployRegistryStep(c, ids, { registry: A, verifier: V_A, manifestPeers: ["31337"] }),
+    /deploy: OrderPortal peer 999: registry split/,
+  );
+  assert.deepEqual(log, []);
+});
+
+test("466: deploy switching the registry also re-points a hand-wired peer, before the registry", () => {
+  const { c, log } = escrowChain({ wired: { [`${AM}:31337`]: V_A, [`${AM}:999`]: V_A }, registries: { [V_A]: A, [V_B]: B }, keyRegistry: A });
+  deployRegistryStep(c, ids, { registry: B, verifier: V_B, manifestPeers: ["31337"] });
+  assert.equal(log[log.length - 1], "AdManager.set_key_registry");
+  assert.ok(log.includes("AdManager.set_root_verifier(999)"), `the hand-wired peer moved: ${log.join(", ")}`);
+});
+
+// #467 (47-1): a failed read of the list must not pass the hand-wired split on 999.
+test("467: an escrow whose list cannot be read fails the run", () => {
+  const { c } = escrowChain({ wired: { [`${AM}:999`]: V_B }, registries: { [V_B]: B }, keyRegistry: A, unlisted: true });
+  assert.throws(
+    () => deployRegistryStep(c, ids, { registry: A, verifier: V_A, manifestPeers: ["31337"] }),
+    /deploy: cannot read AdManager\.wired_chains\(\)/,
+  );
 });

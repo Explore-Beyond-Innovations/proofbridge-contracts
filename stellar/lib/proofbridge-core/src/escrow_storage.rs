@@ -9,7 +9,7 @@
 //! layout-preserving: no migration, no orphaned entry. Anything whose *value* type differs between the two escrows
 //! (the chain record, ads) stays in the contract crate.
 
-use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol};
+use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol, Vec};
 
 use crate::ttl::extend_persistent;
 use crate::types::{ClaimRecord, ContractConfig, OrderRecord, RouteTiming, Status};
@@ -31,6 +31,7 @@ const KEY_ROUTES: Symbol = symbol_short!("routes");
 const KEY_ORDERS: Symbol = symbol_short!("orders");
 const KEY_NULLIFIERS: Symbol = symbol_short!("nulls");
 const KEY_RVERIF: Symbol = symbol_short!("rverif");
+const KEY_WIRED: Symbol = symbol_short!("wired");
 const KEY_INFLT: Symbol = symbol_short!("inflt");
 const KEY_CLAIM: Symbol = symbol_short!("claim");
 const KEY_TIMING: Symbol = symbol_short!("timing");
@@ -215,6 +216,25 @@ pub fn set_root_verifier(env: &Env, chain_id: u128, module: &Address) {
 
 pub fn get_root_verifier(env: &Env, chain_id: u128) -> Option<Address> {
     env.storage().persistent().get(&(KEY_RVERIF, chain_id))
+}
+
+/// #466: every chain a root verifier was ever set for, once each, in first-wired order.
+pub fn add_wired_chain(env: &Env, chain_id: u128) {
+    let mut chains = get_wired_chains(env);
+    if !chains.contains(chain_id) {
+        chains.push_back(chain_id);
+        env.storage().persistent().set(&KEY_WIRED, &chains);
+    }
+    if env.storage().persistent().has(&KEY_WIRED) {
+        extend_persistent(env, &KEY_WIRED);
+    }
+}
+
+pub fn get_wired_chains(env: &Env) -> Vec<u128> {
+    env.storage()
+        .persistent()
+        .get(&KEY_WIRED)
+        .unwrap_or_else(|| Vec::new(env))
 }
 
 // ── in-flight positions ──────────────────────────────────────────────────

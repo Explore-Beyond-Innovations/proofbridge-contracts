@@ -186,6 +186,11 @@ impl OrderPortalContract {
         storage::get_root_verifier(&env, chain_id)
     }
 
+    /// #466: every chain a root verifier was ever set for, once each, in first-wired order.
+    pub fn wired_chains(env: Env) -> soroban_sdk::Vec<u128> {
+        storage::get_wired_chains(&env)
+    }
+
     /// Set the termination clocks for a peer chain (2.3e D6). Validated; unset fails closed.
     pub fn set_route_timing(
         env: Env,

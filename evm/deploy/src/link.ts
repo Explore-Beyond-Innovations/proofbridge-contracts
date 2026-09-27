@@ -7,7 +7,7 @@ import {
 } from "@proofbridge/deployment-manifest";
 import { Acting, adminsOf, connect, foreignAdmins, requireEnv, type DescribedCall } from "./common.js";
 import { attachContract } from "./artifacts.js";
-import { assertOneRegistry, checkPeers, verifierRegistry, type EscrowWiring } from "./one-registry.js";
+import { allPeers, assertOneRegistry, checkPeers, verifierRegistry, type EscrowWiring } from "./one-registry.js";
 import { manifestPath, writeManifest } from "./manifest.js";
 
 export interface LinkOptions {
@@ -162,11 +162,13 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
         name,
         rootVerifier: async (peer: string) => String(await c.getFunction("rootVerifier")(peer)),
         setRootVerifier: async () => false, // link wires above; here it only reads
+        wiredChains: async () => (await c.getFunction("wiredChains")()).map((x: bigint) => x.toString()),
       }),
     );
     await checkPeers({
       escrows,
-      peers: [peerChainId.toString()],
+      // #466: this peer and every other the escrows say they wired.
+      peers: await allPeers([peerChainId.toString()], escrows, "link"),
       escrowRegistry: String(await adManager.getFunction("keyRegistry")()),
       registryOf,
       where: "link",

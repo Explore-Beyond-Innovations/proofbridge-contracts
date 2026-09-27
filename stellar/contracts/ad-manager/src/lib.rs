@@ -189,6 +189,11 @@ impl AdManagerContract {
         storage::get_root_verifier(&env, chain_id)
     }
 
+    /// #466: every chain a root verifier was ever set for, once each, in first-wired order.
+    pub fn wired_chains(env: Env) -> soroban_sdk::Vec<u128> {
+        storage::get_wired_chains(&env)
+    }
+
     /// Set the key registry consulted when an ad's settlement signer is set (2.3c D2).
     pub fn set_key_registry(env: Env, registry: Address) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
