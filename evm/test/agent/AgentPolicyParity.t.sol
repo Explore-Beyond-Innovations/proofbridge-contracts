@@ -3,6 +3,7 @@ pragma solidity ^0.8.34;
 
 import {stdJson} from "forge-std/StdJson.sol";
 import {ModuleKitHelpers, UserOpData} from "modulekit/ModuleKit.sol";
+import {Execution} from "modulekit/accounts/erc7579/lib/ExecutionLib.sol";
 
 import {IAdManager} from "src/interfaces/IAdManager.sol";
 import {ProofBridgeAgentPolicy} from "src/agent/ProofBridgeAgentPolicy.sol";
@@ -14,7 +15,10 @@ import {MockEscrow} from "./mocks/MockEscrow.sol";
 /// Three implementations decide whether an agent's lock is allowed: this module, the Soroban agent
 /// account, and a TypeScript copy the relayer asks first. `test-vectors/agent-policy-parity.json`
 /// holds policy + lock → accept or reject, every verdict written by hand, and all three read it. A
-/// case carries exactly one fault, because the implementations check in different orders.
+/// case carries exactly one fault, except the precedence cases, which pin the one order all three
+/// share. A case this reader does not run names the reason in `skips.evm`, and the enumeration test
+/// asserts it. A `request` step is a batch UserOperation: this chain's "several locks, one
+/// authorization".
 ///
 /// The verdict comes from `preflight`, the one entry point that runs the static rules and the
 /// bucket arithmetic with a clock. But `preflight` is a read, and Soroban's check debits as it
@@ -67,9 +71,19 @@ contract AgentPolicyParityTest is AgentPolicyBase {
     struct Loaded {
         bool revoke;
         bool reinstall;
+        /// A re-install the chain must refuse (a revoked id), or zero when it must install.
+        bytes4 reinstallError;
+        bool setCeiling;
+        bool dropCeiling;
+        bytes32 token;
+        uint256 capacity;
+        uint256 refillPerSecond;
         uint256 warp;
-        bool pinned;
-        bytes callData;
+        /// One entry for a single lock; several for a `request`, which goes as one batch.
+        bool[] pinned;
+        bytes[] callData;
+        bool request;
+        uint256 refusedAt;
         bool accept;
         ProofBridgeAgentPolicy.Refusal refusal;
         string at;
@@ -98,6 +112,11 @@ contract AgentPolicyParityTest is AgentPolicyBase {
     /// forge's per-test gas ceiling. Slicing by index keeps each frame small however the table grows.
     uint256 internal constant SLICES = 4;
 
+    /// @dev `_accountLimit`'s slot in the module's layout, for the one step that has to reach under
+    ///      the module: a ceiling going missing. `_dropCeiling` checks the configured capacity is
+    ///      there before zeroing it, so a layout change fails loudly rather than zeroing nothing.
+    uint256 internal constant ACCOUNT_LIMIT_SLOT = 12;
+
     function test_theModuleMatchesTheSharedPolicyFixture_slice0() public {
         _runSlice(0);
     }
@@ -122,6 +141,7 @@ contract AgentPolicyParityTest is AgentPolicyBase {
         string memory vectors = vm.readFile(VECTORS);
         uint256 cases;
         uint256 steps;
+        uint256 skipped;
         uint256[] memory perSlice = new uint256[](SLICES);
         uint256 total = vectors.readUint(".counts.total.cases");
         // The count is the table's real length, not a number the fixture could understate.
@@ -129,7 +149,11 @@ contract AgentPolicyParityTest is AgentPolicyBase {
         assertEq(vectors.readUint(".counts.evm.slices"), SLICES, "the fixture and this reader agree on the slice count");
         for (uint256 c = 0; c < total; ++c) {
             (bool mine, uint256 stepCount, uint256 slice) = this.loadCount(c);
-            if (!mine) continue;
+            if (!mine) {
+                // Not a silent skip: the fixture has to say why this implementation cannot run it.
+                ++skipped;
+                continue;
+            }
             ++cases;
             steps += stepCount;
             ++perSlice[slice];
@@ -137,6 +161,7 @@ contract AgentPolicyParityTest is AgentPolicyBase {
         assertGt(cases, 0, "no case is this reader's");
         assertEq(cases, vectors.readUint(".counts.evm.cases"), "cases seen");
         assertEq(steps, vectors.readUint(".counts.evm.steps"), "steps seen");
+        assertEq(cases + skipped, total, "every case run or skipped with a reason");
         for (uint256 i = 0; i < SLICES; ++i) {
             assertGt(perSlice[i], 0, "a slice with nothing in it proves nothing by passing");
         }
@@ -179,9 +204,24 @@ contract AgentPolicyParityTest is AgentPolicyBase {
                 }
                 if (step.reinstall) {
                     // The owner installs the same policy again: a new version, so a fresh bucket for
-                    // the agent, while the account's ceiling keeps what was spent.
-                    (bool again,) = _install(setup.policy);
-                    assertTrue(again, string.concat(step.at, ": did not reinstall"));
+                    // the agent, while the account's ceiling keeps what was spent. Or, for a revoked
+                    // id, a refusal: the tombstone.
+                    (bool again, bytes memory err) = _install(setup.policy);
+                    if (step.reinstallError == bytes4(0)) {
+                        assertTrue(again, string.concat(step.at, ": did not reinstall"));
+                    } else {
+                        assertFalse(again, string.concat(step.at, ": re-installed"));
+                        assertEq(bytes4(err), step.reinstallError, step.at);
+                    }
+                    continue;
+                }
+                if (step.setCeiling) {
+                    vm.prank(instance.account);
+                    module.setAccountLimit(step.token, step.capacity, step.refillPerSecond);
+                    continue;
+                }
+                if (step.dropCeiling) {
+                    _dropCeiling(step.token, setup.ceilings, step.at);
                     continue;
                 }
                 _judge(step);
@@ -231,12 +271,28 @@ contract AgentPolicyParityTest is AgentPolicyBase {
     //////////////////////////////////////////////////////////////*/
 
     function _judge(Loaded memory step) internal {
-        MockEscrow target = step.pinned ? escrow : unpinned;
-        UserOpData memory op = instance.getExecOps(address(target), 0, step.callData, address(module));
+        UserOpData memory op;
+        if (step.request) {
+            // One authorization for several locks: a batch, judged whole.
+            Execution[] memory calls = new Execution[](step.callData.length);
+            for (uint256 i = 0; i < calls.length; ++i) {
+                calls[i] = Execution({
+                    target: address(step.pinned[i] ? escrow : unpinned), value: 0, callData: step.callData[i]
+                });
+            }
+            op = instance.getExecOps(calls, address(module));
+        } else {
+            op = instance.getExecOps(address(step.pinned[0] ? escrow : unpinned), 0, step.callData[0], address(module));
+        }
         op.userOp.signature = _sign(op.userOpHash, agentKey);
 
-        (ProofBridgeAgentPolicy.Refusal why,) = module.preflight(instance.account, agentId, op.userOp.callData);
+        (ProofBridgeAgentPolicy.Refusal why, uint256 callIndex) =
+            module.preflight(instance.account, agentId, op.userOp.callData);
         assertEq(uint8(why), uint8(step.refusal), step.at);
+        // In a request, which lock was refused: the second of two means the first's debit counted.
+        if (step.request && !step.accept) {
+            assertEq(callIndex, step.refusedAt, string.concat(step.at, ": the lock refused"));
+        }
 
         // ...and the enforcing path, which `preflight` only describes. What a refusal proves depends
         // on which half refuses. The *validator's* no is the EntryPoint's, and is the same on every
@@ -244,7 +300,7 @@ contract AgentPolicyParityTest is AgentPolicyBase {
         // expired one. Anything else reverting (prefund, the gas budget, the pause) would not match.
         // A *volume* refusal is the hook's, which surfaces differently per account type, so there
         // the claim is only what it can be: `preflight` named the reason, and the lock did not land.
-        uint256 before = target.locks();
+        uint256 before = escrow.locks() + unpinned.locks();
         if (!step.accept) {
             ProofBridgeAgentPolicy.Refusal r = step.refusal;
             if (
@@ -263,7 +319,27 @@ contract AgentPolicyParityTest is AgentPolicyBase {
             }
         }
         op.execUserOps();
-        assertEq(target.locks(), before + (step.accept ? 1 : 0), string.concat(step.at, ": through the EntryPoint"));
+        assertEq(
+            escrow.locks() + unpinned.locks(),
+            before + (step.accept ? step.callData.length : 0),
+            string.concat(step.at, ": through the EntryPoint")
+        );
+    }
+
+    /// @dev A ceiling row gone from under a live policy. Soroban reaches this by an idle entry
+    ///      archiving; EVM storage does not expire and no call removes a ceiling, so this zeroes the
+    ///      stored row to reach the module's own refusal for it (`_floors`, `_acquireCeiling`).
+    function _dropCeiling(bytes32 token, Ceiling[] memory ceilings, string memory at) internal {
+        bytes32 ceilKey = keccak256(abi.encode(module.epochOf(instance.account), "ceiling", token));
+        bytes32 slot = keccak256(abi.encode(instance.account, keccak256(abi.encode(ceilKey, ACCOUNT_LIMIT_SLOT))));
+        uint256 configured;
+        for (uint256 i = 0; i < ceilings.length; ++i) {
+            if (ceilings[i].token == token) configured = ceilings[i].capacity;
+        }
+        assertGt(configured, 0, string.concat(at, ": the case configured no ceiling to drop"));
+        assertEq(uint256(vm.load(address(module), slot)), configured, string.concat(at, ": not the ceiling's slot"));
+        vm.store(address(module), slot, bytes32(0));
+        vm.store(address(module), bytes32(uint256(slot) + 1), bytes32(0));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -322,7 +398,13 @@ contract AgentPolicyParityTest is AgentPolicyBase {
         mine = _reads(vectors, _case(c, ".readers"));
         // A case is this reader's exactly when the fixture gave it a slice.
         assertEq(vm.keyExistsJson(vectors, _case(c, ".evmSlice")), mine, "evmSlice present iff evm reads the case");
-        if (!mine) return (false, 0, 0);
+        // ...and it is not this reader's exactly when the fixture says why not.
+        string memory why = _case(c, ".skips.evm");
+        assertEq(vm.keyExistsJson(vectors, why), !mine, "skips.evm present iff evm does not read the case");
+        if (!mine) {
+            assertGt(bytes(vectors.readString(why)).length, 0, "an empty reason is no reason");
+            return (false, 0, 0);
+        }
         steps = vectors.readUint(_case(c, ".stepCount"));
         slice = vectors.readUint(_case(c, ".evmSlice"));
         // Stated by the fixture; held to the array's real end, or an understated count would let a
@@ -342,12 +424,45 @@ contract AgentPolicyParityTest is AgentPolicyBase {
         string memory op = vectors.readString(_step(c, s, ".op"));
         step.revoke = _eq(op, "revoke");
         step.reinstall = _eq(op, "reinstall");
-        if (step.revoke || step.reinstall) return step;
-        require(_eq(op, "lock"), string.concat("an op this reader does not know: ", op));
+        if (step.revoke) return step;
+        if (step.reinstall) {
+            string memory refused = _step(c, s, ".expect");
+            if (vm.keyExistsJson(vectors, refused)) {
+                step.reinstallError = _installError(
+                    vectors.readString(string.concat(".installReasons.", vectors.readString(refused), ".evm"))
+                );
+            }
+            return step;
+        }
+        step.setCeiling = _eq(op, "setCeiling");
+        step.dropCeiling = _eq(op, "dropCeiling");
+        if (step.setCeiling || step.dropCeiling) {
+            step.token = vectors.readBytes32(_step(c, s, ".token"));
+            if (step.setCeiling) {
+                step.capacity = vectors.readUint(_step(c, s, ".capacity"));
+                step.refillPerSecond = vectors.readUint(_step(c, s, ".refillPerSecond"));
+            }
+            return step;
+        }
+        step.request = _eq(op, "request");
+        require(step.request || _eq(op, "lock"), string.concat("an op this reader does not know: ", op));
 
-        string memory lock = _step(c, s, ".lock");
-        step.pinned = _eq(vectors.readString(string.concat(lock, ".target")), "pinned");
-        step.callData = _callData(vectors, lock);
+        if (step.request) {
+            string memory locks = _step(c, s, ".locks");
+            uint256 n;
+            while (vm.keyExistsJson(vectors, _nth(locks, n, ""))) ++n;
+            step.pinned = new bool[](n);
+            step.callData = new bytes[](n);
+            for (uint256 i = 0; i < n; ++i) {
+                (step.pinned[i], step.callData[i]) = _readLock(vectors, _nth(locks, i, ""));
+            }
+            string memory at = _step(c, s, ".refusedAt");
+            if (vm.keyExistsJson(vectors, at)) step.refusedAt = vectors.readUint(at);
+        } else {
+            step.pinned = new bool[](1);
+            step.callData = new bytes[](1);
+            (step.pinned[0], step.callData[0]) = _readLock(vectors, _step(c, s, ".lock"));
+        }
 
         string memory want = _expected(vectors, _step(c, s, ".expect"));
         step.accept = _eq(want, "accept");
@@ -355,6 +470,21 @@ contract AgentPolicyParityTest is AgentPolicyBase {
             ? ProofBridgeAgentPolicy.Refusal.None
             : _refusal(vectors.readString(string.concat(".reasons.", want, ".evm")));
         if (!step.accept) step.at = string.concat(step.at, ": want ", want);
+    }
+
+    function _readLock(string memory vectors, string memory lock)
+        internal
+        view
+        returns (bool pinned, bytes memory data)
+    {
+        // This module has no rule about the order's maker (`AdManager` reverts `NotMaker` itself), so
+        // a lock naming a stranger is never this reader's: the fixture marks such cases Soroban's.
+        require(
+            _eq(vectors.readString(string.concat(lock, ".maker")), "account"),
+            "a lock with a foreign maker reached the EVM reader"
+        );
+        pinned = _eq(vectors.readString(string.concat(lock, ".target")), "pinned");
+        data = _callData(vectors, lock);
     }
 
     function _callData(string memory vectors, string memory lock) internal view returns (bytes memory) {
@@ -414,6 +544,8 @@ contract AgentPolicyParityTest is AgentPolicyBase {
         if (_eq(word, "NoPolicy")) return ProofBridgeAgentPolicy.Refusal.NoPolicy;
         if (_eq(word, "SettlementSignerMismatch")) return ProofBridgeAgentPolicy.Refusal.SettlementSignerMismatch;
         if (_eq(word, "AdNotInScope")) return ProofBridgeAgentPolicy.Refusal.AdNotInScope;
+        if (_eq(word, "NoAccountCeiling")) return ProofBridgeAgentPolicy.Refusal.NoAccountCeiling;
+        if (_eq(word, "OverStoredAllowance")) return ProofBridgeAgentPolicy.Refusal.OverStoredAllowance;
         revert(string.concat("a refusal this reader does not know: ", word));
     }
 
@@ -422,6 +554,7 @@ contract AgentPolicyParityTest is AgentPolicyBase {
             return ProofBridgeAgentPolicy.AgentPolicy__NoAccountCeiling.selector;
         }
         if (_eq(word, "AgentPolicy__BadExpiry")) return ProofBridgeAgentPolicy.AgentPolicy__BadExpiry.selector;
+        if (_eq(word, "AgentPolicy__AgentRevoked")) return ProofBridgeAgentPolicy.AgentPolicy__AgentRevoked.selector;
         revert(string.concat("an install error this reader does not know: ", word));
     }
 
