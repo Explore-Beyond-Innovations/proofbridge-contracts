@@ -214,6 +214,40 @@ pub fn spend_schedule(
     Ok(())
 }
 
+/// Spend a matured bound schedule whose commitment (and amount) match exactly, or refuse.
+/// The caller removes the row; one rule for the per-ad lock and the account-wide changes.
+fn check_bound(
+    s: Option<policy::BoundSchedule>,
+    commitment: &BytesN<32>,
+    amount: u128,
+    now: u64,
+) -> Result<(), AccountError> {
+    let s = s.ok_or(AccountError::NotScheduled)?;
+    if &s.commitment != commitment || s.amount != amount || now < s.ready_at || now >= s.expires_at
+    {
+        return Err(AccountError::NotScheduled);
+    }
+    Ok(())
+}
+
+/// An account-wide change while any ad is guarded: a matured schedule for this action naming
+/// exactly this commitment. Single use.
+pub fn spend_account_schedule(
+    env: &Env,
+    action: &Symbol,
+    commitment: &BytesN<32>,
+    now: u64,
+) -> Result<(), AccountError> {
+    check_bound(
+        policy::get_account_schedule(env, action),
+        commitment,
+        0,
+        now,
+    )?;
+    policy::clear_account_schedule(env, action);
+    Ok(())
+}
+
 /// The owner path's half of `check_contract_call` (2.1e).
 /// Instant to protect, slow to extract. Three calls move the maker's money out of reach and are
 /// constrained on a guarded ad; everything else the owner does — `set_settlement_signer`, funding,
@@ -297,6 +331,18 @@ pub fn check_owner_call(env: &Env, c: &ContractContext) -> Result<(), AccountErr
     };
 
     if announced {
+        if c.fn_name == lock {
+            // Bound to the exact order, not just its size (C-32).
+            let commitment = policy::args_commitment(env, &c.args);
+            check_bound(
+                policy::get_lock_schedule(env, &ad_id),
+                &commitment,
+                amount,
+                now,
+            )?;
+            policy::clear_lock_schedule(env, &ad_id);
+            return Ok(());
+        }
         return spend_schedule(env, &ad_id, &c.fn_name, amount, to, now);
     }
 

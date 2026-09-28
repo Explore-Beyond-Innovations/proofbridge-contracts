@@ -2409,8 +2409,15 @@ fn t52_repointing_targets_does_not_remove_the_guard() {
     let to = Address::generate(&f.env);
     guard(&f, 0, 3_600, 86_400);
 
+    // Adding a target on a guarded account is itself scheduled (C-29); announce and wait it out.
     let elsewhere = Address::generate(&f.env);
-    f.client.set_targets(&vec![&f.env, elsewhere.clone()]);
+    let targets = vec![&f.env, elsewhere.clone()];
+    f.client.schedule_account_extractive(
+        &Symbol::new(&f.env, "set_targets"),
+        &commit(&f.env, vec![&f.env, targets.to_val()]),
+    );
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    f.client.set_targets(&targets);
 
     let ctx = vec![
         &f.env,
@@ -2585,4 +2592,1094 @@ fn t52_guardrail_input_is_validated() {
         ),
         Err(Ok(AccountError::ActionNotAllowed))
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Pre-soak batch C: D6 and the agent account gaps
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Built by `stellar contract build --optimize` before the tests, as CI does.
+const ACCOUNT_WASM: &[u8] =
+    include_bytes!("../../../target/wasm32v1-none/release/agent_account.wasm");
+const AD_MANAGER_WASM: &[u8] =
+    include_bytes!("../../../target/wasm32v1-none/release/ad_manager.wasm");
+const MERKLE_WASM: &[u8] =
+    include_bytes!("../../../target/wasm32v1-none/release/merkle_manager.wasm");
+
+/// `sha256(XDR(ScVal::Vec(args)))`, computed through the XDR crate the way a client would, not
+/// through the contract's own helper.
+fn commit(env: &Env, args: Vec<Val>) -> BytesN<32> {
+    let sc = ScVal::try_from_val(env, &args.to_val()).unwrap();
+    let bytes = sc.to_xdr(Limits::none()).unwrap();
+    env.crypto()
+        .sha256(&Bytes::from_slice(env, &bytes))
+        .to_bytes()
+}
+
+fn policy_args(
+    env: &Env,
+    id: &BytesN<32>,
+    tokens: &Vec<BytesN<32>>,
+    valid_until: u64,
+    signer: &BytesN<32>,
+    scope: &Option<Vec<String>>,
+    limits: &Vec<TokenLimit>,
+) -> Vec<Val> {
+    vec![
+        env,
+        id.into_val(env),
+        vec![env, lock_for_order(env)].into_val(env),
+        tokens.into_val(env),
+        valid_until.into_val(env),
+        signer.into_val(env),
+        scope.into_val(env),
+        limits.into_val(env),
+    ]
+}
+
+fn sym_of(env: &Env, s: &str) -> Symbol {
+    Symbol::new(env, s)
+}
+
+/// C-5 (D6): on a guarded account, `upgrade` needs a matured `upgrade` schedule naming exactly
+/// that wasm hash, and the schedule is single use.
+#[test]
+fn c5_upgrade_on_a_guarded_account_needs_a_matured_schedule_for_that_wasm() {
+    let f = fixture();
+    let hash = f.env.deployer().upload_contract_wasm(ACCOUNT_WASM);
+    let other = b32(&f.env, 0x42);
+    let up = sym_of(&f.env, "upgrade");
+    guard(&f, 0, 3_600, 86_400);
+
+    assert_eq!(
+        f.client.try_upgrade(&hash),
+        Err(Ok(AccountError::NotScheduled))
+    );
+
+    // A matured schedule for a different wasm does not authorize this one.
+    f.client.schedule_account_extractive(&up, &other);
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    assert_eq!(
+        f.client.try_upgrade(&hash),
+        Err(Ok(AccountError::NotScheduled))
+    );
+
+    // The right hash, announced but not matured.
+    f.client.schedule_account_extractive(&up, &hash);
+    let s = f.client.account_schedule(&up).unwrap();
+    assert_eq!(s.commitment, hash);
+    assert_eq!(s.ready_at, T0 + 3_600 + 3_600);
+    f.env.ledger().set_timestamp(T0 + 3_600 + 3_599);
+    assert_eq!(
+        f.client.try_upgrade(&hash),
+        Err(Ok(AccountError::NotScheduled))
+    );
+
+    // Expired is refused too.
+    f.env.ledger().set_timestamp(T0 + 3_600 + 3_600 + 86_400);
+    assert_eq!(
+        f.client.try_upgrade(&hash),
+        Err(Ok(AccountError::NotScheduled))
+    );
+
+    // Matured and in the window: it goes through, and the row is spent.
+    f.client.schedule_account_extractive(&up, &hash);
+    f.env
+        .ledger()
+        .set_timestamp(T0 + 3_600 + 3_600 + 86_400 + 3_600);
+    f.client.upgrade(&hash);
+    assert!(f.client.account_schedule(&up).is_none(), "single use");
+    assert_eq!(f.client.owner(), f.owner, "storage survived the swap");
+}
+
+/// C-5: an unguarded account upgrades as it always did, with no schedule.
+#[test]
+fn c5_an_unguarded_account_upgrades_instantly() {
+    let f = fixture();
+    let hash = f.env.deployer().upload_contract_wasm(ACCOUNT_WASM);
+    f.client.upgrade(&hash);
+    assert_eq!(f.client.owner(), f.owner);
+}
+
+/// D6: the account-wide delay is the longest across the roster and the window the shortest, so
+/// guarding a second ad with a short delay cannot shorten the wait. Scheduling needs a roster.
+#[test]
+fn d6_account_schedules_take_the_strictest_guardrail() {
+    let f = fixture();
+    let up = sym_of(&f.env, "upgrade");
+    assert_eq!(
+        f.client
+            .try_schedule_account_extractive(&up, &b32(&f.env, 1)),
+        Err(Ok(AccountError::NoGuardRail))
+    );
+    assert_eq!(
+        f.client
+            .try_schedule_account_extractive(&sym_of(&f.env, "withdraw_from_ad"), &b32(&f.env, 1)),
+        Err(Ok(AccountError::ActionNotAllowed))
+    );
+    guard(&f, 0, 86_400, 600);
+    f.client.set_guard_rail(
+        &String::from_str(&f.env, "ad-2"),
+        &Some(GuardRail {
+            threshold: 0,
+            delay: 60,
+            window: 86_400,
+            rate: Limit {
+                capacity: 1,
+                refill_per_second: 1,
+            },
+            bucket: Bucket {
+                level: 0,
+                last_ts: 0,
+            },
+        }),
+    );
+    f.client.schedule_account_extractive(&up, &b32(&f.env, 1));
+    let s = f.client.account_schedule(&up).unwrap();
+    assert_eq!(s.ready_at, T0 + 86_400);
+    assert_eq!(s.expires_at, T0 + 86_400 + 600);
+
+    f.client.cancel_account_extractive(&up);
+    assert!(f.client.account_schedule(&up).is_none());
+    assert_eq!(
+        f.client.try_cancel_account_extractive(&up),
+        Err(Ok(AccountError::NotScheduled))
+    );
+
+    // Disarming a guardrail clears the account-wide rows timed against it.
+    f.client.schedule_account_extractive(&up, &b32(&f.env, 1));
+    f.client
+        .schedule_extractive(&ad(&f.env), &sym_of(&f.env, "set_guard_rail"), &0, &f.owner);
+    f.env.ledger().set_timestamp(T0 + 86_400);
+    f.client.set_guard_rail(&ad(&f.env), &None);
+    assert!(f.client.account_schedule(&up).is_none());
+}
+
+/// C-40: the swap lands after `upgrade` returns, so `upgrade` must not claim a version; the new
+/// code's `migrate` writes the one it expects. Storage survives the swap.
+#[test]
+fn c40_upgrade_leaves_the_marker_and_migrate_moves_it() {
+    let f = fixture();
+    // An account written by an older code: marker 1.
+    f.env.as_contract(&f.account, || {
+        f.env
+            .storage()
+            .instance()
+            .set(&policy::DataKey::SchemaVersion, &1_u32);
+    });
+    let hash = f.env.deployer().upload_contract_wasm(ACCOUNT_WASM);
+    f.client.upgrade(&hash);
+    assert_eq!(f.client.schema_version(), 1, "upgrade claims no version");
+
+    assert_eq!(f.client.migrate(), SCHEMA_VERSION);
+    assert_eq!(f.client.schema_version(), SCHEMA_VERSION);
+    assert_eq!(f.client.owner(), f.owner);
+    assert_eq!(f.client.targets(), vec![&f.env, f.target.clone()]);
+    assert!(f.client.policy(&f.agent.id(&f.env)).is_some());
+
+    // A marker from newer code is a downgrade this code cannot read.
+    f.env.as_contract(&f.account, || {
+        f.env
+            .storage()
+            .instance()
+            .set(&policy::DataKey::SchemaVersion, &(SCHEMA_VERSION + 1));
+    });
+    assert_eq!(f.client.try_migrate(), Err(Ok(AccountError::SchemaTooNew)));
+}
+
+/// C-40, on the running code rather than the uploaded wasm: `migrate` moves an old marker forward
+/// and refuses a newer one.
+#[test]
+fn c40_migrate_moves_an_old_marker_and_refuses_a_newer_one() {
+    let f = fixture();
+    let set = |v: u32| {
+        f.env.as_contract(&f.account, || {
+            f.env
+                .storage()
+                .instance()
+                .set(&policy::DataKey::SchemaVersion, &v);
+        })
+    };
+    set(1);
+    assert_eq!(f.client.migrate(), SCHEMA_VERSION);
+    assert_eq!(f.client.schema_version(), SCHEMA_VERSION);
+    set(SCHEMA_VERSION + 1);
+    assert_eq!(f.client.try_migrate(), Err(Ok(AccountError::SchemaTooNew)));
+    assert_eq!(f.client.schema_version(), SCHEMA_VERSION + 1);
+}
+
+/// C-29: every loosening axis of `set_policy` is refused unannounced on a guarded account, and the
+/// boundary sits exactly at "no wider than now": equal is instant, one more is scheduled.
+#[test]
+fn c29_loosening_set_policy_is_scheduled_on_a_guarded_account() {
+    let f = fixture();
+    let id = f.agent.id(&f.env);
+    let extra = b32(&f.env, 0x77);
+    f.client.set_account_limit(
+        &extra,
+        &Limit {
+            capacity: u128::MAX / 2,
+            refill_per_second: 1,
+        },
+    );
+    let two = vec![&f.env, f.ad_token.clone(), f.order_token.clone()];
+    let scope = Some(vec![&f.env, ad(&f.env)]);
+    let base = |max: u128, cap: u128, refill: u128| {
+        let mut v = Vec::new(&f.env);
+        for t in two.iter() {
+            v.push_back(tl(&t, max, cap, refill));
+        }
+        v
+    };
+    let until = T0 + 10_000;
+    f.client.set_policy(
+        &id,
+        &vec![&f.env, lock_for_order(&f.env)],
+        &two,
+        &until,
+        &f.signer,
+        &scope,
+        &base(1_000, 2_000, 10),
+    );
+    guard(&f, 0, 3_600, 86_400);
+
+    let try_set = |tokens: &Vec<BytesN<32>>,
+                   until: u64,
+                   scope: &Option<Vec<String>>,
+                   limits: &Vec<TokenLimit>| {
+        f.client.try_set_policy(
+            &id,
+            &vec![&f.env, lock_for_order(&f.env)],
+            tokens,
+            &until,
+            &f.signer,
+            scope,
+            limits,
+        )
+    };
+    let three = vec![
+        &f.env,
+        f.ad_token.clone(),
+        f.order_token.clone(),
+        extra.clone(),
+    ];
+    let mut three_limits = base(1_000, 2_000, 10);
+    three_limits.push_back(tl(&extra, 1, 1, 1));
+    let loosening: [(
+        &str,
+        Vec<BytesN<32>>,
+        u64,
+        Option<Vec<String>>,
+        Vec<TokenLimit>,
+    ); 8] = [
+        (
+            "cap +1",
+            two.clone(),
+            until,
+            scope.clone(),
+            base(1_001, 2_000, 10),
+        ),
+        (
+            "capacity +1",
+            two.clone(),
+            until,
+            scope.clone(),
+            base(1_000, 2_001, 10),
+        ),
+        (
+            "refill +1",
+            two.clone(),
+            until,
+            scope.clone(),
+            base(1_000, 2_000, 11),
+        ),
+        (
+            "a new token",
+            three.clone(),
+            until,
+            scope.clone(),
+            three_limits.clone(),
+        ),
+        (
+            "expiry +1",
+            two.clone(),
+            until + 1,
+            scope.clone(),
+            base(1_000, 2_000, 10),
+        ),
+        (
+            "expiry removed",
+            two.clone(),
+            0,
+            scope.clone(),
+            base(1_000, 2_000, 10),
+        ),
+        (
+            "a wider scope",
+            two.clone(),
+            until,
+            Some(vec![&f.env, ad(&f.env), String::from_str(&f.env, "ad-2")]),
+            base(1_000, 2_000, 10),
+        ),
+        (
+            "scope dropped",
+            two.clone(),
+            until,
+            None,
+            base(1_000, 2_000, 10),
+        ),
+    ];
+    for (label, tokens, u, sc, limits) in loosening.iter() {
+        assert_eq!(
+            try_set(tokens, *u, sc, limits),
+            Err(Ok(AccountError::NotScheduled)),
+            "{label} is loosening"
+        );
+    }
+    // A new agent key is loosening by definition.
+    assert_eq!(
+        f.client.try_set_policy(
+            &Agent::new(99).id(&f.env),
+            &vec![&f.env, lock_for_order(&f.env)],
+            &two,
+            &until,
+            &f.signer,
+            &scope,
+            &base(1_000, 2_000, 10),
+        ),
+        Err(Ok(AccountError::NotScheduled))
+    );
+
+    // Equal on every axis, and each axis one step tighter, are instant.
+    let one = vec![&f.env, f.ad_token.clone()];
+    let mut one_limits = Vec::new(&f.env);
+    one_limits.push_back(tl(&f.ad_token, 999, 1_999, 9));
+    let tightening: [(
+        &str,
+        Vec<BytesN<32>>,
+        u64,
+        Option<Vec<String>>,
+        Vec<TokenLimit>,
+    ); 6] = [
+        (
+            "equal",
+            two.clone(),
+            until,
+            scope.clone(),
+            base(1_000, 2_000, 10),
+        ),
+        (
+            "cap -1",
+            two.clone(),
+            until,
+            scope.clone(),
+            base(999, 2_000, 10),
+        ),
+        (
+            "capacity -1",
+            two.clone(),
+            until,
+            scope.clone(),
+            base(999, 1_999, 10),
+        ),
+        (
+            "refill -1",
+            two.clone(),
+            until,
+            scope.clone(),
+            base(999, 1_999, 9),
+        ),
+        (
+            "expiry -1",
+            two.clone(),
+            until - 1,
+            scope.clone(),
+            base(999, 1_999, 9),
+        ),
+        (
+            "a token dropped",
+            one.clone(),
+            until - 1,
+            scope.clone(),
+            one_limits.clone(),
+        ),
+    ];
+    for (label, tokens, u, sc, limits) in tightening.iter() {
+        assert_eq!(
+            try_set(tokens, *u, sc, limits),
+            Ok(Ok(())),
+            "{label} is instant"
+        );
+    }
+
+    // Announced and matured, a loosening write goes through, but only the exact one announced.
+    let limits = base(5_000, 5_000, 50);
+    let args = policy_args(&f.env, &id, &two, 0, &f.signer, &None, &limits);
+    f.client
+        .schedule_account_extractive(&sym_of(&f.env, "set_policy"), &commit(&f.env, args));
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    assert_eq!(
+        try_set(&two, 0, &None, &base(5_000, 5_000, 51)),
+        Err(Ok(AccountError::NotScheduled)),
+        "a different write than the one announced"
+    );
+    assert_eq!(try_set(&two, 0, &None, &limits), Ok(Ok(())));
+    assert!(f
+        .client
+        .account_schedule(&sym_of(&f.env, "set_policy"))
+        .is_none());
+}
+
+/// C-29: an unscoped, non-expiring policy admits any scope and any expiry as tightening.
+#[test]
+fn c29_narrowing_an_open_policy_is_instant() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let tokens = vec![&f.env, f.ad_token.clone(), f.order_token.clone()];
+    let mut limits = Vec::new(&f.env);
+    for t in tokens.iter() {
+        limits.push_back(tl(&t, 1_000_000, u128::MAX / 2, 1));
+    }
+    f.client.set_policy(
+        &f.agent.id(&f.env),
+        &vec![&f.env, lock_for_order(&f.env)],
+        &tokens,
+        &(T0 + 5),
+        &f.signer,
+        &Some(vec![&f.env, ad(&f.env)]),
+        &limits,
+    );
+    assert_eq!(
+        f.client.policy(&f.agent.id(&f.env)).unwrap().valid_until,
+        T0 + 5
+    );
+}
+
+/// C-29: an instant tightening must not refill the agent's spent bucket. Re-installing used to
+/// reset it, which made "tighten" a way to top the agent up.
+#[test]
+fn c29_a_tightening_write_keeps_the_spent_bucket() {
+    let f = fixture();
+    install_metered(&f, 1_000, 1, None);
+    agent_check(&f, &lock_of(&f, 1_000, "ad-1")).expect("drain the bucket");
+    guard(&f, 0, 3_600, 86_400);
+    install_metered(&f, 1_000, 1, None);
+    expect_err(
+        agent_check(&f, &lock_of(&f, 1, "ad-1")),
+        AccountError::VolumeExceeded,
+    );
+    f.env.ledger().set_timestamp(T0 + 5);
+    agent_check(&f, &lock_of(&f, 5, "ad-1")).expect("five seconds of refill, no more");
+}
+
+/// C-29: `set_account_limit` loosening (a first limit, a higher capacity or refill) is scheduled on
+/// a guarded account; equal or lower is instant.
+#[test]
+fn c29_loosening_an_account_limit_is_scheduled() {
+    let f = fixture();
+    let lim = |capacity: u128, refill_per_second: u128| Limit {
+        capacity,
+        refill_per_second,
+    };
+    f.client.set_account_limit(&f.ad_token, &lim(1_000, 10));
+    guard(&f, 0, 3_600, 86_400);
+
+    for (label, l) in [
+        ("capacity +1", lim(1_001, 10)),
+        ("refill +1", lim(1_000, 11)),
+    ] {
+        assert_eq!(
+            f.client.try_set_account_limit(&f.ad_token, &l),
+            Err(Ok(AccountError::NotScheduled)),
+            "{label}"
+        );
+    }
+    assert_eq!(
+        f.client
+            .try_set_account_limit(&b32(&f.env, 0x55), &lim(1, 1)),
+        Err(Ok(AccountError::NotScheduled)),
+        "a first limit for a token"
+    );
+    f.client.set_account_limit(&f.ad_token, &lim(1_000, 10));
+    f.client.set_account_limit(&f.ad_token, &lim(999, 9));
+
+    let raised = lim(5_000, 50);
+    f.client.schedule_account_extractive(
+        &sym_of(&f.env, "set_account_limit"),
+        &commit(
+            &f.env,
+            vec![&f.env, f.ad_token.to_val(), raised.into_val(&f.env)],
+        ),
+    );
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    f.client.set_account_limit(&f.ad_token, &raised);
+    assert_eq!(
+        f.client.try_set_account_limit(&f.ad_token, &lim(5_001, 50)),
+        Err(Ok(AccountError::NotScheduled)),
+        "single use"
+    );
+}
+
+/// C-29: adding a target widens where an agent may call; removing one is instant.
+#[test]
+fn c29_adding_a_target_is_scheduled_removing_is_not() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let extra = Address::generate(&f.env);
+    assert_eq!(
+        f.client
+            .try_set_targets(&vec![&f.env, f.target.clone(), extra.clone()]),
+        Err(Ok(AccountError::NotScheduled))
+    );
+    f.client.set_targets(&vec![&f.env, f.target.clone()]);
+}
+
+/// C-33: on the roster with no row is archived, not unarmed. `set_guard_rail` used to read it as
+/// "never armed" and disarm instantly while the owner path refused the same state.
+#[test]
+fn c33_set_guard_rail_refuses_an_archived_row() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    f.env.as_contract(&f.account, || {
+        f.env
+            .storage()
+            .persistent()
+            .remove(&policy::DataKey::GuardRail(ad(&f.env)));
+    });
+    assert_eq!(
+        f.client.try_set_guard_rail(&ad(&f.env), &None),
+        Err(Ok(AccountError::GuardRailArchived))
+    );
+    assert_eq!(
+        f.client.try_set_guard_rail(
+            &ad(&f.env),
+            &Some(GuardRail {
+                threshold: u128::MAX,
+                delay: 1,
+                window: 1,
+                rate: Limit {
+                    capacity: 1,
+                    refill_per_second: 1,
+                },
+                bucket: Bucket {
+                    level: 0,
+                    last_ts: 0,
+                },
+            }),
+        ),
+        Err(Ok(AccountError::GuardRailArchived))
+    );
+    assert_eq!(
+        f.client.try_schedule_extractive(
+            &ad(&f.env),
+            &sym_of(&f.env, "withdraw_from_ad"),
+            &1,
+            &f.owner,
+        ),
+        Err(Ok(AccountError::GuardRailArchived))
+    );
+    assert_eq!(
+        f.client
+            .try_schedule_account_extractive(&sym_of(&f.env, "upgrade"), &b32(&f.env, 1)),
+        Err(Ok(AccountError::GuardRailArchived))
+    );
+    assert!(f.client.guarded_ads().contains(ad(&f.env)));
+}
+
+/// C-32: the owner can lock above the threshold on a guarded ad by scheduling that exact order.
+#[test]
+fn c32_an_above_threshold_owner_lock_can_be_scheduled_for_one_order() {
+    let f = fixture();
+    guard(&f, 100, 3_600, 86_400);
+    let order = params(&f);
+    let args: Vec<Val> = vec![&f.env, order.clone().into_val(&f.env)];
+    let ctxs = lock_ctx(&f.env, &f.target, args.clone());
+
+    expect_err(owner_check(&f, &ctxs), AccountError::NotScheduled);
+    // The per-ad scheduler still refuses the lock selector: it has no order to bind.
+    assert_eq!(
+        f.client
+            .try_schedule_extractive(&ad(&f.env), &lock_for_order(&f.env), &500_000, &f.owner),
+        Err(Ok(AccountError::ActionNotAllowed))
+    );
+
+    f.client
+        .schedule_lock(&ad(&f.env), &500_000, &commit(&f.env, args.clone()));
+    expect_err(owner_check(&f, &ctxs), AccountError::NotScheduled);
+    f.env.ledger().set_timestamp(T0 + 3_600);
+
+    // Same amount, a different order: refused.
+    let mut other = params(&f);
+    other.salt = soroban_sdk::U256::from_u128(&f.env, 43);
+    let other_ctx = lock_ctx(&f.env, &f.target, vec![&f.env, other.into_val(&f.env)]);
+    expect_err(owner_check(&f, &other_ctx), AccountError::NotScheduled);
+
+    owner_check(&f, &ctxs).expect("the announced order");
+    expect_err(owner_check(&f, &ctxs), AccountError::NotScheduled);
+
+    // A wrong amount on the schedule is refused even with the right commitment.
+    f.client
+        .schedule_lock(&ad(&f.env), &499_999, &commit(&f.env, args.clone()));
+    f.env.ledger().set_timestamp(T0 + 7_200);
+    expect_err(owner_check(&f, &ctxs), AccountError::NotScheduled);
+
+    // And a lock schedule can be cancelled.
+    f.client
+        .schedule_lock(&ad(&f.env), &500_000, &commit(&f.env, args));
+    f.client
+        .cancel_extractive(&ad(&f.env), &lock_for_order(&f.env));
+    assert!(f.client.lock_schedule(&ad(&f.env)).is_none());
+    f.env.ledger().set_timestamp(T0 + 10_800);
+    expect_err(owner_check(&f, &ctxs), AccountError::NotScheduled);
+}
+
+/// The data of the last event this contract emitted.
+fn last_event_data(env: &Env, contract: &Address) -> ScVal {
+    let all = env.events().all().filter_by_contract(contract);
+    let ev = all.events().last().unwrap().clone();
+    match ev.body {
+        xdr::ContractEventBody::V0(v0) => v0.data,
+    }
+}
+
+fn sc<T: IntoVal<Env, Val>>(env: &Env, v: T) -> ScVal {
+    ScVal::try_from_val(env, &v.into_val(env)).unwrap()
+}
+
+/// C-34: `PolicySet` carries the fingerprint and `AccountLimitSet` the numbers.
+#[test]
+fn c34_policy_and_limit_events_say_what_changed() {
+    let f = fixture();
+    let id = f.agent.id(&f.env);
+    let tokens = vec![&f.env, f.ad_token.clone(), f.order_token.clone()];
+    f.client.set_policy(
+        &id,
+        &vec![&f.env, lock_for_order(&f.env)],
+        &tokens,
+        &0_u64,
+        &f.signer,
+        &None,
+        &wide(&f.env, &tokens),
+    );
+    let data = last_event_data(&f.env, &f.account);
+    let topics = event_topics(&f.env, &f.account, true);
+    let fp = f.client.policy_fingerprint(&id);
+    assert_eq!(topics, std::vec![sym("pol_set"), bytes32(&id)]);
+    assert_eq!(
+        data,
+        ScVal::Vec(Some(
+            std::vec![
+                sc(&f.env, f.signer.clone()),
+                sc(&f.env, 0_u64),
+                sc(&f.env, fp)
+            ]
+            .try_into()
+            .unwrap()
+        ))
+    );
+
+    f.client.set_account_limit(
+        &f.ad_token,
+        &Limit {
+            capacity: 1_234,
+            refill_per_second: 56,
+        },
+    );
+    assert_eq!(
+        event_topics(&f.env, &f.account, true),
+        std::vec![sym("acct_lim"), bytes32(&f.ad_token)]
+    );
+    assert_eq!(
+        last_event_data(&f.env, &f.account),
+        ScVal::Vec(Some(
+            std::vec![sc(&f.env, 1_234_u128), sc(&f.env, 56_u128)]
+                .try_into()
+                .unwrap()
+        ))
+    );
+}
+
+/// The contract's exported functions, read from the wasm's `contractspecv0` section.
+fn exported_fns() -> std::collections::BTreeSet<std::string::String> {
+    use soroban_sdk::xdr::{Limited, ReadXdr, ScSpecEntry};
+    let w = ACCOUNT_WASM;
+    let leb = |i: &mut usize| -> usize {
+        let (mut v, mut shift) = (0usize, 0);
+        loop {
+            let b = w[*i];
+            *i += 1;
+            v |= ((b & 0x7f) as usize) << shift;
+            if b & 0x80 == 0 {
+                return v;
+            }
+            shift += 7;
+        }
+    };
+    let mut i = 8;
+    let mut out = std::collections::BTreeSet::new();
+    while i < w.len() {
+        let id = w[i];
+        i += 1;
+        let len = leb(&mut i);
+        let end = i + len;
+        if id == 0 {
+            let mut j = i;
+            let nlen = leb(&mut j);
+            if &w[j..j + nlen] == b"contractspecv0" {
+                let mut r = Limited::new(std::io::Cursor::new(&w[j + nlen..end]), Limits::none());
+                for e in ScSpecEntry::read_xdr_iter(&mut r) {
+                    if let ScSpecEntry::FunctionV0(f) = e.unwrap() {
+                        out.insert(f.name.to_utf8_string().unwrap());
+                    }
+                }
+            }
+        }
+        i = end;
+    }
+    out
+}
+
+/// C-9: every owner-only entry point refuses a caller that is not the owner, with the host's auth
+/// error and before touching state. The list is checked against the wasm's exported functions, so
+/// a new entry point cannot land without a row here or on the view list.
+#[test]
+fn c9_every_owner_only_entry_point_refuses_a_non_owner() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let e = &f.env;
+    let id = f.agent.id(e);
+    let tokens = vec![e, f.ad_token.clone(), f.order_token.clone()];
+    let g = GuardRail {
+        threshold: 0,
+        delay: 3_600,
+        window: 86_400,
+        rate: Limit {
+            capacity: 1,
+            refill_per_second: 1,
+        },
+        bucket: Bucket {
+            level: 0,
+            last_ts: 0,
+        },
+    };
+    let owner_only: std::vec::Vec<(&str, Vec<Val>)> = std::vec![
+        ("set_targets", vec![e, vec![e, f.target.clone()].to_val()]),
+        (
+            "set_policy",
+            policy_args(e, &id, &tokens, 0, &f.signer, &None, &wide(e, &tokens))
+        ),
+        (
+            "set_account_limit",
+            vec![
+                e,
+                f.ad_token.to_val(),
+                Limit {
+                    capacity: 1,
+                    refill_per_second: 1
+                }
+                .into_val(e)
+            ]
+        ),
+        (
+            "set_guard_rail",
+            vec![e, ad(e).to_val(), Some(g).into_val(e)]
+        ),
+        (
+            "schedule_extractive",
+            vec![
+                e,
+                ad(e).to_val(),
+                sym_of(e, "withdraw_from_ad").to_val(),
+                1_u128.into_val(e),
+                f.owner.to_val()
+            ]
+        ),
+        (
+            "schedule_lock",
+            vec![e, ad(e).to_val(), 1_u128.into_val(e), b32(e, 1).to_val()]
+        ),
+        (
+            "cancel_extractive",
+            vec![e, ad(e).to_val(), sym_of(e, "withdraw_from_ad").to_val()]
+        ),
+        (
+            "schedule_account_extractive",
+            vec![e, sym_of(e, "upgrade").to_val(), b32(e, 1).to_val()]
+        ),
+        (
+            "cancel_account_extractive",
+            vec![e, sym_of(e, "upgrade").to_val()]
+        ),
+        ("revoke_agent", vec![e, id.to_val()]),
+        ("upgrade", vec![e, b32(e, 0x42).to_val()]),
+        ("migrate", vec![e]),
+    ];
+    let views = [
+        "__constructor",
+        "__check_auth",
+        "guard_rail",
+        "guarded_ads",
+        "schedule",
+        "lock_schedule",
+        "account_schedule",
+        "policy_fingerprint",
+        "owner",
+        "targets",
+        "policy",
+        "is_revoked",
+        "schema_version",
+    ];
+    let mut listed: std::collections::BTreeSet<std::string::String> = views
+        .iter()
+        .map(|s| std::string::String::from(*s))
+        .collect();
+    for (name, _) in owner_only.iter() {
+        listed.insert(std::string::String::from(*name));
+    }
+    assert_eq!(
+        exported_fns(),
+        listed,
+        "every export is on one of the two lists"
+    );
+
+    // What the host returns when `require_auth` finds no authorization in a called contract.
+    let auth_error: Result<(), Result<soroban_sdk::Error, InvokeError>> =
+        Err(Ok(soroban_sdk::Error::from_type_and_code(
+            xdr::ScErrorType::Context,
+            xdr::ScErrorCode::InvalidAction,
+        )));
+    let before = f.client.policy(&id).unwrap();
+    // A stranger signs everything; the owner signs nothing.
+    let stranger = Address::generate(e);
+    for (name, args) in owner_only.iter() {
+        let fn_name = sym_of(e, name);
+        e.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &stranger,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &f.account,
+                fn_name: name,
+                args: args.clone(),
+                sub_invokes: &[],
+            },
+        }]);
+        let r = e
+            .try_invoke_contract::<Val, soroban_sdk::Error>(&f.account, &fn_name, args.clone())
+            .map(|_| ());
+        assert_eq!(r, auth_error, "{name} must refuse a non-owner");
+    }
+    // Nothing moved.
+    assert_eq!(f.client.policy(&id).unwrap().limits, before.limits);
+    assert!(f.client.guard_rail(&ad(e)).is_some());
+    assert_eq!(f.client.targets(), vec![e, f.target.clone()]);
+
+    // Positive control: with the owner signing, none of them fails on auth.
+    e.mock_all_auths();
+    for (name, args) in owner_only.iter() {
+        if *name == "upgrade" {
+            continue; // a made-up hash traps in the host; covered by the C-5 tests.
+        }
+        let r = e
+            .try_invoke_contract::<Val, soroban_sdk::Error>(
+                &f.account,
+                &sym_of(e, name),
+                args.clone(),
+            )
+            .map(|_| ());
+        assert_ne!(r, auth_error, "{name} passed auth for the owner");
+    }
+}
+
+/// C-6: an agent lock at the policy's maximal shape, metered against the network's per-transaction
+/// limits. Everything the lock touches is wasm (account, AdManager, MerkleManager) or a built-in
+/// (the SAC token), so VM instantiation and storage reads are in the figure. Only the key registry
+/// is a native mock.
+///
+/// Limits: `InvocationResourceLimits::mainnet()` in soroban-sdk 28 (a 2026-07-10 snapshot of
+/// `stellar network settings --network mainnet`): 400M instructions, 41,943,040 bytes of memory,
+/// 200 disk reads, 200 writes, 400 footprint entries, 132,096 write bytes, 16,384 event bytes.
+///
+/// Measured 2026-09-28 (SDK 28.0.0-rc.1, optimized wasm): 14.0M instructions (3.5% of the limit),
+/// 3.23MB memory (7.7%), 0 disk reads, 21 in-memory reads, 9 writes, 7,028 write bytes.
+#[test]
+fn test_agent_lock_metering() {
+    let env = Env::default();
+    env.ledger().set_timestamp(T0);
+    env.ledger().set_protocol_version(PROTOCOL);
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let owner = env.register(MockAuthContract, ());
+    let ad_manager = env.register(AD_MANAGER_WASM, ());
+    let merkle = env.register(MERKLE_WASM, ());
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token = sac.address();
+    let account = env.register(
+        ACCOUNT_WASM,
+        (owner.clone(), vec![&env, ad_manager.clone()]),
+    );
+    let client = AgentAccountClient::new(&env, &account);
+
+    let ad_token = address_to_bytes32(&env, &token);
+    let order_token = b32(&env, 0xBB);
+    let portal = b32(&env, 0xFF);
+    let order_chain_id: u128 = 1;
+    let mm = merkle_manager::ProofBridgeMerkleManagerContractClient::new(&env, &merkle);
+    mm.initialize(&admin);
+    mm.set_manager(&ad_manager, &true);
+    let am = ad_manager::AdManagerContractClient::new(&env, &ad_manager);
+    am.initialize(
+        &admin,
+        &Address::generate(&env),
+        &merkle,
+        &Address::generate(&env),
+        &2_000_000_002_u128,
+    );
+    am.set_chain(&order_chain_id, &portal, &true);
+    am.set_token_route(&ad_token, &order_token, &order_chain_id);
+    am.set_route_timing(
+        &order_chain_id,
+        &ad_manager::RouteTiming {
+            min_window: 0,
+            buffer: 1_800,
+            margin: 0,
+            long_backstop: 86_400,
+            claim_stagger: 0,
+        },
+    );
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&account, &10_000_000_i128);
+    let signer = address_to_bytes32(&env, &account);
+    let key_registry = env.register(MockKeyRegistry, ());
+    MockKeyRegistryClient::new(&env, &key_registry).set(&signer, &true);
+    am.set_key_registry(&key_registry);
+    let ad_id = String::from_str(&env, "ad-1");
+    am.create_ad(
+        &account,
+        &ad_id,
+        &ad_token,
+        &5_000_000_u128,
+        &order_chain_id,
+        &b32(&env, 0xCC),
+        &signer,
+    );
+
+    // Maximal policy: 16 tokens with their limits, 16 ads in scope, 16 guarded ads.
+    // The lock's two tokens and its ad go last, so every linear scan runs its full length.
+    let mut tokens = Vec::new(&env);
+    for i in 0..(MAX_WHITELIST_TOKENS - 2) {
+        tokens.push_back(b32(&env, 0x10 + i as u8));
+    }
+    tokens.push_back(order_token.clone());
+    tokens.push_back(ad_token.clone());
+    let mut limits = Vec::new(&env);
+    for t in tokens.iter() {
+        client.set_account_limit(
+            &t,
+            &Limit {
+                capacity: u128::MAX / 2,
+                refill_per_second: 1,
+            },
+        );
+        limits.push_back(tl(&t, 1_000_000, u128::MAX / 2, 1));
+    }
+    let mut scope = Vec::new(&env);
+    for i in 0..MAX_AD_SCOPE {
+        let id = if i == MAX_AD_SCOPE - 1 {
+            ad_id.clone()
+        } else {
+            String::from_str(&env, &std::format!("ad-scope-{i:02}"))
+        };
+        scope.push_back(id);
+    }
+    let agent = Agent::new(7);
+    client.set_policy(
+        &agent.id(&env),
+        &vec![&env, lock_for_order(&env)],
+        &tokens,
+        &0_u64,
+        &signer,
+        &Some(scope),
+        &limits,
+    );
+    for i in 0..policy::MAX_GUARDED_ADS {
+        let g = if i == policy::MAX_GUARDED_ADS - 1 {
+            ad_id.clone()
+        } else {
+            String::from_str(&env, &std::format!("guarded-{i:02}"))
+        };
+        client.set_guard_rail(
+            &g,
+            &Some(GuardRail {
+                threshold: 1,
+                delay: 3_600,
+                window: 86_400,
+                rate: Limit {
+                    capacity: 1,
+                    refill_per_second: 1,
+                },
+                bucket: Bucket {
+                    level: 0,
+                    last_ts: 0,
+                },
+            }),
+        );
+    }
+    assert_eq!(client.guarded_ads().len(), policy::MAX_GUARDED_ADS);
+
+    // The real agent path: a signed auth entry, the escrow's require_auth, the wasm __check_auth.
+    let e = Escrow {
+        env: env.clone(),
+        owner,
+        account: account.clone(),
+        ad_manager: ad_manager.clone(),
+        ad_token,
+        order_token,
+        portal,
+        order_chain_id,
+        ad_id,
+        agent,
+    };
+    let exp = env.ledger().sequence() + 100;
+    let p_val: Val = escrow_params(&e, 400_000).into_val(&env);
+    let inv = invocation(
+        &ad_manager,
+        "lock_for_order",
+        std::vec![sc_val(&env, p_val)],
+    );
+    let payload = payload_hash(&env, &account, &inv, 1, exp, Creds::V2);
+    let sig = sc_val(&env, e.agent.sign(&env, &payload).into_val(&env));
+    env.set_auths(&[entry(&account, inv, 1, exp, sig, Creds::V2)]);
+    env.cost_estimate().budget().reset_default();
+    let _: BytesN<32> = env.invoke_contract(
+        &ad_manager,
+        &Symbol::new(&env, "lock_for_order"),
+        vec![&env, p_val],
+    );
+    let r = env.cost_estimate().resources();
+    std::println!(
+        "agent lock_for_order (maximal policy, 16 guarded ads): cpu {} insns, mem {} bytes, \
+         disk reads {}, memory reads {}, writes {}, write bytes {}, disk read bytes {}, event bytes {}",
+        r.instructions,
+        r.mem_bytes,
+        r.disk_read_entries,
+        r.memory_read_entries,
+        r.write_entries,
+        r.write_bytes,
+        r.disk_read_bytes,
+        r.contract_events_size_bytes,
+    );
+    assert_eq!(liquidity(&e), 4_600_000, "the lock landed");
+
+    // The SDK does not re-export `InvocationResourceLimits`; these are its `mainnet()` values. The
+    // test env also enforces them on every invocation, so an overrun panics before this point.
+    assert!(r.instructions <= 400_000_000, "CPU over the tx limit");
+    assert!(r.mem_bytes <= 41_943_040, "memory over the tx limit");
+    assert!(r.disk_read_entries <= 200);
+    assert!(r.write_entries <= 200);
+    assert!(
+        r.disk_read_entries + r.memory_read_entries + r.write_entries <= 400,
+        "footprint over the tx limit"
+    );
+    assert!(r.write_bytes <= 132_096);
+    assert!(r.disk_read_bytes <= 200_000);
+    assert!(r.contract_events_size_bytes <= 16_384);
 }

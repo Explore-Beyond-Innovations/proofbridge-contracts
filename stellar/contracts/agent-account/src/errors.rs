@@ -50,4 +50,6 @@ pub enum AccountError {
     /// The ad is on the guarded roster but its settings entry has archived. Refused rather than
     /// read as unguarded (2.3h: absence must not be permission).
     GuardRailArchived = 21,
+    /// `migrate` found a schema version newer than this code knows: a downgrade it cannot read.
+    SchemaTooNew = 22,
 }

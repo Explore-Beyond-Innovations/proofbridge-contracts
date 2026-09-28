@@ -20,8 +20,8 @@ pub const MAX_AD_SCOPE: u32 = 16;
 /// Guarded ads per account. The roster lives in the instance, which is loaded on every call, so it
 /// is bounded for the same reason the whitelist is.
 pub const MAX_GUARDED_ADS: u32 = 16;
-/// Bumped by an `upgrade` whose wasm changes the storage shape; a new wasm
-/// migrates or refuses old state deliberately instead of misreading it.
+/// Bumped by an `upgrade` whose wasm changes the storage shape; the new wasm's `migrate` writes it,
+/// and migrates or refuses old state deliberately instead of misreading it.
 /// 2 = 2.1d's `ad_scope` / `limits` / `buckets`.
 pub const SCHEMA_VERSION: u32 = 2;
 
@@ -163,6 +163,10 @@ pub enum DataKey {
     /// Instance-stored roster of ads the owner has guarded, so an archived row cannot read as
     /// "never guarded".
     GuardedAds,
+    /// An above-threshold owner lock scheduled on one ad, bound to the exact order. Single use.
+    LockSchedule(String),
+    /// An account-wide extractive change (upgrade, loosening policy/limit/targets), keyed by action.
+    AccountSchedule(Symbol),
 }
 
 /// The owner's own brake on one ad (design 02 §2.8): instant to protect, slow to extract.
@@ -207,6 +211,21 @@ pub struct Schedule {
     pub expires_at: u64,
 }
 
+/// A schedule bound to a hash of the exact call rather than to an amount and a destination.
+///
+/// Used for the owner's above-threshold `lock_for_order` (per ad) and for the account-wide changes
+/// (`upgrade`, loosening `set_policy` / `set_account_limit` / `set_targets`). `commitment` is the
+/// new wasm hash for `upgrade`, and `sha256(XDR(ScVal::Vec(args)))` of the call's own argument list
+/// for everything else. `amount` is the lock's ad-side amount, and 0 for the account-wide actions.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundSchedule {
+    pub commitment: BytesN<32>,
+    pub amount: u128,
+    pub ready_at: u64,
+    pub expires_at: u64,
+}
+
 /// Which ads carry a guardrail, in **instance** storage.
 ///
 /// This exists so that a missing per-ad row cannot read as "unguarded". The per-ad entry is
@@ -227,6 +246,29 @@ fn set_guarded_ads(env: &Env, ads: &Vec<String>) {
 
 pub fn is_guarded(env: &Env, ad_id: &String) -> bool {
     guarded_ads(env).contains(ad_id)
+}
+
+/// Any ad on the roster makes the whole account guarded for the account-wide changes. The roster,
+/// not the rows: an archived row still counts, so absence never reads as permission.
+pub fn any_guarded(env: &Env) -> bool {
+    !guarded_ads(env).is_empty()
+}
+
+/// The delay and window an account-wide change must honour: the longest delay and the shortest
+/// window across every guarded ad, so no one ad's brake can be stepped around through the account.
+pub fn account_timelock(env: &Env) -> Result<(u64, u64), AccountError> {
+    let roster = guarded_ads(env);
+    if roster.is_empty() {
+        return Err(AccountError::NoGuardRail);
+    }
+    let mut delay = 0u64;
+    let mut window = u64::MAX;
+    for ad in roster.iter() {
+        let g = get_guard_rail(env, &ad).ok_or(AccountError::GuardRailArchived)?;
+        delay = delay.max(g.delay);
+        window = window.min(g.window);
+    }
+    Ok((delay, window))
 }
 
 pub fn get_guard_rail(env: &Env, ad_id: &String) -> Option<GuardRail> {
@@ -310,6 +352,153 @@ pub fn clear_schedule(env: &Env, ad_id: &String, action: &Symbol) {
 pub fn clear_all_schedules(env: &Env, ad_id: &String) {
     for a in [withdraw_from_ad(env), close_ad(env), set_guard_rail(env)] {
         clear_schedule(env, ad_id, &a);
+    }
+    clear_lock_schedule(env, ad_id);
+    // The account-wide rows were timed against this ad's settings too.
+    for a in account_actions(env) {
+        clear_account_schedule(env, &a);
+    }
+}
+
+pub fn get_lock_schedule(env: &Env, ad_id: &String) -> Option<BoundSchedule> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::LockSchedule(ad_id.clone()))
+}
+
+pub fn set_lock_schedule(env: &Env, ad_id: &String, s: &BoundSchedule) {
+    let key = DataKey::LockSchedule(ad_id.clone());
+    env.storage().persistent().set(&key, s);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+}
+
+pub fn clear_lock_schedule(env: &Env, ad_id: &String) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::LockSchedule(ad_id.clone()));
+}
+
+pub fn get_account_schedule(env: &Env, action: &Symbol) -> Option<BoundSchedule> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::AccountSchedule(action.clone()))
+}
+
+pub fn set_account_schedule(env: &Env, action: &Symbol, s: &BoundSchedule) {
+    let key = DataKey::AccountSchedule(action.clone());
+    env.storage().persistent().set(&key, s);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+}
+
+pub fn clear_account_schedule(env: &Env, action: &Symbol) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::AccountSchedule(action.clone()));
+}
+
+/// Account-wide changes that go through the timelock while any ad is guarded (D6).
+pub fn act_upgrade(env: &Env) -> Symbol {
+    Symbol::new(env, "upgrade")
+}
+
+pub fn act_set_policy(env: &Env) -> Symbol {
+    Symbol::new(env, "set_policy")
+}
+
+pub fn act_set_account_limit(env: &Env) -> Symbol {
+    Symbol::new(env, "set_account_limit")
+}
+
+pub fn act_set_targets(env: &Env) -> Symbol {
+    Symbol::new(env, "set_targets")
+}
+
+pub fn account_actions(env: &Env) -> [Symbol; 4] {
+    [
+        act_upgrade(env),
+        act_set_policy(env),
+        act_set_account_limit(env),
+        act_set_targets(env),
+    ]
+}
+
+/// `sha256(XDR(ScVal::Vec(args)))`: the commitment a bound schedule names for a call's arguments.
+pub fn args_commitment(env: &Env, args: &Vec<Val>) -> BytesN<32> {
+    use soroban_sdk::xdr::ToXdr;
+    env.crypto().sha256(&args.clone().to_xdr(env)).to_bytes()
+}
+
+fn subset<T>(small: &Vec<T>, big: &Vec<T>) -> bool
+where
+    T: Clone + PartialEq + soroban_sdk::IntoVal<Env, Val> + TryFromVal<Env, Val>,
+{
+    small.iter().all(|x| big.contains(&x))
+}
+
+/// Is `next` no wider than `cur` on every axis? Anything else is loosening.
+///
+/// Tightening means: actions, tokens and ad scope are subsets (an unscoped `cur` admits any scope,
+/// a scoped `cur` never admits `None`); every token row has a cap, capacity and refill no higher
+/// than `cur`'s row for it (a missing row is loosening); expiry is no later (a `cur` with no
+/// expiry admits any, a `cur` with one never admits 0); the settlement signer is unchanged.
+/// Adding an agent key is loosening by definition, so there is no `cur` to compare against.
+pub fn is_policy_tightening(cur: &AgentPolicy, next: &AgentPolicy) -> bool {
+    if !subset(&next.allowed_actions, &cur.allowed_actions)
+        || !subset(&next.token_whitelist, &cur.token_whitelist)
+        || next.settlement_signer != cur.settlement_signer
+    {
+        return false;
+    }
+    let expiry_ok =
+        cur.valid_until == 0 || (next.valid_until != 0 && next.valid_until <= cur.valid_until);
+    if !expiry_ok {
+        return false;
+    }
+    let scope_ok = match (&cur.ad_scope, &next.ad_scope) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(c), Some(n)) => subset(n, c),
+    };
+    if !scope_ok {
+        return false;
+    }
+    next.limits.iter().all(|l| match limit_for(cur, &l.token) {
+        Some(c) => {
+            l.max_per_order <= c.max_per_order
+                && l.rate.capacity <= c.rate.capacity
+                && l.rate.refill_per_second <= c.rate.refill_per_second
+        }
+        None => false,
+    })
+}
+
+/// A new account limit is tightening only against an existing row, and only if neither number
+/// rises. No row means unconfigured, which refuses every lock, so any first limit is loosening.
+pub fn is_limit_tightening(cur: Option<&AccountVolume>, next: &Limit) -> bool {
+    match cur {
+        Some(v) => {
+            next.capacity <= v.limit.capacity && next.refill_per_second <= v.limit.refill_per_second
+        }
+        None => false,
+    }
+}
+
+/// Carry `cur`'s spent buckets into `next`, settled at the old rate and clamped to the new one.
+/// An instant tightening write must not hand the agent a full bucket.
+pub fn carry_buckets(cur: &AgentPolicy, next: &mut AgentPolicy, now: u64) {
+    for l in next.limits.clone().iter() {
+        if let (Some(b), Some(c)) = (bucket_for(cur, &l.token), limit_for(cur, &l.token)) {
+            let settled = proofbridge_core::rate_limit::available(&c.rate, &b, now);
+            let level = settled.min(l.rate.capacity);
+            put_bucket(
+                next,
+                &l.token,
+                Bucket {
+                    level,
+                    last_ts: now,
+                },
+            );
+        }
     }
 }
 

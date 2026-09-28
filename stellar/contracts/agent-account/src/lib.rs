@@ -12,10 +12,11 @@
 //! The account is owner-upgradeable (`upgrade`): the owner is already sovereign
 //! over every fund movement, so code control adds no trust, and it is what lets
 //! 2.1d/2.1e/2.1f/2.3b change shape without makers redeploying and re-creating
-//! ads. Once 2.1e adds the extractive-action timelock, `upgrade` sits behind it.
+//! ads. While any ad is guarded, `upgrade` sits behind the extractive timelock (D6).
 //!
-//! Volume buckets and `min_rate` are 2.1d; the revoke → retirement runtime
-//! wiring and the extractive timelock are 2.1e; CAP-85 tolerance is 2.1f.
+//! Volume buckets are 2.1d (`min_rate` was withdrawn, see 2.1 design 06 §2); the
+//! revoke → retirement runtime wiring and the extractive timelock are 2.1e; CAP-85
+//! tolerance is 2.1f.
 
 #![no_std]
 
@@ -30,11 +31,11 @@ use soroban_sdk::{
     auth::{Context, CustomAccountInterface},
     contract, contractimpl,
     crypto::Hash,
-    vec, Address, BytesN, ContractExecutable, Env, IntoVal, String, Symbol, Vec,
+    vec, Address, BytesN, ContractExecutable, Env, IntoVal, String, Symbol, Val, Vec,
 };
 
-use escrow::spend_schedule;
-use policy::{GuardRail, TokenLimit};
+use escrow::{spend_account_schedule, spend_schedule};
+use policy::{BoundSchedule, GuardRail, TokenLimit};
 use proofbridge_core::rate_limit::{self, Bucket, Limit};
 
 pub use auth::{AccountSig, Ed25519Sig, SecpSig};
@@ -69,10 +70,20 @@ impl AgentAccount {
         Ok(())
     }
 
-    /// Owner-only. Needed across an escrow redeploy.
+    /// Owner-only. Needed across an escrow redeploy. While any ad is guarded, adding a target the
+    /// account does not already have widens where an agent may call, so it is scheduled (C-29).
     pub fn set_targets(env: Env, targets: Vec<Address>) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
+        if policy::any_guarded(&env) {
+            let cur = policy::get_targets(&env);
+            if targets.iter().any(|t| !cur.contains(&t)) {
+                let args: Vec<Val> = vec![&env, targets.to_val()];
+                let commitment = policy::args_commitment(&env, &args);
+                let now = env.ledger().timestamp();
+                spend_account_schedule(&env, &policy::act_set_targets(&env), &commitment, now)?;
+            }
+        }
         policy::set_targets(&env, &targets)?;
         events::TargetsSet { targets }.publish(&env);
         Ok(())
@@ -80,6 +91,13 @@ impl AgentAccount {
 
     /// Owner-only. Installs or replaces the agent's policy. A revoked agent id
     /// can never be re-installed (sticky); use a new key.
+    ///
+    /// While any ad is guarded, a **loosening** write needs a matured `set_policy` schedule
+    /// (`schedule_account_extractive`) naming `sha256(XDR(ScVal::Vec(args)))` of this call. Only a
+    /// write that is no wider than the live policy on every axis is instant: a new agent key, a new
+    /// action, token or ad, a wider or dropped ad scope, a higher cap, capacity or refill, a later or
+    /// removed expiry, or a changed settlement signer all count as loosening (`is_policy_tightening`).
+    /// An instant tightening keeps the agent's spent buckets rather than refilling them.
     pub fn set_policy(
         env: Env,
         agent_id: BytesN<32>,
@@ -99,7 +117,17 @@ impl AgentAccount {
         // policy write is the owner saying what the agent may do from now on, and carrying a
         // half-drained bucket across a deliberate re-configure would make the new limits a lie.
         // The account-wide bucket is untouched, so the aggregate still binds across the reset.
-        let p = AgentPolicy {
+        let args: Vec<Val> = vec![
+            &env,
+            agent_id.to_val(),
+            allowed_actions.to_val(),
+            token_whitelist.to_val(),
+            valid_until.into_val(&env),
+            settlement_signer.to_val(),
+            ad_scope.into_val(&env),
+            limits.to_val(),
+        ];
+        let mut p = AgentPolicy {
             allowed_actions,
             token_whitelist,
             valid_until,
@@ -110,11 +138,25 @@ impl AgentAccount {
             buckets: Vec::new(&env),
         };
         policy::validate(&env, &p)?;
+        if policy::any_guarded(&env) {
+            let now = env.ledger().timestamp();
+            match policy::get_policy(&env, &agent_id) {
+                Some(cur) if policy::is_policy_tightening(&cur, &p) => {
+                    policy::carry_buckets(&cur, &mut p, now);
+                }
+                _ => {
+                    let commitment = policy::args_commitment(&env, &args);
+                    spend_account_schedule(&env, &policy::act_set_policy(&env), &commitment, now)?;
+                }
+            }
+        }
+        let fingerprint = fingerprint::fingerprint(&env, &p)?;
         policy::set_policy(&env, &agent_id, &p);
         events::PolicySet {
             agent_id,
             settlement_signer,
             valid_until,
+            fingerprint,
         }
         .publish(&env);
         Ok(())
@@ -126,6 +168,10 @@ impl AgentAccount {
     /// Re-configuring keeps the live bucket where it is rather than refilling it. An owner who
     /// could reset the aggregate by re-setting the limit would have a cap that resets on demand,
     /// which is the fixed window this replaced.
+    ///
+    /// While any ad is guarded, a first limit for a token or a higher capacity or refill is
+    /// loosening and needs a matured `set_account_limit` schedule naming the call's argument
+    /// commitment. Lowering either number stays instant.
     pub fn set_account_limit(
         env: Env,
         token: BytesN<32>,
@@ -135,7 +181,13 @@ impl AgentAccount {
         proofbridge_core::ttl::extend_instance(&env);
         policy::validate_limit(&limit)?;
         let now = env.ledger().timestamp();
-        let bucket = match policy::get_account_volume(&env, &token) {
+        let current = policy::get_account_volume(&env, &token);
+        if policy::any_guarded(&env) && !policy::is_limit_tightening(current.as_ref(), &limit) {
+            let args: Vec<Val> = vec![&env, token.to_val(), limit.into_val(&env)];
+            let commitment = policy::args_commitment(&env, &args);
+            spend_account_schedule(&env, &policy::act_set_account_limit(&env), &commitment, now)?;
+        }
+        let bucket = match current {
             Some(v) => {
                 // Settle at the OLD rate first, then re-stamp. Carrying the old `last_ts` into a
                 // new limit would re-price the whole idle interval at the new `refill_per_second`:
@@ -157,7 +209,12 @@ impl AgentAccount {
             None => Bucket::full(&limit, now),
         };
         policy::set_account_volume(&env, &token, &policy::AccountVolume { limit, bucket });
-        events::AccountLimitSet { token }.publish(&env);
+        events::AccountLimitSet {
+            token,
+            capacity: limit.capacity,
+            refill_per_second: limit.refill_per_second,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -180,6 +237,10 @@ impl AgentAccount {
         proofbridge_core::ttl::extend_instance(&env);
         let now = env.ledger().timestamp();
         let current = policy::get_guard_rail(&env, &ad_id);
+        // On the roster with no row is archived, not unarmed: refuse, as the owner path does (C-33).
+        if current.is_none() && policy::is_guarded(&env, &ad_id) {
+            return Err(AccountError::GuardRailArchived);
+        }
 
         let loosening = match (&current, &guard_rail) {
             // Arming from nothing only ever reduces what the key can do.
@@ -279,14 +340,8 @@ impl AgentAccount {
         if action != withdraw && amount != 0 {
             return Err(AccountError::BadGuardRail);
         }
-        let g = policy::get_guard_rail(&env, &ad_id).ok_or(AccountError::NoGuardRail)?;
-        let now = env.ledger().timestamp();
-        // Checked: `overflow-checks` is on for the workspace, so an absurd delay would otherwise
-        // panic with an opaque host error instead of one the owner can act on.
-        let ready_at = now.checked_add(g.delay).ok_or(AccountError::BadGuardRail)?;
-        let expires_at = ready_at
-            .checked_add(g.window)
-            .ok_or(AccountError::BadGuardRail)?;
+        let g = guard_rail_for_schedule(&env, &ad_id)?;
+        let (ready_at, expires_at) = window_from_now(&env, g.delay, g.window)?;
         let s = policy::Schedule {
             amount,
             to: to.clone(),
@@ -306,19 +361,119 @@ impl AgentAccount {
         Ok(())
     }
 
+    /// Owner-only. Schedule an above-threshold owner `lock_for_order` on a guarded ad (C-32).
+    ///
+    /// `amount` is the ad-side amount the escrow will lock and `commitment` is
+    /// `sha256(XDR(ScVal::Vec([order])))`, so the schedule authorizes that one order and nothing
+    /// else. One pending lock per ad; a new one replaces it. Cancel with `cancel_extractive`.
+    pub fn schedule_lock(
+        env: Env,
+        ad_id: String,
+        amount: u128,
+        commitment: BytesN<32>,
+    ) -> Result<(), AccountError> {
+        policy::get_owner(&env).require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        let g = guard_rail_for_schedule(&env, &ad_id)?;
+        let (ready_at, expires_at) = window_from_now(&env, g.delay, g.window)?;
+        policy::set_lock_schedule(
+            &env,
+            &ad_id,
+            &BoundSchedule {
+                commitment: commitment.clone(),
+                amount,
+                ready_at,
+                expires_at,
+            },
+        );
+        events::LockScheduled {
+            ad_id,
+            amount,
+            commitment,
+            ready_at,
+            expires_at,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     /// Owner-only. Stand a schedule down — the lever an owner reaches for on seeing an
-    /// `ExtractiveScheduled` event they did not cause.
+    /// `ExtractiveScheduled` event they did not cause. `lock_for_order` cancels the ad's lock
+    /// schedule.
     pub fn cancel_extractive(env: Env, ad_id: String, action: Symbol) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
         // Existence checked, so the audit trail this event exists for does not fill with
         // cancellations of schedules that were never made.
-        if policy::get_schedule(&env, &ad_id, &action).is_none() {
-            return Err(AccountError::NotScheduled);
+        if action == policy::lock_for_order(&env) {
+            if policy::get_lock_schedule(&env, &ad_id).is_none() {
+                return Err(AccountError::NotScheduled);
+            }
+            policy::clear_lock_schedule(&env, &ad_id);
+        } else {
+            if policy::get_schedule(&env, &ad_id, &action).is_none() {
+                return Err(AccountError::NotScheduled);
+            }
+            policy::clear_schedule(&env, &ad_id, &action);
         }
-        policy::clear_schedule(&env, &ad_id, &action);
         events::ExtractiveCancelled { ad_id, action }.publish(&env);
         Ok(())
+    }
+
+    /// Owner-only. Announce an account-wide change (D6): `upgrade` (commitment = the new wasm
+    /// hash), or a loosening `set_policy` / `set_account_limit` / `set_targets` (commitment =
+    /// `sha256(XDR(ScVal::Vec(args)))` of that call). The delay is the longest and the window the
+    /// shortest across every guarded ad. One pending row per action; a new one replaces it.
+    pub fn schedule_account_extractive(
+        env: Env,
+        action: Symbol,
+        commitment: BytesN<32>,
+    ) -> Result<(), AccountError> {
+        policy::get_owner(&env).require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        if !policy::account_actions(&env).contains(&action) {
+            return Err(AccountError::ActionNotAllowed);
+        }
+        let (delay, window) = policy::account_timelock(&env)?;
+        let (ready_at, expires_at) = window_from_now(&env, delay, window)?;
+        policy::set_account_schedule(
+            &env,
+            &action,
+            &BoundSchedule {
+                commitment: commitment.clone(),
+                amount: 0,
+                ready_at,
+                expires_at,
+            },
+        );
+        events::AccountExtractiveScheduled {
+            action,
+            commitment,
+            ready_at,
+            expires_at,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Owner-only. Stand an account-wide schedule down.
+    pub fn cancel_account_extractive(env: Env, action: Symbol) -> Result<(), AccountError> {
+        policy::get_owner(&env).require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        if policy::get_account_schedule(&env, &action).is_none() {
+            return Err(AccountError::NotScheduled);
+        }
+        policy::clear_account_schedule(&env, &action);
+        events::AccountExtractiveCancelled { action }.publish(&env);
+        Ok(())
+    }
+
+    pub fn lock_schedule(env: Env, ad_id: String) -> Option<BoundSchedule> {
+        policy::get_lock_schedule(&env, &ad_id)
+    }
+
+    pub fn account_schedule(env: Env, action: Symbol) -> Option<BoundSchedule> {
+        policy::get_account_schedule(&env, &action)
     }
 
     pub fn guard_rail(env: Env, ad_id: String) -> Option<GuardRail> {
@@ -360,20 +515,40 @@ impl AgentAccount {
         Ok(())
     }
 
-    /// Owner-only. Replaces this account's code; storage (owner, targets,
-    /// policies) stays. The new wasm reads `schema_version` and migrates or
-    /// refuses old state. 2.1e puts this behind the extractive timelock.
+    /// Owner-only. Replaces this account's code; storage (owner, targets, policies) stays.
+    /// While any ad is guarded it needs a matured `upgrade` schedule naming exactly this wasm
+    /// hash (C-5). Call `migrate` next: the swap lands after this call returns, so a version
+    /// written here would be the old code's (C-40).
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
+        if policy::any_guarded(&env) {
+            let now = env.ledger().timestamp();
+            spend_account_schedule(&env, &policy::act_upgrade(&env), &new_wasm_hash, now)?;
+        }
         env.deployer()
             .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
-        // The marker has to move with the code, or `schema_version()` reports whatever the
-        // constructor wrote years ago and nothing can branch on it. Policies migrate lazily on
-        // read (`policy::get_policy`); this is the part that says which shape new writes take.
-        policy::set_schema_version(&env);
         events::Upgraded { new_wasm_hash }.publish(&env);
         Ok(())
+    }
+
+    /// Owner-only. Runs under the new code after `upgrade` and moves the schema marker to what
+    /// this code expects. Policies migrate lazily on read (`policy::get_policy`); a marker newer
+    /// than this code is a downgrade and is refused.
+    pub fn migrate(env: Env) -> Result<u32, AccountError> {
+        policy::get_owner(&env).require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        let from = policy::get_schema_version(&env);
+        if from > SCHEMA_VERSION {
+            return Err(AccountError::SchemaTooNew);
+        }
+        policy::set_schema_version(&env);
+        events::Migrated {
+            from,
+            to: SCHEMA_VERSION,
+        }
+        .publish(&env);
+        Ok(SCHEMA_VERSION)
     }
 
     // ---- views ----
@@ -398,6 +573,26 @@ impl AgentAccount {
     pub fn schema_version(env: Env) -> u32 {
         policy::get_schema_version(&env)
     }
+}
+
+/// The ad's guardrail for a new schedule: `NoGuardRail` off the roster, `GuardRailArchived` on it.
+fn guard_rail_for_schedule(env: &Env, ad_id: &String) -> Result<GuardRail, AccountError> {
+    match policy::get_guard_rail(env, ad_id) {
+        Some(g) => Ok(g),
+        None if policy::is_guarded(env, ad_id) => Err(AccountError::GuardRailArchived),
+        None => Err(AccountError::NoGuardRail),
+    }
+}
+
+/// `(ready_at, expires_at)` from now. Checked: an absurd delay is an error the owner can act on,
+/// not an opaque overflow panic.
+fn window_from_now(env: &Env, delay: u64, window: u64) -> Result<(u64, u64), AccountError> {
+    let now = env.ledger().timestamp();
+    let ready_at = now.checked_add(delay).ok_or(AccountError::BadGuardRail)?;
+    let expires_at = ready_at
+        .checked_add(window)
+        .ok_or(AccountError::BadGuardRail)?;
+    Ok((ready_at, expires_at))
 }
 
 #[contractimpl(contracttrait)]
