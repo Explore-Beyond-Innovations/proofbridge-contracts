@@ -39,10 +39,18 @@ jobs:
       - uses: actions/checkout@v4
 
       # The event circuit lives in proofbridge-circuits; the VK build below needs it.
+      # Pinned to CIRCUITS_COMMIT, the commit the monorepo's proof_circuits pointer names (a repo-check
+      # there keeps the two equal). Checking out main tested the VK against circuits nobody deployed.
+      - name: Read the pinned circuits commit
+        id: circuits
+        working-directory: .
+        run: echo "sha=$(tr -d '[:space:]' < CIRCUITS_COMMIT)" >> "$GITHUB_OUTPUT"
+
       - name: Checkout proofbridge-circuits
         uses: actions/checkout@v4
         with:
           repository: Explore-Beyond-Innovations/proofbridge-circuits
+          ref: ${{ steps.circuits.outputs.sha }}
           path: proof_circuits
 
       # The monorepo layout puts proof_circuits one level above evm/ and stellar/
