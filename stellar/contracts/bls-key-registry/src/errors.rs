@@ -41,6 +41,9 @@ pub enum RegistryError {
     SourceNotAllowed = 19,
     /// Enabling proof registration with no source chains
     ProofRegistrationRefsUnset = 20,
+    /// A signed owner auth whose legs do not hold this registry's own leg exactly once (or a
+    /// retirement that names legs at all).
+    LegMismatch = 21,
 }
 
 // No `From<Fault>` here on purpose. The registry's only shared helper is the event public-input

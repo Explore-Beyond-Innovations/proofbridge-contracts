@@ -2877,6 +2877,8 @@ fn test_t67_register_by_proof_against_anchored_root_registers() {
     // The signature path's nonce is untouched: a proof registration is invisible to nonce-based
     // landing detection (plan §7).
     assert_eq!(client.nonce_of(&account), 0);
+    // 2.6: a proof registration writes the fingerprint map too, so `RetireKey` can find the slot.
+    assert_eq!(client.slot_of_key(&account, &maker_fp(&s.env, 0)), Some(0));
 }
 
 #[test]
@@ -3991,6 +3993,14 @@ fn real_registry_signer(
     (client, account, auth)
 }
 
+/// The fingerprint `set_valid_until` names for the vector maker's slots key `i` (2.6).
+fn maker_fp(env: &Env, i: usize) -> BytesN<32> {
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
+    let fp = &vectors["ownerAuth"]["maker"]["register"][i]["keyCommitment"];
+    BytesN::from_array(env, &hex_to_array(fp.as_str().unwrap()))
+}
+
 fn lock_signed_by(s: &TestSetup, account: &BytesN<32>) -> ad_manager_contract::OrderParams {
     let mut params = ad_manager_order_params(&s.env, &s.tp);
     params.ad_settlement_signer = account.clone();
@@ -4006,7 +4016,7 @@ fn test_422_real_registry_kill_after_the_lock_waits_the_grace() {
     let (client, account, auth) = real_registry_signer(&s);
     let p = lock_signed_by(&s, &account);
     warp(&s, s.env.ledger().timestamp() + 10);
-    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     assert!(
         client.has_usable_slot(&account),
         "the second slot keeps the identity usable"
@@ -4028,7 +4038,7 @@ fn test_422_real_registry_kill_before_the_lock_ordinary_timing() {
     let s = setup();
     let (client, account, auth) = real_registry_signer(&s);
     warp(&s, s.env.ledger().timestamp() + 10);
-    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     warp(&s, s.env.ledger().timestamp() + 10);
     let p = lock_signed_by(&s, &account);
     warp(&s, p.deadline);
@@ -4043,7 +4053,12 @@ fn test_422_real_registry_shorten_before_the_lock_naming_a_date_inside_waits_the
     let s = setup();
     let (client, account, auth) = real_registry_signer(&s);
     let p_preview = ad_manager_order_params(&s.env, &s.tp);
-    client.set_valid_until(&account, &auth, &0, &(p_preview.deadline - 600));
+    client.set_valid_until(
+        &account,
+        &auth,
+        &maker_fp(&s.env, 0),
+        &(p_preview.deadline - 600),
+    );
     warp(&s, s.env.ledger().timestamp() + 10);
     let p = lock_signed_by(&s, &account);
     warp(&s, p.deadline);
@@ -4062,7 +4077,7 @@ fn test_422_real_registry_kill_at_the_deadline_counts() {
     let (client, account, auth) = real_registry_signer(&s);
     let p = lock_signed_by(&s, &account);
     warp(&s, p.deadline);
-    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER);
     assert_eq!(
@@ -4081,7 +4096,7 @@ fn test_422_real_registry_kill_after_the_cutoff_ordinary_timing() {
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER + 1);
-    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     s.ad_manager.finalize_cancel(&p);
 }
 
@@ -4095,7 +4110,7 @@ fn test_422_real_registry_kill_between_the_deadline_and_the_cutoff_waits_the_gra
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + 600);
-    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     warp(&s, p.deadline + SUITE_BUFFER);
     assert_eq!(
         s.ad_manager.try_finalize_cancel(&p),
@@ -4111,7 +4126,7 @@ fn test_422_real_registry_shorten_naming_a_date_in_the_gap_waits_the_grace() {
     let s = setup();
     let (client, account, auth) = real_registry_signer(&s);
     let p = lock_signed_by(&s, &account);
-    client.set_valid_until(&account, &auth, &0, &(p.deadline + 600));
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &(p.deadline + 600));
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER);
@@ -4128,11 +4143,11 @@ fn test_422_real_registry_re_kill_after_the_window_keeps_the_in_window_expiry() 
     let s = setup();
     let (client, account, auth) = real_registry_signer(&s);
     let p = lock_signed_by(&s, &account);
-    client.set_valid_until(&account, &auth, &0, &(p.deadline - 600));
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &(p.deadline - 600));
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER + 1);
-    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     assert_eq!(
         s.ad_manager.try_finalize_cancel(&p),
         Err(Ok(AdErr::TooEarly))
@@ -4153,7 +4168,7 @@ fn test_422_real_registry_kill_at_the_cutoff_counts() {
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER - 300);
-    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     warp(&s, p.deadline + SUITE_BUFFER);
     assert_eq!(
         s.ad_manager.try_finalize_cancel(&p),
@@ -4185,7 +4200,7 @@ fn test_422_real_registry_same_second_kill_prune_and_lock_still_waits_the_grace(
         assert!(reg(i).is_ok());
     }
     client.set_position_guards(&soroban_sdk::vec![&s.env, s.ad_manager.address.clone()]);
-    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     assert_eq!(
         reg(5),
         Err(Ok(bls_key_registry_contract::RegistryError::RegistryFull)),
@@ -4237,7 +4252,7 @@ fn test_453_real_registry_a_kill_outlives_the_full_order_span() {
     warp(&s, deadline - MAX_ORDER_WINDOW);
     let p = lock_signed_by(&s, &account);
     warp(&s, s.env.ledger().timestamp() + 1);
-    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
 
     warp(&s, deadline);
     s.ad_manager.claim_cancel(&p);
@@ -4267,7 +4282,7 @@ fn test_422_real_registry_cancel_finalizes_at_reads_the_grace_for_a_kill_in_the_
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + 600);
-    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     assert_eq!(
         s.ad_manager.cancel_finalizes_at(&p),
         p.deadline + 2 * SUITE_BUFFER,
@@ -4286,8 +4301,8 @@ fn test_461_real_registry_kill_every_slot_after_the_cutoff_ordinary_timing() {
     let before = s.ad_manager.cancel_finalizes_at(&p);
     assert_eq!(before, p.deadline + SUITE_BUFFER, "plain window end");
     warp(&s, p.deadline + SUITE_BUFFER + 1);
-    client.set_valid_until(&account, &auth, &0, &1);
-    client.set_valid_until(&account, &auth, &1, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 1), &1);
     assert!(!client.has_usable_slot(&account), "no usable slot left");
     assert_eq!(
         s.ad_manager.cancel_finalizes_at(&p),
@@ -4329,7 +4344,7 @@ fn test_465_escrow_only_swap_the_order_keeps_its_registry_a_kill_waits_the_grace
     let p = lock_signed_by(&s, &account);
     s.ad_manager.set_key_registry(&s.key_registry); // live: the mock, no kill on record
     warp(&s, s.env.ledger().timestamp() + 10);
-    client.set_valid_until(&account, &auth, &0, &1); // killed in the order's own registry
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1); // killed in the order's own registry
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     assert_eq!(
@@ -4375,7 +4390,7 @@ fn test_465_full_migration_cannot_erase_the_kill() {
     verifier_on(&s, &client.address);
     let p = lock_signed_by(&s, &account);
     warp(&s, s.env.ledger().timestamp() + 10);
-    client.set_valid_until(&account, &auth, &0, &1); // the kill, in the order's registry
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1); // the kill, in the order's registry
     s.ad_manager.set_key_registry(&s.key_registry);
     verifier_on(&s, &s.key_registry); // both now agree on the mock, which never saw the kill
     warp(&s, p.deadline);
@@ -4463,11 +4478,11 @@ fn test_464_full_migration_new_orders_lock_old_order_waits() {
 fn test_461_real_registry_kill_the_only_slot_inside_the_window_waits_the_grace() {
     let s = setup();
     let (client, account, auth) = real_registry_signer(&s);
-    client.set_valid_until(&account, &auth, &1, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 1), &1);
     warp(&s, s.env.ledger().timestamp() + 10);
     let p = lock_signed_by(&s, &account);
     warp(&s, s.env.ledger().timestamp() + 10);
-    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     assert!(!client.has_usable_slot(&account), "the only slot is gone");
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
@@ -4492,7 +4507,7 @@ fn test_422_real_registry_kill_just_past_the_cutoff_ordinary_timing() {
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER - 300 + 1);
-    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     warp(&s, p.deadline + SUITE_BUFFER);
     s.ad_manager.finalize_cancel(&p);
 }
@@ -4516,7 +4531,7 @@ fn test_422_real_registry_kill_before_the_challenge_deadline_fallback_waits_the_
         "the dispute door outlives the cancel cutoff"
     );
     warp(&s, p.deadline + SUITE_BUFFER + 1);
-    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     warp(&s, until + 1);
     assert_eq!(
         s.ad_manager.try_finalize_dispute(&p),
@@ -4566,7 +4581,7 @@ fn test_422_real_registry_kill_after_the_challenge_deadline_fallback_ordinary_ti
         .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
     let until = dm.effective_challenge_deadline(&order_hash);
     warp(&s, until + 1);
-    client.set_valid_until(&account, &auth, &0, &1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     s.ad_manager.finalize_dispute(&p);
     assert_eq!(
         s.ad_manager.get_order_status(&order_hash),
@@ -8517,3 +8532,130 @@ fn test_c28_meter_dispute_and_finalize_dispute() {
     meter_door(&s, "ad_manager.finalize_dispute", FINALIZE_DISPUTE);
     assert_eq!(ad_status(&s), ad_manager_contract::Status::Resolved);
 }
+
+// --- 2.6: one owner signature, metered on the real WASM -------------------------------------
+//
+// `register` with a two-leg `RegisterKey`: the secp256k1 path (EIP-712 over KeyLeg[]) and the
+// ed25519 path (the fixed text, SEP-53). Measured 2026-09-29 (SDK 28.0.0-rc.1, --optimize):
+//
+//   register, secp256k1, 2 legs     34,170,928   (+2.39M over require_auth: keccaks + recover)
+//   register, sep53, 2 legs         32,314,142   (+0.53M: the text, sha256, ed25519 verify)
+//   register, require_auth (mocked) 31,785,340   (the BLS PoP pairing is ~all of it)
+//   set_valid_until, secp256k1       3,188,386
+//   set_valid_until, sep53           1,310,694
+//
+// Ceilings sit at measured + ~10%.
+
+fn signed_owner_auth(env: &Env, e: &serde_json::Value) -> bls_key_registry_contract::OwnerAuth {
+    let mut legs = soroban_sdk::Vec::new(env);
+    for l in e["legs"].as_array().into_iter().flatten() {
+        legs.push_back(bls_key_registry_contract::KeyLeg {
+            chain_id: l["chainId"].as_str().unwrap().parse().unwrap(),
+            registry: BytesN::from_array(env, &hex_to_array(l["registry"].as_str().unwrap())),
+            nonce: l["nonce"].as_str().unwrap().parse().unwrap(),
+        });
+    }
+    let sig = vhex(&e["sig"]);
+    let sig = if e["scheme"] == "sep53" {
+        bls_key_registry_contract::OwnerSig::Sep53(BytesN::from_array(
+            env,
+            &sig.try_into().unwrap(),
+        ))
+    } else {
+        bls_key_registry_contract::OwnerSig::Secp256k1(BytesN::from_array(
+            env,
+            &sig.try_into().unwrap(),
+        ))
+    };
+    bls_key_registry_contract::OwnerAuth::Signed(bls_key_registry_contract::SignedOwner {
+        legs,
+        sig,
+    })
+}
+
+#[test]
+fn test_owner_sig_register_metering() {
+    let s = setup();
+    let (client, _, _, _) = vector_registry(&s);
+    let v = vector_json();
+    for (who, slots, ceiling) in [
+        (
+            "bridger",
+            "bridgerOnStellarTestnet",
+            OWNER_SIG_REGISTER_SECP_CPU,
+        ),
+        (
+            "maker",
+            "makerOnStellarTestnet",
+            OWNER_SIG_REGISTER_SEP53_CPU,
+        ),
+    ] {
+        let e = &v["ownerAuth"][who]["register"][0];
+        assert_eq!(
+            e["legs"].as_array().unwrap().len(),
+            2,
+            "a two-leg RegisterKey"
+        );
+        let r = &v["slots"][slots]["registrations"][0];
+        let account = BytesN::from_array(
+            &s.env,
+            &hex_to_array(v["slots"][slots]["account"].as_str().unwrap()),
+        );
+        client.register(
+            &account,
+            &signed_owner_auth(&s.env, e),
+            &BytesN::from_array(&s.env, &vhex(&r["pkNative"]).try_into().unwrap()),
+            &BytesN::from_array(&s.env, &vhex(&r["pop"]).try_into().unwrap()),
+            &0,
+        );
+        let res = s.env.cost_estimate().resources();
+        std::println!(
+            "METER | bls_key_registry.register ({}, 2 legs) | cpu {} | mem {} | writes {}",
+            e["scheme"].as_str().unwrap(),
+            res.instructions,
+            res.mem_bytes,
+            res.write_entries
+        );
+        assert!(
+            res.instructions <= ceiling,
+            "{who}: register CPU grew to {}",
+            res.instructions
+        );
+        assert!(res.instructions <= MAINNET_TX_INSTRUCTIONS);
+        // and the owner's pre-signed RetireKey (no legs) on the key just registered
+        let retire = &v["ownerAuth"][who]["retire"][0];
+        client.set_valid_until(
+            &account,
+            &signed_owner_auth(&s.env, retire),
+            &BytesN::from_array(
+                &s.env,
+                &hex_to_array(retire["keyCommitment"].as_str().unwrap()),
+            ),
+            &1,
+        );
+        std::println!(
+            "METER | bls_key_registry.set_valid_until ({}) | cpu {}",
+            retire["scheme"].as_str().unwrap(),
+            s.env.cost_estimate().resources().instructions
+        );
+    }
+    // The baseline the signature adds to: the same register under `require_auth` (mocked).
+    let r = &v["slots"]["makerOnStellarTestnet"]["registrations"][1];
+    let pk: [u8; 32] = hex_to_array(v["keys"]["makerWallet"]["pk"].as_str().unwrap());
+    client.register(
+        &BytesN::from_array(&s.env, &pk),
+        &bls_key_registry_contract::OwnerAuth::Stellar(Address::from_string(
+            &SorobanString::from_str(&s.env, &stellar_strkey::ed25519::PublicKey(pk).to_string()),
+        )),
+        &BytesN::from_array(&s.env, &vhex(&r["pkNative"]).try_into().unwrap()),
+        &BytesN::from_array(&s.env, &vhex(&r["pop"]).try_into().unwrap()),
+        &1,
+    );
+    std::println!(
+        "METER | bls_key_registry.register (require_auth, mocked) | cpu {}",
+        s.env.cost_estimate().resources().instructions
+    );
+}
+
+const OWNER_SIG_REGISTER_SECP_CPU: i64 = 37_600_000;
+const OWNER_SIG_REGISTER_SEP53_CPU: i64 = 35_600_000;

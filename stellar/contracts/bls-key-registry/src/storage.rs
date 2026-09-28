@@ -21,6 +21,9 @@ const KEY_NONCE: Symbol = symbol_short!("nonce");
 const KEY_EXPIRED: Symbol = symbol_short!("expiredat");
 /// (KEY_USED, account, commitment) -> bool; a commitment never re-enters a slot.
 const KEY_USED: Symbol = symbol_short!("used");
+/// (KEY_KEYSLOT, account, fingerprint) -> u32: the slot a key occupies, for `set_valid_until`.
+/// Outlives the slot on purpose: a stale entry names a slot that is gone, so it reads as NoSuchSlot.
+const KEY_KEYSLOT: Symbol = symbol_short!("keyslot");
 /// 2.1b proof-carried registration wiring (instance); absent = disabled.
 const KEY_PROOFREG: Symbol = symbol_short!("proofreg");
 
@@ -134,6 +137,18 @@ pub fn remove_slot(env: &Env, account: &BytesN<32>, slot_id: u32) {
     env.storage()
         .persistent()
         .remove(&(KEY_EXPIRED, account.clone(), slot_id));
+}
+
+pub fn get_key_slot(env: &Env, account: &BytesN<32>, fingerprint: &BytesN<32>) -> Option<u32> {
+    env.storage()
+        .persistent()
+        .get(&(KEY_KEYSLOT, account.clone(), fingerprint.clone()))
+}
+
+pub fn set_key_slot(env: &Env, account: &BytesN<32>, fingerprint: &BytesN<32>, slot_id: u32) {
+    let key = (KEY_KEYSLOT, account.clone(), fingerprint.clone());
+    env.storage().persistent().set(&key, &slot_id);
+    bump(env, &key);
 }
 
 pub fn get_expired_at(env: &Env, account: &BytesN<32>, slot_id: u32) -> u64 {
