@@ -67,3 +67,10 @@ pub struct OrderRefunded {
     pub bridger: BytesN<32>,
     pub amount: u128,
 }
+
+/// C-14: the deposit went to the maker on a `BridgerForfeit` ruling proved from the primary.
+#[contractevent(topics = ["ord_forf"], data_format = "single-value")]
+pub struct OrderForfeited {
+    #[topic]
+    pub order_hash: BytesN<32>,
+}

@@ -136,6 +136,10 @@ pub enum OrderPortalError {
     NonCanonicalInput = 89,
     /// #453: the deadline is past `now + MAX_ORDER_WINDOW`.
     DeadlineTooFar = 90,
+    /// C-10: the primary's window has closed, so a dispute can no longer be filed.
+    DisputeWindowClosed = 91,
+    /// C-31: the dispute module refused or trapped the call.
+    DisputeModuleRejected = 92,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
@@ -192,6 +196,8 @@ impl From<proofbridge_core::escrow_ops::Fault> for OrderPortalError {
             NotDisputable => OrderPortalError::NotDisputable,
             NonCanonicalInput => OrderPortalError::NonCanonicalInput,
             DisputeNotResolved => OrderPortalError::DisputeNotResolved,
+            DisputeWindowClosed => OrderPortalError::DisputeWindowClosed,
+            DisputeModuleRejected => OrderPortalError::DisputeModuleRejected,
         }
     }
 }

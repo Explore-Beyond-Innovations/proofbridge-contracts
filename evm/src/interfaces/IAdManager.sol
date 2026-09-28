@@ -193,6 +193,10 @@ interface IAdManager is IEscrow {
     function disputeManager() external view returns (IDisputeManager);
     /// @notice Emitted when the dispute module is (re)pointed.
     event DisputeManagerSet(address indexed disputeManager);
+    /// @notice The module an order's dispute was filed under (D5); zero if never disputed.
+    function disputeModuleOf(bytes32 orderHash) external view returns (IDisputeManager);
+    /// @notice `finalizeDispute` applied `outcome` (the fallback reads as `MutualRefund`).
+    event DisputeFinalized(bytes32 indexed orderHash, Dispute.Outcome outcome);
 
     /// @notice File a dispute on an open or claimed leg, posting the route's bond in native value.
     ///         The bond goes straight to the dispute module; this escrow never holds it.

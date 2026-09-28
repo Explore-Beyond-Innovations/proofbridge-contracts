@@ -9,11 +9,12 @@
     "bondSizing": 6,
     "bondRouting": 10,
     "legActions": 4,
-    "paramValidation": 4
+    "paramValidation": 6
   },
   "constants": {
     "bpsDenominator": "10000",
     "minChallengePeriod": 3600,
+    "maxChallengePeriod": 604800,
     "maxBondBps": 1000
   },
   "outcomes": [
@@ -198,6 +199,20 @@
       "bondFloor": "1",
       "bondBps": 0,
       "validField": 0
+    },
+    {
+      "label": "the longest legal challenge period",
+      "challengePeriod": 604800,
+      "bondFloor": "1",
+      "bondBps": 0,
+      "validField": 0
+    },
+    {
+      "label": "one second past the challenge-period ceiling",
+      "challengePeriod": 604801,
+      "bondFloor": "1",
+      "bondBps": 0,
+      "validField": 1
     }
   ]
 }

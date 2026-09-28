@@ -1,5 +1,6 @@
 //! Storage helpers for the MerkleManager contract.
 
+use proofbridge_core::ttl::extend_persistent;
 use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol};
 
 // =============================================================================
@@ -96,7 +97,10 @@ pub fn get_node_hash(env: &Env, index: u128) -> Option<BytesN<32>> {
 
 /// Set a node hash by index.
 pub fn set_node_hash(env: &Env, index: u128, hash: &BytesN<32>) {
-    env.storage().persistent().set(&(KEY_HASHES, index), hash);
+    let key = (KEY_HASHES, index);
+    env.storage().persistent().set(&key, hash);
+    // C-13: an archived node breaks every later append and proof that walks it.
+    extend_persistent(env, &key);
 }
 
 /// Get the root at a specific width (leaf count).
@@ -106,7 +110,10 @@ pub fn get_root_at_width(env: &Env, width: u128) -> Option<BytesN<32>> {
 
 /// Set the root at a specific width.
 pub fn set_root_at_width(env: &Env, width: u128, root: &BytesN<32>) {
-    env.storage().persistent().set(&(KEY_HISTORY, width), root);
+    let key = (KEY_HISTORY, width);
+    env.storage().persistent().set(&key, root);
+    // C-13: historical roots are what the escrows' unlocks resolve against.
+    extend_persistent(env, &key);
 }
 
 /// Check if an address is a manager.
@@ -119,9 +126,10 @@ pub fn is_manager(env: &Env, addr: &Address) -> bool {
 
 /// Set manager status for an address.
 pub fn set_manager(env: &Env, addr: &Address, status: bool) {
-    env.storage()
-        .persistent()
-        .set(&(KEY_MGRS, addr.clone()), &status);
+    let key = (KEY_MGRS, addr.clone());
+    env.storage().persistent().set(&key, &status);
+    // Written once, read on every append: an archived row would block the escrow's appends.
+    extend_persistent(env, &key);
 }
 
 // =============================================================================

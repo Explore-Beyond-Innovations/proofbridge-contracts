@@ -150,6 +150,10 @@ pub enum AdManagerError {
     DeadlineTooFar = 69,
     /// #464: the order chain's verifier checks co-signatures against a different key registry.
     RegistrySplit = 70,
+    /// C-10: the primary's window has closed, so a dispute can no longer be filed.
+    DisputeWindowClosed = 71,
+    /// C-31: the dispute module refused or trapped the call.
+    DisputeModuleRejected = 72,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for AdManagerError {
@@ -206,6 +210,8 @@ impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
             NotDisputable => AdManagerError::NotDisputable,
             NonCanonicalInput => AdManagerError::NonCanonicalInput,
             DisputeNotResolved => AdManagerError::DisputeNotResolved,
+            DisputeWindowClosed => AdManagerError::DisputeWindowClosed,
+            DisputeModuleRejected => AdManagerError::DisputeModuleRejected,
         }
     }
 }

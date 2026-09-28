@@ -34,6 +34,8 @@ pub struct DisputeFiled {
     pub initiator: Address,
     pub bond: u128,
     pub challenge_deadline: u64,
+    /// C-14: the filer's evidence hash, so an indexer needs no second read.
+    pub evidence: BytesN<32>,
 }
 
 #[contractevent(topics = ["dsp_resp"], data_format = "vec")]
@@ -70,6 +72,14 @@ pub struct BondRouted {
 
 #[contractevent(topics = ["pay_cred"], data_format = "vec")]
 pub struct PayoutCredited {
+    #[topic]
+    pub recipient: Address,
+    pub amount: u128,
+}
+
+/// C-34: a credited bond payout was withdrawn.
+#[contractevent(topics = ["pay_clm"], data_format = "vec")]
+pub struct PayoutClaimed {
     #[topic]
     pub recipient: Address,
     pub amount: u128,

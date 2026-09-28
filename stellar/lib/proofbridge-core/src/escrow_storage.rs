@@ -37,6 +37,8 @@ const KEY_CLAIM: Symbol = symbol_short!("claim");
 const KEY_TIMING: Symbol = symbol_short!("timing");
 const KEY_CLAIMS: Symbol = symbol_short!("claims");
 const KEY_SETTLED: Symbol = symbol_short!("settled");
+/// C-11: the dispute module an order was filed with: `(dspord, order_hash) -> Address`.
+const KEY_DSPORD: Symbol = symbol_short!("dspord");
 
 // ── initialization and config ────────────────────────────────────────────
 
@@ -155,6 +157,20 @@ pub fn get_dispute_manager(env: &Env) -> Option<Address> {
 
 pub fn set_dispute_manager(env: &Env, manager: &Address) {
     env.storage().instance().set(&KEY_DSPMGR, manager);
+}
+
+/// The module this order's dispute was filed with; `None` if it never was (C-11).
+pub fn get_order_dispute_manager(env: &Env, order_hash: &BytesN<32>) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get(&(KEY_DSPORD, order_hash.clone()))
+}
+
+/// Snapshotted at filing so a later module swap only affects new filings (D5).
+pub fn set_order_dispute_manager(env: &Env, order_hash: &BytesN<32>, manager: &Address) {
+    let key = (KEY_DSPORD, order_hash.clone());
+    env.storage().persistent().set(&key, manager);
+    extend_persistent(env, &key);
 }
 
 pub fn get_claim(env: &Env, order_hash: &BytesN<32>) -> Option<ClaimRecord> {

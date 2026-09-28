@@ -75,12 +75,16 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     event DisputeParamsSet(uint256 indexed chainId, Dispute.Params params);
     event ArbiterSet(address indexed arbiter);
     event ProtocolFeePoolSet(address indexed pool);
-    event DisputeFiled(bytes32 indexed orderHash, address indexed initiator, uint128 bond, uint64 challengeDeadline);
+    event DisputeFiled(
+        bytes32 indexed orderHash, address indexed initiator, uint128 bond, uint64 challengeDeadline, bytes32 evidence
+    );
     event DisputeResponded(bytes32 indexed orderHash, address indexed responder, bytes32 evidence);
     event DisputeRuled(bytes32 indexed orderHash, Dispute.Outcome outcome, uint64 finalizeAt);
     event DisputeClaimed(bytes32 indexed orderHash, uint64 finalizeAt);
     event BondRouted(bytes32 indexed orderHash, address indexed to, uint128 amount, bool returnedToFiler);
     event PayoutCredited(address indexed recipient, uint256 amount);
+    /// @notice A credited payout left for `to` (`to == recipient` for `claim`).
+    event PayoutClaimed(address indexed recipient, address indexed to, uint256 amount);
 
     error DisputeManager__NotEscrow();
     error DisputeManager__NotArbiter();
@@ -88,7 +92,10 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     error DisputeManager__DisputeExists(bytes32 orderHash);
     error DisputeManager__NotDisputed(bytes32 orderHash);
     error DisputeManager__ArbiterCannotSettle();
-    error DisputeManager__BondTooSmall(uint256 required, uint256 provided);
+    /// @notice The bond must be paid exactly (C-17): a surplus is refused, not refunded.
+    error DisputeManager__NativeAmountMismatch(uint256 sent, uint256 expected);
+    /// @notice Plain native sends are refused; only the wrapped-native contract's unwraps land.
+    error DisputeManager__NativeNotAccepted(address sender);
     error DisputeManager__ChallengeOpen(uint256 until);
     error DisputeManager__ChallengeClosed(uint256 since);
     error DisputeManager__AlreadyRuled(bytes32 orderHash);
@@ -157,12 +164,10 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
 
         Dispute.Params storage p = disputeParams.load(peerChainId);
         uint256 required = Dispute.bondFor(amount, p);
-        if (msg.value < required) revert DisputeManager__BondTooSmall(required, msg.value);
+        // Exact (C-17): an over- or under-paid bond is refused, so nothing is left to refund.
+        if (msg.value != required) revert DisputeManager__NativeAmountMismatch(msg.value, required);
         bond = uint128(required);
-        // Wrap everything that arrived, not just the bond: the surplus is refunded through the same
-        // wrapper every other exit uses, so wrapping only part of it would pay the refund out of the
-        // bond's own backing.
-        i_wNativeToken.safeDeposit(msg.value);
+        i_wNativeToken.safeDeposit(required);
 
         // The challenge period can be shorter than the order has left to run, so it is a floor on
         // how long the arbiter has, never a licence to finish early: no dispute path may complete
@@ -184,11 +189,7 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
             buffer: buffer
         });
         disputeEscrow[orderHash] = msg.sender;
-        emit DisputeFiled(orderHash, filer, bond, challengeDeadline);
-
-        // Never strand the surplus: everything above the bond is wrapped-native this contract could
-        // otherwise never pay out, since every exit withdraws through the wrapper.
-        if (msg.value > required) _payOrCredit(filer, uint128(msg.value - required));
+        emit DisputeFiled(orderHash, filer, bond, challengeDeadline, evidence);
     }
 
     /// @inheritdoc IDisputeManager
@@ -315,17 +316,28 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         return uint256(d.challengeDeadline) + (IEscrowPause(escrow).pausedSeconds() - d.pausedAtOpen);
     }
 
-    /// @notice Withdraw a credited bond payout.
+    /// @notice Withdraw a credited bond payout to its recipient. Permissionless.
     function claim(address recipient) external {
-        uint256 amount = claimable[recipient];
-        if (amount == 0) revert DisputeManager__NothingToClaim();
-        claimable[recipient] = 0;
-        i_wNativeToken.safeWithdrawTo(amount, recipient);
+        _payCredit(recipient, recipient);
+    }
+
+    /// @notice Withdraw the caller's own credit to `to` (C-16): for a recipient that refuses native.
+    function claimTo(address to) external {
+        if (to == address(0)) revert DisputeManager__ZeroAddress();
+        _payCredit(msg.sender, to);
     }
 
     /*//////////////////////////////////////////////////////////////
                                 INTERNAL
     //////////////////////////////////////////////////////////////*/
+
+    function _payCredit(address recipient, address to) private {
+        uint256 amount = claimable[recipient];
+        if (amount == 0) revert DisputeManager__NothingToClaim();
+        claimable[recipient] = 0;
+        i_wNativeToken.safeWithdrawTo(amount, to);
+        emit PayoutClaimed(recipient, to, amount);
+    }
 
     function _unwindowed(bytes32 orderHash) private view returns (Dispute.Record storage d) {
         d = disputes[orderHash];
@@ -348,5 +360,8 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         }
     }
 
-    receive() external payable {}
+    /// @dev Only the wrapper's unwraps land here; a stray send would be stranded (C-17).
+    receive() external payable {
+        if (msg.sender != address(i_wNativeToken)) revert DisputeManager__NativeNotAccepted(msg.sender);
+    }
 }

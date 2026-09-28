@@ -104,13 +104,14 @@ contract DisputeInvariantTest is Test {
 
     /*//////////////////// what the handler may do ////////////////////*/
 
-    function handlerFile(uint256 salt, uint256 value) external returns (bytes32 h) {
+    function handlerFile(uint256 salt, uint256) external returns (bytes32 h) {
         IAdManager.OrderParams memory p = _params(salt);
         // The maker locks its own ad's liquidity; the suite pranks for the same reason.
         vm.prank(maker);
         h = adManager.lockForOrder(p);
         uint256 required = Dispute.bondFor(LOCK, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
-        uint256 sent = bound(value, required, required * 2);
+        // C-17: the bond is paid exactly; any other value is refused.
+        uint256 sent = required;
         // Only the order's two parties may file (D11). The maker is one of them; a test contract
         // filing as itself is refused, which is how the vacuity guard caught this harness the
         // moment the party check landed.

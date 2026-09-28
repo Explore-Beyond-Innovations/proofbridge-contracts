@@ -79,6 +79,9 @@ library Dispute {
     /// @notice A challenge period shorter than this leaves no room to gather evidence.
     uint64 internal constant MIN_CHALLENGE_PERIOD = 1 hours;
 
+    /// @notice C-36: a longer challenge period would let a dispute outlive the follower's backstop.
+    uint64 internal constant MAX_CHALLENGE_PERIOD = 7 days;
+
     /// @notice Bond ceiling: 10%. Above this the bond deters honest disputes as much as frivolous ones.
     uint16 internal constant MAX_BOND_BPS = 1000;
 
@@ -99,7 +102,10 @@ library Dispute {
     /// @dev Fail-closed, the same shape as `RouteTiming.validate`: a zero `challengePeriod` is what
     ///      an unset route reads as, so it can never be a legal written value.
     function validate(Params calldata p) internal pure {
-        if (p.challengePeriod < MIN_CHALLENGE_PERIOD) revert Dispute__InvalidParams(1);
+        if (p.challengePeriod < MIN_CHALLENGE_PERIOD || p.challengePeriod > MAX_CHALLENGE_PERIOD) {
+            revert Dispute__InvalidParams(1);
+        }
+        // No ceiling on `bondFloor`: it is in the wrapped-native token's units, so no one number fits every chain.
         if (p.bondFloor == 0) revert Dispute__InvalidParams(2);
         if (p.bondBps > MAX_BOND_BPS) revert Dispute__InvalidParams(3);
     }

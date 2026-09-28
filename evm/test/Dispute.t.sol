@@ -25,6 +25,19 @@ contract RefusingRecipient {
     }
 }
 
+/// Refuses native value until opened.
+contract ToggleRecipient {
+    bool internal accepting;
+
+    function open() external {
+        accepting = true;
+    }
+
+    receive() external payable {
+        require(accepting, "closed");
+    }
+}
+
 contract DisputeTest is AdManagerTest, CancellationHarness {
     DisputeManager internal dm;
     address internal arbiter = makeAddr("arbiter");
@@ -388,15 +401,28 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         assertEq(responderEvidence, bytes32("response"), "the counterparty's hash is recorded");
     }
 
-    /// S4: everything above the bond was wrapped and then unreachable, since every exit withdraws
-    /// through the wrapper. The surplus goes back to the filer.
-    function test_s4_anOverpaidBondIsRefunded() public {
-        (IAdManager.OrderParams memory p,) = _lockedOrder(26);
+    /// S4, tightened by C-17: the bond is paid exactly. An overpaid or underpaid bond is refused,
+    /// so no surplus is ever wrapped and nothing needs refunding.
+    function test_c17_bondMustBeExact() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(26);
         uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
         vm.deal(filer, bond * 2);
+
         vm.prank(filer);
-        adManager.dispute{value: bond * 2}(p, bytes32("evidence"));
-        assertEq(filer.balance, bond, "the surplus came straight back");
+        vm.expectRevert(
+            abi.encodeWithSelector(DisputeManager.DisputeManager__NativeAmountMismatch.selector, bond + 1, bond)
+        );
+        adManager.dispute{value: bond + 1}(p, bytes32("evidence"));
+
+        vm.prank(filer);
+        vm.expectRevert(
+            abi.encodeWithSelector(DisputeManager.DisputeManager__NativeAmountMismatch.selector, bond - 1, bond)
+        );
+        adManager.dispute{value: bond - 1}(p, bytes32("evidence"));
+
+        vm.prank(filer);
+        adManager.dispute{value: bond}(p, bytes32("evidence"));
+        assertTrue(dm.isDisputed(h), "the exact bond files");
         assertEq(_wNativeToken.balanceOf(address(dm)), bond, "the module holds exactly the bond");
     }
 
@@ -587,6 +613,270 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         _file(p, filer);
         vm.expectRevert();
         _file(p, filer);
+    }
+
+    /*//////////////// batch B (soak): filing window, module pinning, events ////////////////*/
+
+    /// C-10: filing is allowed up to and including the primary's window end.
+    function test_c10_filingAtTheWindowEndIsAllowed() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(60);
+        vm.warp(p.deadline + 30 minutes);
+        _file(p, filer);
+        assertTrue(dm.isDisputed(h));
+    }
+
+    /// C-10: one second past the window end, filing is refused. A later dispute would run past the
+    /// point the follower's backstop may already have refunded the bridger.
+    function test_c10_filingPastTheWindowEndIsRefused() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(61);
+        uint256 windowEnd = p.deadline + 30 minutes;
+        vm.warp(windowEnd + 1);
+        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        vm.deal(filer, bond);
+        vm.prank(filer);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeWindowClosed.selector, h, windowEnd));
+        adManager.dispute{value: bond}(p, bytes32("evidence"));
+    }
+
+    /// C-10: a pause after the lock moves the window end by the pause, so filing still fits.
+    function test_c10_aPauseExtendsTheFilingWindow() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(62);
+        vm.prank(admin);
+        adManager.pause();
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(admin);
+        adManager.unpause();
+        vm.warp(p.deadline + 30 minutes + 1 hours);
+        _file(p, filer);
+        assertTrue(dm.isDisputed(h));
+    }
+
+    /// C-10: a `Claimed` order uses its frozen claimed window end, not one rebuilt from the route's
+    /// current buffer. A retiming after the claim must not reopen filing.
+    function test_c10_aClaimedOrderUsesItsClaimedWindowEnd() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(63);
+        vm.warp(p.deadline);
+        adManager.claimCancel(p);
+        uint256 claimedEnd = p.deadline + 30 minutes;
+        // The route's buffer grows after the claim; the claim's own end does not move.
+        vm.prank(admin);
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 2 hours, 0, 1 days, 0));
+
+        vm.warp(claimedEnd + 1);
+        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        vm.deal(filer, bond);
+        vm.prank(filer);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeWindowClosed.selector, h, claimedEnd));
+        adManager.dispute{value: bond}(p, bytes32("evidence"));
+
+        // At the claimed end itself, filing still goes through.
+        vm.warp(claimedEnd);
+        vm.prank(filer);
+        adManager.dispute{value: bond}(p, bytes32("evidence"));
+        assertTrue(dm.isDisputed(h));
+    }
+
+    /// C-36: the challenge period has a ceiling of 7 days.
+    function test_c36_challengePeriodCeiling() public {
+        vm.startPrank(admin);
+        dm.setDisputeParams(orderChainId, Dispute.Params(7 days, BOND_FLOOR, BOND_BPS));
+        vm.expectRevert(abi.encodeWithSelector(Dispute.Dispute__InvalidParams.selector, 1));
+        dm.setDisputeParams(orderChainId, Dispute.Params(7 days + 1, BOND_FLOOR, BOND_BPS));
+        vm.stopPrank();
+        (uint64 period,,) = dm.disputeParams(orderChainId);
+        assertEq(period, 7 days, "the refused write left the accepted one in force");
+    }
+
+    /// Parameter validation, from the shared vector both chains loop over: every row either writes or
+    /// fails naming the field the vector expects (C-36 put the challenge-period ceiling there).
+    function test_paramValidationMatchesTheSharedVector() public {
+        string memory v = vm.readFile("../test-vectors/dispute.json");
+        uint256 n = vm.parseJsonUint(v, ".counts.paramValidation");
+        assertGt(n, 0, "the vector holds no validation rows");
+        vm.startPrank(admin);
+        for (uint256 i = 0; i < n; i++) {
+            string memory at = string.concat(".paramValidation[", vm.toString(i), "]");
+            Dispute.Params memory p = Dispute.Params({
+                challengePeriod: uint64(vm.parseJsonUint(v, string.concat(at, ".challengePeriod"))),
+                bondFloor: uint128(vm.parseUint(vm.parseJsonString(v, string.concat(at, ".bondFloor")))),
+                bondBps: uint16(vm.parseJsonUint(v, string.concat(at, ".bondBps")))
+            });
+            uint256 field = vm.parseJsonUint(v, string.concat(at, ".validField"));
+            if (field != 0) {
+                vm.expectRevert(abi.encodeWithSelector(Dispute.Dispute__InvalidParams.selector, uint8(field)));
+            }
+            dm.setDisputeParams(orderChainId, p);
+        }
+        vm.stopPrank();
+    }
+
+    /// A second module, wired for this escrow like the first.
+    function _secondModule() internal returns (DisputeManager b) {
+        b = new DisputeManager(admin, IwNativeToken(address(_wNativeToken)));
+        vm.startPrank(admin);
+        b.setEscrow(address(adManager), true);
+        b.setArbiter(arbiter);
+        b.setProtocolFeePool(feePool);
+        b.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        adManager.setDisputeManager(IDisputeManager(address(b)));
+        vm.stopPrank();
+    }
+
+    /// C-11: a dispute filed under module A is responded to, finalized and bond-settled in A after
+    /// the escrow is repointed at B; a new filing then goes to B.
+    function test_c11_aSwappedModuleDoesNotStrandOpenDisputes() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(64);
+        uint256 bond = _file(p, filer);
+        assertEq(address(adManager.disputeModuleOf(h)), address(dm), "pinned to A at filing");
+
+        DisputeManager b = _secondModule();
+
+        vm.prank(maker);
+        adManager.respondToDispute(p, bytes32("response"));
+        (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        assertEq(responderEvidence, bytes32("response"), "the response landed in A");
+
+        vm.prank(arbiter);
+        dm.resolveDispute(h, Dispute.Outcome.MutualRefund);
+        _warpPastWindow(h);
+        adManager.finalizeDispute(p);
+
+        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Resolved));
+        assertFalse(dm.isDisputed(h), "A's record closed");
+        assertEq(filer.balance, bond, "and A paid the bond back");
+
+        // A fresh filing goes to the module wired now.
+        (IAdManager.OrderParams memory p2, bytes32 h2) =
+            _openOrder(lastAdId, address(adToken), 60 ether, 65, bridger, recipient);
+        _file(p2, filer);
+        assertEq(address(adManager.disputeModuleOf(h2)), address(b), "the new filing pins B");
+        assertTrue(b.isDisputed(h2));
+        assertFalse(dm.isDisputed(h2));
+    }
+
+    /// C-11: the evidence path closes the dispute in the module it was filed under, after a swap.
+    function test_c11_evidenceClosesTheDisputeInItsOwnModule() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(66);
+        uint256 bond = _file(p, filer);
+        _secondModule();
+
+        _presentSettledOn(p, h);
+
+        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Filled));
+        assertFalse(dm.isDisputed(h), "A's record closed by the evidence");
+        assertEq(_wNativeToken.balanceOf(address(dm)), 0, "no bond stranded in A");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, bond, "TradeProceeds routed it to the pool");
+    }
+
+    /// C-11: a never-disputed order has no module.
+    function test_c11_neverDisputedHasNoModule() public {
+        (, bytes32 h) = _lockedOrder(67);
+        assertEq(address(adManager.disputeModuleOf(h)), address(0));
+    }
+
+    /// C-14: `finalizeDispute` emits the settled outcome, per outcome class.
+    function test_c14_finalizeEmitsTheOutcome() public {
+        test_fundAd_makerOnly();
+        Dispute.Outcome[3] memory rulings =
+            [Dispute.Outcome.MutualRefund, Dispute.Outcome.MakerForfeit, Dispute.Outcome.BridgerForfeit];
+        for (uint256 i = 0; i < 3; i++) {
+            (IAdManager.OrderParams memory p, bytes32 h) =
+                _openOrder(lastAdId, address(adToken), 60 ether, 70 + i, bridger, recipient);
+            _file(p, filer);
+            vm.prank(arbiter);
+            dm.resolveDispute(h, rulings[i]);
+            _warpPastWindow(h);
+            vm.expectEmit(true, false, false, true, address(adManager));
+            emit IAdManager.DisputeFinalized(h, rulings[i]);
+            adManager.finalizeDispute(p);
+        }
+    }
+
+    /// C-14: no ruling finalizes as the fallback, and the event says `MutualRefund`, not `None`.
+    function test_c14_theFallbackEmitsMutualRefund() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(75);
+        _file(p, filer);
+        _warpPastWindow(h);
+        vm.expectEmit(true, false, false, true, address(adManager));
+        emit IAdManager.DisputeFinalized(h, Dispute.Outcome.MutualRefund);
+        adManager.finalizeDispute(p);
+    }
+
+    /// C-14: the filing event carries the filer's evidence hash.
+    function test_c14_filingEventCarriesTheEvidence() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(76);
+        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint64 challengeDeadline = uint64(block.timestamp) + CHALLENGE;
+        if (p.deadline + 30 minutes > challengeDeadline) challengeDeadline = uint64(p.deadline + 30 minutes);
+        vm.deal(filer, bond);
+        vm.expectEmit(true, true, false, true, address(dm));
+        emit DisputeManager.DisputeFiled(h, filer, uint128(bond), challengeDeadline, bytes32("the evidence"));
+        vm.prank(filer);
+        adManager.dispute{value: bond}(p, bytes32("the evidence"));
+    }
+
+    /// C-16 + C-34: a filer that refuses native is credited; `claimTo` sends its own credit
+    /// elsewhere, and both claims emit `PayoutClaimed`.
+    function test_c16_claimToRedirectsARefusedCredit() public {
+        address refuser = address(new RefusingRecipient());
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrderTo(77, refuser);
+        uint256 bond = _file(p, refuser);
+        vm.prank(arbiter);
+        dm.resolveDispute(h, Dispute.Outcome.MutualRefund);
+        _warpPastWindow(h);
+        adManager.finalizeDispute(p);
+        assertEq(dm.claimable(refuser), bond, "credited");
+
+        // `claim` to the refuser still fails; the credit stays put.
+        vm.expectRevert(bytes("no"));
+        dm.claim(refuser);
+
+        vm.prank(refuser);
+        vm.expectRevert(DisputeManager.DisputeManager__ZeroAddress.selector);
+        dm.claimTo(address(0));
+
+        address wallet = makeAddr("wallet");
+        vm.expectEmit(true, true, false, true, address(dm));
+        emit DisputeManager.PayoutClaimed(refuser, wallet, bond);
+        vm.prank(refuser);
+        dm.claimTo(wallet);
+        assertEq(wallet.balance, bond, "paid to the address the recipient chose");
+        assertEq(dm.claimable(refuser), 0);
+
+        // Only the credited account's own credit moves: a stranger has nothing to claim.
+        vm.prank(stranger);
+        vm.expectRevert(DisputeManager.DisputeManager__NothingToClaim.selector);
+        dm.claimTo(wallet);
+    }
+
+    /// C-34: the permissionless `claim` emits too.
+    function test_c34_claimEmits() public {
+        ToggleRecipient r = new ToggleRecipient();
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrderTo(78, address(r));
+        uint256 bond = _file(p, address(r));
+        vm.prank(arbiter);
+        dm.resolveDispute(h, Dispute.Outcome.MutualRefund);
+        _warpPastWindow(h);
+        adManager.finalizeDispute(p);
+        assertEq(dm.claimable(address(r)), bond, "credited");
+
+        r.open();
+        vm.expectEmit(true, true, false, true, address(dm));
+        emit DisputeManager.PayoutClaimed(address(r), address(r), bond);
+        dm.claim(address(r));
+        assertEq(address(r).balance, bond);
+    }
+
+    /// C-17: a plain native send to the module is refused; unwraps from the wrapper still land.
+    function test_c17_moduleRefusesStrayNative() public {
+        vm.deal(stranger, 1 ether);
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__NativeNotAccepted.selector, stranger));
+        (bool ok,) = address(dm).call{value: 1 ether}("");
+        assertTrue(ok, "expectRevert consumed the revert");
+        assertEq(address(dm).balance, 0);
+        // The bond exits unwrap through this contract's `receive`, so a bond round trip proves it.
+        test_d7_mutualRefundReturnsTheBond();
     }
 }
 

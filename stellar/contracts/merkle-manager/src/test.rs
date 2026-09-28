@@ -682,3 +682,54 @@ fn test_append_metering() {
         }
     }
 }
+
+/// C-13: node hashes and root history are written once and then only read, by later appends and by
+/// every unlock's root lookup, so each write extends the entry. Asserted on the TTL itself: the test
+/// environment does not evict, so a read after aging would pass either way.
+#[test]
+fn test_append_extends_node_and_root_history_ttl() {
+    use proofbridge_core::ttl::PERSISTENT_BUMP_AMOUNT;
+    use soroban_sdk::testutils::storage::Persistent as _;
+    use soroban_sdk::{symbol_short, IntoVal, Val};
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, manager) = setup_contract(&env);
+    client.initialize(&admin);
+    client.set_manager(&manager, &true);
+    client.append_order_hash(&manager, &BytesN::from_array(&env, &[1u8; 32]), &0);
+    client.append_order_hash(&manager, &BytesN::from_array(&env, &[2u8; 32]), &0);
+
+    let ttl_of = |key: Val| {
+        env.as_contract(&client.address, || {
+            if env.storage().persistent().has(&key) {
+                Some(env.storage().persistent().get_ttl(&key))
+            } else {
+                None
+            }
+        })
+    };
+    let mut nodes = 0;
+    for i in 0..=client.get_size() {
+        if let Some(ttl) = ttl_of((symbol_short!("hashes"), i).into_val(&env)) {
+            assert!(
+                ttl >= PERSISTENT_BUMP_AMOUNT,
+                "node {i} not extended: {ttl}"
+            );
+            nodes += 1;
+        }
+    }
+    assert_eq!(nodes, 3, "two leaves and their branch");
+    for w in 1..=2u128 {
+        let ttl = ttl_of((symbol_short!("history"), w).into_val(&env)).expect("root recorded");
+        assert!(
+            ttl >= PERSISTENT_BUMP_AMOUNT,
+            "root at width {w} not extended: {ttl}"
+        );
+    }
+    let ttl = ttl_of((symbol_short!("mgrs"), manager.clone()).into_val(&env)).unwrap();
+    assert!(
+        ttl >= PERSISTENT_BUMP_AMOUNT,
+        "manager row not extended: {ttl}"
+    );
+}

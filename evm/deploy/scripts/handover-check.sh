@@ -48,6 +48,10 @@ for e in adManager orderPortal; do
   [ "$(cast call --rpc-url http://127.0.0.1:$PA $(addrOf $e) 'rootVerifier(uint256)(address)' 31338)" = "$(addrOf counterpartyVerifier)" ] && pass "plain link wired $e.rootVerifier(31338)" || fail "plain link left $e without a root verifier"
 done
 
+echo "== 2a. (C-10) a follower backstop shorter than the primary's worst-case dispute is refused before anything is sent"
+n0=$(nonceA); A env ROUTE_LONG_BACKSTOP_S=3600 pnpm -s cli link --peer $MB > $L/2a.log 2>&1; rc=$?
+[ $rc -ne 0 ] && grep -q "this chain as follower" $L/2a.log && [ "$(nonceA)" = "$n0" ] && pass "link refused a 1-hour backstop against a 1-hour challenge period (exit $rc, 0 txs)" || fail "short backstop: exit $rc, txs $(( $(nonceA) - n0 )), $(grep -m1 -i 'error' $L/2a.log | cut -c1-140)"
+
 echo "== 2b. (#466) a verifier on another registry, wired by hand for any peer, is refused by deploy and link"
 RPA=http://127.0.0.1:$PA
 A pnpm -s cli link --peer $MB > $L/2b0.log 2>&1 && [ "$(cast call --rpc-url $RPA $(addrOf adManager) 'rootVerifier(uint256)(address)' 31338)" = "$(addrOf counterpartyVerifier)" ] && pass "link wired the good verifier for 31338" || fail "link: $(grep -m1 -i error $L/2b0.log | cut -c1-120)"

@@ -909,14 +909,7 @@ impl AdManagerContract {
         // #422 rule 3, this door too: every outcome but MakerForfeit hands the lock back to the
         // maker, so a denied payout waits the evidence grace past the challenge deadline (F1).
         if outcome != DisputeOutcome::MakerForfeit {
-            let manager =
-                storage::get_dispute_manager(&env).ok_or(AdManagerError::NoDisputeManager)?;
-            let until = proofbridge_core::cross_contract::challenge_deadline_of(
-                &env,
-                &manager,
-                &order_hash,
-                storage::get_paused_seconds(&env),
-            );
+            let until = ops::dispute_challenge_deadline(&env, &order_hash)?;
             if Self::co_sign_denied(&env, &ad.maker, &params, &order_hash, until) {
                 let buffer = Self::timing(&env, params.order_chain_id)?.buffer;
                 let grace = Self::evidence_grace(&env, params.order_chain_id, buffer)?;
@@ -966,6 +959,11 @@ impl AdManagerContract {
             LEAF_DOMAIN_CANCEL
         };
         cross_contract::append_to_merkle(&env, &config.merkle_manager, &order_hash, domain)?;
+        events::DisputeFinalized {
+            order_hash,
+            outcome,
+        }
+        .publish(&env);
         storage::extend_instance_ttl(&env);
         Ok(())
     }
@@ -1118,6 +1116,41 @@ impl AdManagerContract {
 
     pub fn has_open_positions(env: Env, account: BytesN<32>) -> bool {
         storage::get_in_flight(&env, &account) > 0
+    }
+
+    /// C-15: what `claim` would pay `recipient` in `token` right now.
+    pub fn claimable(env: Env, recipient: BytesN<32>, token: BytesN<32>) -> u128 {
+        storage::get_claimable(&env, &recipient, &token)
+    }
+
+    /// C-35: whether a proof's nullifier has been spent here.
+    pub fn nullifier_used(env: Env, nullifier_hash: BytesN<32>) -> bool {
+        storage::is_nullifier_used(&env, &nullifier_hash)
+    }
+
+    /// C-35: the account's open-position count (the EVM `inFlightOf`).
+    pub fn in_flight_of(env: Env, account: BytesN<32>) -> u64 {
+        storage::get_in_flight(&env, &account)
+    }
+
+    /// C-35: the peer token routed from `token` for `peer_chain_id`, if any.
+    pub fn token_route(env: Env, token: BytesN<32>, peer_chain_id: u128) -> Option<BytesN<32>> {
+        storage::get_token_route(&env, &token, peer_chain_id)
+    }
+
+    /// C-35: the key-registry epoch new locks are stamped with (#465).
+    pub fn registry_epoch(env: Env) -> u32 {
+        storage::get_registry_epoch(&env)
+    }
+
+    /// C-35: the key registry a given epoch pointed at.
+    pub fn registry_at(env: Env, epoch: u32) -> Option<Address> {
+        storage::get_registry_at(&env, epoch)
+    }
+
+    /// C-11: the dispute module this order was filed with, `None` if it never was.
+    pub fn dispute_module_of(env: Env, order_hash: BytesN<32>) -> Option<Address> {
+        storage::get_order_dispute_manager(&env, &order_hash)
     }
 
     /// Get available (unlocked) liquidity for an ad.
@@ -1288,7 +1321,7 @@ impl AdManagerContract {
         outcome: DisputeOutcome,
         params: &OrderParams,
     ) -> Result<(), AdManagerError> {
-        let filer = match ops::dispute_filer(env, order_hash) {
+        let filer = match ops::dispute_filer(env, order_hash)? {
             Some(who) => who,
             None => return Ok(()),
         };
@@ -1302,7 +1335,7 @@ impl AdManagerContract {
             order_hash,
             outcome,
             filer != maker,
-        );
+        )?;
         Ok(())
     }
 

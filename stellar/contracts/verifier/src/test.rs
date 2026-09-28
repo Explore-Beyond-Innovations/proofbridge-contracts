@@ -179,3 +179,35 @@ fn test_simple_circuit_wrong_proof_size_fails() {
         "Verification should fail with wrong proof size"
     );
 }
+
+/// C-13: `verify_proof` keeps the VK's instance alive. An idle verifier whose instance archived
+/// would fail every unlock until someone paid to restore it.
+#[test]
+fn test_verify_proof_extends_the_instance_ttl() {
+    use proofbridge_core::ttl::{INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD};
+    use soroban_sdk::testutils::{storage::Instance as _, Ledger as _};
+
+    let env = Env::default();
+    env.cost_estimate().budget().reset_unlimited();
+    let client = setup_simple_circuit_verifier(&env);
+
+    // Age the instance until its TTL is under the threshold.
+    let ttl = |env: &Env| env.as_contract(&client.address, || env.storage().instance().get_ttl());
+    let age = ttl(&env) - INSTANCE_LIFETIME_THRESHOLD + 1;
+    env.ledger().with_mut(|l| l.sequence_number += age);
+    assert!(
+        ttl(&env) < INSTANCE_LIFETIME_THRESHOLD,
+        "set-up: the instance is due"
+    );
+
+    client.verify_proof(
+        &Bytes::from_slice(&env, SIMPLE_PUBLIC_INPUTS),
+        &Bytes::from_slice(&env, SIMPLE_PROOF),
+    );
+    assert_eq!(
+        ttl(&env),
+        INSTANCE_BUMP_AMOUNT,
+        "verify_proof did not extend the instance"
+    );
+    assert!(client.get_vk().is_some(), "the VK is still readable");
+}

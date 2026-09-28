@@ -10,6 +10,7 @@ doctest = false
 
 [dependencies]
 soroban-sdk = { workspace = true }
+proofbridge-core = { workspace = true }
 ultrahonk_soroban_verifier = { workspace = true }
 
 [dev-dependencies]

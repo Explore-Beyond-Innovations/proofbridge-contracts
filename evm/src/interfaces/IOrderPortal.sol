@@ -45,6 +45,9 @@ interface IOrderPortal is IEscrow {
 
     /// @notice The bridger's deposit went back to them (`Cancelled`).
     event OrderRefunded(bytes32 indexed orderHash, bytes32 indexed bridger, uint256 amount);
+    /// @notice `payMakerByForfeit`: the bridger forfeited and the deposit went to the maker (C-14).
+    ///         Emitted beside `OrderSettled(orderHash, true)`.
+    event OrderForfeited(bytes32 indexed orderHash);
 
     error OrderPortal__AdManagerMismatch(bytes32 expected);
     error OrderPortal__BridgerMustBeSender();

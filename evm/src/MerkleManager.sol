@@ -26,6 +26,8 @@ contract MerkleManager is IMerkleManager, TwoStepAdmin, AccessControl, Pausable,
 
     // Errors
     error MerkleManager__ZeroAddress();
+    /// @notice `DEFAULT_ADMIN_ROLE` moves only with the two-step handover (C-37).
+    error MerkleManager__AdminRoleViaHandover();
 
     // Self-verifying core; width/size stay readable via the view functions.
     event DepositHashAppended(uint256 indexed index, bytes32 indexed orderHash, uint256 side, bytes32 newRoot);
@@ -53,6 +55,23 @@ contract MerkleManager is IMerkleManager, TwoStepAdmin, AccessControl, Pausable,
     function _afterAdminChange(address from, address to) internal override {
         if (to != address(0)) _grantRole(DEFAULT_ADMIN_ROLE, to);
         if (from != address(0)) _revokeRole(DEFAULT_ADMIN_ROLE, from);
+    }
+
+    /// @dev C-37: a raw grant would make a second admin the handover never sees; other roles pass.
+    function grantRole(bytes32 role, address account) public override {
+        if (role == DEFAULT_ADMIN_ROLE) revert MerkleManager__AdminRoleViaHandover();
+        super.grantRole(role, account);
+    }
+
+    /// @dev Revoking or renouncing it raw would leave `admin` without the role; same rule.
+    function revokeRole(bytes32 role, address account) public override {
+        if (role == DEFAULT_ADMIN_ROLE) revert MerkleManager__AdminRoleViaHandover();
+        super.revokeRole(role, account);
+    }
+
+    function renounceRole(bytes32 role, address callerConfirmation) public override {
+        if (role == DEFAULT_ADMIN_ROLE) revert MerkleManager__AdminRoleViaHandover();
+        super.renounceRole(role, callerConfirmation);
     }
 
     /**

@@ -244,7 +244,7 @@ contract AdManager is EscrowBase, IAdManager {
         bytes calldata proof,
         bytes calldata cosigData
     ) external nonReentrant whenNotPaused {
-        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        bytes32 orderHash = _orderHash(params);
         // D2: the co-signed unlock is the presentation — valid through the window, minus the margin.
         _requireNotPast(_presentationCutoff(orderHash, params));
         _requireSettleable(orderHash, nullifierHash);
@@ -262,9 +262,7 @@ contract AdManager is EscrowBase, IAdManager {
 
         // A co-signed unlock is evidence too (D5), and `_requireSettleable` admits `Disputed`, so
         // this path can terminate a disputed order and must close its dispute like any other.
-        _closeDisputeByEvidence(
-            orderHash, Dispute.Outcome.TradeProceeds, _disputeFiler(orderHash) != ads[params.adId].maker
-        );
+        _closeDisputeByEvidence(orderHash, maker);
         _settle(orderHash, nullifierHash, params.adSettlementSigner);
         _payFromAd(params);
 
@@ -277,7 +275,7 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @inheritdoc IAdManager
     function claimCancel(OrderParams calldata params) external nonReentrant whenNotPaused {
-        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        bytes32 orderHash = _orderHash(params);
         _requireStatus(orderHash, Status.Open);
         _requireReached(params.deadline);
         // Deadline-anchored (D1): a late claim cannot shorten the window the fast unlock relies on;
@@ -291,7 +289,7 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @inheritdoc IAdManager
     function finalizeCancel(OrderParams calldata params) external nonReentrant whenNotPaused {
-        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        bytes32 orderHash = _orderHash(params);
         _requireFinalizable(orderHash);
         // #422 rule 3: when the co-signed payout was denied, the cancel waits for the order chain's
         // SETTLED evidence to be anchorable and presented, so a maker paid on the other chain cannot
@@ -315,7 +313,7 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @inheritdoc IAdManager
     function dispute(OrderParams calldata params, bytes32 evidence) external payable nonReentrant whenNotPaused {
-        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        bytes32 orderHash = _orderHash(params);
         // Only the order's two parties may file. Without this any address could dispute any live
         // order and, one short challenge period later, cancel it out from under both of them.
         _requireParty(ads[params.adId].maker, params.orderRecipient.toAddressChecked());
@@ -333,27 +331,28 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @inheritdoc IAdManager
     function respondToDispute(OrderParams calldata params, bytes32 evidence) external nonReentrant whenNotPaused {
-        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        bytes32 orderHash = _orderHash(params);
         _requireStatus(orderHash, Status.Disputed);
-        address responder =
-            _requireResponder(orderHash, ads[params.adId].maker, params.orderRecipient.toAddressChecked());
-        _disputeManager().recordResponse(orderHash, responder, evidence);
+        // Either party may call; the module refuses the filer, so only the other one gets through.
+        _requireParty(ads[params.adId].maker, params.orderRecipient.toAddressChecked());
+        disputeModuleOf[orderHash].recordResponse(orderHash, msg.sender, evidence);
     }
 
     /// @inheritdoc IAdManager
     function finalizeDispute(OrderParams calldata params) external nonReentrant whenNotPaused {
-        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        bytes32 orderHash = _orderHash(params);
         _requireStatus(orderHash, Status.Disputed);
+        // D5: the module the order was filed under, whatever is wired now.
+        IDisputeManager m = disputeModuleOf[orderHash];
 
-        (Dispute.Outcome outcome, bool windowOver, address initiator) =
-            _disputeManager().outcomeOf(orderHash, pausedSeconds);
+        (Dispute.Outcome outcome, bool windowOver, address initiator) = m.outcomeOf(orderHash, pausedSeconds);
         if (!windowOver) revert Escrow__DisputeNotResolved(orderHash);
         // No ruling means the fallback: a mutual refund, the unified primitive's terminal (D4).
         if (outcome == Dispute.Outcome.None) outcome = Dispute.Outcome.MutualRefund;
         // #422 rule 3, this door too: every outcome but MakerForfeit hands the lock back to the maker,
         // so a denied payout waits the evidence grace past the challenge deadline (review F1).
         if (outcome != Dispute.Outcome.MakerForfeit) {
-            uint256 until = _disputeManager().effectiveChallengeDeadline(orderHash);
+            uint256 until = m.effectiveChallengeDeadline(orderHash);
             if (_coSignDenied(params, orderHash, until)) {
                 _requireReached(until + _evidenceGrace(params.orderChainId));
             }
@@ -373,7 +372,7 @@ contract AdManager is EscrowBase, IAdManager {
         _resolve(orderHash, params.adSettlementSigner);
         // The flag is absolute: was this filed by the bridger? Filing is restricted to the order's
         // two parties, so on the ad leg "not the maker" is exactly "the bridger".
-        _disputeManager().settleBond(orderHash, outcome, initiator != ad.maker);
+        m.settleBond(orderHash, outcome, initiator != ad.maker);
 
         // Broadcast the outcome to the follower, which has no dispute of its own and acts only on
         // this leaf. CANCEL means "refund the bridger" and already did before 2.3g; FORFEIT is the
@@ -382,6 +381,7 @@ contract AdManager is EscrowBase, IAdManager {
         // did — hands the follower a proof of the opposite ruling.
         _appendLeaf(orderHash, outcome == Dispute.Outcome.BridgerForfeit ? LeafDomain.FORFEIT : LeafDomain.CANCEL);
         emit OrderCancelled(orderHash, false);
+        emit DisputeFinalized(orderHash, outcome);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -396,18 +396,15 @@ contract AdManager is EscrowBase, IAdManager {
     ///      pass 1 found, so the type system is where that should be refused.
     IDisputeManager public disputeManager;
 
+    /// @notice D5: the module each order's dispute was filed under. Every later read for the order
+    ///         goes here, so `setDisputeManager` only affects new filings. Zero if never disputed.
+    mapping(bytes32 orderHash => IDisputeManager) public disputeModuleOf;
+
     /// @inheritdoc IAdManager
     function setDisputeManager(IDisputeManager manager) external onlyAdmin {
         if (address(manager) == address(0)) revert Escrow__ZeroAddress();
         disputeManager = manager;
         emit DisputeManagerSet(address(manager));
-    }
-
-    /// @dev The module, or `NoDisputeManager` — unset means disputes are unavailable here, which is
-    ///      a safe default rather than a broken one.
-    function _disputeManager() internal view returns (IDisputeManager m) {
-        m = disputeManager;
-        if (address(m) == address(0)) revert Escrow__NoDisputeManager();
     }
 
     /**
@@ -429,6 +426,9 @@ contract AdManager is EscrowBase, IAdManager {
     ) internal {
         Order storage o = _orders[orderHash];
         if (o.status != Status.Open && o.status != Status.Claimed) revert Escrow__NotDisputable(orderHash, o.status);
+        // D4: no filing once the primary's window closed (claimed window end once `Claimed`).
+        uint256 windowEnd = _windowEnd(orderHash, deadline, buffer);
+        if (block.timestamp > windowEnd) revert Escrow__DisputeWindowClosed(orderHash, windowEnd);
 
         // Order matters, and it is the cheap half of keeping the two contracts in step. The module
         // call is the fallible step — an unset route, an underfunded bond — so it runs *before* this
@@ -440,9 +440,12 @@ contract AdManager is EscrowBase, IAdManager {
         // c41-J: the module adds every second paused past this snapshot, so passing the order's own
         // (from the lock, not the filing) makes its floor the primary's `_windowEnd` to the second —
         // a pause between lock and filing extends the unlock and the dispute alike.
-        _disputeManager().openDispute{value: msg.value}(
+        IDisputeManager m = disputeManager;
+        if (address(m) == address(0)) revert Escrow__NoDisputeManager();
+        m.openDispute{value: msg.value}(
             orderHash, amount, peerChainId, msg.sender, evidence, deadline, buffer, o.pausedAtOpen
         );
+        disputeModuleOf[orderHash] = m;
         o.status = Status.Disputed;
     }
 
@@ -458,12 +461,6 @@ contract AdManager is EscrowBase, IAdManager {
         if (msg.sender != maker && msg.sender != bridger) revert Escrow__NotAParty(msg.sender);
     }
 
-    /// @dev The party that did not file. Reverts unless the caller is the other one.
-    function _requireResponder(bytes32 orderHash, address maker, address bridger) internal view returns (address) {
-        _requireParty(maker, bridger);
-        return msg.sender;
-    }
-
     /**
      * @dev Evidence terminated a disputed order, so the dispute is over whatever the arbiter
      *      thought. A no-op when nothing was disputed, so every path that admits `Disputed` can call
@@ -471,23 +468,15 @@ contract AdManager is EscrowBase, IAdManager {
      *      status leaves `Disputed`, `finalizeDispute` can never run again and the module would hold
      *      the bond forever.
      *
-     *      `outcome` is what the path proved, not what anyone ruled: a settle is `TradeProceeds`, a
-     *      cancel-refund is `MutualRefund`. Reading the record's ruling here would route the bond by
-     *      a finding this evidence has just overturned.
+     *      Both callers settle the trade, so the bond routes on `TradeProceeds`: what the path
+     *      proved, not what anyone ruled. Reads the order's own module (D5); a never-disputed order
+     *      has none. `filerIsBridger` is "not the maker": only the two parties can file (D11).
      */
-    function _closeDisputeByEvidence(bytes32 orderHash, Dispute.Outcome outcome, bool filerIsBridger) internal {
-        IDisputeManager m = disputeManager;
-        if (address(m) != address(0) && m.isDisputed(orderHash)) {
-            m.settleBond(orderHash, outcome, filerIsBridger);
-        }
-    }
-
-    /// @dev Who filed, or the zero address when nothing is disputed here. The escrows need it to
-    ///      answer `filerIsBridger` on the evidence paths, where no ruling is involved.
-    function _disputeFiler(bytes32 orderHash) internal view returns (address) {
-        IDisputeManager m = disputeManager;
-        if (address(m) == address(0)) return address(0);
-        return m.initiatorOf(orderHash);
+    function _closeDisputeByEvidence(bytes32 orderHash, address maker) internal {
+        // `Disputed` here implies an open record on the order's module (filing writes both).
+        if (_orders[orderHash].status != Status.Disputed) return;
+        IDisputeManager m = disputeModuleOf[orderHash];
+        m.settleBond(orderHash, Dispute.Outcome.TradeProceeds, m.initiatorOf(orderHash) != maker);
     }
 
     /// @dev `→ Resolved`: the dispute terminal. Mirrors {_cancel}'s bookkeeping — in particular it
@@ -502,7 +491,7 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @inheritdoc IAdManager
     function cancelNeverLocked(OrderParams calldata params) external nonReentrant whenNotPaused {
-        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        bytes32 orderHash = _orderHash(params);
         _requireStatus(orderHash, Status.None);
         _requireReached(params.deadline);
         // D5: a lock needs `deadline ≥ now + minWindow`, so past the deadline none can follow this.
@@ -516,7 +505,7 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @inheritdoc IAdManager
     function recordSettled(OrderParams calldata params) external nonReentrant whenNotPaused {
-        _recordSettled(_hashOrder(params, block.chainid, address(this)));
+        _recordSettled(_orderHash(params));
     }
 
     /// @inheritdoc IAdManager
@@ -525,16 +514,14 @@ contract AdManager is EscrowBase, IAdManager {
         nonReentrant
         whenNotPaused
     {
-        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        bytes32 orderHash = _orderHash(params);
         _requirePresentable(orderHash);
         _requireAnchored(params.orderChainId, targetRoot);
         _requireEventProof(targetRoot, orderHash, proof, LeafDomain.SETTLED);
 
         // Evidence beats arbitration: if this order was disputed, that dispute is now over and the
         // bond settles on what the proof shows, not on whatever the arbiter had ruled.
-        _closeDisputeByEvidence(
-            orderHash, Dispute.Outcome.TradeProceeds, _disputeFiler(orderHash) != ads[params.adId].maker
-        );
+        _closeDisputeByEvidence(orderHash, ads[params.adId].maker);
         _fill(orderHash, params.adSettlementSigner, true);
         _payFromAd(params);
     }
@@ -580,6 +567,11 @@ contract AdManager is EscrowBase, IAdManager {
             adSettlementSigner: p.adSettlementSigner
         });
         return OrderHash.digest(o);
+    }
+
+    /// @dev This escrow's hash of `p`: the ad-chain context is this chain and this contract.
+    function _orderHash(OrderParams calldata p) private view returns (bytes32) {
+        return _hashOrder(p, block.chainid, address(this));
     }
 
     /// @dev The signed amount in ad-chain units — what the lock reserved and the payout releases.
@@ -654,7 +646,7 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @inheritdoc IAdManager
     function cancelFinalizesAt(OrderParams calldata params) external view returns (uint256) {
-        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        bytes32 orderHash = _orderHash(params);
         if (_statusOf(orderHash) != Status.Claimed) return 0;
         uint256 end = _claimedWindowEnd(orderHash);
         return _coSignDenied(params, orderHash, _presentationCutoff(orderHash, params))
@@ -724,6 +716,6 @@ contract AdManager is EscrowBase, IAdManager {
         // not take new locks: the bridger's deposit could never be unlocked (2.3c D2).
         _requireRegistered(ad.settlementSigner);
 
-        orderHash = _hashOrder(params, block.chainid, address(this));
+        orderHash = _orderHash(params);
     }
 }

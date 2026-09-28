@@ -9,6 +9,9 @@ use crate::types::{DisputeOutcome, DisputeParams};
 /// A challenge period shorter than this leaves no room to gather evidence.
 pub const MIN_CHALLENGE_PERIOD: u64 = 60 * 60;
 
+/// C-36: a longer challenge period would let a dispute outlive the follower's backstop (D4).
+pub const MAX_CHALLENGE_PERIOD: u64 = 7 * 24 * 60 * 60;
+
 /// Bond ceiling: 10%. Above this a bond deters honest disputes as much as frivolous ones.
 pub const MAX_BOND_BPS: u32 = 1000;
 
@@ -19,9 +22,10 @@ const BPS_DENOMINATOR: u128 = 10_000;
 /// Fail-closed, the same shape as `timing::validate`: a zero `challenge_period` is what an unset
 /// route reads as, so it can never be a legal written value.
 pub fn validate(p: &DisputeParams) -> Result<(), u8> {
-    if p.challenge_period < MIN_CHALLENGE_PERIOD {
+    if p.challenge_period < MIN_CHALLENGE_PERIOD || p.challenge_period > MAX_CHALLENGE_PERIOD {
         return Err(1);
     }
+    // No ceiling on the floor: it is in the route token's units, so no one number fits every token.
     if p.bond_floor == 0 {
         return Err(2);
     }

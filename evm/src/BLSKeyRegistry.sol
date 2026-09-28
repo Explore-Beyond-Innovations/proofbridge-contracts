@@ -72,6 +72,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
     bool public proofRegistrationEnabled;
 
     constructor(address admin_) {
+        if (admin_ == address(0)) revert ZeroAdmin();
         admin = admin_;
     }
 

@@ -190,6 +190,36 @@ fn params_fail_closed() {
         .is_err());
 }
 
+/// Parameter validation from the shared vector both chains loop over: each row either writes or fails
+/// with the error for the field the vector names (C-36 put the challenge-period ceiling there).
+#[test]
+fn param_validation_matches_the_shared_vector() {
+    let v: serde_json::Value = serde_json::from_str(DISPUTE_VECTORS).unwrap();
+    let rows = v["paramValidation"].as_array().unwrap();
+    assert_eq!(
+        rows.len() as u64,
+        v["counts"]["paramValidation"].as_u64().unwrap()
+    );
+    assert!(!rows.is_empty(), "the vector holds no validation rows");
+    let f = fixture();
+    for row in rows {
+        let p = DisputeParams {
+            challenge_period: row["challengePeriod"].as_u64().unwrap(),
+            bond_floor: row["bondFloor"].as_str().unwrap().parse().unwrap(),
+            bond_bps: row["bondBps"].as_u64().unwrap() as _,
+        };
+        let got = f.client.try_set_dispute_params(&CHAIN, &p);
+        let label = row["label"].as_str().unwrap();
+        match row["validField"].as_u64().unwrap() {
+            0 => assert!(got.is_ok(), "{label}: should write"),
+            1 => assert_eq!(got, Err(Ok(Error::InvalidChallengePeriod)), "{label}"),
+            2 => assert_eq!(got, Err(Ok(Error::InvalidBondFloor)), "{label}"),
+            3 => assert_eq!(got, Err(Ok(Error::InvalidBondBps)), "{label}"),
+            other => panic!("{label}: unknown field {other}"),
+        }
+    }
+}
+
 #[test]
 fn an_unconfigured_route_cannot_be_disputed() {
     let f = fixture();
@@ -590,4 +620,79 @@ fn arbiter_and_fee_pool_views_follow_their_setters() {
         assert_eq!(f.client.get_arbiter(), Some(arbiter));
         assert_eq!(f.client.get_protocol_fee_pool(), Some(pool));
     }
+}
+
+// ── soak batch B ─────────────────────────────────────────────────────────
+
+fn with_challenge(challenge_period: u64) -> DisputeParams {
+    DisputeParams {
+        challenge_period,
+        bond_floor: BOND_FLOOR,
+        bond_bps: BOND_BPS,
+    }
+}
+
+/// C-36: seven days is the longest challenge period a route may take; one second more is refused
+/// with the same error as one below the minimum.
+#[test]
+fn challenge_period_ceiling_is_seven_days() {
+    let f = fixture();
+    let max = proofbridge_core::dispute::MAX_CHALLENGE_PERIOD;
+    assert_eq!(max, 604_800);
+    f.client.set_dispute_params(&CHAIN, &with_challenge(max));
+    assert_eq!(f.client.dispute_params(&CHAIN), Some(with_challenge(max)));
+    assert_eq!(
+        f.client
+            .try_set_dispute_params(&CHAIN, &with_challenge(max + 1)),
+        Err(Ok(Error::InvalidChallengePeriod))
+    );
+}
+
+/// C-14: the filing event carries the evidence hash, so an indexer needs no second read.
+#[test]
+fn the_filing_event_carries_the_evidence_hash() {
+    use soroban_sdk::{events::Event as _, testutils::Events as _};
+    let f = fixture();
+    let h = hash(&f.env, 1);
+    let bond = file(&f, &h, 1_000);
+    // `events().all()` holds the last invocation only, so read them before any other call.
+    let got = f.env.events().all().filter_by_contract(&f.client.address);
+    let d = f.client.get_dispute(&h).unwrap();
+    let want = events::DisputeFiled {
+        order_hash: h.clone(),
+        initiator: f.filer.clone(),
+        bond,
+        challenge_deadline: d.challenge_deadline,
+        evidence: hash(&f.env, 0xEE),
+    }
+    .to_xdr(&f.env, &f.client.address);
+    assert!(
+        got.events().contains(&want),
+        "no DisputeFiled with the evidence: {got:?}"
+    );
+}
+
+/// C-34: withdrawing a credited bond payout is observable.
+#[test]
+fn claim_publishes_payout_claimed() {
+    use soroban_sdk::{events::Event as _, testutils::Events as _};
+    let f = fixture();
+    let who = Address::generate(&f.env);
+    // Seed a credit as `pay_or_credit` leaves one, with the tokens it would hold.
+    f.env.as_contract(&f.client.address, || {
+        storage::set_claimable(&f.env, &who, 500)
+    });
+    TokenContractClient::new(&f.env, &f.token).mint(&f.client.address, &500);
+
+    f.client.claim(&who);
+
+    let want = events::PayoutClaimed {
+        recipient: who.clone(),
+        amount: 500,
+    }
+    .to_xdr(&f.env, &f.client.address);
+    let got = f.env.events().all().filter_by_contract(&f.client.address);
+    assert!(got.events().contains(&want), "no PayoutClaimed: {got:?}");
+    assert_eq!(token::Client::new(&f.env, &f.token).balance(&who), 500);
+    assert_eq!(f.client.claimable(&who), 0);
 }

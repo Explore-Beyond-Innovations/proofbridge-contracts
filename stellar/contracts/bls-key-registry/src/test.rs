@@ -1267,3 +1267,50 @@ fn any_slot_expired_within_reads_the_slots_expiries() {
         "before: no"
     );
 }
+
+/// C-13: the escrows and the verifier read this registry on every lock and unlock, so each read
+/// and write entry point keeps the instance alive. Each step ages the instance past the threshold
+/// first, so a step that stopped extending is caught by name.
+#[test]
+fn read_and_write_entry_points_extend_the_instance_ttl() {
+    use proofbridge_core::ttl::{INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD};
+    use soroban_sdk::testutils::storage::Instance as _;
+
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+
+    let ttl = || env.as_contract(&client.address, || env.storage().instance().get_ttl());
+    let age = || {
+        let by = ttl() - INSTANCE_LIFETIME_THRESHOLD + 1;
+        env.ledger().with_mut(|l| l.sequence_number += by);
+        assert!(
+            ttl() < INSTANCE_LIFETIME_THRESHOLD,
+            "set-up: the instance is due"
+        );
+    };
+    let steps: [(&str, &dyn Fn()); 5] = [
+        ("has_usable_slot", &|| {
+            assert!(client.has_usable_slot(&account))
+        }),
+        ("any_slot_expired_within", &|| {
+            client.any_slot_expired_within(&account, &0, &T0);
+        }),
+        ("lookup", &|| assert!(client.lookup(&account, &0).is_some())),
+        ("commitment_at", &|| {
+            client.commitment_at(&account, &0);
+        }),
+        ("register", &|| {
+            register_slot(&env, &client, &v, MAKER, 1);
+        }),
+    ];
+    for (name, step) in steps {
+        age();
+        step();
+        assert_eq!(
+            ttl(),
+            INSTANCE_BUMP_AMOUNT,
+            "{name} did not extend the instance"
+        );
+    }
+}

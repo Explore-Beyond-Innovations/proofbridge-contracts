@@ -1155,6 +1155,11 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         _anchorRoot(root);
 
         uint256 before = orderToken.balanceOf(adRecipient);
+        // C-14: the forfeit is named, beside the evidence settle event.
+        vm.expectEmit(true, false, false, true, address(portal));
+        emit IEscrow.OrderSettled(h, true);
+        vm.expectEmit(true, false, false, true, address(portal));
+        emit IOrderPortal.OrderForfeited(h);
         portal.payMakerByForfeit(p, root, proof);
 
         assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Filled), "the deposit was paid out");

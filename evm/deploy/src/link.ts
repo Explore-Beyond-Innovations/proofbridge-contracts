@@ -1,3 +1,4 @@
+import { assertDisputeFitsBackstop } from "./dispute-fit.js";
 import {
   readManifest,
   type ChainDeploymentManifest,
@@ -75,6 +76,28 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
   );
 
   const peerChainId = BigInt(peer.chain.chainId);
+
+  // C-10: before anything on this route is sent, the follower's backstop must outlast the primary's
+  // worst-case dispute, both ways. The peer's side is read from its manifest; unset there, its link checks.
+  {
+    const localKey = String(local.chain.chainId);
+    const peerKey = String(peerChainId);
+    const checked = assertDisputeFitsBackstop(
+      {
+        timing: routeTimingFromEnv(local.meta.env),
+        dispute: local.contracts.disputeManager ? disputeParamsFromEnv(local.meta.env) : undefined,
+        anchorDelay: process.env.ANCHOR_DELAY_S ?? "0",
+      },
+      {
+        timing: peer.routeTiming?.[localKey],
+        dispute: peer.disputeParams?.[localKey],
+        anchorDelay: peer.rootAnchorConfig?.anchorDelays?.[localKey],
+      },
+      "link",
+    );
+    console.log(`  [check] dispute fits the follower's backstop (${peerKey}): ${checked.length ? checked.join(", ") : "left to the peer's link"}`);
+  }
+
   const registryOf = async (v: string): Promise<string> =>
     String(await attachContract(v, "CounterpartyVerifier", "CounterpartyVerifier", signer).getFunction("registry")());
   const sameHex = (a: unknown, b: string) =>

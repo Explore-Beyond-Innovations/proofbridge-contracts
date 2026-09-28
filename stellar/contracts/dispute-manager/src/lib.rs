@@ -170,7 +170,7 @@ impl DisputeManagerContract {
                 bond,
                 challenge_deadline,
                 paused_at_open: escrow_paused_seconds,
-                initiator_evidence: evidence,
+                initiator_evidence: evidence.clone(),
                 responder_evidence: BytesN::from_array(&env, &[0u8; 32]),
                 ruling: DisputeOutcome::None,
                 escrow,
@@ -183,6 +183,7 @@ impl DisputeManagerContract {
             initiator: filer,
             bond,
             challenge_deadline,
+            evidence,
         }
         .publish(&env);
         storage::extend_instance_ttl(&env);
@@ -433,6 +434,7 @@ impl DisputeManagerContract {
             &recipient,
             &(amount as i128),
         );
+        events::PayoutClaimed { recipient, amount }.publish(&env);
         Ok(())
     }
 

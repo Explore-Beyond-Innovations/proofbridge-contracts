@@ -571,6 +571,8 @@ impl OrderPortalContract {
         // is valid whenever it arrives.
         Self::fill(&env, &order_hash, &params.bridger, true);
         Self::pay_maker(&env, &config, &params);
+        // C-14: `OrderSettled` alone cannot tell a forfeit from a settle.
+        events::OrderForfeited { order_hash }.publish(&env);
         storage::extend_instance_ttl(&env);
         Ok(())
     }
@@ -630,6 +632,26 @@ impl OrderPortalContract {
 
     pub fn has_open_positions(env: Env, account: BytesN<32>) -> bool {
         storage::get_in_flight(&env, &account) > 0
+    }
+
+    /// C-15: what `claim` would pay `recipient` in `token` right now.
+    pub fn claimable(env: Env, recipient: BytesN<32>, token: BytesN<32>) -> u128 {
+        storage::get_claimable(&env, &recipient, &token)
+    }
+
+    /// C-35: whether a proof's nullifier has been spent here.
+    pub fn nullifier_used(env: Env, nullifier_hash: BytesN<32>) -> bool {
+        storage::is_nullifier_used(&env, &nullifier_hash)
+    }
+
+    /// C-35: the account's open-position count (the EVM `inFlightOf`).
+    pub fn in_flight_of(env: Env, account: BytesN<32>) -> u64 {
+        storage::get_in_flight(&env, &account)
+    }
+
+    /// C-35: the peer token routed from `token` for `peer_chain_id`, if any.
+    pub fn token_route(env: Env, token: BytesN<32>, peer_chain_id: u128) -> Option<BytesN<32>> {
+        storage::get_token_route(&env, &token, peer_chain_id)
     }
 
     pub fn get_dest_token(env: Env, order_token: BytesN<32>, ad_chain_id: u128) -> BytesN<32> {

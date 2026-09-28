@@ -73,6 +73,7 @@ impl ProofBridgeVerifierContract {
 
         // Store the verification key immutably
         env.storage().instance().set(&Self::key_vk(), &vk_bytes);
+        proofbridge_core::ttl::extend_instance(&env);
     }
 
     // =========================================================================
@@ -94,6 +95,8 @@ impl ProofBridgeVerifierContract {
         public_inputs: Bytes,
         proof_bytes: Bytes,
     ) -> Result<(), VerifierError> {
+        // C-13: every unlock reads the VK from instance storage, so keep the instance alive.
+        proofbridge_core::ttl::extend_instance(&env);
         // Validate proof size
         if proof_bytes.len() as usize != PROOF_BYTES {
             return Err(VerifierError::ProofParseError);
