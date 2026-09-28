@@ -2711,7 +2711,11 @@ fn s1_arming_a_longer_guard_restamps_a_pending_change() {
         "the pending row now waits the new delay"
     );
     f.env.ledger().set_timestamp(T0 + 3_600 + 1);
-    assert_eq!(f.client.try_upgrade(&hash), Err(Ok(AccountError::NotScheduled)), "the old delay no longer opens it");
+    assert_eq!(
+        f.client.try_upgrade(&hash),
+        Err(Ok(AccountError::NotScheduled)),
+        "the old delay no longer opens it"
+    );
     f.env.ledger().set_timestamp(T0 + 7 * 86_400 + 1);
     f.client.upgrade(&hash);
 }
@@ -2722,12 +2726,18 @@ fn s4_disarming_clears_the_lock_schedule() {
     let f = fixture();
     guard(&f, 0, 3_600, 86_400);
     let args = vec![&f.env, Val::from_u32(1).to_val()];
-    f.client.schedule_lock(&ad(&f.env), &500_000, &commit(&f.env, args));
-    let has = |f: &Fixture| f.env.as_contract(&f.account, || policy::get_lock_schedule(&f.env, &ad(&f.env)).is_some());
+    f.client
+        .schedule_lock(&ad(&f.env), &500_000, &commit(&f.env, args));
+    let has = |f: &Fixture| {
+        f.env.as_contract(&f.account, || {
+            policy::get_lock_schedule(&f.env, &ad(&f.env)).is_some()
+        })
+    };
     assert!(has(&f), "scheduled");
     // Disarming is a loosening: announced, then waited out (T-52).
     let to = Address::generate(&f.env);
-    f.client.schedule_extractive(&ad(&f.env), &Symbol::new(&f.env, "set_guard_rail"), &0, &to);
+    f.client
+        .schedule_extractive(&ad(&f.env), &Symbol::new(&f.env, "set_guard_rail"), &0, &to);
     f.env.ledger().set_timestamp(T0 + 3_600);
     f.client.set_guard_rail(&ad(&f.env), &None);
     assert!(!has(&f), "disarming cleared it");

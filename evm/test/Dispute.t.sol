@@ -407,7 +407,10 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     /// so no surplus is ever wrapped and nothing needs refunding.
     /// 49E-2: the bond is exact, so the amount is quoted by the contract, not re-derived by clients.
     function test_49e2_bondForQuotesWhatTheFilingRequires() public {
-        assertEq(dm.bondFor(60 ether, orderChainId), Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS)));
+        assertEq(
+            dm.bondFor(60 ether, orderChainId),
+            Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS))
+        );
         assertEq(dm.bondFor(1, orderChainId), BOND_FLOOR, "the floor dominates a tiny amount");
         vm.expectRevert();
         dm.bondFor(60 ether, orderChainId + 7);
