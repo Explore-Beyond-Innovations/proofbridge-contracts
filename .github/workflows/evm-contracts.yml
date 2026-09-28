@@ -38,7 +38,11 @@ jobs:
       - name: Read the pinned circuits commit
         id: circuits
         working-directory: .
-        run: echo "sha=$(tr -d '[:space:]' < CIRCUITS_COMMIT)" >> "$GITHUB_OUTPUT"
+        # A-9: an empty or malformed pin must fail here, not silently check out circuits main.
+        run: |
+          sha="$(tr -d '[:space:]' < CIRCUITS_COMMIT)"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::CIRCUITS_COMMIT must be a full 40-hex commit, got '${sha}'"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       - name: Checkout proofbridge-circuits
         uses: actions/checkout@v4

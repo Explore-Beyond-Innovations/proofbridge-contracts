@@ -4,7 +4,7 @@
 // Usage:
 //   evm-deploy deploy             [--out <manifest-path>]
 //   evm-deploy deploy-test-tokens [--out <manifest-path>]
-//   evm-deploy link --peer <peer-manifest> [--in <local-manifest>]
+//   evm-deploy link --peer <peer-manifest> [--in <local-manifest>] [--peer-env <peer-env-file>]
 //   evm-deploy handover --to <address> | --verify   [--in <manifest-path>]
 //
 // Reads EVM_RPC_URL, EVM_ADMIN_PRIVATE_KEY from env. Other knobs:
@@ -45,6 +45,8 @@ async function main(): Promise<void> {
       const r = await link({
         peerManifest: peer,
         localManifest: parseFlag(rest, "--in"),
+        // A-5: the peer's env file, so a fresh route is checked both ways before anything is sent.
+        peerEnvFile: parseFlag(rest, "--peer-env"),
       });
       if (r.described.length) process.exit(2);
       return;

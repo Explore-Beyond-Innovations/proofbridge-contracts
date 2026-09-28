@@ -4,7 +4,7 @@
 // Usage:
 //   stellar-deploy deploy             [--out <manifest-path>] [--chain-id <n>]
 //   stellar-deploy deploy-test-tokens [--out <manifest-path>] [--chain-id <n>]
-//   stellar-deploy link --peer <peer-manifest> [--in <local-manifest>]
+//   stellar-deploy link --peer <peer-manifest> [--in <local-manifest>] [--peer-env <peer-env-file>]
 //   stellar-deploy handover --to <G...> | --verify   [--in <manifest-path>] [--chain-id <n>]
 //
 // Reads the `stellar` CLI environment:
@@ -56,6 +56,8 @@ async function main(): Promise<void> {
       const r = await link({
         peerManifest: peer,
         localManifest: parseFlag(rest, "--in"),
+        // A-5: the peer's env file, so a fresh route is checked both ways before anything is sent.
+        peerEnvFile: parseFlag(rest, "--peer-env"),
         localChainId: parseChainId(rest),
       });
       if (r.described.length) process.exit(2);

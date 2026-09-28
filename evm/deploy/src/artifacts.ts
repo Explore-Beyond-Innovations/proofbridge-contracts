@@ -15,6 +15,7 @@ interface Artifact {
     linkReferences?: Record<string, Record<string, LinkReference[]>>;
   };
   deployedBytecode?: {
+    object?: string;
     linkReferences?: Record<string, Record<string, LinkReference[]>>;
   };
 }
@@ -31,6 +32,13 @@ function loadArtifact(contractFile: string, contractName: string): Artifact {
     );
   }
   return JSON.parse(fs.readFileSync(p, "utf8")) as Artifact;
+}
+
+/** The runtime bytecode the artifact says a fresh deploy leaves on chain (`deployedBytecode`). */
+export function deployedBytecodeOf(contractFile: string, contractName: string): string {
+  const code = loadArtifact(contractFile, contractName).deployedBytecode?.object;
+  if (!code) throw new Error(`artifact ${contractFile}/${contractName} has no deployedBytecode`);
+  return code;
 }
 
 export function getAbi(contractFile: string, contractName: string): any[] {

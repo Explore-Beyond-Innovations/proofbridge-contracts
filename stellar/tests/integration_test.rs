@@ -7368,8 +7368,9 @@ fn test_c11_a_never_disputed_order_has_no_module() {
 
 // --- C-31: a module failure is the escrow's own error -------------------------
 
-/// A module that refuses (here: no params for the route) surfaces as `DisputeModuleRejected`, not as
-/// the module's error number read under the escrow's enum (17 would read as `OrderExists`).
+/// A module that refuses (here: no params for the route) surfaces as the escrow's OWN code for that
+/// refusal (49S-3: `DisputeNoParams`), never as the module's number read under the escrow's enum
+/// (17 would read as `OrderExists`); a host failure stays `DisputeModuleRejected`.
 #[test]
 fn test_c31_a_module_refusal_to_file_is_the_escrows_error() {
     let s = setup();
@@ -7384,13 +7385,13 @@ fn test_c31_a_module_refusal_to_file_is_the_escrows_error() {
     assert_eq!(
         s.ad_manager
             .try_dispute(&p, &s.maker_addr, &evidence(&s, 0xEE)),
-        Err(Ok(AdErr::DisputeModuleRejected))
+        Err(Ok(AdErr::DisputeNoParams))
     );
     assert_eq!(ad_status(&s), ad_manager_contract::Status::Open);
 }
 
-/// The filer answering its own dispute is refused by the module (`NotResponder`); the escrow says
-/// `DisputeModuleRejected`.
+/// The filer answering its own dispute is refused by the module (`NotResponder`); the escrow relays
+/// it as `DisputeNotResponder` (49S-3).
 #[test]
 fn test_c31_a_module_refusal_to_record_a_response_is_the_escrows_error() {
     let s = setup();
@@ -7400,7 +7401,7 @@ fn test_c31_a_module_refusal_to_record_a_response_is_the_escrows_error() {
     assert_eq!(
         s.ad_manager
             .try_respond_to_dispute(&p, &filer, &evidence(&s, 0x11)),
-        Err(Ok(AdErr::DisputeModuleRejected))
+        Err(Ok(AdErr::DisputeNotResponder))
     );
 }
 
@@ -8015,7 +8016,7 @@ fn test_c19_the_filer_cannot_respond_to_their_own_dispute() {
     assert_eq!(
         s.ad_manager
             .try_respond_to_dispute(&p, &filer, &evidence(&s, 0x11)),
-        Err(Ok(AdErr::DisputeModuleRejected))
+        Err(Ok(AdErr::DisputeNotResponder))
     );
     assert_eq!(
         dm.get_dispute(&h).unwrap().responder_evidence,
@@ -8029,6 +8030,30 @@ fn test_c19_the_filer_cannot_respond_to_their_own_dispute() {
         dm.get_dispute(&h).unwrap().responder_evidence,
         evidence(&s, 0x22)
     );
+}
+
+/// 49S-5: the per-order dispute-module row is what a later `finalize_dispute` resolves against; it
+/// must carry the persistent bump like every other fund-relevant write (C-13).
+#[test]
+fn test_49s5_the_per_order_dispute_module_row_gets_its_ttl_extended() {
+    use proofbridge_core::ttl::{PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD};
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+
+    let ttl = s.env.as_contract(&s.ad_manager.address, || {
+        let key = (soroban_sdk::symbol_short!("dspord"), h.clone());
+        s.env.storage().persistent().get_ttl(&key)
+    });
+    assert!(
+        ttl >= PERSISTENT_BUMP_AMOUNT,
+        "the dispute-module row was written without a TTL bump: {ttl} < {PERSISTENT_BUMP_AMOUNT}"
+    );
+    assert!(ttl > PERSISTENT_LIFETIME_THRESHOLD);
 }
 
 /// Finalize before the module's window closes is `DisputeNotResolved`, ruled or not.

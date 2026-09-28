@@ -154,6 +154,15 @@ pub enum AdManagerError {
     DisputeWindowClosed = 71,
     /// C-31: the dispute module refused or trapped the call.
     DisputeModuleRejected = 72,
+    /// 49S-3: the dispute module's own refusals, relayed (codes only ever appended).
+    DisputeBondTooSmall = 73,
+    DisputeNoParams = 74,
+    DisputeNotEscrow = 75,
+    DisputeExists = 76,
+    DisputeWrongEscrow = 77,
+    DisputeNotResponder = 78,
+    DisputeChallengeOpen = 79,
+    DisputeChallengeClosed = 80,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for AdManagerError {
@@ -212,6 +221,14 @@ impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
             DisputeNotResolved => AdManagerError::DisputeNotResolved,
             DisputeWindowClosed => AdManagerError::DisputeWindowClosed,
             DisputeModuleRejected => AdManagerError::DisputeModuleRejected,
+            DisputeBondTooSmall => AdManagerError::DisputeBondTooSmall,
+            DisputeNoParams => AdManagerError::DisputeNoParams,
+            DisputeNotEscrow => AdManagerError::DisputeNotEscrow,
+            DisputeExists => AdManagerError::DisputeExists,
+            DisputeWrongEscrow => AdManagerError::DisputeWrongEscrow,
+            DisputeNotResponder => AdManagerError::DisputeNotResponder,
+            DisputeChallengeOpen => AdManagerError::DisputeChallengeOpen,
+            DisputeChallengeClosed => AdManagerError::DisputeChallengeClosed,
         }
     }
 }

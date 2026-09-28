@@ -360,6 +360,34 @@ pub fn clear_all_schedules(env: &Env, ad_id: &String) {
     }
 }
 
+/// 49S-1: every pending schedule this ad's settings time — its own three actions, its lock, and the
+/// account-wide rows — matures no earlier than `not_before`. Arming or tightening a guard rail
+/// calls this, so the delay just set applies to what was already announced.
+pub fn restamp_schedules(env: &Env, ad_id: &String, not_before: u64) {
+    for a in [withdraw_from_ad(env), close_ad(env), set_guard_rail(env)] {
+        if let Some(mut s) = get_schedule(env, ad_id, &a) {
+            if s.ready_at < not_before {
+                s.ready_at = not_before;
+                set_schedule(env, ad_id, &a, &s);
+            }
+        }
+    }
+    if let Some(mut s) = get_lock_schedule(env, ad_id) {
+        if s.ready_at < not_before {
+            s.ready_at = not_before;
+            set_lock_schedule(env, ad_id, &s);
+        }
+    }
+    for a in account_actions(env) {
+        if let Some(mut s) = get_account_schedule(env, &a) {
+            if s.ready_at < not_before {
+                s.ready_at = not_before;
+                set_account_schedule(env, &a, &s);
+            }
+        }
+    }
+}
+
 pub fn get_lock_schedule(env: &Env, ad_id: &String) -> Option<BoundSchedule> {
     env.storage()
         .persistent()

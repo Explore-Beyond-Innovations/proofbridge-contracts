@@ -1,3 +1,4 @@
+import * as fs from "fs";
 import { assertDisputeFitsBackstop } from "./dispute-fit.js";
 import { stellarChainIdOrLocal } from "./deploy-env.js";
 import {
@@ -18,6 +19,12 @@ export interface StellarLinkOptions {
   localManifest?: string;
   /** Path to the peer chain's manifest. Required. */
   peerManifest: string;
+  /**
+   * A-5: the peer chain's deploy env file. On a fresh deploy the peer has not linked yet, so its
+   * manifest carries no clocks or dispute params for this route; they are derived from its env
+   * file instead, so the first link can check both directions before sending its own values.
+   */
+  peerEnvFile?: string;
   /** Override local chain id (else STELLAR_CHAIN_ID, else the local id 1000001). */
   localChainId?: bigint;
   /**
@@ -76,15 +83,21 @@ export async function link(
         dispute: local.contracts.disputeManager ? disputeParamsFromEnv(local.meta.env) : undefined,
         anchorDelay: process.env.ANCHOR_DELAY_S ?? "0",
       },
-      {
-        timing: peer.routeTiming?.[localKey],
-        dispute: peer.disputeParams?.[localKey],
-        anchorDelay: peer.rootAnchorConfig?.anchorDelays?.[localKey],
-      },
+      peerSide(peer, localKey, opts.peerEnvFile),
       "link",
     );
-    console.log(`  [check] dispute fits the follower's backstop (${peerKey}): ${checked.length ? checked.join(", ") : "left to the peer's link"}`);
+    // A-5: nothing this link sends may go unchecked. If the peer's side is not recorded and no env
+    // file was given for it, refuse rather than leave "the peer's link will check" — by then a too
+    // short backstop would already be on this chain.
+    if (checked.length < 2) {
+      throw new Error(
+        `link: the route to ${peerKey} could not be checked in both directions (checked: ${checked.join(", ") || "none"}). ` +
+          `The peer has not linked yet; pass --peer-env <the peer chain's env file> so its clocks and dispute params can be derived, or link the peer first.`,
+      );
+    }
+    console.log(`  [check] dispute fits the follower's backstop (${peerKey}): ${checked.join(", ")}`);
   }
+  assertPeerCompatible(local, peer);
 
   const registryOf = (v: string): string => readView(v, "registry") as string;
 
@@ -423,10 +436,10 @@ export type { ChainDeploymentManifest };
  * The dispute params from env, same rule as the clocks. The contract's floor is 1 hour and its bond
  * cap is 10%; both are re-checked by the manifest schema, so a bad value fails before a transaction.
  */
-function disputeParamsFromEnv(env: string): DisputeParams {
+function disputeParamsFromEnv(env: string, vars: Record<string, string | undefined> = process.env): DisputeParams {
   const isLocal = env === "local";
   const read = (name: string, localDefault: string): string => {
-    const v = process.env[name];
+    const v = vars[name];
     if (v !== undefined) {
       if (!/^\d+$/.test(v)) throw new Error(`link: ${name}="${v}" is not a whole number`);
       return v;
@@ -447,10 +460,30 @@ function disputeParamsFromEnv(env: string): DisputeParams {
 }
 
 /** The route clocks from env: local deploys get the smallest legal set; elsewhere every var is required. */
-function routeTimingFromEnv(env: string): RouteTiming {
+/**
+ * The peer's side of the route: what its manifest recorded, else (A-5) what its env file says its
+ * link will set. `local` here is the peer's view of THIS chain.
+ */
+function peerSide(peer: ChainDeploymentManifest, localKey: string, peerEnvFile: string | undefined) {
+  const recorded = {
+    timing: peer.routeTiming?.[localKey],
+    dispute: peer.disputeParams?.[localKey],
+    anchorDelay: peer.rootAnchorConfig?.anchorDelays?.[localKey],
+  };
+  if (recorded.timing || !peerEnvFile) return recorded;
+  const vars = readEnvFile(peerEnvFile);
+  const env = vars.DEPLOY_ENV ?? peer.meta.env;
+  return {
+    timing: routeTimingFromEnv(env, vars),
+    dispute: peer.contracts.disputeManager ? disputeParamsFromEnv(env, vars) : undefined,
+    anchorDelay: vars.ANCHOR_DELAY_S ?? "0",
+  };
+}
+
+function routeTimingFromEnv(env: string, vars: Record<string, string | undefined> = process.env): RouteTiming {
   const local = env === "local";
   const read = (name: string, localDefault: string): string => {
-    const v = process.env[name];
+    const v = vars[name];
     if (v !== undefined) {
       if (!/^\d+$/.test(v)) throw new Error(`link: ${name}="${v}" is not a whole number of seconds`);
       return v;
@@ -467,4 +500,36 @@ function routeTimingFromEnv(env: string): RouteTiming {
     longBackstop: read("ROUTE_LONG_BACKSTOP_S", "86400"),
     claimStagger: read("ROUTE_CLAIM_STAGGER_S", "0"),
   };
+}
+
+/** KEY=VALUE lines of an env file (the deploy env files), `#` comments and blanks skipped. */
+export function readEnvFile(file: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const raw of fs.readFileSync(file, "utf8").split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim().replace(/^export\s+/, "");
+    let value = line.slice(eq + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+    out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * A-6: two chains linked into one route must have been deployed for the same environment and
+ * against the same event-circuit VK; otherwise every cross-chain proof one side makes, the other
+ * refuses — and nothing says why until a settlement fails.
+ */
+export function assertPeerCompatible(local: ChainDeploymentManifest, peer: ChainDeploymentManifest): void {
+  if (local.meta.env !== peer.meta.env) {
+    throw new Error(`link: this chain was deployed for env=${local.meta.env} but the peer for env=${peer.meta.env}; a route cannot span environments`);
+  }
+  const a = local.meta.vkSha256?.toLowerCase();
+  const b = peer.meta.vkSha256?.toLowerCase();
+  if (a && b && a !== b) {
+    throw new Error(`link: this chain's verifier VK is ${a} but the peer's is ${b}; the two would refuse each other's proofs. Redeploy one from the other's bundle`);
+  }
 }

@@ -2692,6 +2692,47 @@ fn c5_upgrade_on_a_guarded_account_needs_a_matured_schedule_for_that_wasm() {
     assert_eq!(f.client.owner(), f.owner, "storage survived the swap");
 }
 
+/// 49S-1: a change announced under a short delay must wait the LONGER delay the owner arms
+/// afterwards — a stolen key's 1-day upgrade cannot outrun a 7-day guard raised in the meantime.
+#[test]
+fn s1_arming_a_longer_guard_restamps_a_pending_change() {
+    let f = fixture();
+    let hash = f.env.deployer().upload_contract_wasm(ACCOUNT_WASM);
+    let up = sym_of(&f.env, "upgrade");
+    guard(&f, 0, 3_600, 7 * 86_400);
+    f.client.schedule_account_extractive(&up, &hash);
+    assert_eq!(f.client.account_schedule(&up).unwrap().ready_at, T0 + 3_600);
+
+    // The owner tightens the delay to seven days while the change is pending.
+    guard(&f, 0, 7 * 86_400, 7 * 86_400);
+    assert_eq!(
+        f.client.account_schedule(&up).unwrap().ready_at,
+        T0 + 7 * 86_400,
+        "the pending row now waits the new delay"
+    );
+    f.env.ledger().set_timestamp(T0 + 3_600 + 1);
+    assert_eq!(f.client.try_upgrade(&hash), Err(Ok(AccountError::NotScheduled)), "the old delay no longer opens it");
+    f.env.ledger().set_timestamp(T0 + 7 * 86_400 + 1);
+    f.client.upgrade(&hash);
+}
+
+/// 49S-4: disarming clears the pending lock schedule along with the others.
+#[test]
+fn s4_disarming_clears_the_lock_schedule() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let args = vec![&f.env, Val::from_u32(1).to_val()];
+    f.client.schedule_lock(&ad(&f.env), &500_000, &commit(&f.env, args));
+    let has = |f: &Fixture| f.env.as_contract(&f.account, || policy::get_lock_schedule(&f.env, &ad(&f.env)).is_some());
+    assert!(has(&f), "scheduled");
+    // Disarming is a loosening: announced, then waited out (T-52).
+    let to = Address::generate(&f.env);
+    f.client.schedule_extractive(&ad(&f.env), &Symbol::new(&f.env, "set_guard_rail"), &0, &to);
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    f.client.set_guard_rail(&ad(&f.env), &None);
+    assert!(!has(&f), "disarming cleared it");
+}
+
 /// C-5: an unguarded account upgrades as it always did, with no schedule.
 #[test]
 fn c5_an_unguarded_account_upgrades_instantly() {

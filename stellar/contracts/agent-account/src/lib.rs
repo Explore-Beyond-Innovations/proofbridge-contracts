@@ -286,6 +286,11 @@ impl AgentAccount {
                 // Settings the schedules were made under are gone, so the schedules go with them.
                 if loosening {
                     policy::clear_all_schedules(&env, &ad_id);
+                } else {
+                    // 49S-1: a pending change keeps waiting until the NEW delay has passed. Without
+                    // this, an upgrade a stolen key scheduled under a 1-day delay would still land
+                    // after the owner armed a 7-day guard — the guard would defend nothing pending.
+                    policy::restamp_schedules(&env, &ad_id, now + armed.delay);
                 }
                 events::GuardRailSet {
                     ad_id,

@@ -15,13 +15,14 @@ import {
   type DescribedCall,
   evmRoot,
 } from "./common.js";
-import { namedOutsideLocal, requireDeployEnv } from "./deploy-env.js";
-import { assertReusedVk, vkRecord } from "./vk.js";
+import { namedOutsideLocal, requireDeployEnv, assertChainIdForEnv } from "./deploy-env.js";
+import { assertReusedVk, vkRecord, assertVerifierCode } from "./vk.js";
 import {
   contractFactory,
   contractFactoryLinked,
   linkedLibraryIn,
   attachContract,
+  deployedBytecodeOf,
 } from "./artifacts.js";
 import {
   buildManifest,
@@ -137,6 +138,8 @@ async function deployCoreRun(
   }
   const admin = deployer;
   const env = requireDeployEnv(opts.env);
+  // A-4: the environment must be the one the RPC is actually on.
+  assertChainIdForEnv(chainId, env);
   const commit = opts.commit ?? envOrDefault("GIT_COMMIT", "unknown");
   const chainName =
     opts.chainName ?? envOrDefault("CHAIN_NAME", `evm-${chainId}`);
@@ -172,6 +175,10 @@ async function deployCoreRun(
   const anchorThreshold = Number(envOrDefault("ANCHOR_THRESHOLD", "1"));
   for (const a of [admin, ...anchorSigners]) {
     if (!ethers.isAddress(a)) throw new Error(`deploy-core: not an address: ${a} (ADMIN / ANCHOR_PUBLISHER)`);
+  }
+  // A-8: naming the deployer as notary outside local is the local default in disguise.
+  if (env !== "local" && anchorSigners.some((a) => a.toLowerCase() === deployer.toLowerCase())) {
+    throw new Error("deploy-core: ANCHOR_PUBLISHER names the deployer — outside local the notary must be a separate key (it stays the anchor signer after handover)");
   }
   if (!Number.isInteger(anchorThreshold) || anchorThreshold < 1 || anchorThreshold > anchorSigners.length) {
     throw new Error(
@@ -310,8 +317,12 @@ async function deployCoreRun(
     process.env.EVENT_VK ?? process.env.STELLAR_EVENT_VK ?? path.join(evmRoot(), "..", "..", "proof_circuits", "events", "target", "vk"),
   );
   if (existing?.contracts.verifier.address) {
-    const r = assertReusedVk("evm-deploy Verifier", vkRec.vkSha256, existing.meta.vkSha256);
-    if (r === "unknown") console.warn("[evm-deploy] reused Verifier: its VK could not be compared (no recorded hash); check it matches the bundle");
+    // The manifest's claim first, then the chain's fact (A-3): the reused Verifier's runtime code
+    // must be this bundle's, whatever the manifest recorded — or failed to record.
+    assertReusedVk("evm-deploy Verifier", vkRec.vkSha256, existing.meta.vkSha256);
+    const onChain = await signer.provider!.getCode(existing.contracts.verifier.address);
+    assertVerifierCode("evm-deploy Verifier", onChain, deployedBytecodeOf("Verifier", "HonkVerifier"));
+    console.log(`  [reuse] Verifier code matches the bundle${existing.meta.vkSha256 ? "" : " (VK hash recorded now)"}`);
   }
   const verifierAddr = await deployIfMissing(
     "Verifier",

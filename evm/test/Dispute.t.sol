@@ -405,6 +405,14 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
     /// S4, tightened by C-17: the bond is paid exactly. An overpaid or underpaid bond is refused,
     /// so no surplus is ever wrapped and nothing needs refunding.
+    /// 49E-2: the bond is exact, so the amount is quoted by the contract, not re-derived by clients.
+    function test_49e2_bondForQuotesWhatTheFilingRequires() public {
+        assertEq(dm.bondFor(60 ether, orderChainId), Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS)));
+        assertEq(dm.bondFor(1, orderChainId), BOND_FLOOR, "the floor dominates a tiny amount");
+        vm.expectRevert();
+        dm.bondFor(60 ether, orderChainId + 7);
+    }
+
     function test_c17_bondMustBeExact() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(26);
         uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
@@ -818,7 +826,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     }
 
     /// C-16 + C-34: a filer that refuses native is credited; `claimTo` sends its own credit
-    /// elsewhere, and both claims emit `PayoutClaimed`.
+    /// elsewhere, and both claims emit `BondClaimed` (its own topic, apart from the escrows' PayoutClaimed).
     function test_c16_claimToRedirectsARefusedCredit() public {
         address refuser = address(new RefusingRecipient());
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrderTo(77, refuser);
@@ -839,7 +847,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
         address wallet = makeAddr("wallet");
         vm.expectEmit(true, true, false, true, address(dm));
-        emit DisputeManager.PayoutClaimed(refuser, wallet, bond);
+        emit DisputeManager.BondClaimed(refuser, wallet, bond);
         vm.prank(refuser);
         dm.claimTo(wallet);
         assertEq(wallet.balance, bond, "paid to the address the recipient chose");
@@ -864,7 +872,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
         r.open();
         vm.expectEmit(true, true, false, true, address(dm));
-        emit DisputeManager.PayoutClaimed(address(r), address(r), bond);
+        emit DisputeManager.BondClaimed(address(r), address(r), bond);
         dm.claim(address(r));
         assertEq(address(r).balance, bond);
     }

@@ -34,6 +34,24 @@ export function namedOutsideLocal(
 
 /** The id local stacks and every e2e use. The encodings spec gives testnet `1000002`. */
 export const LOCAL_STELLAR_CHAIN_ID = 1000001n;
+export const TESTNET_STELLAR_CHAIN_ID = 1000002n;
+
+/**
+ * A-7: the synthetic id is tied to the environment — it is signed into every registration and
+ * order, so testnet with the local id (or mainnet with either) would mint signatures for the
+ * wrong network's rules while looking healthy.
+ */
+export function assertStellarChainIdForEnv(id: bigint, deployEnv: DeployEnv): void {
+  if (deployEnv === "local" && id !== LOCAL_STELLAR_CHAIN_ID) {
+    throw new Error(`DEPLOY_ENV=local uses STELLAR_CHAIN_ID ${LOCAL_STELLAR_CHAIN_ID}, got ${id}`);
+  }
+  if (deployEnv === "testnet" && id !== TESTNET_STELLAR_CHAIN_ID) {
+    throw new Error(`DEPLOY_ENV=testnet uses STELLAR_CHAIN_ID ${TESTNET_STELLAR_CHAIN_ID} (encodings spec §4), got ${id}`);
+  }
+  if (deployEnv === "mainnet" && (id === LOCAL_STELLAR_CHAIN_ID || id === TESTNET_STELLAR_CHAIN_ID)) {
+    throw new Error(`DEPLOY_ENV=mainnet cannot use the local or testnet STELLAR_CHAIN_ID (${id})`);
+  }
+}
 
 /**
  * The synthetic Stellar chain id, bound into BLS registration and the order hash: a deployment
@@ -45,13 +63,20 @@ export function requireStellarChainId(
   deployEnv: DeployEnv,
   env: NodeJS.ProcessEnv = process.env,
 ): bigint {
-  if (opt !== undefined) return opt;
-  const v = env.STELLAR_CHAIN_ID;
-  if (v && v.length > 0) {
-    if (!/^\d+$/.test(v)) throw new Error(`STELLAR_CHAIN_ID=${v} is not a decimal id`);
-    return BigInt(v);
+  const id = (() => {
+    if (opt !== undefined) return opt;
+    const v = env.STELLAR_CHAIN_ID;
+    if (v && v.length > 0) {
+      if (!/^\d+$/.test(v)) throw new Error(`STELLAR_CHAIN_ID=${v} is not a decimal id`);
+      return BigInt(v);
+    }
+    if (deployEnv === "local") return LOCAL_STELLAR_CHAIN_ID;
+    return undefined;
+  })();
+  if (id !== undefined) {
+    assertStellarChainIdForEnv(id, deployEnv);
+    return id;
   }
-  if (deployEnv === "local") return LOCAL_STELLAR_CHAIN_ID;
   throw new Error(
     `STELLAR_CHAIN_ID is unset for DEPLOY_ENV=${deployEnv}. Set it explicitly (testnet is 1000002, per the encodings spec §4); the id is signed into every registration and order.`,
   );

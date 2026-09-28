@@ -92,7 +92,13 @@ pub fn set_width(env: &Env, width: u128) {
 
 /// Get a node hash by index.
 pub fn get_node_hash(env: &Env, index: u128) -> Option<BytesN<32>> {
-    env.storage().persistent().get(&(KEY_HASHES, index))
+    let key = (KEY_HASHES, index);
+    let v = env.storage().persistent().get(&key);
+    // 49S-2: peaks are read on every append; keep the nodes the tree still uses alive.
+    if v.is_some() {
+        extend_persistent(env, &key);
+    }
+    v
 }
 
 /// Set a node hash by index.
@@ -105,7 +111,13 @@ pub fn set_node_hash(env: &Env, index: u128, hash: &BytesN<32>) {
 
 /// Get the root at a specific width (leaf count).
 pub fn get_root_at_width(env: &Env, width: u128) -> Option<BytesN<32>> {
-    env.storage().persistent().get(&(KEY_HISTORY, width))
+    let key = (KEY_HISTORY, width);
+    let v = env.storage().persistent().get(&key);
+    // 49S-2: a root an unlock still resolves against stays alive while it is read.
+    if v.is_some() {
+        extend_persistent(env, &key);
+    }
+    v
 }
 
 /// Set the root at a specific width.
@@ -118,10 +130,15 @@ pub fn set_root_at_width(env: &Env, width: u128, root: &BytesN<32>) {
 
 /// Check if an address is a manager.
 pub fn is_manager(env: &Env, addr: &Address) -> bool {
-    env.storage()
-        .persistent()
-        .get(&(KEY_MGRS, addr.clone()))
-        .unwrap_or(false)
+    let key = (KEY_MGRS, addr.clone());
+    let v = env.storage().persistent().get(&key).unwrap_or(false);
+    // 49S-2: read on every append, written once. On a live network a fresh entry lives ~120 days
+    // (above the bump threshold, so the write-time extend was a no-op); extending on the read keeps
+    // the row alive as long as the escrow keeps appending, instead of a paid restore around day 120.
+    if v {
+        extend_persistent(env, &key);
+    }
+    v
 }
 
 /// Set manager status for an address.

@@ -271,6 +271,10 @@ export async function deployCore(
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+  // A-8: naming the deployer as notary outside local is the local default in disguise.
+  if (env !== "local" && anchorSigners.includes(adminStrkey)) {
+    throw new Error("stellar-deploy: ANCHOR_PUBLISHER names the deployer — outside local the notary must be a separate key (it stays the anchor signer after handover)");
+  }
   const anchorThreshold = Number(envOrDefault("ANCHOR_THRESHOLD", "1"));
   let rootAnchor = reused(existing?.contracts.rootAnchor?.address);
   if (!rootAnchor) {

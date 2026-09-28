@@ -140,6 +140,15 @@ pub enum OrderPortalError {
     DisputeWindowClosed = 91,
     /// C-31: the dispute module refused or trapped the call.
     DisputeModuleRejected = 92,
+    /// 49S-3: the dispute module's own refusals, relayed (codes only ever appended).
+    DisputeBondTooSmall = 93,
+    DisputeNoParams = 94,
+    DisputeNotEscrow = 95,
+    DisputeExists = 96,
+    DisputeWrongEscrow = 97,
+    DisputeNotResponder = 98,
+    DisputeChallengeOpen = 99,
+    DisputeChallengeClosed = 100,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
@@ -198,6 +207,14 @@ impl From<proofbridge_core::escrow_ops::Fault> for OrderPortalError {
             DisputeNotResolved => OrderPortalError::DisputeNotResolved,
             DisputeWindowClosed => OrderPortalError::DisputeWindowClosed,
             DisputeModuleRejected => OrderPortalError::DisputeModuleRejected,
+            DisputeBondTooSmall => OrderPortalError::DisputeBondTooSmall,
+            DisputeNoParams => OrderPortalError::DisputeNoParams,
+            DisputeNotEscrow => OrderPortalError::DisputeNotEscrow,
+            DisputeExists => OrderPortalError::DisputeExists,
+            DisputeWrongEscrow => OrderPortalError::DisputeWrongEscrow,
+            DisputeNotResponder => OrderPortalError::DisputeNotResponder,
+            DisputeChallengeOpen => OrderPortalError::DisputeChallengeOpen,
+            DisputeChallengeClosed => OrderPortalError::DisputeChallengeClosed,
         }
     }
 }

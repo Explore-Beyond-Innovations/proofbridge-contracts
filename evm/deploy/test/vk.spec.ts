@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { assertReusedVk, sha256Hex, vkRecord } from "../src/vk.js";
+import { assertReusedVk, sha256Hex, vkRecord, assertVerifierCode } from "../src/vk.js";
 
 // C-20: a reused verifier checking proofs against another VK makes one chain refuse every proof.
 test("a reused verifier with another VK is refused; the same VK, or nothing to compare, passes", () => {
@@ -25,6 +25,20 @@ test("the record hashes the VK file and takes a well-formed CIRCUITS_COMMIT", ()
     vkSha256: sha256Hex(Buffer.from("vk-bytes")),
     circuitsCommit: "2d9791e6",
   });
-  assert.deepEqual(vkRecord(path.join(dir, "missing"), { CIRCUITS_COMMIT: "not a sha" }), {});
+  // A-3: a missing file refuses (it used to record nothing and erase the manifest's hash).
+  assert.throws(() => vkRecord(path.join(dir, "missing"), { CIRCUITS_COMMIT: "not a sha" }), /VK file is missing/);
+  assert.equal(vkRecord(f, { CIRCUITS_COMMIT: "not a sha" }).circuitsCommit, undefined, "a malformed commit is dropped");
   fs.rmSync(dir, { recursive: true });
 });
+
+// A-3: the chain's code is the fact; the manifest's hash is only a claim.
+test("a reused Verifier must carry this bundle's runtime code", () => {
+  assertVerifierCode("t", "0xAABB", "aabb");
+  assert.throws(() => assertVerifierCode("t", "0xaabb", "0xaabc"), /not this bundle's Verifier/);
+  assert.throws(() => assertVerifierCode("t", "0x", "0xaabb"), /no code at the reused verifier address/);
+});
+
+test("a missing VK file refuses instead of recording nothing", () => {
+  assert.throws(() => vkRecord("/nonexistent/vk", {}), /VK file is missing/);
+});
+

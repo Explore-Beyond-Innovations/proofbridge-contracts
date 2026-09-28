@@ -83,8 +83,9 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     event DisputeClaimed(bytes32 indexed orderHash, uint64 finalizeAt);
     event BondRouted(bytes32 indexed orderHash, address indexed to, uint128 amount, bool returnedToFiler);
     event PayoutCredited(address indexed recipient, uint256 amount);
-    /// @notice A credited payout left for `to` (`to == recipient` for `claim`).
-    event PayoutClaimed(address indexed recipient, address indexed to, uint256 amount);
+    /// @notice A credited bond payout left for `to` (`to == recipient` for `claim`). Named apart from
+    ///         the escrows' `PayoutClaimed` so the two can never share a topic0 (49E-1).
+    event BondClaimed(address indexed recipient, address indexed to, uint256 amount);
 
     error DisputeManager__NotEscrow();
     error DisputeManager__NotArbiter();
@@ -289,6 +290,13 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         windowOver = initiator != address(0) && block.timestamp >= until_;
     }
 
+    /// @notice The exact bond a filing on `peerChainId`'s route must carry for `amount` (49E-2): the
+    ///         bond is exact (C-17), so clients quote it here instead of re-deriving the formula.
+    ///         Reverts as the filing would when the route has no params.
+    function bondFor(uint256 amount, uint256 peerChainId) external view returns (uint256) {
+        return Dispute.bondFor(amount, disputeParams.load(peerChainId));
+    }
+
     /// @inheritdoc IDisputeManager
     function initiatorOf(bytes32 orderHash) external view returns (address) {
         return disputes[orderHash].initiator;
@@ -336,7 +344,7 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         if (amount == 0) revert DisputeManager__NothingToClaim();
         claimable[recipient] = 0;
         i_wNativeToken.safeWithdrawTo(amount, to);
-        emit PayoutClaimed(recipient, to, amount);
+        emit BondClaimed(recipient, to, amount);
     }
 
     function _unwindowed(bytes32 orderHash) private view returns (Dispute.Record storage d) {
