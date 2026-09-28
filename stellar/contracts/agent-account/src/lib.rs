@@ -113,10 +113,8 @@ impl AgentAccount {
         if policy::get_policy(&env, &agent_id).is_some_and(|p| p.revoked) {
             return Err(AccountError::AgentRevoked);
         }
-        // Re-installing resets the agent's spend. That is the owner's call by construction: a
-        // policy write is the owner saying what the agent may do from now on, and carrying a
-        // half-drained bucket across a deliberate re-configure would make the new limits a lie.
-        // The account-wide bucket is untouched, so the aggregate still binds across the reset.
+        // Re-installing resets the agent's spend, except an instant tightening on a guarded account,
+        // which carries it (else "tighten" would top the agent up). The account-wide bucket binds either way.
         let args: Vec<Val> = vec![
             &env,
             agent_id.to_val(),
