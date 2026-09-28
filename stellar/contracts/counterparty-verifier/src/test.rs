@@ -532,3 +532,17 @@ fn is_root_valid_extends_its_own_and_the_registrys_instance_ttl() {
         "registry instance not extended"
     );
 }
+
+// ---- soak batch D (C-19): every reachable error, named ----
+
+/// A second `initialize` is refused, and the registry the module reads does not move.
+#[test]
+fn initialize_twice_is_already_initialized() {
+    let s = setup();
+    let before = s.verifier.registry();
+    assert_eq!(
+        s.verifier.try_initialize(&Address::generate(&s.env)),
+        Err(Ok(VerifierError::AlreadyInitialized))
+    );
+    assert_eq!(s.verifier.registry(), before);
+}

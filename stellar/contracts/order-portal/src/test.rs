@@ -69,7 +69,10 @@ mod contract_tests {
             &w_native_token,
             &chain_id,
         );
-        assert!(result.is_err());
+        assert_eq!(
+            result,
+            Err(Ok(crate::errors::OrderPortalError::AlreadyInitialized))
+        );
     }
 
     #[test]

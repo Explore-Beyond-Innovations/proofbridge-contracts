@@ -153,41 +153,41 @@ fn bond_is_max_of_floor_and_percentage() {
 fn params_fail_closed() {
     let f = fixture();
     // Too short a challenge period leaves no room to gather evidence.
-    assert!(f
-        .client
-        .try_set_dispute_params(
+    assert_eq!(
+        f.client.try_set_dispute_params(
             &CHAIN,
             &DisputeParams {
                 challenge_period: 60,
                 bond_floor: BOND_FLOOR,
                 bond_bps: BOND_BPS,
             }
-        )
-        .is_err());
+        ),
+        Err(Ok(Error::InvalidChallengePeriod))
+    );
     // A zero floor would let a bond round down to nothing.
-    assert!(f
-        .client
-        .try_set_dispute_params(
+    assert_eq!(
+        f.client.try_set_dispute_params(
             &CHAIN,
             &DisputeParams {
                 challenge_period: CHALLENGE,
                 bond_floor: 0,
                 bond_bps: BOND_BPS,
             }
-        )
-        .is_err());
+        ),
+        Err(Ok(Error::InvalidBondFloor))
+    );
     // Above the ceiling a bond deters honest disputes as much as frivolous ones.
-    assert!(f
-        .client
-        .try_set_dispute_params(
+    assert_eq!(
+        f.client.try_set_dispute_params(
             &CHAIN,
             &DisputeParams {
                 challenge_period: CHALLENGE,
                 bond_floor: BOND_FLOOR,
                 bond_bps: 2_000,
             }
-        )
-        .is_err());
+        ),
+        Err(Ok(Error::InvalidBondBps))
+    );
 }
 
 /// Parameter validation from the shared vector both chains loop over: each row either writes or fails
@@ -224,9 +224,8 @@ fn param_validation_matches_the_shared_vector() {
 fn an_unconfigured_route_cannot_be_disputed() {
     let f = fixture();
     let h = hash(&f.env, 1);
-    assert!(f
-        .client
-        .try_open_dispute(
+    assert_eq!(
+        f.client.try_open_dispute(
             &f.escrow,
             &h,
             &1_000,
@@ -236,8 +235,9 @@ fn an_unconfigured_route_cannot_be_disputed() {
             &DEADLINE,
             &BUFFER,
             &0u64
-        )
-        .is_err());
+        ),
+        Err(Ok(Error::NoDisputeParams))
+    );
 }
 
 // ── the escrow edge ──────────────────────────────────────────────────────
@@ -247,9 +247,8 @@ fn only_a_registered_escrow_may_open_a_dispute() {
     let f = fixture();
     let stranger = Address::generate(&f.env);
     let h = hash(&f.env, 2);
-    assert!(f
-        .client
-        .try_open_dispute(
+    assert_eq!(
+        f.client.try_open_dispute(
             &stranger,
             &h,
             &1_000,
@@ -259,8 +258,9 @@ fn only_a_registered_escrow_may_open_a_dispute() {
             &DEADLINE,
             &BUFFER,
             &0u64
-        )
-        .is_err());
+        ),
+        Err(Ok(Error::NotEscrow))
+    );
 }
 
 #[test]
@@ -279,9 +279,8 @@ fn one_dispute_per_order() {
     let f = fixture();
     let h = hash(&f.env, 4);
     file(&f, &h, 100_000);
-    assert!(f
-        .client
-        .try_open_dispute(
+    assert_eq!(
+        f.client.try_open_dispute(
             &f.escrow,
             &h,
             &100_000,
@@ -291,8 +290,9 @@ fn one_dispute_per_order() {
             &DEADLINE,
             &BUFFER,
             &0u64
-        )
-        .is_err());
+        ),
+        Err(Ok(Error::DisputeExists))
+    );
 }
 
 // ── the arbiter boundary ─────────────────────────────────────────────────
@@ -304,14 +304,15 @@ fn the_arbiter_can_never_rule_that_the_trade_went_through() {
     file(&f, &h, 100_000);
     // TradeProceeds is what evidence produces; an arbiter reaching it would be arbitration
     // overruling proof.
-    assert!(f
-        .client
-        .try_resolve_dispute(&h, &DisputeOutcome::TradeProceeds)
-        .is_err());
-    assert!(f
-        .client
-        .try_resolve_dispute(&h, &DisputeOutcome::None)
-        .is_err());
+    assert_eq!(
+        f.client
+            .try_resolve_dispute(&h, &DisputeOutcome::TradeProceeds),
+        Err(Ok(Error::ArbiterCannotSettle))
+    );
+    assert_eq!(
+        f.client.try_resolve_dispute(&h, &DisputeOutcome::None),
+        Err(Ok(Error::ArbiterCannotSettle))
+    );
 }
 
 #[test]
@@ -404,10 +405,11 @@ fn the_arbiter_cannot_rule_after_the_challenge_period() {
     let h = hash(&f.env, 8);
     file(&f, &h, 100_000);
     warp_past_window(&f, &h);
-    assert!(f
-        .client
-        .try_resolve_dispute(&h, &DisputeOutcome::MutualRefund)
-        .is_err());
+    assert_eq!(
+        f.client
+            .try_resolve_dispute(&h, &DisputeOutcome::MutualRefund),
+        Err(Ok(Error::ChallengeClosed))
+    );
 }
 
 // ── bond routing ─────────────────────────────────────────────────────────
@@ -570,10 +572,11 @@ fn only_the_escrow_that_opened_a_dispute_may_settle_it() {
     f.client.set_escrow(&other, &true);
     let h = hash(&f.env, 11);
     file(&f, &h, 100_000);
-    assert!(f
-        .client
-        .try_settle_bond(&other, &h, &DisputeOutcome::MutualRefund, &false)
-        .is_err());
+    assert_eq!(
+        f.client
+            .try_settle_bond(&other, &h, &DisputeOutcome::MutualRefund, &false),
+        Err(Ok(Error::WrongEscrow))
+    );
 }
 
 /// The handover reads who the admin is (#424): the deployer until the nominee accepts, the nominee
@@ -695,4 +698,109 @@ fn claim_publishes_payout_claimed() {
     assert!(got.events().contains(&want), "no PayoutClaimed: {got:?}");
     assert_eq!(token::Client::new(&f.env, &f.token).balance(&who), 500);
     assert_eq!(f.client.claimable(&who), 0);
+}
+
+// ── soak batch D (C-19): every reachable error, named ─────────────────────
+
+/// A second `initialize` is refused; the first admin stays.
+#[test]
+fn initialize_twice_is_already_initialized() {
+    let f = fixture();
+    assert_eq!(
+        f.client.try_initialize(&f.admin, &f.token),
+        Err(Ok(Error::AlreadyInitialized))
+    );
+    assert_eq!(f.client.get_admin(), Some(f.admin.clone()));
+}
+
+/// Before `initialize` there is no admin to authorize a setter, and no arbiter to rule.
+#[test]
+fn an_uninitialized_module_is_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(DisputeManagerContract, ());
+    let client = DisputeManagerContractClient::new(&env, &id);
+    assert_eq!(
+        client.try_set_escrow(&Address::generate(&env), &true),
+        Err(Ok(Error::NotInitialized))
+    );
+    assert_eq!(
+        client.try_resolve_dispute(&hash(&env, 1), &DisputeOutcome::MutualRefund),
+        Err(Ok(Error::NotInitialized))
+    );
+}
+
+/// Every path that reads a record refuses an order that was never disputed.
+#[test]
+fn an_undisputed_order_is_not_disputed() {
+    let f = fixture();
+    let h = hash(&f.env, 40);
+    assert_eq!(
+        f.client
+            .try_resolve_dispute(&h, &DisputeOutcome::MutualRefund),
+        Err(Ok(Error::NotDisputed))
+    );
+    assert_eq!(f.client.try_claim_dispute(&h), Err(Ok(Error::NotDisputed)));
+    assert_eq!(
+        f.client
+            .try_settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false),
+        Err(Ok(Error::NotDisputed))
+    );
+    assert_eq!(
+        f.client
+            .try_record_response(&f.escrow, &h, &Address::generate(&f.env), &hash(&f.env, 1)),
+        Err(Ok(Error::NotDisputed))
+    );
+}
+
+/// The filer cannot answer their own dispute: the responder slot is the other party's.
+#[test]
+fn the_filer_cannot_respond_to_their_own_dispute() {
+    let f = fixture();
+    let h = hash(&f.env, 41);
+    file(&f, &h, 100_000);
+    assert_eq!(
+        f.client
+            .try_record_response(&f.escrow, &h, &f.filer, &hash(&f.env, 0x11)),
+        Err(Ok(Error::NotResponder))
+    );
+    assert_eq!(
+        f.client.get_dispute(&h).unwrap().responder_evidence,
+        hash(&f.env, 0),
+        "the slot is still empty"
+    );
+
+    // The real counterparty still can.
+    let counterparty = Address::generate(&f.env);
+    f.client
+        .record_response(&f.escrow, &h, &counterparty, &hash(&f.env, 0x11));
+    assert_eq!(
+        f.client.get_dispute(&h).unwrap().responder_evidence,
+        hash(&f.env, 0x11)
+    );
+}
+
+/// A response has to come through the escrow the dispute was filed on.
+#[test]
+fn a_response_through_another_escrow_is_wrong_escrow() {
+    let f = fixture();
+    let other = f.env.register(MockEscrow, ());
+    f.client.set_escrow(&other, &true);
+    let h = hash(&f.env, 42);
+    file(&f, &h, 100_000);
+    assert_eq!(
+        f.client
+            .try_record_response(&other, &h, &Address::generate(&f.env), &hash(&f.env, 0x11)),
+        Err(Ok(Error::WrongEscrow))
+    );
+}
+
+/// `claim` with no credit pays nothing and says so.
+#[test]
+fn claim_with_no_credit_is_nothing_to_claim() {
+    let f = fixture();
+    assert_eq!(
+        f.client.try_claim(&Address::generate(&f.env)),
+        Err(Ok(Error::NothingToClaim))
+    );
 }

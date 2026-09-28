@@ -1314,3 +1314,52 @@ fn read_and_write_entry_points_extend_the_instance_ttl() {
         );
     }
 }
+
+// ---- soak batch D (C-19): every reachable error, named ----
+
+/// A second `initialize` is refused; the chain id stays.
+#[test]
+fn initialize_twice_is_already_initialized() {
+    let (env, client, _) = setup();
+    assert_eq!(
+        client.try_initialize(&Address::generate(&env), &7),
+        Err(Ok(RegistryError::AlreadyInitialized))
+    );
+    assert_eq!(client.chain_id(), CHAIN_ID);
+}
+
+/// Before `initialize`, every write path refuses.
+#[test]
+fn an_uninitialized_registry_is_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = BlsKeyRegistryClient::new(&env, &env.register(BlsKeyRegistry, ()));
+    let v = vectors();
+    let r = reg(&v, "makerOnStellarTestnet");
+    let account = bn::<32>(&env, &r["account"]);
+    let owner = OwnerAuth::Stellar(maker_owner(&env, &v));
+    let e = Some(Ok(RegistryError::NotInitialized));
+    assert_eq!(
+        client
+            .try_register(
+                &account,
+                &owner,
+                &bn::<96>(&env, &r["pkNative"]),
+                &bn::<192>(&env, &r["pop"]),
+                &0
+            )
+            .err(),
+        e
+    );
+    assert_eq!(
+        client.try_set_valid_until(&account, &owner, &0, &1).err(),
+        e
+    );
+    assert_eq!(client.try_revoke(&account, &owner, &0).err(), e);
+    assert_eq!(
+        client
+            .try_set_position_guards(&soroban_sdk::vec![&env])
+            .err(),
+        e
+    );
+}

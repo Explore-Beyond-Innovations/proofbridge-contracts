@@ -239,3 +239,23 @@ fn epochs_are_per_account() {
     assert_eq!(f.client.next_epoch(&address_to_bytes32(&f.env, &a)), 8);
     assert_eq!(f.client.next_epoch(&address_to_bytes32(&f.env, &b)), 1);
 }
+
+// --- soak batch D (C-19): every reachable error, named -------------------------
+
+/// Before `initialize` there is no merkle manager to append to, so nothing is minted.
+#[test]
+fn register_leaf_before_initialize_is_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = RegistrarClient::new(&env, &env.register(Registrar, ()));
+    assert_eq!(
+        client.try_register_leaf(
+            &Address::generate(&env),
+            &commitment(&env),
+            &0,
+            &DST_CHAIN,
+            &dst_registry(&env)
+        ),
+        Err(Ok(RegistrarError::NotInitialized))
+    );
+}
