@@ -150,7 +150,8 @@ contract RegistryPauseTest is Test {
     function test_pause_blocksRegisterAndRevoke() public {
         registry.pause();
 
-        IBLSKeyRegistry.OwnerAuth memory auth = IBLSKeyRegistry.OwnerAuth(IBLSKeyRegistry.Scheme.Eip712, new bytes(65));
+        IBLSKeyRegistry.OwnerAuth memory auth;
+        auth.sig = new bytes(65);
         vm.expectRevert(IBLSKeyRegistry.EnforcedPause.selector);
         registry.register(bytes32(uint256(1)), auth, new bytes(128), new bytes(256), 0);
 

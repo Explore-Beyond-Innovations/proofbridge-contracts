@@ -5,6 +5,8 @@ import {Test} from "forge-std/Test.sol";
 import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 import {BLSKeyRegistry, IPositionGuard} from "../src/BLSKeyRegistry.sol";
+import {KeyMessages} from "../src/libraries/KeyMessages.sol";
+import {OwnerAuthVectors} from "./utils/OwnerAuthVectors.sol";
 
 contract MockGuard is IPositionGuard {
     function hasOpenPositions(bytes32) external pure returns (bool) {
@@ -61,30 +63,24 @@ contract BLSKeyRegistryTest is Test {
         return v.readBytes32(string.concat(".registration.", who, ".", field));
     }
 
-    function sep53Auth(string memory path) internal view returns (IBLSKeyRegistry.OwnerAuth memory) {
-        bytes memory data = abi.encode(
-            uint256(v.readBytes32(string.concat(path, ".scl.r"))),
-            uint256(v.readBytes32(string.concat(path, ".scl.s"))),
-            uint256(v.readBytes32(string.concat(path, ".scl.edX"))),
-            uint256(v.readBytes32(string.concat(path, ".scl.edY")))
-        );
-        return IBLSKeyRegistry.OwnerAuth(IBLSKeyRegistry.Scheme.Sep53, data);
+    /// `ownerAuth.<maker|bridger>.<entry>` (2.6): one signature whose legs name both registries.
+    function oa(string memory who, string memory entry) internal view returns (IBLSKeyRegistry.OwnerAuth memory) {
+        return OwnerAuthVectors.auth(v, oaPath(who, entry));
     }
 
-    function eip712Auth(string memory path) internal view returns (IBLSKeyRegistry.OwnerAuth memory) {
-        bytes memory data = abi.encodePacked(
-            v.readBytes32(string.concat(path, ".sig.r")),
-            v.readBytes32(string.concat(path, ".sig.s")),
-            uint8(v.readUint(string.concat(path, ".sig.v")))
-        );
-        return IBLSKeyRegistry.OwnerAuth(IBLSKeyRegistry.Scheme.Eip712, data);
+    function oaPath(string memory who, string memory entry) internal pure returns (string memory) {
+        return string.concat(".ownerAuth.", isMaker(who) ? "maker" : "bridger", ".", entry);
+    }
+
+    function idx(string memory name, uint256 i) internal pure returns (string memory) {
+        return string.concat(name, "[", vm.toString(i), "]");
     }
 
     function registerMaker() internal returns (bytes32 account) {
         account = reg32("makerOnSepolia", "account");
         registry.register(
             account,
-            sep53Auth(".registration.makerOnSepolia.ownerSig"),
+            oa("makerOnSepolia", "register[0]"),
             reg("makerOnSepolia", "pkNative"),
             reg("makerOnSepolia", "pop"),
             0
@@ -95,7 +91,7 @@ contract BLSKeyRegistryTest is Test {
         account = reg32("bridgerOnSepolia", "account");
         registry.register(
             account,
-            eip712Auth(".registration.bridgerOnSepolia.ownerSig"),
+            oa("bridgerOnSepolia", "register[0]"),
             reg("bridgerOnSepolia", "pkNative"),
             reg("bridgerOnSepolia", "pop"),
             0
@@ -109,8 +105,7 @@ contract BLSKeyRegistryTest is Test {
     }
 
     function slotAuth(string memory who, uint256 i) internal view returns (IBLSKeyRegistry.OwnerAuth memory) {
-        string memory path = string.concat(slotPath(who, i), ".ownerSig");
-        return isMaker(who) ? sep53Auth(path) : eip712Auth(path);
+        return oa(who, idx("register", i));
     }
 
     function isMaker(string memory who) internal pure returns (bool) {
@@ -132,27 +127,30 @@ contract BLSKeyRegistryTest is Test {
         return v.readBytes32(string.concat(slotPath(who, i), ".commitment"));
     }
 
-    /// `slots.<who>.setValidUntil[]` is (slotId, validUntil) x {1, graceTs}, index = slotId*2 + (validUntil==1 ? 0 : 1).
-    function svuAuth(string memory who, uint32 slotId, bool retire)
+    /// `ownerAuth.<who>.retire[]` is (key, validUntil) x {1, graceTs}, index = key*2 + (validUntil==1 ? 0 : 1).
+    function svuAuth(string memory who, uint32 key, bool retire)
         internal
         view
         returns (IBLSKeyRegistry.OwnerAuth memory)
     {
-        string memory path = string.concat(
-            ".slots.", who, ".setValidUntil[", vm.toString(uint256(slotId) * 2 + (retire ? 0 : 1)), "].ownerSig"
-        );
-        return isMaker(who) ? sep53Auth(path) : eip712Auth(path);
+        return oa(who, idx("retire", uint256(key) * 2 + (retire ? 0 : 1)));
+    }
+
+    /// The fingerprint key i is named by (on EVM, the stored commitment).
+    function fp(string memory who, uint256 i) internal view returns (bytes32) {
+        return OwnerAuthVectors.key(v, oaPath(who, idx("register", i)));
     }
 
     function graceTs() internal view returns (uint64) {
         return uint64(vm.parseUint(v.readString(".slots.graceTs")));
     }
 
-    function setValidUntil(string memory who, uint32 slotId, bool retire) internal {
+    /// Retires key i (whatever slot it occupies) under its pre-signed `RetireKey`.
+    function setValidUntil(string memory who, uint32 key, bool retire) internal {
         registry.setValidUntil(
             v.readBytes32(string.concat(".slots.", who, ".account")),
-            svuAuth(who, slotId, retire),
-            slotId,
+            svuAuth(who, key, retire),
+            fp(who, key),
             retire ? 1 : graceTs()
         );
     }
@@ -175,7 +173,7 @@ contract BLSKeyRegistryTest is Test {
         assertEq(registry.liveSlots(account).length, 1);
     }
 
-    function test_registerEvmHomeAccountViaEip712() public {
+    function test_registerEvmHomeAccountViaSecp256k1() public {
         bytes32 account = registerBridger();
         assertEq(registry.commitmentAt(account, 0), reg32("bridgerOnSepolia", "commitment"));
         IBLSKeyRegistry.KeySlot memory slot = registry.lookup(account, 0);
@@ -185,7 +183,7 @@ contract BLSKeyRegistryTest is Test {
 
     function test_revokeStellarHomeThenKeyIsGone() public {
         bytes32 account = registerMaker();
-        registry.revoke(account, sep53Auth(".registration.makerOnSepolia.revokeAtNonce1.ownerSig"), 1);
+        registry.revoke(account, oa("makerOnSepolia", "revoke[1]"), 1);
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.commitmentAt(account, 0);
         assertEq(registry.nonceOf(account), 2);
@@ -194,7 +192,7 @@ contract BLSKeyRegistryTest is Test {
 
     function test_revokeEvmHomeWithNonce1Signature() public {
         bytes32 account = registerBridger();
-        registry.revoke(account, eip712Auth(".registration.bridgerOnSepolia.revokeAtNonce1.ownerSig"), 1);
+        registry.revoke(account, oa("bridgerOnSepolia", "revoke[1]"), 1);
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.commitmentAt(account, 0);
     }
@@ -316,7 +314,7 @@ contract BLSKeyRegistryTest is Test {
         vm.expectRevert(IBLSKeyRegistry.KeyPreviouslyUsed.selector);
         registry.register(
             account,
-            sep53Auth(".registration.makerOnSepolia.registerAtNonce1.ownerSig"),
+            oa("makerOnSepolia", "reuseKey0AtNonce1"),
             reg("makerOnSepolia", "registerAtNonce1.pkNative"),
             reg("makerOnSepolia", "registerAtNonce1.pop"),
             1
@@ -330,7 +328,7 @@ contract BLSKeyRegistryTest is Test {
         vm.expectRevert(IBLSKeyRegistry.KeyPreviouslyUsed.selector);
         registry.register(
             account,
-            sep53Auth(".registration.makerOnSepolia.registerAtNonce1.ownerSig"),
+            oa("makerOnSepolia", "reuseKey0AtNonce1"),
             reg("makerOnSepolia", "registerAtNonce1.pkNative"),
             reg("makerOnSepolia", "registerAtNonce1.pop"),
             1
@@ -340,7 +338,7 @@ contract BLSKeyRegistryTest is Test {
     /// revoke drops every slot; the next registration continues the id sequence.
     function test_revokeClearsAllSlotsAndNextIdKeepsAdvancing() public {
         bytes32 account = registerMaker(); // nonce 0 -> slot 0
-        registry.revoke(account, sep53Auth(".registration.makerOnSepolia.revokeAtNonce1.ownerSig"), 1);
+        registry.revoke(account, oa("makerOnSepolia", "revoke[1]"), 1);
         assertEq(registry.liveSlots(account).length, 0);
 
         assertEq(registerSlot("makerOnSepolia", 2), 1); // nonce 2, fresh key -> slot 1
@@ -428,35 +426,35 @@ contract BLSKeyRegistryTest is Test {
         bytes32 account = v.readBytes32(".slots.bridgerOnSepolia.account");
         registerSlot("bridgerOnSepolia", 0);
         vm.expectRevert(IBLSKeyRegistry.BadValidUntil.selector);
-        registry.setValidUntil(account, svuAuth("bridgerOnSepolia", 0, true), 0, 0);
+        registry.setValidUntil(account, svuAuth("bridgerOnSepolia", 0, true), fp("bridgerOnSepolia", 0), 0);
     }
 
     function test_setValidUntilUnknownSlotRejected() public {
         bytes32 account = v.readBytes32(".slots.bridgerOnSepolia.account");
         registerSlot("bridgerOnSepolia", 0);
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
-        registry.setValidUntil(account, svuAuth("bridgerOnSepolia", 1, true), 1, 1);
+        registry.setValidUntil(account, svuAuth("bridgerOnSepolia", 1, true), fp("bridgerOnSepolia", 1), 1);
     }
 
     function test_setValidUntilWrongSignerRejected() public {
         bytes32 account = v.readBytes32(".slots.bridgerOnSepolia.account");
         registerSlot("bridgerOnSepolia", 0);
         IBLSKeyRegistry.OwnerAuth memory auth = svuAuth("bridgerOnSepolia", 0, true);
-        auth.data[64] = auth.data[64] == bytes1(uint8(27)) ? bytes1(uint8(28)) : bytes1(uint8(27));
+        auth.sig[64] = auth.sig[64] == bytes1(uint8(27)) ? bytes1(uint8(28)) : bytes1(uint8(27));
         vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
-        registry.setValidUntil(account, auth, 0, 1);
+        registry.setValidUntil(account, auth, fp("bridgerOnSepolia", 0), 1);
     }
 
-    function test_setValidUntilSigBoundToSlotAndValue() public {
+    function test_setValidUntilSigBoundToKeyAndValue() public {
         bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
         registerSlot("makerOnSepolia", 0);
         registerSlot("makerOnSepolia", 1);
-        // slot-0 signature replayed against slot 1
+        // key-0 signature replayed against key 1
         vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
-        registry.setValidUntil(account, svuAuth("makerOnSepolia", 0, true), 1, 1);
+        registry.setValidUntil(account, svuAuth("makerOnSepolia", 0, true), fp("makerOnSepolia", 1), 1);
         // value-1 signature used for a different value
         vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
-        registry.setValidUntil(account, svuAuth("makerOnSepolia", 0, true), 0, 2);
+        registry.setValidUntil(account, svuAuth("makerOnSepolia", 0, true), fp("makerOnSepolia", 0), 2);
     }
 
     /// A retirement signed before later writes still lands (no nonce), and replay is a no-op.
@@ -469,12 +467,12 @@ contract BLSKeyRegistryTest is Test {
         setValidUntil("bridgerOnSepolia", 1, false); // another retirement on a different slot
         uint256 nonce = registry.nonceOf(account);
 
-        registry.setValidUntil(account, preSigned, 0, 1);
+        registry.setValidUntil(account, preSigned, fp("bridgerOnSepolia", 0), 1);
         vm.expectRevert(IBLSKeyRegistry.SlotExpired.selector);
         registry.commitmentAt(account, 0);
 
         vm.expectRevert(IBLSKeyRegistry.BadValidUntil.selector);
-        registry.setValidUntil(account, preSigned, 0, 1); // replay
+        registry.setValidUntil(account, preSigned, fp("bridgerOnSepolia", 0), 1); // replay
         assertEq(registry.nonceOf(account), nonce);
         assertEq(registry.commitmentAt(account, 1), slotCommitment("bridgerOnSepolia", 1)); // slot 1 untouched
     }
@@ -558,7 +556,7 @@ contract BLSKeyRegistryTest is Test {
     /// Same nonce -> BadNonce; bumped nonce with a stale PoP -> InvalidPop.
     function test_reregisterWithoutFreshPopReverts() public {
         bytes32 account = registerMaker();
-        IBLSKeyRegistry.OwnerAuth memory auth = sep53Auth(".registration.makerOnSepolia.ownerSig");
+        IBLSKeyRegistry.OwnerAuth memory auth = oa("makerOnSepolia", "register[0]");
         bytes memory pk = reg("makerOnSepolia", "pkNative");
         bytes memory pop = reg("makerOnSepolia", "pop");
 
@@ -573,7 +571,7 @@ contract BLSKeyRegistryTest is Test {
         vm.expectRevert(IBLSKeyRegistry.IdentityKey.selector);
         registry.register(
             reg32("makerOnSepolia", "account"),
-            sep53Auth(".registration.makerOnSepolia.ownerSig"),
+            oa("makerOnSepolia", "register[0]"),
             v.readBytes(".negative.identityPubkey.eip2537"),
             reg("makerOnSepolia", "pop"),
             0
@@ -584,16 +582,16 @@ contract BLSKeyRegistryTest is Test {
         vm.expectRevert(IBLSKeyRegistry.InvalidPop.selector);
         registry.register(
             reg32("makerOnSepolia", "account"),
-            sep53Auth(".registration.makerOnSepolia.ownerSig"),
+            oa("makerOnSepolia", "register[0]"),
             reg("makerOnSepolia", "pkNative"),
             v.readBytes(".negative.popWrongDstSepolia.pop"),
             0
         );
     }
 
-    function test_eip712WrongSignerRejected() public {
-        IBLSKeyRegistry.OwnerAuth memory auth = eip712Auth(".registration.bridgerOnSepolia.ownerSig");
-        auth.data[64] = auth.data[64] == bytes1(uint8(27)) ? bytes1(uint8(28)) : bytes1(uint8(27));
+    function test_secp256k1WrongSignerRejected() public {
+        IBLSKeyRegistry.OwnerAuth memory auth = oa("bridgerOnSepolia", "register[0]");
+        auth.sig[64] = auth.sig[64] == bytes1(uint8(27)) ? bytes1(uint8(28)) : bytes1(uint8(27));
 
         vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
         registry.register(
@@ -606,9 +604,9 @@ contract BLSKeyRegistryTest is Test {
     }
 
     function test_sep53TamperedPointRejected() public {
-        IBLSKeyRegistry.OwnerAuth memory auth = sep53Auth(".registration.makerOnSepolia.ownerSig");
-        (uint256 r, uint256 s, uint256 edX, uint256 edY) = abi.decode(auth.data, (uint256, uint256, uint256, uint256));
-        auth.data = abi.encode(r, s, edX + 1, edY);
+        IBLSKeyRegistry.OwnerAuth memory auth = oa("makerOnSepolia", "register[0]");
+        (uint256 r, uint256 s, uint256 edX, uint256 edY) = abi.decode(auth.sig, (uint256, uint256, uint256, uint256));
+        auth.sig = abi.encode(r, s, edX + 1, edY);
 
         vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
         registry.register(
@@ -618,16 +616,14 @@ contract BLSKeyRegistryTest is Test {
 
     function test_revokeUnregisteredRejected() public {
         vm.expectRevert(IBLSKeyRegistry.NotRegistered.selector);
-        registry.revoke(
-            reg32("makerOnSepolia", "account"), sep53Auth(".registration.makerOnSepolia.revokeAtNonce1.ownerSig"), 0
-        );
+        registry.revoke(reg32("makerOnSepolia", "account"), oa("makerOnSepolia", "revoke[1]"), 0);
     }
 
     function test_revokeBlockedWhileInFlight() public {
         bytes32 account = registerMaker();
         busyGuard();
         vm.expectRevert(IBLSKeyRegistry.AccountInFlight.selector);
-        registry.revoke(account, sep53Auth(".registration.makerOnSepolia.revokeAtNonce1.ownerSig"), 1);
+        registry.revoke(account, oa("makerOnSepolia", "revoke[1]"), 1);
     }
 
     // A single open position in EITHER escrow must block the revoke; both clear allows it.
@@ -642,16 +638,350 @@ contract BLSKeyRegistryTest is Test {
 
         adSide.setBusy(true);
         vm.expectRevert(IBLSKeyRegistry.AccountInFlight.selector);
-        registry.revoke(account, sep53Auth(".registration.makerOnSepolia.revokeAtNonce1.ownerSig"), 1);
+        registry.revoke(account, oa("makerOnSepolia", "revoke[1]"), 1);
 
         adSide.setBusy(false);
         orderSide.setBusy(true);
         vm.expectRevert(IBLSKeyRegistry.AccountInFlight.selector);
-        registry.revoke(account, sep53Auth(".registration.makerOnSepolia.revokeAtNonce1.ownerSig"), 1);
+        registry.revoke(account, oa("makerOnSepolia", "revoke[1]"), 1);
 
         orderSide.setBusy(false);
-        registry.revoke(account, sep53Auth(".registration.makerOnSepolia.revokeAtNonce1.ownerSig"), 1);
+        registry.revoke(account, oa("makerOnSepolia", "revoke[1]"), 1);
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.commitmentAt(account, 0);
+    }
+
+    // =========================================================================
+    // 2.6 plan §4: one owner signature, every refusal, both schemes
+    // =========================================================================
+
+    function whoAt(uint256 k) internal pure returns (string memory) {
+        return k == 0 ? "makerOnSepolia" : "bridgerOnSepolia";
+    }
+
+    function registerWith(string memory who, IBLSKeyRegistry.OwnerAuth memory auth) internal returns (uint32) {
+        return registry.register(
+            v.readBytes32(string.concat(".slots.", who, ".account")),
+            auth,
+            v.readBytes(string.concat(slotPath(who, 0), ".pkNative")),
+            v.readBytes(string.concat(slotPath(who, 0), ".pop")),
+            0
+        );
+    }
+
+    /// A single-leg signature naming only this registry is enough here.
+    function test_aSignatureNamingOnlyThisRegistryRegisters() public {
+        for (uint256 k = 0; k < 2; k++) {
+            assertEq(registerWith(whoAt(k), oa(whoAt(k), "onlySepoliaLeg")), 0);
+        }
+    }
+
+    /// Refusal: a signature over a different leg set (the other registry's nonce moved, or a leg added).
+    function test_aSignatureOverADifferentLegSetIsRefused() public {
+        for (uint256 k = 0; k < 2; k++) {
+            IBLSKeyRegistry.OwnerAuth memory moved = oa(whoAt(k), "register[0]");
+            moved.legs[1].nonce += 1;
+            vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+            registerWith(whoAt(k), moved);
+
+            IBLSKeyRegistry.OwnerAuth memory base = oa(whoAt(k), "register[0]");
+            IBLSKeyRegistry.OwnerAuth memory added;
+            added.scheme = base.scheme;
+            added.sig = base.sig;
+            added.legs = new IBLSKeyRegistry.KeyLeg[](3);
+            added.legs[0] = base.legs[0];
+            added.legs[1] = base.legs[1];
+            added.legs[2] = IBLSKeyRegistry.KeyLeg(84532, bytes32(uint256(0x33)), 0);
+            vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+            registerWith(whoAt(k), added);
+        }
+    }
+
+    /// Refusal: `legs` without this registry's own leg (a valid signature naming only the Soroban leg).
+    function test_legsWithoutTheOwnLegAreRefused() public {
+        for (uint256 k = 0; k < 2; k++) {
+            vm.expectRevert(IBLSKeyRegistry.LegMismatch.selector);
+            registerWith(whoAt(k), oa(whoAt(k), "onlyStellarLeg"));
+        }
+    }
+
+    /// Refusal: this registry's own leg twice, under a valid signature over exactly those legs.
+    function test_theOwnLegTwiceIsRefused() public {
+        for (uint256 k = 0; k < 2; k++) {
+            vm.expectRevert(IBLSKeyRegistry.LegMismatch.selector);
+            registerWith(whoAt(k), oa(whoAt(k), "duplicateLegs"));
+        }
+    }
+
+    /// Refusal: a stale nonce. The owner signed a revoke at nonce 0; at nonce 1 its leg is not ours.
+    function test_aStaleNonceIsRefused() public {
+        for (uint256 k = 0; k < 2; k++) {
+            string memory who = whoAt(k);
+            bytes32 account = v.readBytes32(string.concat(".slots.", who, ".account"));
+            registerSlot(who, 0);
+            IBLSKeyRegistry.OwnerAuth memory stale = oa(who, "revoke[0]");
+            vm.expectRevert(IBLSKeyRegistry.LegMismatch.selector);
+            registry.revoke(account, stale, 1);
+            vm.expectRevert(IBLSKeyRegistry.BadNonce.selector);
+            registry.revoke(account, stale, 0);
+            assertEq(registry.liveSlots(account).length, 1);
+        }
+    }
+
+    /// Refusal: a text with one byte changed. The maker signed a text one byte off the one rebuilt here.
+    function test_aTextWithOneByteChangedIsRefused() public {
+        IBLSKeyRegistry.OwnerAuth memory auth = oa("makerOnSepolia", "register[0]");
+        auth.sig = v.readBytes(".ownerAuth.negative.tamperedText.evmSig");
+        assertEq(
+            bytes(v.readString(".ownerAuth.negative.tamperedText.signedText")).length,
+            bytes(v.readString(string.concat(oaPath("makerOnSepolia", "register[0]"), ".text"))).length
+        );
+        vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+        registerWith("makerOnSepolia", auth);
+    }
+
+    /// Refusal: a secp256k1 signature on an ed25519 (non-padded) account. The signature is valid and
+    /// its signer is the account's low 20 bytes: only the padding rule refuses it.
+    function test_aSecp256k1SignatureOnAnEd25519AccountIsRefused() public {
+        string memory n = ".ownerAuth.negative.secpOnNonEvmAccount";
+        vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+        registry.register(
+            v.readBytes32(string.concat(n, ".account")),
+            OwnerAuthVectors.auth(v, n),
+            v.readBytes(string.concat(n, ".sepolia.pkNative")),
+            v.readBytes(string.concat(n, ".sepolia.pop")),
+            0
+        );
+    }
+
+    /// Refusal: an ed25519 signature on an EVM-shaped (padded) account.
+    function test_anEd25519SignatureOnAnEvmAccountIsRefused() public {
+        string memory n = ".ownerAuth.negative.sep53OnEvmAccount";
+        assertEq(v.readBytes32(string.concat(n, ".account")), v.readBytes32(".slots.bridgerOnSepolia.account"));
+        vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+        registerWith("bridgerOnSepolia", OwnerAuthVectors.auth(v, n));
+    }
+
+    /// A retirement names no legs: one that carries any is refused, even when the signature is sound.
+    function test_aRetirementWithLegsIsRefused() public {
+        bytes32 account = v.readBytes32(".slots.bridgerOnSepolia.account");
+        registerSlot("bridgerOnSepolia", 0);
+        IBLSKeyRegistry.OwnerAuth memory auth = svuAuth("bridgerOnSepolia", 0, true);
+        auth.legs = oa("bridgerOnSepolia", "register[0]").legs;
+        vm.expectRevert(IBLSKeyRegistry.LegMismatch.selector);
+        registry.setValidUntil(account, auth, fp("bridgerOnSepolia", 0), 1);
+    }
+
+    /// A signature the test's own wallet key makes over the vector digest lands: the wallet's rule.
+    function test_aFreshSecp256k1SignatureOverTheVectorDigestRegisters() public {
+        string memory path = oaPath("bridgerOnSepolia", "register[0]");
+        (uint8 sv, bytes32 r, bytes32 ss) =
+            vm.sign(uint256(v.readBytes32(".keys.bridgerWallet.sk")), v.readBytes32(string.concat(path, ".digest")));
+        IBLSKeyRegistry.OwnerAuth memory auth = oa("bridgerOnSepolia", "register[0]");
+        auth.sig = abi.encodePacked(r, ss, sv);
+        assertEq(registerWith("bridgerOnSepolia", auth), 0);
+    }
+
+    /// The fingerprint map: a key maps to its slot, a revoked key to none (and its retirement fails).
+    function test_slotOfKeyFollowsRegistrationAndRevoke() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
+        registry.slotOfKey(account, fp("makerOnSepolia", 0));
+        registerSlot("makerOnSepolia", 0);
+        assertEq(registry.slotOfKey(account, fp("makerOnSepolia", 0)), 0);
+        registry.revoke(account, oa("makerOnSepolia", "revoke[1]"), 1);
+        vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
+        registry.slotOfKey(account, fp("makerOnSepolia", 0));
+        assertEq(registerSlot("makerOnSepolia", 2), 1);
+        assertEq(registry.slotOfKey(account, fp("makerOnSepolia", 2)), 1);
+        vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
+        setValidUntil("makerOnSepolia", 0, true);
+    }
+
+    /// D2: on EVM the fingerprint is the stored commitment.
+    function test_theFingerprintIsTheStoredCommitment() public view {
+        for (uint256 k = 0; k < 2; k++) {
+            for (uint256 i = 0; i < 6; i++) {
+                assertEq(fp(whoAt(k), i), slotCommitment(whoAt(k), i));
+            }
+        }
+    }
+
+    /// Gas for `register` under a two-leg RegisterKey, each scheme, and for the pre-signed RetireKey.
+    /// Measured 2026-09-29: register 420,102 (secp256k1) / 1,000,533 (sep53); setValidUntil
+    /// 33,712 / 573,149. The BLS PoP pairing dominates register; ceilings sit ~10% above.
+    function test_ownerSigGas() public {
+        string[2] memory names = ["bridgerOnSepolia", "makerOnSepolia"];
+        uint256[2] memory registerCeil = [REGISTER_SECP_GAS, REGISTER_SEP53_GAS];
+        for (uint256 k = 0; k < 2; k++) {
+            string memory who = names[k];
+            IBLSKeyRegistry.OwnerAuth memory auth = oa(who, "register[0]");
+            assertEq(auth.legs.length, 2);
+            bytes32 account = v.readBytes32(string.concat(".slots.", who, ".account"));
+            bytes memory pk = v.readBytes(string.concat(slotPath(who, 0), ".pkNative"));
+            bytes memory pop = v.readBytes(string.concat(slotPath(who, 0), ".pop"));
+            uint256 g = gasleft();
+            registry.register(account, auth, pk, pop, 0);
+            g -= gasleft();
+            emit log_named_uint(string.concat("register gas, 2 legs, ", who), g);
+            assertLe(g, registerCeil[k]);
+
+            IBLSKeyRegistry.OwnerAuth memory retire = svuAuth(who, 0, true);
+            bytes32 key = fp(who, 0);
+            g = gasleft();
+            registry.setValidUntil(account, retire, key, 1);
+            g -= gasleft();
+            emit log_named_uint(string.concat("setValidUntil gas, ", who), g);
+        }
+    }
+
+    uint256 constant REGISTER_SECP_GAS = 462_000;
+    uint256 constant REGISTER_SEP53_GAS = 1_100_000;
+
+    function test_domainSeparatorIsTheKeysDomain() public view {
+        assertEq(registry.domainSeparator(), v.readBytes32(".ownerAuth._meta.domainSeparator"));
+    }
+}
+
+/// Exposes `KeyMessages` so the builders can be held to the vectors byte for byte.
+contract KeyMessagesHarness {
+    function structHash(
+        KeyMessages.Kind kind,
+        bytes32 account,
+        bytes32 key,
+        IBLSKeyRegistry.KeyLeg[] calldata legs,
+        uint64 validUntil
+    ) external pure returns (bytes32) {
+        return KeyMessages.structHash(kind, account, key, legs, validUntil);
+    }
+
+    function digest(
+        KeyMessages.Kind kind,
+        bytes32 account,
+        bytes32 key,
+        IBLSKeyRegistry.KeyLeg[] calldata legs,
+        uint64 validUntil
+    ) external pure returns (bytes32) {
+        return KeyMessages.digest(kind, account, key, legs, validUntil);
+    }
+
+    function text(
+        KeyMessages.Kind kind,
+        bytes32 account,
+        bytes32 key,
+        IBLSKeyRegistry.KeyLeg[] calldata legs,
+        uint64 validUntil
+    ) external pure returns (bytes memory) {
+        return KeyMessages.text(kind, account, key, legs, validUntil);
+    }
+}
+
+contract KeyMessagesVectorsTest is Test {
+    using stdJson for string;
+
+    string v;
+    KeyMessagesHarness h;
+
+    function setUp() public {
+        v = vm.readFile("../test-vectors/bls-encodings.json");
+        h = new KeyMessagesHarness();
+    }
+
+    function test_typehashesMatchTheVectors() public view {
+        assertEq(KeyMessages.KEY_LEG_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.keyLeg"));
+        assertEq(KeyMessages.REGISTER_KEY_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.registerKey"));
+        assertEq(KeyMessages.REVOKE_KEYS_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.revokeKeys"));
+        assertEq(KeyMessages.RETIRE_KEY_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.retireKey"));
+        assertEq(KeyMessages.DOMAIN_SEPARATOR, v.readBytes32(".ownerAuth._meta.domainSeparator"));
+    }
+
+    // Each cheatcode read re-encodes the whole 250 KB vector file into memory, so these readers
+    // hand the scratch space back after every read; without it the loop below runs out of memory.
+    function r32(string memory path) internal view returns (bytes32 out) {
+        uint256 fmp;
+        assembly {
+            fmp := mload(0x40)
+        }
+        out = v.readBytes32(path);
+        assembly {
+            mstore(0x40, fmp)
+        }
+    }
+
+    function rstr(string memory path) internal view returns (string memory out) {
+        uint256 fmp;
+        assembly {
+            fmp := mload(0x40)
+        }
+        string memory tmp = v.readString(path);
+        assembly {
+            let words := add(div(add(mload(tmp), 31), 32), 1)
+            for { let i := 0 } lt(i, words) { i := add(i, 1) } {
+                mstore(add(fmp, mul(i, 32)), mload(add(tmp, mul(i, 32))))
+            }
+            out := fmp
+            mstore(0x40, add(fmp, mul(words, 32)))
+        }
+    }
+
+    function exists(string memory path) internal view returns (bool out) {
+        uint256 fmp;
+        assembly {
+            fmp := mload(0x40)
+        }
+        out = vm.keyExistsJson(v, path);
+        assembly {
+            mstore(0x40, fmp)
+        }
+    }
+
+    function legsAt(string memory path) internal view returns (IBLSKeyRegistry.KeyLeg[] memory out) {
+        uint256 n;
+        while (exists(string.concat(path, ".legs[", vm.toString(n), "]"))) n++;
+        out = new IBLSKeyRegistry.KeyLeg[](n);
+        for (uint256 i = 0; i < n; i++) {
+            string memory l = string.concat(path, ".legs[", vm.toString(i), "]");
+            out[i] = IBLSKeyRegistry.KeyLeg(
+                vm.parseUint(rstr(string.concat(l, ".chainId"))),
+                r32(string.concat(l, ".registry")),
+                vm.parseUint(rstr(string.concat(l, ".nonce")))
+            );
+        }
+    }
+
+    function check(string memory path) internal view {
+        bytes32 kindName = keccak256(bytes(rstr(string.concat(path, ".kind"))));
+        KeyMessages.Kind kind = kindName == keccak256("register")
+            ? KeyMessages.Kind.Register
+            : kindName == keccak256("revoke") ? KeyMessages.Kind.Revoke : KeyMessages.Kind.Retire;
+        bytes32 key = kind == KeyMessages.Kind.Revoke ? bytes32(0) : r32(string.concat(path, ".keyCommitment"));
+        uint64 vu = kind == KeyMessages.Kind.Retire ? uint64(vm.parseUint(rstr(string.concat(path, ".validUntil")))) : 0;
+        bytes32 account = r32(string.concat(path, ".account"));
+        IBLSKeyRegistry.KeyLeg[] memory legs = legsAt(path);
+        assertEq(h.structHash(kind, account, key, legs, vu), r32(string.concat(path, ".structHash")), path);
+        assertEq(h.digest(kind, account, key, legs, vu), r32(string.concat(path, ".digest")), path);
+        assertEq(string(h.text(kind, account, key, legs, vu)), rstr(string.concat(path, ".text")), path);
+    }
+
+    function test_everyVectorEntryRebuildsByteForByte() public view {
+        string[2] memory actors = ["maker", "bridger"];
+        for (uint256 a = 0; a < 2; a++) {
+            string memory base = string.concat(".ownerAuth.", actors[a], ".");
+            for (uint256 i = 0; i < 6; i++) {
+                check(string.concat(base, "register[", vm.toString(i), "]"));
+            }
+            for (uint256 i = 0; i < 7; i++) {
+                check(string.concat(base, "revoke[", vm.toString(i), "]"));
+            }
+            for (uint256 i = 0; i < 12; i++) {
+                check(string.concat(base, "retire[", vm.toString(i), "]"));
+            }
+            check(string.concat(base, "reuseKey0AtNonce1"));
+            check(string.concat(base, "onlySepoliaLeg"));
+            check(string.concat(base, "onlyStellarLeg"));
+            check(string.concat(base, "duplicateLegs"));
+        }
+        check(".ownerAuth.negative.secpOnNonEvmAccount");
+        check(".ownerAuth.negative.sep53OnEvmAccount");
     }
 }

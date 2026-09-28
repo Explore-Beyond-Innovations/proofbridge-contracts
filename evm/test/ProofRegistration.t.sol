@@ -278,7 +278,8 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
         vm.expectRevert(IBLSKeyRegistry.BadLength.selector);
         registry.registerByProof(account, pk, bytes.concat(pop, hex"00"), EPOCH, SOURCE_CHAIN, fxRoot, fxProof);
         // The owner-signed path checks the same lengths, then the signature's own.
-        IBLSKeyRegistry.OwnerAuth memory owner = IBLSKeyRegistry.OwnerAuth(IBLSKeyRegistry.Scheme.Eip712, hex"00");
+        IBLSKeyRegistry.OwnerAuth memory owner;
+        owner.sig = hex"00";
         vm.expectRevert(IBLSKeyRegistry.BadLength.selector);
         registry.register(account, owner, bytes.concat(pk, hex"00"), pop, 0);
     }

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.34;
 
 import {TestField} from "test/utils/TestField.sol";
+import {OwnerAuthVectors} from "test/utils/OwnerAuthVectors.sol";
 
 import {IEscrow} from "src/interfaces/IEscrow.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
@@ -424,16 +425,6 @@ abstract contract RealRegistryFixture is AdManagerTest {
 
     /*//////////////////////////// vector helpers ////////////////////////////*/
 
-    function _sep53(string memory path) internal view returns (IBLSKeyRegistry.OwnerAuth memory) {
-        bytes memory data = abi.encode(
-            uint256(v.readBytes32(string.concat(path, ".scl.r"))),
-            uint256(v.readBytes32(string.concat(path, ".scl.s"))),
-            uint256(v.readBytes32(string.concat(path, ".scl.edX"))),
-            uint256(v.readBytes32(string.concat(path, ".scl.edY")))
-        );
-        return IBLSKeyRegistry.OwnerAuth(IBLSKeyRegistry.Scheme.Sep53, data);
-    }
-
     /// The vector digests bind the Sepolia chain id; the escrow keeps the runtime one.
     modifier onVectorChain() {
         uint256 cid = block.chainid;
@@ -446,19 +437,20 @@ abstract contract RealRegistryFixture is AdManagerTest {
         string memory path = string.concat(".slots.makerOnSepolia.registrations[", vm.toString(i), "]");
         registry.register(
             account,
-            _sep53(string.concat(path, ".ownerSig")),
+            OwnerAuthVectors.auth(v, string.concat(".ownerAuth.maker.register[", vm.toString(i), "]")),
             v.readBytes(string.concat(path, ".pkNative")),
             v.readBytes(string.concat(path, ".pop")),
             i
         );
     }
 
-    /// `setValidUntil` vectors: index = slotId*2 + (retire ? 0 : 1); a retire names `1`.
-    function _setValidUntil(uint32 slotId, bool retire) internal onVectorChain {
-        string memory path = string.concat(
-            ".slots.makerOnSepolia.setValidUntil[", vm.toString(uint256(slotId) * 2 + (retire ? 0 : 1)), "].ownerSig"
+    /// `ownerAuth.maker.retire` vectors: index = key*2 + (retire ? 0 : 1); a retire names `1`.
+    function _setValidUntil(uint32 key, bool retire) internal onVectorChain {
+        string memory path =
+            string.concat(".ownerAuth.maker.retire[", vm.toString(uint256(key) * 2 + (retire ? 0 : 1)), "]");
+        registry.setValidUntil(
+            account, OwnerAuthVectors.auth(v, path), OwnerAuthVectors.key(v, path), retire ? 1 : _graceTs()
         );
-        registry.setValidUntil(account, _sep53(path), slotId, retire ? 1 : _graceTs());
     }
 
     function _graceTs() internal view returns (uint64) {
