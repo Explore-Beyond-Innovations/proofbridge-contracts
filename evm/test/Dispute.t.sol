@@ -119,7 +119,9 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         // Under-funding fails inside the *module*, after the escrow has already written Disputed.
         vm.deal(filer, bond);
         vm.prank(filer);
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(DisputeManager.DisputeManager__NativeAmountMismatch.selector, bond - 1, bond)
+        );
         adManager.dispute{value: bond - 1}(p, bytes32(0));
 
         // Neither side kept anything: the escrow's status rolled back with the module's record.
@@ -337,7 +339,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         assertGe(dm.effectiveChallengeDeadline(h), p.deadline + 30 minutes, "window floors at deadline + buffer");
 
         vm.warp(block.timestamp + CHALLENGE + 1);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeNotResolved.selector, h));
         adManager.finalizeDispute(p);
     }
 
@@ -381,7 +383,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
         assertGe(dm.effectiveChallengeDeadline(h), p.deadline + 30 minutes, "the ruling opened a buffer");
         vm.warp(p.deadline + 1);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeNotResolved.selector, h));
         adManager.finalizeDispute(p);
     }
 
@@ -607,11 +609,11 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         }
     }
 
-    /// A second dispute on the same order is refused by the module.
+    /// A second dispute on the same order is refused: the escrow sees `Disputed` before the module.
     function test_oneDisputePerOrder() public {
-        (IAdManager.OrderParams memory p,) = _lockedOrder(12);
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(12);
         _file(p, filer);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotDisputable.selector, h, IEscrow.Status.Disputed));
         _file(p, filer);
     }
 
@@ -877,6 +879,86 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         assertEq(address(dm).balance, 0);
         // The bond exits unwrap through this contract's `receive`, so a bond round trip proves it.
         test_d7_mutualRefundReturnsTheBond();
+    }
+
+    /*//////////////// C-19: every module error named ////////////////*/
+
+    /// C-19: the filer cannot answer its own dispute; only the other party's evidence lands.
+    function test_c19_theFilerCannotRespond() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(70);
+        _file(p, filer);
+        vm.prank(filer);
+        vm.expectRevert(DisputeManager.DisputeManager__NotResponder.selector);
+        adManager.respondToDispute(p, bytes32("mine too"));
+        vm.prank(maker);
+        adManager.respondToDispute(p, bytes32("theirs"));
+        (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        assertEq(responderEvidence, bytes32("theirs"));
+    }
+
+    /// C-19: the arbiter cannot rule once the challenge window has closed.
+    function test_c19_noRulingAfterTheWindow() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(71);
+        _file(p, filer);
+        uint256 until = dm.effectiveChallengeDeadline(h);
+        vm.warp(until);
+        vm.prank(arbiter);
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__ChallengeClosed.selector, until));
+        dm.resolveDispute(h, Dispute.Outcome.MutualRefund);
+        // One second earlier it would have landed.
+        vm.warp(until - 1);
+        vm.prank(arbiter);
+        dm.resolveDispute(h, Dispute.Outcome.MutualRefund);
+    }
+
+    /// C-19: ruling, claiming or answering an order that holds no dispute names the order.
+    function test_c19_noDisputeNoRecord() public {
+        bytes32 none = keccak256("never filed");
+        vm.prank(arbiter);
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__NotDisputed.selector, none));
+        dm.resolveDispute(none, Dispute.Outcome.MutualRefund);
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__NotDisputed.selector, none));
+        dm.claimDispute(none);
+    }
+
+    /// C-19: only an allowed escrow opens a dispute, and the module holds one per order even if an
+    /// escrow asks twice.
+    function test_c19_moduleEdgeRefusesStrangersAndDoubles() public {
+        bytes32 h = keccak256("direct");
+        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        vm.deal(stranger, 2 * bond);
+        vm.prank(stranger);
+        vm.expectRevert(DisputeManager.DisputeManager__NotEscrow.selector);
+        dm.openDispute{value: bond}(h, 60 ether, orderChainId, stranger, bytes32(0), 0, 0, 0);
+
+        vm.prank(admin);
+        dm.setEscrow(stranger, true);
+        vm.prank(stranger);
+        dm.openDispute{value: bond}(h, 60 ether, orderChainId, filer, bytes32(0), 0, 0, 0);
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__DisputeExists.selector, h));
+        dm.openDispute{value: bond}(h, 60 ether, orderChainId, filer, bytes32(0), 0, 0, 0);
+
+        // Settling a bond or recording a response is for the escrow that opened it, nobody else.
+        vm.expectRevert(DisputeManager.DisputeManager__NotEscrow.selector);
+        dm.settleBond(h, Dispute.Outcome.MutualRefund, false);
+        vm.expectRevert(DisputeManager.DisputeManager__NotEscrow.selector);
+        dm.recordResponse(h, maker, bytes32(0));
+    }
+
+    /// C-19: a module with no parameters for the route refuses the filing and names the chain.
+    function test_c19_aRouteWithNoParamsCannotBeFiled() public {
+        DisputeManager bare = new DisputeManager(admin, IwNativeToken(address(_wNativeToken)));
+        vm.startPrank(admin);
+        bare.setEscrow(address(adManager), true);
+        adManager.setDisputeManager(IDisputeManager(address(bare)));
+        vm.stopPrank();
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(72);
+        vm.deal(filer, 1 ether);
+        vm.prank(filer);
+        vm.expectRevert(abi.encodeWithSelector(Dispute.Dispute__NoParams.selector, orderChainId));
+        adManager.dispute{value: 1 ether}(p, bytes32("evidence"));
+        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Open), "nothing changed");
     }
 }
 

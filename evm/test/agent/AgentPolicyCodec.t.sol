@@ -255,11 +255,11 @@ contract AgentPolicyCodecTest is Test {
 
     function test_zeroActionsOrZeroTokensAreNotAPolicy() public {
         bytes memory noActions = bytes.concat(AgentPolicyCodec.DOMAIN, hex"00");
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(IAgentPolicyCodecErrors.AgentPolicyCodec__BadActionCount.selector, 0));
         codec.parse(noActions);
 
         bytes memory noTokens = bytes.concat(AgentPolicyCodec.DOMAIN, hex"01", hex"01", hex"00");
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(IAgentPolicyCodecErrors.AgentPolicyCodec__BadTokenCount.selector, 0));
         codec.parse(noTokens);
     }
 

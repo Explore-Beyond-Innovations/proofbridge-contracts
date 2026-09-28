@@ -175,10 +175,10 @@ jobs:
           done
         id: agent-accounts
 
-      - name: Unlock gas baseline gate (1.6c)
+      - name: Unlock and door gas baseline gate (1.6c, #358)
         run: |
           set -o pipefail
-          forge test --match-contract UnlockGas -vv | tee /tmp/gas.log
+          forge test --match-contract 'UnlockGas|EscrowDoorGas' -vv | tee /tmp/gas.log
           grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/gas.log
         id: gas-baseline
 
