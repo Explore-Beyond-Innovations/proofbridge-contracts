@@ -14,14 +14,8 @@ use proofbridge_core::rate_limit::{self, Bucket, Limit};
 use crate::errors::AccountError;
 use crate::policy::{self, AccountVolume, AgentPolicy};
 
-/// The settlement identity a policy may name today: this account. 2.3b (the
-/// 17-field order with `ad_settlement_signer`) relaxes this to the owner's
-/// settlement EOA; that is the one swap point, with `settlement_signer_of`.
-pub fn required_settlement_signer(env: &Env) -> BytesN<32> {
-    proofbridge_core::eip712::contract_address_to_bytes32(env)
-}
-
-/// The settlement identity a lock names: the order's `ad_settlement_signer` (2.3b).
+/// The settlement identity a lock names: the order's `ad_settlement_signer` (2.3b). It must equal
+/// the policy's, which the owner names (2.6 D9: the agent's identity M, not this account).
 pub fn settlement_signer_of(
     env: &Env,
     lock: &Map<Symbol, Val>,

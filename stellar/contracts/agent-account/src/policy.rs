@@ -724,10 +724,10 @@ pub fn validate(env: &Env, policy: &AgentPolicy) -> Result<(), AccountError> {
         }
     }
 
-    // Until 2.3b the only settlement identity a lock can name is this account
-    // (F5): the escrow does not bind `ad_creator` to `ad.maker` on Stellar, so
-    // a foreign signer here would pin locks the relayer never built.
-    if policy.settlement_signer != crate::escrow::required_settlement_signer(env) {
+    // The settlement signer is the owner's to name (2.6 D9): the agent's derived identity M, not
+    // this account. `check_contract_call` still pins `ad_creator` to this account, and a changed
+    // signer is loosening (`is_policy_tightening`), so on a guarded account it waits the delay.
+    if proofbridge_core::auth::is_zero_bytes32(&policy.settlement_signer) {
         return Err(AccountError::BadPolicy);
     }
     if policy.valid_until != 0 && policy.valid_until <= env.ledger().timestamp() {

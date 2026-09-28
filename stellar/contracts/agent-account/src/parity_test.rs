@@ -79,9 +79,11 @@ struct Rig {
     unpinned: Address,
     key: SigningKey,
     agent_id: BytesN<32>,
-    /// What `policy` means for a lock's signer here: the account itself, the only signer this
-    /// chain installs a policy with.
+    /// What `policy` means for a lock's signer here: the fixture's owner-named signer, the same
+    /// one the EVM policy bytes carry (2.6 D9: it need not be the account).
     signer: BytesN<32>,
+    /// The account's own id: what `maker: account` means for a lock's `ad_creator`.
+    account_id: BytesN<32>,
 }
 
 /// A fresh account at `start`, with the case's ceilings set. No policy yet: installing one is what
@@ -113,7 +115,13 @@ fn rig(start: u64, ceilings: &Value) -> Rig {
     seed[31] = 0x5a;
     let key = SigningKey::from_bytes(&seed);
     let agent_id = BytesN::from_array(&env, &key.verifying_key().to_bytes());
-    let signer = address_to_bytes32(&env, &account);
+    let signer = hex32(
+        &env,
+        vectors()["constants"]["evmSettlementSigner"]
+            .as_str()
+            .unwrap(),
+    );
+    let account_id = address_to_bytes32(&env, &account);
 
     Rig {
         env,
@@ -124,6 +132,7 @@ fn rig(start: u64, ceilings: &Value) -> Rig {
         key,
         agent_id,
         signer,
+        account_id,
     }
 }
 
@@ -190,7 +199,7 @@ fn context(r: &Rig, lock: &Value) -> Context {
         ad_id: String::from_str(env, lock["adId"].as_str().unwrap()),
         // The ad's maker: this account, or a stranger (02-agent-account.md §6 step 4).
         ad_creator: match lock["maker"].as_str().unwrap() {
-            "account" => r.signer.clone(),
+            "account" => r.account_id.clone(),
             "other" => hex32(env, vectors()["constants"]["otherSigner"].as_str().unwrap()),
             other => panic!("maker: {other}"),
         },
