@@ -17,7 +17,15 @@ interface Artifact {
   deployedBytecode?: {
     object?: string;
     linkReferences?: Record<string, Record<string, LinkReference[]>>;
+    /** Immutable slots, filled at deploy time: zero in the artifact, a value on chain. */
+    immutableReferences?: Record<string, LinkReference[]>;
   };
+}
+
+/** Runtime code as the artifact records it, plus the byte ranges a deploy fills in (immutables, libraries). */
+export interface RuntimeCode {
+  code: string;
+  masks: LinkReference[];
 }
 
 function loadArtifact(contractFile: string, contractName: string): Artifact {
@@ -34,11 +42,18 @@ function loadArtifact(contractFile: string, contractName: string): Artifact {
   return JSON.parse(fs.readFileSync(p, "utf8")) as Artifact;
 }
 
-/** The runtime bytecode the artifact says a fresh deploy leaves on chain (`deployedBytecode`). */
-export function deployedBytecodeOf(contractFile: string, contractName: string): string {
-  const code = loadArtifact(contractFile, contractName).deployedBytecode?.object;
-  if (!code) throw new Error(`artifact ${contractFile}/${contractName} has no deployedBytecode`);
-  return code;
+/**
+ * The runtime bytecode the artifact says a fresh deploy leaves on chain (`deployedBytecode`), with the
+ * ranges that differ per deployment: immutables (written by the constructor) and linked library
+ * addresses. A comparison with `getCode` has to skip those and nothing else.
+ */
+export function deployedBytecodeOf(contractFile: string, contractName: string): RuntimeCode {
+  const db = loadArtifact(contractFile, contractName).deployedBytecode;
+  if (!db?.object) throw new Error(`artifact ${contractFile}/${contractName} has no deployedBytecode`);
+  const masks: LinkReference[] = [];
+  for (const refs of Object.values(db.immutableReferences ?? {})) masks.push(...refs);
+  for (const byFile of Object.values(db.linkReferences ?? {})) for (const refs of Object.values(byFile)) masks.push(...refs);
+  return { code: db.object, masks };
 }
 
 export function getAbi(contractFile: string, contractName: string): any[] {

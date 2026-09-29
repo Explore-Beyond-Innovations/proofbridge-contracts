@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { assertReusedVk, sha256Hex, vkRecord, assertVerifierCode } from "../src/vk.js";
+import { assertReusedVk, sha256Hex, vkRecord, assertVerifierCode, maskRanges } from "../src/vk.js";
 
 // C-20: a reused verifier checking proofs against another VK makes one chain refuse every proof.
 test("a reused verifier with another VK is refused; the same VK, or nothing to compare, passes", () => {
@@ -33,10 +33,16 @@ test("the record hashes the VK file and takes a well-formed CIRCUITS_COMMIT", ()
 });
 
 // A-3: the chain's code is the fact; the manifest's hash is only a claim.
-test("a reused Verifier must carry this bundle's runtime code", () => {
-  assertVerifierCode("t", "0xAABB", "aabb");
-  assert.throws(() => assertVerifierCode("t", "0xaabb", "0xaabc"), /not this bundle's Verifier/);
-  assert.throws(() => assertVerifierCode("t", "0x", "0xaabb"), /no code at the reused verifier address/);
+test("a reused Verifier must carry this bundle's runtime code, immutable slots excepted", () => {
+  const art = { code: "aabb", masks: [] };
+  assertVerifierCode("t", "0xAABB", art);
+  assert.throws(() => assertVerifierCode("t", "0xaabb", { code: "0xaabc", masks: [] }), /not this bundle's Verifier/);
+  assert.throws(() => assertVerifierCode("t", "0x", art), /no code at the reused verifier address/);
+  // An immutable is zero in the artifact and a value on chain: masked, the rest must still match.
+  const withImm = { code: "0x11" + "00".repeat(32) + "22", masks: [{ start: 1, length: 32 }] };
+  assertVerifierCode("t", "0x11" + "ab".repeat(32) + "22", withImm);
+  assert.throws(() => assertVerifierCode("t", "0x11" + "ab".repeat(32) + "23", withImm), /not this bundle's Verifier/);
+  assert.equal(maskRanges("aabbccdd", [{ start: 1, length: 2 }]), "aa0000dd");
 });
 
 test("a missing VK file refuses instead of recording nothing", () => {

@@ -57,14 +57,20 @@ export function assertReusedVk(
 }
 
 /**
- * A-3: on EVM the chain CAN answer whether a reused Verifier is the bundle's — its runtime code
- * is the artifact's `deployedBytecode`. Compared byte for byte (the same source, compiler and
- * metadata give the same code); a match with no recorded VK hash is then safe to record.
+ * A-3: on EVM the chain CAN answer whether a reused Verifier is the bundle's — its runtime code is
+ * the artifact's `deployedBytecode`, except where a deployment fills values in (immutables, linked
+ * libraries); those ranges are masked on both sides and everything else must match byte for byte.
+ * A match with no recorded VK hash is then safe to record.
  */
-export function assertVerifierCode(label: string, onChainCode: string, artifactCode: string): void {
+export function assertVerifierCode(
+  label: string,
+  onChainCode: string,
+  artifact: { code: string; masks: Array<{ start: number; length: number }> },
+): void {
   const norm = (h: string) => h.toLowerCase().replace(/^0x/, "");
-  if (norm(onChainCode) === "" ) throw new Error(`${label}: no code at the reused verifier address`);
-  if (norm(onChainCode) !== norm(artifactCode)) {
+  const chain = norm(onChainCode);
+  if (chain === "") throw new Error(`${label}: no code at the reused verifier address`);
+  if (maskRanges(chain, artifact.masks) !== maskRanges(norm(artifact.code), artifact.masks)) {
     throw new Error(
       `${label}: the reused verifier's code is not this bundle's Verifier. It was deployed from another build (another VK or compiler); ` +
         `deploy the verifier again (drop it from the manifest) or use the bundle it was built from.`,
@@ -72,3 +78,14 @@ export function assertVerifierCode(label: string, onChainCode: string, artifactC
   }
 }
 
+/** Zero the given byte ranges of a hex string (offsets in bytes, as the artifact records them). */
+export function maskRanges(hex: string, masks: Array<{ start: number; length: number }>): string {
+  let out = hex;
+  for (const m of masks) {
+    const a = m.start * 2;
+    const b = Math.min(out.length, (m.start + m.length) * 2);
+    if (a >= out.length) continue;
+    out = out.slice(0, a) + "0".repeat(b - a) + out.slice(b);
+  }
+  return out;
+}

@@ -433,13 +433,20 @@ function peerSide(peer: ChainDeploymentManifest, localKey: string, peerEnvFile: 
     dispute: peer.disputeParams?.[localKey],
     anchorDelay: peer.rootAnchorConfig?.anchorDelays?.[localKey],
   };
-  if (recorded.timing || !peerEnvFile) return recorded;
-  const vars = readEnvFile(peerEnvFile);
+  // Complete when the peer's link recorded its clocks and (where it has a dispute module) its params.
+  const complete = !!recorded.timing && (!!recorded.dispute || !peer.contracts.disputeManager);
+  if (complete) return recorded;
+  // A local pair needs no env file: both sides run the local defaults, which is exactly what the
+  // peer's link will set. A real network's peer must be linked already or described by --peer-env.
+  if (!peerEnvFile && peer.meta.env !== "local") return recorded;
+  const vars = peerEnvFile ? readEnvFile(peerEnvFile) : {};
   const env = vars.DEPLOY_ENV ?? peer.meta.env;
+  // Only what the peer has not recorded is derived (a redeployed dispute module, for instance,
+  // has clocks on record but no params until the peer links again).
   return {
-    timing: routeTimingFromEnv(env, vars),
-    dispute: peer.contracts.disputeManager ? disputeParamsFromEnv(env, vars) : undefined,
-    anchorDelay: vars.ANCHOR_DELAY_S ?? "0",
+    timing: recorded.timing ?? routeTimingFromEnv(env, vars),
+    dispute: recorded.dispute ?? (peer.contracts.disputeManager ? disputeParamsFromEnv(env, vars) : undefined),
+    anchorDelay: recorded.anchorDelay ?? vars.ANCHOR_DELAY_S ?? "0",
   };
 }
 

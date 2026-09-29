@@ -21,7 +21,8 @@ trap 'kill $PID_A $PID_B 2>/dev/null' EXIT
 sleep 3
 cd "$HERE"
 A(){ env EVM_RPC_URL=http://127.0.0.1:$PA EVM_ADMIN_PRIVATE_KEY=$K0 EVM_DEPLOYMENTS_DIR="$WORK/a" DEPLOY_ENV=local "$@"; }
-B(){ env EVM_RPC_URL=http://127.0.0.1:$PB EVM_ADMIN_PRIVATE_KEY=$K0 EVM_DEPLOYMENTS_DIR="$WORK/b" DEPLOY_ENV=local "$@"; }
+# A-4: chain B runs on 31338, which is not a default local id — declared, as a private devnet would be.
+B(){ env EVM_RPC_URL=http://127.0.0.1:$PB EVM_ADMIN_PRIVATE_KEY=$K0 EVM_DEPLOYMENTS_DIR="$WORK/b" DEPLOY_ENV=local LOCAL_EVM_CHAIN_IDS=31338 "$@"; }
 nonceA(){ cast nonce $A0 --rpc-url http://127.0.0.1:$PA; }
 MA="$WORK/a/31337.json"; MB="$WORK/b/31338.json"
 adminOf(){ node -p "require('$MA').admin.$1"; }
