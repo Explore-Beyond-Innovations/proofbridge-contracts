@@ -19,11 +19,17 @@ export interface VkRecord {
 export function vkRecord(vkFile: string | undefined, env: NodeJS.ProcessEnv = process.env): VkRecord {
   const rec: VkRecord = {};
   // A-3: a deploy without the VK file cannot compare a reused verifier, and recording nothing would
-  // erase the manifest's hash on the next write. The bundle fetch guarantees the file; refuse without it.
+  // erase the manifest's hash on the next write. The bundle fetch guarantees the file outside local;
+  // refuse without it there. A local stack (Anvil, the e2e harnesses) may run without built circuits.
   if (!vkFile || !fs.existsSync(vkFile)) {
-    throw new Error(`the event-circuit VK file is missing (${vkFile ?? "unset"}); point EVENT_VK at the bundle's proof_circuits/events/target/vk`);
+    if (env.DEPLOY_ENV === "local") {
+      console.warn(`[vk] no VK file at ${vkFile ?? "<unset>"} — local deploy, the manifest records no VK hash`);
+    } else {
+      throw new Error(`the event-circuit VK file is missing (${vkFile ?? "unset"}); point EVENT_VK at the bundle's proof_circuits/events/target/vk`);
+    }
+  } else {
+    rec.vkSha256 = sha256Hex(fs.readFileSync(vkFile));
   }
-  rec.vkSha256 = sha256Hex(fs.readFileSync(vkFile));
   const c = env.CIRCUITS_COMMIT;
   if (c && /^[0-9a-f]{7,40}$/.test(c)) rec.circuitsCommit = c;
   return rec;

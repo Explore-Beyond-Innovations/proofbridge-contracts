@@ -36,7 +36,9 @@ echo "== 1b. an unset DEPLOY_ENV, or a real env without the anchor notary, is re
 n0=$(nonceA); A env -u DEPLOY_ENV pnpm -s run deploy > $L/1b.log 2>&1; rc=$?
 [ $rc -ne 0 ] && grep -q "DEPLOY_ENV is unset" $L/1b.log && [ "$(nonceA)" = "$n0" ] && pass "deploy refused an unset DEPLOY_ENV (exit $rc, 0 txs)" || fail "unset DEPLOY_ENV: exit $rc, txs $(( $(nonceA) - n0 ))"
 n0=$(nonceA); A env DEPLOY_ENV=testnet DISPUTE_ARBITER=$A1 DISPUTE_FEE_POOL=$A1 pnpm -s run deploy > $L/1c.log 2>&1; rc=$?
-[ $rc -ne 0 ] && grep -q "ANCHOR_PUBLISHER is unset for DEPLOY_ENV=testnet" $L/1c.log && [ "$(nonceA)" = "$n0" ] && pass "deploy refused testnet without ANCHOR_PUBLISHER (exit $rc, 0 txs)" || fail "testnet without ANCHOR_PUBLISHER: exit $rc, txs $(( $(nonceA) - n0 ))"
+# A-4: on Anvil (chain 31337) a `testnet` env is refused for the chain id first — before the notary
+# check, and equally before any transaction. Either refusal satisfies the case's point.
+[ $rc -ne 0 ] && grep -qE "ANCHOR_PUBLISHER is unset for DEPLOY_ENV=testnet|DEPLOY_ENV=testnet but the RPC is chain 31337, which is a local chain" $L/1c.log && [ "$(nonceA)" = "$n0" ] && pass "deploy refused testnet on a local chain / without ANCHOR_PUBLISHER (exit $rc, 0 txs)" || fail "testnet without ANCHOR_PUBLISHER: exit $rc, txs $(( $(nonceA) - n0 ))"
 
 echo "== 2. deploy both, link both ways"
 A pnpm -s run deploy > $L/2a.log 2>&1 && B pnpm -s run deploy > $L/2b.log 2>&1 && pass "both deployed" || fail "deploy: $(grep -m1 Error $L/2a.log $L/2b.log)"

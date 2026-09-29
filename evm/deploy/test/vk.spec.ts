@@ -26,7 +26,8 @@ test("the record hashes the VK file and takes a well-formed CIRCUITS_COMMIT", ()
     circuitsCommit: "2d9791e6",
   });
   // A-3: a missing file refuses (it used to record nothing and erase the manifest's hash).
-  assert.throws(() => vkRecord(path.join(dir, "missing"), { CIRCUITS_COMMIT: "not a sha" }), /VK file is missing/);
+  assert.throws(() => vkRecord(path.join(dir, "missing"), { DEPLOY_ENV: "testnet", CIRCUITS_COMMIT: "not a sha" }), /VK file is missing/);
+  assert.deepEqual(vkRecord(path.join(dir, "missing"), { DEPLOY_ENV: "local" }), {}, "a local stack may run without built circuits");
   assert.equal(vkRecord(f, { CIRCUITS_COMMIT: "not a sha" }).circuitsCommit, undefined, "a malformed commit is dropped");
   fs.rmSync(dir, { recursive: true });
 });
