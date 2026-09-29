@@ -427,7 +427,7 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
  * The peer's side of the route: what its manifest recorded, else (A-5) what its env file says its
  * link will set. `local` here is the peer's view of THIS chain.
  */
-function peerSide(peer: ChainDeploymentManifest, localKey: string, peerEnvFile: string | undefined) {
+export function peerSide(peer: ChainDeploymentManifest, localKey: string, peerEnvFile: string | undefined) {
   const recorded = {
     timing: peer.routeTiming?.[localKey],
     dispute: peer.disputeParams?.[localKey],
