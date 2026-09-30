@@ -149,6 +149,8 @@ pub enum OrderPortalError {
     DisputeNotResponder = 98,
     DisputeChallengeOpen = 99,
     DisputeChallengeClosed = 100,
+    /// 49S-3: the dispute module could not move the bond (a token refusal, not a dispute rule).
+    DisputeBondTransferFailed = 101,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
@@ -215,6 +217,7 @@ impl From<proofbridge_core::escrow_ops::Fault> for OrderPortalError {
             DisputeNotResponder => OrderPortalError::DisputeNotResponder,
             DisputeChallengeOpen => OrderPortalError::DisputeChallengeOpen,
             DisputeChallengeClosed => OrderPortalError::DisputeChallengeClosed,
+            DisputeBondTransferFailed => OrderPortalError::DisputeBondTransferFailed,
         }
     }
 }

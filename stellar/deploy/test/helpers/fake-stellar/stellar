@@ -1,0 +1,14 @@
+#!/bin/sh
+# A stand-in `stellar` CLI for the call-site specs: logs every call, answers `network info` and
+# `keys address` from the environment, and refuses everything else, so a spec can see how far the
+# deploy or link got and that no transaction was attempted.
+[ -n "${FAKE_STELLAR_LOG:-}" ] && echo "$*" >> "$FAKE_STELLAR_LOG"
+if [ "$1 $2" = "network info" ]; then
+  if [ -z "${FAKE_STELLAR_PASSPHRASE:-}" ]; then
+    echo '{"error":{"type":"unknown","message":"client error (Connect)"}}'; exit 1
+  fi
+  printf '{"protocol_version":23,"passphrase":"%s"}\n' "$FAKE_STELLAR_PASSPHRASE"; exit 0
+fi
+if [ "$1 $2" = "keys address" ]; then echo "${FAKE_STELLAR_ADDRESS:-}"; exit 0; fi
+echo "fake stellar: no answer for $*" >&2
+exit 1

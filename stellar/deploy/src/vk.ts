@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import { createHash } from "crypto";
+import type { DeployEnv } from "./deploy-env.js";
 
 // The EVM Verifier bakes the event-circuit VK in; the Soroban verifier is handed it at deploy. If a
 // reused verifier checks against another VK than the bundle's, one chain refuses every proof, and
@@ -16,9 +17,18 @@ export interface VkRecord {
 }
 
 /** The VK file's hash, and CIRCUITS_COMMIT when the bundle fetch exported it. */
-export function vkRecord(vkFile: string | undefined, env: NodeJS.ProcessEnv = process.env): VkRecord {
+export function vkRecord(vkFile: string | undefined, deployEnv: DeployEnv, env: NodeJS.ProcessEnv = process.env): VkRecord {
   const rec: VkRecord = {};
-  if (vkFile && fs.existsSync(vkFile)) rec.vkSha256 = sha256Hex(fs.readFileSync(vkFile));
+  // Without the file the manifest records no hash, and link's VK compare (A-6) has nothing to compare.
+  // A local stack may run without built circuits; everywhere else the bundle carries the file.
+  if (!vkFile || !fs.existsSync(vkFile)) {
+    if (deployEnv !== "local") {
+      throw new Error(`the event-circuit VK file is missing (${vkFile ?? "unset"}); point STELLAR_EVENT_VK at the bundle's proof_circuits/events/target/vk`);
+    }
+    console.warn(`[vk] no VK file at ${vkFile ?? "<unset>"} — local deploy, the manifest records no VK hash`);
+  } else {
+    rec.vkSha256 = sha256Hex(fs.readFileSync(vkFile));
+  }
   const c = env.CIRCUITS_COMMIT;
   if (c && /^[0-9a-f]{7,40}$/.test(c)) rec.circuitsCommit = c;
   return rec;

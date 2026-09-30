@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The deploy CLI's own check (#424): deploy → link → handover → accept → verify → link-describes,
-# on two Anvils, plus the edges its review found: a contract deployed after the handover is wired
-# and named as needing its own handover; a handover with nothing to do leaves the manifest alone;
+# on two Anvils (a third, on Sepolia's id, for the testnet refusals), plus the edges its review
+# found: a contract deployed after the handover is wired and named as needing its own handover; a handover with nothing to do leaves the manifest alone;
 # a deploy on reuse records what the chain says; an unchanged redeploy after the handover is a
 # clean exit 0; --to 0x0 is refused; (#466) a verifier on another registry, hand-wired for any
 # peer, is refused by deploy and by link. Run from contracts/evm/deploy with `out/` built. Exit = FAILs.
@@ -12,12 +12,14 @@ K0=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80   # anvil 
 A0=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 K1=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d   # anvil #1: the "multisig"
 A1=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
-PA=${HANDOVER_CHECK_PORT_A:-8591}; PB=${HANDOVER_CHECK_PORT_B:-8592}
+PA=${HANDOVER_CHECK_PORT_A:-8591}; PB=${HANDOVER_CHECK_PORT_B:-8592}; PC=${HANDOVER_CHECK_PORT_C:-8593}
 fails=0; pass(){ echo "PASS  $*"; }; fail(){ echo "FAIL  $*"; fails=$((fails+1)); }
-mkdir -p "$WORK/a" "$WORK/b"
+mkdir -p "$WORK/a" "$WORK/b" "$WORK/c"
 anvil --port $PA --chain-id 31337 --silent & PID_A=$!
 anvil --port $PB --chain-id 31338 --silent & PID_B=$!
-trap 'kill $PID_A $PID_B 2>/dev/null' EXIT
+# Sepolia's id, so a testnet env passes the chain-id check and the notary checks behind it are reached.
+anvil --port $PC --chain-id 11155111 --silent & PID_C=$!
+trap 'kill $PID_A $PID_B $PID_C 2>/dev/null' EXIT
 sleep 3
 cd "$HERE"
 A(){ env EVM_RPC_URL=http://127.0.0.1:$PA EVM_ADMIN_PRIVATE_KEY=$K0 EVM_DEPLOYMENTS_DIR="$WORK/a" DEPLOY_ENV=local "$@"; }
@@ -33,13 +35,20 @@ echo "== 1. ADMIN set to someone else is refused up front, zero transactions"
 n0=$(nonceA); A env ADMIN=$A1 pnpm -s run deploy > $L/1.log 2>&1; rc=$?
 [ $rc -ne 0 ] && grep -q "is not the deployer" $L/1.log && [ "$(nonceA)" = "$n0" ] && pass "deploy refused ADMIN (exit $rc, 0 txs)" || fail "ADMIN refusal: exit $rc, txs $(( $(nonceA) - n0 ))"
 
-echo "== 1b. an unset DEPLOY_ENV, or a real env without the anchor notary, is refused up front, zero transactions"
+echo "== 1b. an unset DEPLOY_ENV, a real env without a separate anchor notary, or a real env on a local chain, is refused up front, zero transactions"
 n0=$(nonceA); A env -u DEPLOY_ENV pnpm -s run deploy > $L/1b.log 2>&1; rc=$?
 [ $rc -ne 0 ] && grep -q "DEPLOY_ENV is unset" $L/1b.log && [ "$(nonceA)" = "$n0" ] && pass "deploy refused an unset DEPLOY_ENV (exit $rc, 0 txs)" || fail "unset DEPLOY_ENV: exit $rc, txs $(( $(nonceA) - n0 ))"
-n0=$(nonceA); A env DEPLOY_ENV=testnet DISPUTE_ARBITER=$A1 DISPUTE_FEE_POOL=$A1 pnpm -s run deploy > $L/1c.log 2>&1; rc=$?
-# A-4: on Anvil (chain 31337) a `testnet` env is refused for the chain id first — before the notary
-# check, and equally before any transaction. Either refusal satisfies the case's point.
-[ $rc -ne 0 ] && grep -qE "ANCHOR_PUBLISHER is unset for DEPLOY_ENV=testnet|DEPLOY_ENV=testnet but the RPC is chain 31337, which is a local chain" $L/1c.log && [ "$(nonceA)" = "$n0" ] && pass "deploy refused testnet on a local chain / without ANCHOR_PUBLISHER (exit $rc, 0 txs)" || fail "testnet without ANCHOR_PUBLISHER: exit $rc, txs $(( $(nonceA) - n0 ))"
+C(){ env EVM_RPC_URL=http://127.0.0.1:$PC EVM_ADMIN_PRIVATE_KEY=$K0 EVM_DEPLOYMENTS_DIR="$WORK/c" DEPLOY_ENV=testnet DISPUTE_ARBITER=$A1 DISPUTE_FEE_POOL=$A1 "$@"; }
+nonceC(){ cast nonce $A0 --rpc-url http://127.0.0.1:$PC; }
+# C-24: on a testnet chain id, the notary must be named ...
+n0=$(nonceC); C pnpm -s run deploy > $L/1c.log 2>&1; rc=$?
+[ $rc -ne 0 ] && grep -q "ANCHOR_PUBLISHER is unset for DEPLOY_ENV=testnet" $L/1c.log && [ "$(nonceC)" = "$n0" ] && pass "deploy refused testnet without ANCHOR_PUBLISHER (exit $rc, 0 txs)" || fail "testnet without ANCHOR_PUBLISHER: exit $rc, txs $(( $(nonceC) - n0 )), $(grep -m1 -i error $L/1c.log | cut -c1-140)"
+# ... (A-8) and may not be the deployer.
+n0=$(nonceC); C env ANCHOR_PUBLISHER=$A0 pnpm -s run deploy > $L/1c2.log 2>&1; rc=$?
+[ $rc -ne 0 ] && grep -q "ANCHOR_PUBLISHER names the deployer" $L/1c2.log && [ "$(nonceC)" = "$n0" ] && pass "deploy refused the deployer as notary outside local (exit $rc, 0 txs)" || fail "deployer as notary: exit $rc, txs $(( $(nonceC) - n0 )), $(grep -m1 -i error $L/1c2.log | cut -c1-140)"
+# A-4: with every role named, testnet on Anvil (31337) is refused for the chain id alone.
+n0=$(nonceA); A env DEPLOY_ENV=testnet ANCHOR_PUBLISHER=$A1 DISPUTE_ARBITER=$A1 DISPUTE_FEE_POOL=$A1 pnpm -s run deploy > $L/1d.log 2>&1; rc=$?
+[ $rc -ne 0 ] && grep -q "DEPLOY_ENV=testnet but the RPC is chain 31337, which is a local chain" $L/1d.log && [ "$(nonceA)" = "$n0" ] && pass "deploy refused testnet on a local chain id (exit $rc, 0 txs)" || fail "testnet on 31337: exit $rc, txs $(( $(nonceA) - n0 )), $(grep -m1 -i error $L/1d.log | cut -c1-140)"
 
 echo "== 2. deploy both, link both ways"
 A pnpm -s run deploy > $L/2a.log 2>&1 && B pnpm -s run deploy > $L/2b.log 2>&1 && pass "both deployed" || fail "deploy: $(grep -m1 Error $L/2a.log $L/2b.log)"

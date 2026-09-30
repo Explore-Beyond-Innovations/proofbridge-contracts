@@ -8,7 +8,7 @@
 //   stellar-deploy handover --to <G...> | --verify   [--in <manifest-path>] [--chain-id <n>]
 //
 // Reads the `stellar` CLI environment:
-//   STELLAR_NETWORK (default: testnet), STELLAR_SOURCE_ACCOUNT (default: admin)
+//   STELLAR_NETWORK (required; `local` by default for DEPLOY_ENV=local only), STELLAR_SOURCE_ACCOUNT (default: admin)
 // Optional: STELLAR_WASM_DIR, STELLAR_EVENT_VK, STELLAR_DEPLOYMENTS_DIR,
 //           DEPLOY_ENV, GIT_COMMIT, CHAIN_NAME.
 

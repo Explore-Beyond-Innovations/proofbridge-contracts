@@ -1,7 +1,8 @@
 //! Errors for the DisputeManager.
 //!
 //! Its own `#[contracterror]` enum with its own discriminants, like every other contract here —
-//! they are ABI, so they are never shared across crates even when the names match.
+//! they are ABI. The codes the escrows relay are also defined in `proofbridge_core::dispute::error_code`;
+//! a test pins each pair.
 
 use soroban_sdk::contracterror;
 
@@ -47,4 +48,6 @@ pub enum DisputeManagerError {
     NothingToClaim = 22,
     /// The arbiter already ruled, so the no-ruling fallback does not apply.
     AlreadyRuled = 23,
+    /// 49S-3: the bond token refused the transfer (no trustline, a shortfall, a frozen account).
+    BondTransferFailed = 24,
 }

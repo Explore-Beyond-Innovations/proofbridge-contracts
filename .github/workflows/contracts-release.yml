@@ -54,19 +54,16 @@ jobs:
       - name: Install wasm32v1-none target
         run: rustup target add wasm32v1-none
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            stellar/target
-          key: ${{ runner.os }}-cargo-stellar-${{
-            hashFiles('stellar/Cargo.lock') }}
+      # No cache: this job can write releases, so it builds from a clean tree rather than restoring
+      # anything another run wrote.
 
       - name: Install Stellar CLI
+        env:
+          # GitHub's published digest for this asset, checked against a fresh download.
+          STELLAR_CLI_SHA256: 207544486734fccb4df1afc4a7745478f9f1e21688b2f9506f0ef36f60ce3fdc
         run: |
-          curl -Ls https://github.com/stellar/stellar-cli/releases/download/v28.0.0/stellar-cli-28.0.0-x86_64-unknown-linux-gnu.tar.gz -o /tmp/stellar-cli.tar.gz
+          curl -fsSL https://github.com/stellar/stellar-cli/releases/download/v28.0.0/stellar-cli-28.0.0-x86_64-unknown-linux-gnu.tar.gz -o /tmp/stellar-cli.tar.gz
+          echo "${STELLAR_CLI_SHA256}  /tmp/stellar-cli.tar.gz" | sha256sum -c -
           mkdir -p "$HOME/.local/bin"
           tar -xzf /tmp/stellar-cli.tar.gz -C "$HOME/.local/bin" stellar
           chmod +x "$HOME/.local/bin/stellar"

@@ -38,6 +38,10 @@ import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Posei
 ///
 /// C-18: the campaign now also reaches MakerForfeit (the one outcome that pays out of the ad),
 /// `presentSettled`, every other dispute outcome, and a native-token ad beside the ERC20 one.
+///
+/// 49E-4: the solvency check is an equality (a stranded surplus fails it as surely as a shortfall),
+/// the credited recipients redirect their credit with `claimTo` (C-16), and `afterInvariant`
+/// requires BridgerForfeit as well as the other outcomes.
 contract EscrowConservationInvariantTest is Test {
     AdManager internal adManager;
     DisputeManager internal dm;
@@ -56,6 +60,12 @@ contract EscrowConservationInvariantTest is Test {
     address internal feePool = makeAddr("feePool");
     address internal orderPortal = makeAddr("orderPortal");
     address internal orderToken = makeAddr("orderToken");
+    /// Where `claimTo` sends the recipients' credit; nothing else pays these two.
+    address internal claimWallet = makeAddr("claimWallet");
+    address internal nativeClaimWallet = makeAddr("nativeClaimWallet");
+    /// Ghosts: what `claimTo` moved, per token.
+    uint256 internal claimedToErc20;
+    uint256 internal claimedToNative;
 
     address internal constant NATIVE = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
     string internal constant ERC20_AD = "inv";
@@ -218,6 +228,21 @@ contract EscrowConservationInvariantTest is Test {
         adManager.claim(address(nativeRecipient), NATIVE);
     }
 
+    /// C-16: the credited account redirects its own credit, e.g. while it still refuses payment.
+    function handlerClaimTo(bool native) external {
+        if (native) {
+            uint256 amount = adManager.claimable(address(nativeRecipient), NATIVE);
+            vm.prank(address(nativeRecipient));
+            adManager.claimTo(NATIVE, nativeClaimWallet);
+            claimedToNative += amount;
+        } else {
+            uint256 amount = adManager.claimable(recipient, address(adToken));
+            vm.prank(recipient);
+            adManager.claimTo(address(adToken), claimWallet);
+            claimedToErc20 += amount;
+        }
+    }
+
     /// Flip the recipients' ability to receive. With them refusing, a payout credits instead of
     /// paying, which is the branch the solvency invariant exists to police.
     function handlerSetRefusing(bool v) external {
@@ -302,14 +327,27 @@ contract EscrowConservationInvariantTest is Test {
     /// has promised in that ad's token. A push that failed becomes a credit, so the two move
     /// together and the total cannot drift — which is the whole of "no state holds funds with no
     /// exit" on the money side. Native is held wrapped.
+    ///
+    /// 49E-4: exactly, not at least. Nothing else ever pays the escrow, so a surplus is funds with
+    /// no exit, stranded as surely as a shortfall is a promise it cannot keep.
     function invariant_escrowHoldsWhatItOwes() public view {
         (,,,,,,, uint256 adBalance,) = adManager.ads(ERC20_AD);
         uint256 owed = adManager.claimable(recipient, address(adToken));
-        assertGe(adToken.balanceOf(address(adManager)), adBalance + owed, "escrow insolvent (ERC20)");
+        assertEq(adToken.balanceOf(address(adManager)), adBalance + owed, "escrow holds other than it owes (ERC20)");
 
         (,,,,,,, uint256 nativeBalance,) = adManager.ads(NATIVE_AD);
         uint256 nativeOwed = adManager.claimable(address(nativeRecipient), NATIVE);
-        assertGe(wNative.balanceOf(address(adManager)), nativeBalance + nativeOwed, "escrow insolvent (native)");
+        assertEq(
+            wNative.balanceOf(address(adManager)),
+            nativeBalance + nativeOwed,
+            "escrow holds other than it owes (native)"
+        );
+    }
+
+    /// C-16: `claimTo` moves only the caller's own credit: each wallet holds exactly what was claimed to it.
+    function invariant_claimToPaysOnlyTheCallersCredit() public view {
+        assertEq(adToken.balanceOf(claimWallet), claimedToErc20, "claimTo paid other than the credit (ERC20)");
+        assertEq(nativeClaimWallet.balance, claimedToNative, "claimTo paid other than the credit (native)");
     }
 
     /// Locked liquidity equals the orders actually live, per ad. An order that terminates without
@@ -336,8 +374,10 @@ contract EscrowConservationInvariantTest is Test {
         assertGt(handler.presents(), 0, "presentSettled never landed");
         assertGt(handler.outcomes(uint8(Dispute.Outcome.MakerForfeit)), 0, "MakerForfeit never paid out");
         assertGt(handler.outcomes(uint8(Dispute.Outcome.MutualRefund)), 0, "no dispute refunded");
+        assertGt(handler.outcomes(uint8(Dispute.Outcome.BridgerForfeit)), 0, "no dispute finalized as BridgerForfeit");
         assertGt(handler.nativeLocks(), 0, "the native ad never locked");
         assertGt(handler.credits(), 0, "no payout was ever credited");
+        assertGt(handler.claimsTo(), 0, "claimTo never paid");
     }
 
     /// Proves the handler reaches the states the invariants police. Without this a handler that
@@ -392,6 +432,19 @@ contract EscrowConservationInvariantTest is Test {
         assertEq(nativeBalance, 500 ether - LOCK, "the forfeit left the ad");
         assertEq(nativeLocked, 0);
         assertEq(adManager.claimable(address(nativeRecipient), NATIVE), LOCK, "credited to the recipient");
+        // C-16: still refusing, the recipient redirects its own credit.
+        handler.claimTo(true);
+        assertEq(handler.claimsTo(), 1);
+        assertEq(nativeClaimWallet.balance, LOCK);
+        invariant_claimToPaysOnlyTheCallersCredit();
+        invariant_escrowHoldsWhatItOwes();
+    }
+
+    /// 49E-4: BridgerForfeit is reachable through the handler (index 2 of its outcome table).
+    function test_bridgerForfeitIsReachable() public {
+        handler.dispute(3, false, 2);
+        assertEq(handler.outcomes(uint8(Dispute.Outcome.BridgerForfeit)), 1);
+        invariant_escrowHoldsWhatItOwes();
     }
 
     /// Every credit the escrow holds, both tokens: a rise means a refused payout was credited.
@@ -737,6 +790,7 @@ contract EscrowHandler {
     uint256 public presents;
     uint256 public nativeLocks;
     uint256 public credits;
+    uint256 public claimsTo;
     mapping(uint8 => uint256) public outcomes;
 
     constructor(EscrowConservationInvariantTest t_) {
@@ -783,6 +837,12 @@ contract EscrowHandler {
 
     function claimNative() external {
         try t.handlerClaimNative() {} catch {}
+    }
+
+    function claimTo(bool native) external {
+        try t.handlerClaimTo(native) {
+            claimsTo++;
+        } catch {}
     }
 
     function setRefusing(bool v) external {
