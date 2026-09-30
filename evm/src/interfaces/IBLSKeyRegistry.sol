@@ -55,6 +55,8 @@ interface IBLSKeyRegistry is IKeyRegistry {
     event AdminTransferStarted(address indexed from, address indexed to);
     event AdminTransferred(address indexed from, address indexed to);
     event KeyRevoked(bytes32 indexed account, uint256 nonce);
+    /// Review D2: the nonce moved and no slot changed; every signature naming `nonce` here is dead.
+    event RegistrationCancelled(bytes32 indexed account, uint256 nonce);
     event PositionGuardsSet(address[] guards);
 
     error BadNonce();
@@ -118,6 +120,7 @@ interface IBLSKeyRegistry is IKeyRegistry {
     ) external returns (uint32 slotId);
     function setValidUntil(bytes32 account, OwnerAuth calldata owner, bytes32 keyCommitment, uint64 validUntil) external;
     function revoke(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external;
+    function cancel(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external;
 
     // views
     function admin() external view returns (address);

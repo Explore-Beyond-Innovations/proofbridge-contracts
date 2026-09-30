@@ -17,7 +17,8 @@ library KeyMessages {
     enum Kind {
         Register,
         Revoke,
-        Retire
+        Retire,
+        Cancel
     }
 
     bytes32 internal constant DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,string version,bytes32 salt)");
@@ -27,6 +28,9 @@ library KeyMessages {
     );
     bytes32 internal constant REVOKE_KEYS_TYPEHASH =
         keccak256("RevokeKeys(bytes32 account,KeyLeg[] legs)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)");
+    /// Review D2: moves the nonce and nothing else, so a pending registration dies and live keys stay.
+    bytes32 internal constant CANCEL_PENDING_TYPEHASH =
+        keccak256("CancelPending(bytes32 account,KeyLeg[] legs)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)");
     bytes32 internal constant RETIRE_KEY_TYPEHASH =
         keccak256("RetireKey(bytes32 account,bytes32 keyCommitment,uint64 validUntil)");
 
@@ -61,6 +65,7 @@ library KeyMessages {
             return keccak256(abi.encode(REGISTER_KEY_TYPEHASH, account, keyCommitment, legsHash(legs), time));
         }
         if (kind == Kind.Revoke) return keccak256(abi.encode(REVOKE_KEYS_TYPEHASH, account, legsHash(legs)));
+        if (kind == Kind.Cancel) return keccak256(abi.encode(CANCEL_PENDING_TYPEHASH, account, legsHash(legs)));
         return keccak256(abi.encode(RETIRE_KEY_TYPEHASH, account, keyCommitment, time));
     }
 
@@ -90,11 +95,15 @@ library KeyMessages {
             t = "ProofBridge: register a settlement key";
         } else if (kind == Kind.Revoke) {
             t = "ProofBridge: remove every settlement key";
+        } else if (kind == Kind.Cancel) {
+            t = "ProofBridge: cancel a pending key registration";
         } else {
             t = "ProofBridge: retire a settlement key";
         }
         t = bytes.concat(t, "\n\nNetwork: ", env, "\nAccount: ", hex32(account));
-        if (kind != Kind.Revoke) t = bytes.concat(t, "\nKey fingerprint: ", hex32(keyCommitment));
+        if (kind == Kind.Register || kind == Kind.Retire) {
+            t = bytes.concat(t, "\nKey fingerprint: ", hex32(keyCommitment));
+        }
         if (kind == Kind.Register) {
             t = bytes.concat(t, "\nValid until: ", utc(time), " (", bytes(Strings.toString(time)), ")");
         }

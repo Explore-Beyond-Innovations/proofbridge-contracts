@@ -1005,6 +1005,49 @@ contract BLSKeyRegistryTest is Test {
     }
 
     // =========================================================================
+    // Review D2 follow-up: cancel moves the nonce and never removes a key
+    // =========================================================================
+
+    /// Cancel at a registry holding an older live key: the pending registration dies, the key stays.
+    function test_cancelLeavesAnOlderLiveKeyLive() public {
+        busyGuard(); // cancel asks no guard
+        for (uint256 k = 0; k < 2; k++) {
+            string memory who = whoAt(k);
+            bytes32 account = v.readBytes32(string.concat(".slots.", who, ".account"));
+            registerSlot(who, 0); // the older live key; nonce 0 -> 1
+            vm.expectEmit(true, false, false, true, REGISTRY);
+            emit IBLSKeyRegistry.RegistrationCancelled(account, 1);
+            registry.cancel(account, oa(who, "cancel[1]"), 1);
+            assertEq(registry.nonceOf(account), 2);
+            assertEq(registry.commitmentAt(account, 0), slotCommitment(who, 0), "the live key stays");
+            assertEq(registry.liveSlots(account).length, 1);
+            // the pending registration signed at nonce 1 is dead
+            vm.expectRevert(IBLSKeyRegistry.BadNonce.selector);
+            registerSlot(who, 1);
+        }
+    }
+
+    function test_cancelChecksNonceLegsAndSignature() public {
+        for (uint256 k = 0; k < 2; k++) {
+            string memory who = whoAt(k);
+            bytes32 account = v.readBytes32(string.concat(".slots.", who, ".account"));
+            vm.expectRevert(IBLSKeyRegistry.BadNonce.selector);
+            registry.cancel(account, oa(who, "cancel[1]"), 1);
+            vm.expectRevert(IBLSKeyRegistry.LegMismatch.selector);
+            registry.cancel(account, oa(who, "cancel[1]"), 0);
+            vm.expectRevert(IBLSKeyRegistry.LegMismatch.selector);
+            registry.cancel(account, oa(who, "cancelSameRegistryTwoNonces"), 0);
+            // a RevokeKeys signature over the same legs is not a cancel
+            vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+            registry.cancel(account, oa(who, "revoke[0]"), 0);
+            assertEq(registry.nonceOf(account), 0);
+        }
+        registry.pause();
+        vm.expectRevert(IBLSKeyRegistry.EnforcedPause.selector);
+        registry.cancel(v.readBytes32(".slots.bridgerOnSepolia.account"), oa("bridgerOnSepolia", "cancel[0]"), 0);
+    }
+
+    // =========================================================================
     // Review 50-3: a registry named twice is refused whatever the nonces
     // =========================================================================
 
@@ -1078,6 +1121,7 @@ contract KeyMessagesVectorsTest is Test {
         assertEq(KeyMessages.KEY_LEG_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.keyLeg"));
         assertEq(KeyMessages.REGISTER_KEY_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.registerKey"));
         assertEq(KeyMessages.REVOKE_KEYS_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.revokeKeys"));
+        assertEq(KeyMessages.CANCEL_PENDING_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.cancelPending"));
         assertEq(KeyMessages.RETIRE_KEY_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.retireKey"));
         assertEq(KeyMessages.DOMAIN_TYPEHASH, keccak256(bytes(v.readString(".ownerAuth._meta.domainType"))));
         string[3] memory envs = ["local", "testnet", "mainnet"];
@@ -1157,8 +1201,11 @@ contract KeyMessagesVectorsTest is Test {
         bytes32 kindName = keccak256(bytes(rstr(string.concat(path, ".kind"))));
         KeyMessages.Kind kind = kindName == keccak256("register")
             ? KeyMessages.Kind.Register
-            : kindName == keccak256("revoke") ? KeyMessages.Kind.Revoke : KeyMessages.Kind.Retire;
-        bytes32 key = kind == KeyMessages.Kind.Revoke ? bytes32(0) : r32(string.concat(path, ".keyCommitment"));
+            : kindName == keccak256("revoke")
+                ? KeyMessages.Kind.Revoke
+                : kindName == keccak256("cancel") ? KeyMessages.Kind.Cancel : KeyMessages.Kind.Retire;
+        bool keyed = kind == KeyMessages.Kind.Register || kind == KeyMessages.Kind.Retire;
+        bytes32 key = keyed ? r32(string.concat(path, ".keyCommitment")) : bytes32(0);
         uint64 time = kind == KeyMessages.Kind.Retire
             ? uint64(vm.parseUint(rstr(string.concat(path, ".validUntil"))))
             : kind == KeyMessages.Kind.Register ? uint64(vm.parseUint(rstr(string.concat(path, ".deadline")))) : 0;
@@ -1193,19 +1240,24 @@ contract KeyMessagesVectorsTest is Test {
         checkFamily("revoke", 7);
     }
 
+    function test_everyCancelEntryRebuildsByteForByte() public view {
+        checkFamily("cancel", 7);
+    }
+
     function test_everyRetireEntryRebuildsByteForByte() public view {
         checkFamily("retire", 12);
     }
 
     function test_everyNamedEntryRebuildsByteForByte() public view {
         string[2] memory actors = ["maker", "bridger"];
-        string[7] memory named = [
+        string[8] memory named = [
             "reuseKey0AtNonce1",
             "onlySepoliaLeg",
             "onlyStellarLeg",
             "duplicateLegs",
             "sameRegistryTwoNonces",
             "revokeSameRegistryTwoNonces",
+            "cancelSameRegistryTwoNonces",
             "otherEnv"
         ];
         for (uint256 a = 0; a < 2; a++) {

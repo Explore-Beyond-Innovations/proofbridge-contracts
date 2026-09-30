@@ -406,6 +406,30 @@ impl BlsKeyRegistry {
         Ok(())
     }
 
+    /// Kills every outstanding signature naming `nonce` here (a pending registration) by consuming
+    /// the nonce; no slot changes, so live keys stay and no guard is asked (review D2).
+    pub fn cancel_pending(
+        env: Env,
+        account: BytesN<32>,
+        owner: OwnerAuth,
+        nonce: u64,
+    ) -> Result<(), RegistryError> {
+        if !storage::is_initialized(&env) {
+            return Err(RegistryError::NotInitialized);
+        }
+        if storage::is_paused(&env) {
+            return Err(RegistryError::ContractPaused);
+        }
+        if nonce != storage::get_nonce(&env, &account) {
+            return Err(RegistryError::BadNonce);
+        }
+        check_owner(&env, &account, owner, KeyMessage::Cancel { nonce })?;
+        storage::set_nonce(&env, &account, nonce + 1);
+        proofbridge_core::ttl::extend_instance(&env);
+        events::RegistrationCancelled { account, nonce }.publish(&env);
+        Ok(())
+    }
+
     // ---- views ----
 
     /// The verifier's one call: the commitment iff the slot exists and is usable now.

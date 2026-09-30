@@ -1,5 +1,5 @@
 //! The owner's key messages, shared with the EVM registry (2.6 plan 13, D1–D5): one signature over
-//! RegisterKey / RevokeKeys / RetireKey names every registry it is for. secp256k1 owners sign the
+//! RegisterKey / RevokeKeys / CancelPending / RetireKey names every registry it is for. secp256k1 owners sign the
 //! EIP-712 form, ed25519 owners the fixed text (SEP-53). Pinned by bls-encodings.json `ownerAuth`.
 
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String, Vec};
@@ -21,6 +21,11 @@ pub(crate) const REGISTER_KEY_TYPEHASH: [u8; 32] = [
     0x86, 0xb4, 0xf5, 0xa5, 0xd0, 0x73, 0x5e, 0x9a, 0x7a, 0x9e, 0xb9, 0xdf, 0xa3, 0x2f, 0x81, 0x36,
     0x4b, 0x16, 0x02, 0xf5, 0x09, 0x8d, 0x95, 0x18, 0x2d, 0xa5, 0x06, 0xee, 0xf7, 0x02, 0x7c, 0x92,
 ];
+/// keccak256("CancelPending(bytes32 account,KeyLeg[] legs)KeyLeg(...)"): the nonce-only cancel (review D2)
+pub(crate) const CANCEL_PENDING_TYPEHASH: [u8; 32] = [
+    0x35, 0x28, 0xec, 0x7f, 0x94, 0x8a, 0x36, 0xba, 0xeb, 0x96, 0x10, 0x76, 0x7a, 0xa9, 0xf0, 0x59,
+    0x22, 0xe7, 0xe1, 0x4d, 0x2e, 0xab, 0xe5, 0x11, 0x42, 0xe5, 0x8c, 0x74, 0x37, 0x78, 0xd1, 0x2f,
+];
 /// keccak256("RevokeKeys(bytes32 account,KeyLeg[] legs)KeyLeg(...)")
 pub(crate) const REVOKE_KEYS_TYPEHASH: [u8; 32] = [
     0xd2, 0xcc, 0x96, 0x44, 0xd4, 0xc5, 0xbc, 0xcc, 0xcd, 0x70, 0x6c, 0xaf, 0xc5, 0x8d, 0x84, 0x44,
@@ -39,6 +44,7 @@ pub(crate) const MAX_REGISTER_TTL: u64 = 7 * 24 * 3600;
 const KEYS_ENVS: [&[u8]; 3] = [b"local", b"testnet", b"mainnet"];
 const REGISTER_HEADING: &[u8] = b"ProofBridge: register a settlement key";
 const REVOKE_HEADING: &[u8] = b"ProofBridge: remove every settlement key";
+const CANCEL_HEADING: &[u8] = b"ProofBridge: cancel a pending key registration";
 const RETIRE_HEADING: &[u8] = b"ProofBridge: retire a settlement key";
 
 /// One registry a signature is for: its chain, its 32-byte id and its nonce for the account.
@@ -86,6 +92,9 @@ pub(crate) enum KeyMessage {
         deadline: u64,
     },
     Revoke {
+        nonce: u64,
+    },
+    Cancel {
         nonce: u64,
     },
     Retire {
@@ -170,7 +179,9 @@ pub(crate) fn check_owner(
 /// carries the current nonce; a retirement names none.
 fn check_legs(env: &Env, legs: &Vec<KeyLeg>, msg: &KeyMessage) -> Result<(), RegistryError> {
     let nonce = match msg {
-        KeyMessage::Register { nonce, .. } | KeyMessage::Revoke { nonce } => *nonce,
+        KeyMessage::Register { nonce, .. }
+        | KeyMessage::Revoke { nonce }
+        | KeyMessage::Cancel { nonce } => *nonce,
         KeyMessage::Retire { .. } => {
             return if legs.is_empty() {
                 Ok(())
@@ -285,6 +296,11 @@ pub(crate) fn struct_hash(
             enc.extend_from_slice(&account.to_array());
             enc.extend_from_slice(&legs_hash(env, legs));
         }
+        KeyMessage::Cancel { .. } => {
+            enc.extend_from_slice(&CANCEL_PENDING_TYPEHASH);
+            enc.extend_from_slice(&account.to_array());
+            enc.extend_from_slice(&legs_hash(env, legs));
+        }
         KeyMessage::Retire {
             fingerprint,
             valid_until,
@@ -306,6 +322,7 @@ pub(crate) fn text(env: &Env, account: &BytesN<32>, legs: &Vec<KeyLeg>, msg: &Ke
     let heading = match msg {
         KeyMessage::Register { .. } => REGISTER_HEADING,
         KeyMessage::Revoke { .. } => REVOKE_HEADING,
+        KeyMessage::Cancel { .. } => CANCEL_HEADING,
         KeyMessage::Retire { .. } => RETIRE_HEADING,
     };
     t.extend_from_slice(heading);
@@ -320,7 +337,7 @@ pub(crate) fn text(env: &Env, account: &BytesN<32>, legs: &Vec<KeyLeg>, msg: &Ke
             t.extend_from_slice(b"\nKey fingerprint: ");
             t.extend_from_slice(&hex_0x_lower(&fingerprint.to_array()));
         }
-        KeyMessage::Revoke { .. } => {}
+        KeyMessage::Revoke { .. } | KeyMessage::Cancel { .. } => {}
     }
     if let KeyMessage::Register { deadline, .. } = msg {
         t.extend_from_slice(b"\nValid until: ");

@@ -457,6 +457,79 @@ fn revoke_with_no_slots_bumps_the_nonce_and_kills_a_pending_registration() {
     assert_eq!(client.nonce_of(&maker), 1);
 }
 
+/// Review D2 follow-up: cancel at a registry holding an older live key moves the nonce, emits, asks
+/// no guard, and leaves the key live; the pending registration at the old nonce is dead.
+#[test]
+fn cancel_at_a_registry_holding_an_older_live_key_leaves_that_key_live() {
+    let (env, client, v) = setup();
+    busy_guard(&env, &client);
+    for who in [MAKER, BRIDGER] {
+        let account = slot_account(&env, &v, who);
+        let slot = register_slot(&env, &client, &v, who, 0); // nonce 0 -> 1
+        client.cancel_pending(&account, &signed(&env, &oa(&v, who)["cancel"][1]), &1);
+        {
+            use soroban_sdk::{events::Event as _, testutils::Events as _};
+            let want = events::RegistrationCancelled {
+                account: account.clone(),
+                nonce: 1,
+            }
+            .to_xdr(&env, &client.address);
+            let got = env.events().all().filter_by_contract(&client.address);
+            assert!(
+                got.events().contains(&want),
+                "no RegistrationCancelled: {got:?}"
+            );
+        }
+        assert_eq!(client.nonce_of(&account), 2);
+        assert_eq!(
+            client.commitment_at(&account, &slot),
+            slot_commitment(&env, &v, who, 0)
+        );
+        assert_eq!(client.live_slots(&account).len(), 1);
+        let r = slot_reg(&v, who, 1);
+        assert_eq!(
+            client.try_register(
+                &account,
+                &signed(&env, &oa(&v, who)["register"][1]),
+                &bn::<96>(&env, &r["pkNative"]),
+                &bn::<192>(&env, &r["pop"]),
+                &1,
+                &DEADLINE,
+            ),
+            Err(Ok(RegistryError::BadNonce))
+        );
+    }
+}
+
+#[test]
+fn cancel_checks_nonce_legs_and_signature() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, BRIDGER);
+    let a = oa(&v, BRIDGER);
+    assert_eq!(
+        client.try_cancel_pending(&account, &signed(&env, &a["cancel"][1]), &1),
+        Err(Ok(RegistryError::BadNonce))
+    );
+    assert_eq!(
+        client.try_cancel_pending(&account, &signed(&env, &a["cancel"][1]), &0),
+        Err(Ok(RegistryError::LegMismatch))
+    );
+    assert_eq!(
+        client.try_cancel_pending(
+            &account,
+            &signed(&env, &a["cancelSameRegistryTwoNonces"]),
+            &0
+        ),
+        Err(Ok(RegistryError::LegMismatch))
+    );
+    // a RevokeKeys signature over the same legs is not a cancel
+    assert_eq!(
+        client.try_cancel_pending(&account, &signed(&env, &a["revoke"][0]), &0),
+        Err(Ok(RegistryError::OwnerMismatch))
+    );
+    assert_eq!(client.nonce_of(&account), 0);
+}
+
 // =============================================================================
 // I-NEW-RV: revoke blocked while the account has open positions
 // =============================================================================
@@ -1578,6 +1651,7 @@ fn message_of(env: &Env, e: &serde_json::Value) -> KeyMessage {
             deadline: e["deadline"].as_str().unwrap().parse().unwrap(),
         },
         "revoke" => KeyMessage::Revoke { nonce: 0 },
+        "cancel" => KeyMessage::Cancel { nonce: 0 },
         _ => KeyMessage::Retire {
             fingerprint: fp(),
             valid_until: e["validUntil"].as_str().unwrap().parse().unwrap(),
@@ -1591,7 +1665,7 @@ fn text_and_struct_hash_match_every_vector() {
     let mut entries = std::vec::Vec::new();
     for who in ["maker", "bridger"] {
         let a = &v["ownerAuth"][who];
-        for k in ["register", "registerLate", "revoke", "retire"] {
+        for k in ["register", "registerLate", "revoke", "cancel", "retire"] {
             entries.extend(a[k].as_array().unwrap().iter().cloned());
         }
         for k in [
@@ -1601,6 +1675,7 @@ fn text_and_struct_hash_match_every_vector() {
             "duplicateLegs",
             "sameRegistryTwoNonces",
             "revokeSameRegistryTwoNonces",
+            "cancelSameRegistryTwoNonces",
             "otherEnv",
         ] {
             entries.push(a[k].clone());
@@ -1671,6 +1746,10 @@ fn constants_match_the_vectors() {
     assert_eq!(
         owner::REVOKE_KEYS_TYPEHASH.to_vec(),
         k(m["typeStrings"]["revokeKeys"].as_str().unwrap())
+    );
+    assert_eq!(
+        owner::CANCEL_PENDING_TYPEHASH.to_vec(),
+        k(m["typeStrings"]["cancelPending"].as_str().unwrap())
     );
     assert_eq!(
         owner::RETIRE_KEY_TYPEHASH.to_vec(),

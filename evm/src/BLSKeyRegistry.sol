@@ -270,6 +270,17 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         emit KeyRevoked(account, nonce);
     }
 
+    /// Kills every outstanding signature naming `nonce` here (a pending registration) by consuming
+    /// the nonce; no slot changes, so live keys stay and no guard is asked (review D2).
+    function cancel(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external {
+        if (paused) revert EnforcedPause();
+        if (nonce != nonceOf[account]) revert BadNonce();
+        _requireOwnLeg(owner.legs, nonce);
+        _checkOwner(account, owner, KeyMessages.Kind.Cancel, bytes32(0), 0);
+        nonceOf[account] = nonce + 1;
+        emit RegistrationCancelled(account, nonce);
+    }
+
     function _addSlot(bytes32 account, bytes32 commitment) private returns (uint32 slotId) {
         if (usedCommitment[account][commitment]) revert KeyPreviouslyUsed();
         RegistryEntry storage e = entries[account];

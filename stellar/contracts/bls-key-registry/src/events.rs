@@ -44,6 +44,14 @@ pub struct KeyRevoked {
     pub nonce: u64,
 }
 
+/// Review D2: the nonce moved and no slot changed; every signature naming `nonce` here is dead.
+#[contractevent(topics = ["key_cncl"], data_format = "single-value")]
+pub struct RegistrationCancelled {
+    #[topic]
+    pub account: BytesN<32>,
+    pub nonce: u64,
+}
+
 #[contractevent(topics = ["guard_set"], data_format = "single-value")]
 pub struct PositionGuardsSet {
     pub guards: Vec<Address>,
