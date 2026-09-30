@@ -16,6 +16,7 @@ pub enum RegistryError {
     InvalidPop = 5,
     /// Owner auth does not resolve to `account`.
     OwnerMismatch = 6,
+    /// Unused since a zero-slot revoke bumps the nonce (2.6 review D2); the number stays reserved.
     NotRegistered = 7,
     /// Revoke while the account has locked funds / open orders.
     AccountInFlight = 8,
@@ -44,6 +45,12 @@ pub enum RegistryError {
     /// A signed owner auth whose legs do not hold this registry's own leg exactly once (or a
     /// retirement that names legs at all).
     LegMismatch = 21,
+    /// The ledger is past the RegisterKey's deadline (2.6 review D2).
+    DeadlineExpired = 22,
+    /// The RegisterKey's deadline is more than 7 days past ledger time (D2).
+    DeadlineTooFar = 23,
+    /// `initialize` was given an environment other than local, testnet or mainnet (D3).
+    BadEnv = 24,
 }
 
 // No `From<Fault>` here on purpose. The registry's only shared helper is the event public-input

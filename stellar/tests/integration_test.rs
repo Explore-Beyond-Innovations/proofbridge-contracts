@@ -1265,6 +1265,7 @@ fn real_registry_with_vector_maker(
         &pk,
         &pop,
         &0,
+        &(s.env.ledger().timestamp() + 3_600), // require_auth: any deadline within 7 days
     );
     (client, account, owner)
 }
@@ -2716,7 +2717,11 @@ fn vector_registry(
         .unwrap()
         .parse()
         .unwrap();
-    client.initialize(&s.admin_addr, &chain_id);
+    client.initialize(
+        &s.admin_addr,
+        &chain_id,
+        &SorobanString::from_str(&s.env, "testnet"),
+    );
 
     let r = &vectors["registration"]["makerOnStellarTestnet"];
     let account = BytesN::from_array(&s.env, &hexv(&r["account"]).try_into().unwrap());
@@ -3986,6 +3991,7 @@ fn real_registry_signer(
         &BytesN::from_array(&s.env, &hexv(&r["pkNative"]).try_into().unwrap()),
         &BytesN::from_array(&s.env, &hexv(&r["pop"]).try_into().unwrap()),
         &1,
+        &(s.env.ledger().timestamp() + 3_600),
     );
     s.ad_manager.set_key_registry(&client.address);
     let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
@@ -4194,6 +4200,7 @@ fn test_422_real_registry_same_second_kill_prune_and_lock_still_waits_the_grace(
             &BytesN::from_array(&s.env, &hexv(&r["pkNative"]).try_into().unwrap()),
             &BytesN::from_array(&s.env, &hexv(&r["pop"]).try_into().unwrap()),
             &(i as u64),
+            &(s.env.ledger().timestamp() + 3_600),
         )
     };
     for i in 2..5 {
@@ -4235,6 +4242,7 @@ fn test_453_real_registry_a_kill_outlives_the_full_order_span() {
             &BytesN::from_array(&s.env, &hexv(&r["pkNative"]).try_into().unwrap()),
             &BytesN::from_array(&s.env, &hexv(&r["pop"]).try_into().unwrap()),
             &(i as u64),
+            &(s.env.ledger().timestamp() + 3_600),
         )
     };
     for i in 2..5 {
@@ -8562,7 +8570,11 @@ fn wire_real_stack(s: &TestSetup) -> Bytes {
     s.env
         .register_at(&registry, bls_key_registry_contract::WASM, ());
     let reg = bls_key_registry_contract::Client::new(&s.env, &registry);
-    reg.initialize(&s.admin_addr, &REGISTRY_CHAIN);
+    reg.initialize(
+        &s.admin_addr,
+        &REGISTRY_CHAIN,
+        &SorobanString::from_str(&s.env, "testnet"),
+    );
     for (account, who) in [
         (s.tp.ad_settlement_signer, "makerBls"),
         (s.tp.bridger, "bridgerBls"),
@@ -8576,6 +8588,7 @@ fn wire_real_stack(s: &TestSetup) -> Bytes {
             &BytesN::from_array(&s.env, &pk),
             &vector_pop(&s.env, &REGISTRY_ID, REGISTRY_CHAIN, &account, who),
             &0,
+            &(s.env.ledger().timestamp() + 3_600),
         );
         assert_eq!(slot, 0, "the co-signature names slot 0");
     }
@@ -8848,13 +8861,22 @@ fn test_owner_sig_register_metering() {
             &s.env,
             &hex_to_array(v["slots"][slots]["account"].as_str().unwrap()),
         );
+        // the signed deadline binds the vector clock (`_meta.deadline.registerChainTime`)
+        let now = s.env.ledger().timestamp();
+        let m = &v["ownerAuth"]["_meta"]["deadline"];
+        warp(
+            &s,
+            m["registerChainTime"].as_str().unwrap().parse().unwrap(),
+        );
         client.register(
             &account,
             &signed_owner_auth(&s.env, e),
             &BytesN::from_array(&s.env, &vhex(&r["pkNative"]).try_into().unwrap()),
             &BytesN::from_array(&s.env, &vhex(&r["pop"]).try_into().unwrap()),
             &0,
+            &e["deadline"].as_str().unwrap().parse::<u64>().unwrap(),
         );
+        warp(&s, now);
         let res = s.env.cost_estimate().resources();
         std::println!(
             "METER | bls_key_registry.register ({}, 2 legs) | cpu {} | mem {} | writes {}",
@@ -8897,6 +8919,7 @@ fn test_owner_sig_register_metering() {
         &BytesN::from_array(&s.env, &vhex(&r["pkNative"]).try_into().unwrap()),
         &BytesN::from_array(&s.env, &vhex(&r["pop"]).try_into().unwrap()),
         &1,
+        &(s.env.ledger().timestamp() + 3_600),
     );
     std::println!(
         "METER | bls_key_registry.register (require_auth, mocked) | cpu {}",

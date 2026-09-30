@@ -2,7 +2,7 @@
 //! RegisterKey / RevokeKeys / RetireKey names every registry it is for. secp256k1 owners sign the
 //! EIP-712 form, ed25519 owners the fixed text (SEP-53). Pinned by bls-encodings.json `ownerAuth`.
 
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String, Vec};
 
 use proofbridge_core::eip712::{
     abi_encode_uint256, address_to_bytes32, contract_address_to_bytes32,
@@ -11,20 +11,15 @@ use proofbridge_core::eip712::{
 use crate::errors::RegistryError;
 use crate::storage;
 
-/// keccak256(abi.encode(DOMAIN_TYPEHASH_MIN, keccak256("ProofBridge Keys"), keccak256("2")))
-pub(crate) const KEYS_DOMAIN_SEPARATOR: [u8; 32] = [
-    0x60, 0x90, 0x02, 0x8e, 0x5b, 0x01, 0x20, 0xe7, 0x98, 0x05, 0xd8, 0x1c, 0x40, 0x09, 0x3f, 0x9c,
-    0x6f, 0xdd, 0x23, 0x88, 0x07, 0xb4, 0xad, 0x02, 0x68, 0xba, 0x2e, 0xbc, 0xf2, 0xe0, 0xfc, 0xef,
-];
 /// keccak256("KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)")
 pub(crate) const KEY_LEG_TYPEHASH: [u8; 32] = [
     0xfa, 0x75, 0xaf, 0x9d, 0x4f, 0x7f, 0x23, 0x32, 0x33, 0xf7, 0x04, 0x6e, 0x92, 0x9e, 0xf4, 0x0c,
     0xd6, 0xd1, 0x7e, 0xe3, 0xc0, 0xf5, 0x79, 0xae, 0xae, 0x91, 0xb2, 0xc8, 0x69, 0x7b, 0x95, 0x99,
 ];
-/// keccak256("RegisterKey(bytes32 account,bytes32 keyCommitment,KeyLeg[] legs)KeyLeg(...)")
+/// keccak256("RegisterKey(bytes32 account,bytes32 keyCommitment,KeyLeg[] legs,uint64 deadline)KeyLeg(...)")
 pub(crate) const REGISTER_KEY_TYPEHASH: [u8; 32] = [
-    0x96, 0x4f, 0x6f, 0xa8, 0xc4, 0x66, 0xcc, 0x4a, 0xcc, 0xed, 0x70, 0xdd, 0xab, 0x5e, 0xd7, 0x04,
-    0xa8, 0xca, 0x7f, 0x71, 0x57, 0x91, 0x05, 0x42, 0x7f, 0x0f, 0xea, 0x9d, 0x57, 0x10, 0xb3, 0xdd,
+    0x86, 0xb4, 0xf5, 0xa5, 0xd0, 0x73, 0x5e, 0x9a, 0x7a, 0x9e, 0xb9, 0xdf, 0xa3, 0x2f, 0x81, 0x36,
+    0x4b, 0x16, 0x02, 0xf5, 0x09, 0x8d, 0x95, 0x18, 0x2d, 0xa5, 0x06, 0xee, 0xf7, 0x02, 0x7c, 0x92,
 ];
 /// keccak256("RevokeKeys(bytes32 account,KeyLeg[] legs)KeyLeg(...)")
 pub(crate) const REVOKE_KEYS_TYPEHASH: [u8; 32] = [
@@ -38,6 +33,10 @@ pub(crate) const RETIRE_KEY_TYPEHASH: [u8; 32] = [
 ];
 
 const SEP53_PREFIX: &[u8; 24] = b"Stellar Signed Message:\n";
+/// D2: a RegisterKey deadline may sit at most this far past ledger time.
+pub(crate) const MAX_REGISTER_TTL: u64 = 7 * 24 * 3600;
+/// D3: the environments a registry is initialized for.
+const KEYS_ENVS: [&[u8]; 3] = [b"local", b"testnet", b"mainnet"];
 const REGISTER_HEADING: &[u8] = b"ProofBridge: register a settlement key";
 const REVOKE_HEADING: &[u8] = b"ProofBridge: remove every settlement key";
 const RETIRE_HEADING: &[u8] = b"ProofBridge: retire a settlement key";
@@ -84,6 +83,7 @@ pub(crate) enum KeyMessage {
     Register {
         fingerprint: BytesN<32>,
         nonce: u64,
+        deadline: u64,
     },
     Revoke {
         nonce: u64,
@@ -92,6 +92,42 @@ pub(crate) enum KeyMessage {
         fingerprint: BytesN<32>,
         valid_until: u64,
     },
+}
+
+/// D3: the env's bytes, if it is one of local / testnet / mainnet.
+fn env_bytes(name: &String) -> Option<([u8; 7], usize)> {
+    let len = name.len() as usize;
+    if len > 7 {
+        return None;
+    }
+    let mut buf = [0u8; 7];
+    name.copy_into_slice(&mut buf[..len]);
+    KEYS_ENVS
+        .iter()
+        .any(|e| *e == &buf[..len])
+        .then_some((buf, len))
+}
+
+/// D3: keccak(EIP712Domain(string name,string version,bytes32 salt) ‖ name ‖ version ‖ salt) with
+/// salt = keccak256("proofbridge:" ‖ env); refuses any other environment.
+pub(crate) fn keys_domain_separator(env: &Env, name: &String) -> Result<BytesN<32>, RegistryError> {
+    let (buf, len) = env_bytes(name).ok_or(RegistryError::BadEnv)?;
+    let mut salt_pre = Bytes::from_slice(env, b"proofbridge:");
+    salt_pre.extend_from_slice(&buf[..len]);
+    let mut enc = Bytes::from_slice(
+        env,
+        &keccak(
+            env,
+            &Bytes::from_slice(
+                env,
+                b"EIP712Domain(string name,string version,bytes32 salt)",
+            ),
+        ),
+    );
+    enc.extend_from_slice(&keccak(env, &Bytes::from_slice(env, b"ProofBridge Keys")));
+    enc.extend_from_slice(&keccak(env, &Bytes::from_slice(env, b"2")));
+    enc.extend_from_slice(&keccak(env, &salt_pre));
+    Ok(BytesN::from_array(env, &keccak(env, &enc)))
 }
 
 /// D2: keccak256 of the key's EIP-2537 128-byte form, rebuilt by padding each 48-byte coordinate
@@ -130,7 +166,8 @@ pub(crate) fn check_owner(
     }
 }
 
-/// D5 check 1: exactly one entry equals this registry's own leg; a retirement names none.
+/// D5 check 1: exactly one entry names this registry (whatever its nonce, review 50-3) and it
+/// carries the current nonce; a retirement names none.
 fn check_legs(env: &Env, legs: &Vec<KeyLeg>, msg: &KeyMessage) -> Result<(), RegistryError> {
     let nonce = match msg {
         KeyMessage::Register { nonce, .. } | KeyMessage::Revoke { nonce } => *nonce,
@@ -142,15 +179,15 @@ fn check_legs(env: &Env, legs: &Vec<KeyLeg>, msg: &KeyMessage) -> Result<(), Reg
             };
         }
     };
-    let own = KeyLeg {
-        chain_id: storage::get_chain_id(env),
-        registry: contract_address_to_bytes32(env),
-        nonce,
-    };
-    if legs.iter().filter(|l| *l == own).count() != 1 {
-        return Err(RegistryError::LegMismatch);
+    let chain_id = storage::get_chain_id(env);
+    let registry = contract_address_to_bytes32(env);
+    let mut mine = legs
+        .iter()
+        .filter(|l| l.chain_id == chain_id && l.registry == registry);
+    match (mine.next(), mine.next()) {
+        (Some(l), None) if l.nonce == nonce => Ok(()),
+        _ => Err(RegistryError::LegMismatch),
     }
-    Ok(())
 }
 
 /// `account` must be 12 zero bytes || the address recovered from the EIP-712 digest.
@@ -166,7 +203,7 @@ fn check_secp256k1(
         return Err(RegistryError::OwnerMismatch);
     }
     let mut prefixed = Bytes::from_slice(env, &[0x19, 0x01]);
-    prefixed.extend_from_slice(&KEYS_DOMAIN_SEPARATOR);
+    prefixed.extend_from_slice(&storage::get_domain(env).to_array());
     prefixed.extend_from_slice(&struct_hash(env, account, legs, msg));
     let digest = env.crypto().keccak256(&prefixed);
 
@@ -232,11 +269,16 @@ pub(crate) fn struct_hash(
 ) -> [u8; 32] {
     let mut enc = Bytes::new(env);
     match msg {
-        KeyMessage::Register { fingerprint, .. } => {
+        KeyMessage::Register {
+            fingerprint,
+            deadline,
+            ..
+        } => {
             enc.extend_from_slice(&REGISTER_KEY_TYPEHASH);
             enc.extend_from_slice(&account.to_array());
             enc.extend_from_slice(&fingerprint.to_array());
             enc.extend_from_slice(&legs_hash(env, legs));
+            enc.extend_from_slice(&abi_encode_uint256(*deadline as u128));
         }
         KeyMessage::Revoke { .. } => {
             enc.extend_from_slice(&REVOKE_KEYS_TYPEHASH);
@@ -267,7 +309,11 @@ pub(crate) fn text(env: &Env, account: &BytesN<32>, legs: &Vec<KeyLeg>, msg: &Ke
         KeyMessage::Retire { .. } => RETIRE_HEADING,
     };
     t.extend_from_slice(heading);
-    t.extend_from_slice(b"\n\nAccount: ");
+    t.extend_from_slice(b"\n\nNetwork: ");
+    let name = storage::get_keys_env(env);
+    let (buf, len) = env_bytes(&name).unwrap_or(([0u8; 7], 0));
+    t.extend_from_slice(&buf[..len]);
+    t.extend_from_slice(b"\nAccount: ");
     t.extend_from_slice(&hex_0x_lower(&account.to_array()));
     match msg {
         KeyMessage::Register { fingerprint, .. } | KeyMessage::Retire { fingerprint, .. } => {
@@ -275,6 +321,13 @@ pub(crate) fn text(env: &Env, account: &BytesN<32>, legs: &Vec<KeyLeg>, msg: &Ke
             t.extend_from_slice(&hex_0x_lower(&fingerprint.to_array()));
         }
         KeyMessage::Revoke { .. } => {}
+    }
+    if let KeyMessage::Register { deadline, .. } = msg {
+        t.extend_from_slice(b"\nValid until: ");
+        push_utc(&mut t, *deadline);
+        t.extend_from_slice(b" (");
+        push_decimal(&mut t, *deadline as u128);
+        t.extend_from_slice(b")");
     }
     t.extend_from_slice(b"\n");
     match msg {
@@ -294,6 +347,42 @@ pub(crate) fn text(env: &Env, account: &BytesN<32>, legs: &Vec<KeyLeg>, msg: &Ke
         }
     }
     t
+}
+
+/// Unix seconds as "YYYY-MM-DD HH:MM:SS UTC" (Hinnant civil_from_days, as bls-encodings' utcText).
+pub(crate) fn push_utc(t: &mut Bytes, unix: u64) {
+    let tt = unix as u128;
+    let (days, sod) = (tt / 86_400, tt % 86_400);
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if mo <= 2 { 1 } else { 0 };
+    push_padded(t, y, 4);
+    t.push_back(b'-');
+    push_padded(t, mo, 2);
+    t.push_back(b'-');
+    push_padded(t, d, 2);
+    t.push_back(b' ');
+    push_padded(t, sod / 3_600, 2);
+    t.push_back(b':');
+    push_padded(t, (sod % 3_600) / 60, 2);
+    t.push_back(b':');
+    push_padded(t, sod % 60, 2);
+    t.extend_from_slice(b" UTC");
+}
+
+fn push_padded(t: &mut Bytes, v: u128, width: u32) {
+    let mut p = 10u128.pow(width - 1);
+    while v < p && p > 1 {
+        t.push_back(b'0');
+        p /= 10;
+    }
+    push_decimal(t, v);
 }
 
 fn push_decimal(t: &mut Bytes, mut v: u128) {

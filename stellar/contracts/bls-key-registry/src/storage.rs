@@ -1,6 +1,6 @@
 //! Storage helpers for the BLSKeyRegistry contract (v2: per-account key slots).
 
-use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec};
 
 const KEY_INIT: Symbol = symbol_short!("init");
 const KEY_ADMIN: Symbol = symbol_short!("admin");
@@ -10,6 +10,9 @@ const KEY_GUARD: Symbol = symbol_short!("guard");
 const KEY_PAUSED: Symbol = symbol_short!("paused");
 /// Pending admin for the two-step handover.
 const KEY_PENDADM: Symbol = symbol_short!("pendadm");
+/// D3: the environment the registry was initialized for, and the key messages' domain separator.
+const KEY_KEYSENV: Symbol = symbol_short!("keysenv");
+const KEY_DOMAIN: Symbol = symbol_short!("domain");
 
 /// (KEY_ENTRY, account) -> RegistryEntry
 const KEY_ENTRY: Symbol = symbol_short!("entry");
@@ -57,6 +60,8 @@ pub struct KeySlot {
     /// 0 = no expiry; else usable while ledger timestamp < valid_until
     pub valid_until: u64,
     pub registered_at: u64,
+    /// keccak256 of the EIP-2537 form (the RetireKey name); `touch` keeps its keyslot row alive.
+    pub fingerprint: BytesN<32>,
 }
 
 #[contracttype]
@@ -90,6 +95,19 @@ pub fn set_chain_id(env: &Env, chain_id: u128) {
 
 pub fn get_chain_id(env: &Env) -> u128 {
     env.storage().instance().get(&KEY_CHAIN).unwrap()
+}
+
+pub fn set_keys_env(env: &Env, name: &String, domain: &BytesN<32>) {
+    env.storage().instance().set(&KEY_KEYSENV, name);
+    env.storage().instance().set(&KEY_DOMAIN, domain);
+}
+
+pub fn get_keys_env(env: &Env) -> String {
+    env.storage().instance().get(&KEY_KEYSENV).unwrap()
+}
+
+pub fn get_domain(env: &Env) -> BytesN<32> {
+    env.storage().instance().get(&KEY_DOMAIN).unwrap()
 }
 
 pub fn set_guards(env: &Env, guards: &Vec<Address>) {
@@ -191,10 +209,20 @@ pub fn set_used(env: &Env, account: &BytesN<32>, commitment: &BytesN<32>) {
 }
 
 /// Re-extend the account's live records at use time (unlock) so an active
-/// account never archives between writes.
-pub fn touch(env: &Env, account: &BytesN<32>, slot_id: u32) {
+/// account never archives between writes; the keyslot row too, so a retirement never needs a restore.
+pub fn touch(env: &Env, account: &BytesN<32>, slot_id: u32, fingerprint: &BytesN<32>) {
     bump(env, &(KEY_ENTRY, account.clone()));
     bump(env, &(KEY_SLOT, account.clone(), slot_id));
+    bump(env, &(KEY_KEYSLOT, account.clone(), fingerprint.clone()));
+}
+
+/// Test-only: the keyslot row's live-until ledger.
+#[cfg(test)]
+pub fn key_slot_ttl(env: &Env, account: &BytesN<32>, fingerprint: &BytesN<32>) -> u32 {
+    use soroban_sdk::testutils::storage::Persistent as _;
+    env.storage()
+        .persistent()
+        .get_ttl(&(KEY_KEYSLOT, account.clone(), fingerprint.clone()))
 }
 
 fn bump<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {

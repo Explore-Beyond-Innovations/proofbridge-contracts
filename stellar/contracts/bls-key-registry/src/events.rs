@@ -1,12 +1,13 @@
 //! Event types for the BLSKeyRegistry contract
 
-use soroban_sdk::{contractevent, Address, BytesN, Vec};
+use soroban_sdk::{contractevent, Address, BytesN, String, Vec};
 
 #[contractevent(topics = ["init"], data_format = "vec")]
 pub struct Initialized {
     #[topic]
     pub admin: Address,
     pub chain_id: u128,
+    pub deploy_env: String,
 }
 
 /// Carries the full key — storage holds only the keccak commitment.

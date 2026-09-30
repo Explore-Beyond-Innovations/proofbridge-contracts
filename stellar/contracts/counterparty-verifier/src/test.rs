@@ -55,7 +55,11 @@ fn setup() -> Setup {
     let at = Address::from_string(&SString::from_str(&env, &strkey));
     let registry_addr = env.register_at(&at, BlsKeyRegistry, ());
     let registry = BlsKeyRegistryClient::new(&env, &registry_addr);
-    registry.initialize(&Address::generate(&env), &CHAIN_ID);
+    registry.initialize(
+        &Address::generate(&env),
+        &CHAIN_ID,
+        &SString::from_str(&env, "testnet"),
+    );
 
     for who in ["makerOnStellarTestnet", "bridgerOnStellarTestnet"] {
         let r = &v["registration"][who];
@@ -85,6 +89,12 @@ fn setup() -> Setup {
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &0,
+            // the bridger's signed deadline (`_meta.deadline.register`); require_auth takes any in range
+            &v["ownerAuth"]["_meta"]["deadline"]["register"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap(),
         );
     }
 
@@ -199,6 +209,7 @@ impl Setup {
             &bn::<96>(&self.env, &r["pkNative"]),
             &bn::<192>(&self.env, &r["pop"]),
             &(i as u64),
+            &(self.env.ledger().timestamp() + 3_600), // require_auth: any deadline within 7 days
         )
     }
 

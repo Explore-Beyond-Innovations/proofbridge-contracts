@@ -17,6 +17,11 @@ const VECTORS: &str = include_str!("../../../../test-vectors/bls-encodings.json"
 const REGISTRY_ID: [u8; 32] = [0x22; 32];
 const CHAIN_ID: u128 = 1_000_002;
 const T0: u64 = 1_700_000_000;
+/// `ownerAuth.*.register[i]` deadline (`_meta.deadline.register`): 72 h after T0.
+const DEADLINE: u64 = 1_700_259_200;
+/// `ownerAuth.*.registerLate[i]` deadline: 72 h after graceTs.
+const LATE_DEADLINE: u64 = 2_000_259_200;
+const MAX_TTL: u64 = 604_800;
 
 fn vectors() -> serde_json::Value {
     serde_json::from_str(VECTORS).unwrap()
@@ -51,7 +56,28 @@ fn setup() -> (Env, BlsKeyRegistryClient<'static>, serde_json::Value) {
     let contract_id = env.register_at(&at, BlsKeyRegistry, ());
     let client = BlsKeyRegistryClient::new(&env, &contract_id);
 
-    client.initialize(&Address::generate(&env), &CHAIN_ID);
+    client.initialize(
+        &Address::generate(&env),
+        &CHAIN_ID,
+        &SString::from_str(&env, "testnet"),
+    );
+    (env, client, vectors())
+}
+
+/// The same registry initialized for another environment (D3).
+fn setup_env(name: &str) -> (Env, BlsKeyRegistryClient<'static>, serde_json::Value) {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
+    let strkey = stellar_strkey::Contract(REGISTRY_ID).to_string();
+    let at = Address::from_string(&SString::from_str(&env, &strkey));
+    let contract_id = env.register_at(&at, BlsKeyRegistry, ());
+    let client = BlsKeyRegistryClient::new(&env, &contract_id);
+    client.initialize(
+        &Address::generate(&env),
+        &CHAIN_ID,
+        &SString::from_str(&env, name),
+    );
     (env, client, vectors())
 }
 
@@ -117,12 +143,19 @@ fn register_slot(
     i: usize,
 ) -> u32 {
     let r = slot_reg(v, who, i);
+    // D2: at or after graceTs the clock is past `register[i]`'s deadline; `registerLate[i]` fits it.
+    let (entry, deadline) = if env.ledger().timestamp() >= grace_ts(v) {
+        ("registerLate", LATE_DEADLINE)
+    } else {
+        ("register", DEADLINE)
+    };
     client.register(
         &slot_account(env, v, who),
-        &signed(env, &oa(v, who)["register"][i]),
+        &signed(env, &oa(v, who)[entry][i]),
         &bn::<96>(env, &r["pkNative"]),
         &bn::<192>(env, &r["pop"]),
         &(i as u64),
+        &deadline,
     )
 }
 
@@ -189,6 +222,7 @@ fn register_stellar_home_account_via_require_auth() {
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &0,
+        &DEADLINE,
     );
 
     assert_eq!(
@@ -209,6 +243,7 @@ fn register_evm_home_account_via_secp256k1() {
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &0,
+        &DEADLINE,
     );
 
     assert_eq!(
@@ -230,6 +265,7 @@ fn revoke_stellar_home_then_key_is_gone() {
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &0,
+        &DEADLINE,
     );
     client.revoke(&account, &OwnerAuth::Stellar(owner), &1);
 
@@ -267,14 +303,35 @@ fn reregister_without_fresh_pop_reverts() {
     let pk = bn::<96>(&env, &r["pkNative"]);
     let pop = bn::<192>(&env, &r["pop"]);
 
-    client.register(&account, &OwnerAuth::Stellar(owner.clone()), &pk, &pop, &0);
+    client.register(
+        &account,
+        &OwnerAuth::Stellar(owner.clone()),
+        &pk,
+        &pop,
+        &0,
+        &DEADLINE,
+    );
 
     assert_eq!(
-        client.try_register(&account, &OwnerAuth::Stellar(owner.clone()), &pk, &pop, &0),
+        client.try_register(
+            &account,
+            &OwnerAuth::Stellar(owner.clone()),
+            &pk,
+            &pop,
+            &0,
+            &DEADLINE
+        ),
         Err(Ok(RegistryError::BadNonce))
     );
     assert_eq!(
-        client.try_register(&account, &OwnerAuth::Stellar(owner), &pk, &pop, &1),
+        client.try_register(
+            &account,
+            &OwnerAuth::Stellar(owner),
+            &pk,
+            &pop,
+            &1,
+            &DEADLINE
+        ),
         Err(Ok(RegistryError::InvalidPop))
     );
 }
@@ -292,6 +349,7 @@ fn identity_pubkey_rejected() {
             &bn::<96>(&env, &neg["uncompressed"]),
             &bn::<192>(&env, &r["pop"]),
             &0,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::IdentityKey))
     );
@@ -310,6 +368,7 @@ fn pop_signed_with_wrong_dst_rejected() {
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &neg["pop"]),
             &0,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::InvalidPop))
     );
@@ -327,6 +386,7 @@ fn stellar_owner_that_is_not_the_account_rejected() {
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &0,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::OwnerMismatch))
     );
@@ -353,24 +413,48 @@ fn evm_owner_sig_by_wrong_signer_rejected() {
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &0,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::OwnerMismatch))
     );
 }
 
+/// D2: with no slots here, revoke skips the guard, bumps the nonce and emits, so a pending
+/// registration signed at the old nonce is dead at this registry.
 #[test]
-fn revoke_unregistered_account_rejected() {
+fn revoke_with_no_slots_bumps_the_nonce_and_kills_a_pending_registration() {
     let (env, client, v) = setup();
-    let r = reg(&v, "makerOnStellarTestnet");
-
+    busy_guard(&env, &client);
+    let account = slot_account(&env, &v, BRIDGER);
+    client.revoke(&account, &signed(&env, &oa(&v, BRIDGER)["revoke"][0]), &0);
+    {
+        use soroban_sdk::{events::Event as _, testutils::Events as _};
+        // `events().all()` holds the last invocation only, so read them before any other call
+        let want = events::KeyRevoked {
+            account: account.clone(),
+            nonce: 0,
+        }
+        .to_xdr(&env, &client.address);
+        let got = env.events().all().filter_by_contract(&client.address);
+        assert!(got.events().contains(&want), "no KeyRevoked: {got:?}");
+    }
+    assert_eq!(client.nonce_of(&account), 1);
+    let r = slot_reg(&v, BRIDGER, 0);
     assert_eq!(
-        client.try_revoke(
-            &bn::<32>(&env, &r["account"]),
-            &OwnerAuth::Stellar(maker_owner(&env, &v)),
-            &0
+        client.try_register(
+            &account,
+            &signed(&env, &oa(&v, BRIDGER)["register"][0]),
+            &bn::<96>(&env, &r["pkNative"]),
+            &bn::<192>(&env, &r["pop"]),
+            &0,
+            &DEADLINE,
         ),
-        Err(Ok(RegistryError::NotRegistered))
+        Err(Ok(RegistryError::BadNonce))
     );
+    // the maker's Stellar path too
+    let maker = bn::<32>(&env, &reg(&v, "makerOnStellarTestnet")["account"]);
+    client.revoke(&maker, &OwnerAuth::Stellar(maker_owner(&env, &v)), &0);
+    assert_eq!(client.nonce_of(&maker), 1);
 }
 
 // =============================================================================
@@ -411,6 +495,7 @@ fn revoke_blocked_while_in_flight() {
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &0,
+        &DEADLINE,
     );
 
     let guard = env.register(MockGuard, ());
@@ -438,6 +523,7 @@ fn first_registration_ignores_busy_guards() {
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &0,
+        &DEADLINE,
     );
     assert_eq!(
         client.commitment_at(&account, &0),
@@ -463,7 +549,8 @@ fn pause_blocks_register_and_revoke_but_not_retirement() {
             &OwnerAuth::Stellar(owner.clone()),
             &bn::<96>(&env, &r1["pkNative"]),
             &bn::<192>(&env, &r1["pop"]),
-            &1
+            &1,
+            &DEADLINE
         ),
         Err(Ok(RegistryError::ContractPaused))
     );
@@ -551,6 +638,7 @@ fn sixth_slot_reverts_registry_full() {
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &5,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::RegistryFull))
     );
@@ -634,10 +722,11 @@ fn register_at_cap_keeps_a_dead_slot_while_in_flight_until_the_grace() {
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &5,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::RegistryFull))
     );
-    env.ledger().set_timestamp(T0 + 30 * 86_400 + 1);
+    env.ledger().set_timestamp(grace_ts(&v)); // past the 30-day grace, in registerLate's window
     assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
     assert_eq!(client.lookup(&account, &2), None);
 }
@@ -660,10 +749,11 @@ fn register_at_cap_no_guard_wired_keeps_a_dead_slot_until_the_grace() {
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &5,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::RegistryFull))
     );
-    env.ledger().set_timestamp(T0 + 30 * 86_400 + 1);
+    env.ledger().set_timestamp(grace_ts(&v)); // past the 30-day grace, in registerLate's window
     assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
     assert_eq!(client.lookup(&account, &2), None);
 }
@@ -705,6 +795,7 @@ fn in_grace_slot_is_not_pruned() {
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &5,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::RegistryFull))
     );
@@ -724,6 +815,7 @@ fn reused_key_rejected() {
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &0,
+        &DEADLINE,
     );
     assert_eq!(
         client.try_register(
@@ -732,6 +824,7 @@ fn reused_key_rejected() {
             &bn::<96>(&env, &rot["pkNative"]),
             &bn::<192>(&env, &rot["pop"]),
             &1,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::KeyPreviouslyUsed))
     );
@@ -752,6 +845,7 @@ fn reused_key_rejected_after_retirement() {
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &0,
+        &DEADLINE,
     );
     set_valid_until(&env, &client, &v, MAKER, 0, true);
     assert_eq!(
@@ -761,6 +855,7 @@ fn reused_key_rejected_after_retirement() {
             &bn::<96>(&env, &rot["pkNative"]),
             &bn::<192>(&env, &rot["pop"]),
             &1,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::KeyPreviouslyUsed))
     );
@@ -983,6 +1078,7 @@ fn t04_second_slot_needs_fresh_pop() {
             &bn::<96>(&env, &r1["pkNative"]),
             &bn::<192>(&env, &r0["pop"]), // slot-0 PoP
             &1,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::InvalidPop))
     );
@@ -1086,6 +1182,7 @@ fn sep53_fresh_signature_over_the_text_verifies() {
         &bn::<96>(&env, &r0["pkNative"]),
         &bn::<192>(&env, &r0["pop"]),
         &0,
+        &DEADLINE,
     );
     let e = &oa(&v, MAKER)["retire"][1]; // (key 0, graceTs)
     client.set_valid_until(
@@ -1238,6 +1335,7 @@ fn a_signature_naming_only_this_registry_registers() {
                 &bn::<96>(&env, &r["pkNative"]),
                 &bn::<192>(&env, &r["pop"]),
                 &0,
+                &DEADLINE,
             ),
             0
         );
@@ -1267,13 +1365,13 @@ fn a_signature_over_a_different_leg_set_is_refused() {
             let (pk, pop) = (bn::<96>(&env, &r["pkNative"]), bn::<192>(&env, &r["pop"]));
             if who == BRIDGER {
                 assert_eq!(
-                    client.try_register(&account, &auth, &pk, &pop, &0),
+                    client.try_register(&account, &auth, &pk, &pop, &0, &DEADLINE),
                     Err(Ok(RegistryError::OwnerMismatch))
                 );
             } else {
                 assert_crypto_trap(
                     || {
-                        client.register(&account, &auth, &pk, &pop, &0);
+                        client.register(&account, &auth, &pk, &pop, &0, &DEADLINE);
                     },
                     "sep53 over another leg set",
                 );
@@ -1296,6 +1394,7 @@ fn legs_without_the_own_leg_are_refused() {
                 &bn::<96>(&env, &r["pkNative"]),
                 &bn::<192>(&env, &r["pop"]),
                 &0,
+                &DEADLINE,
             ),
             Err(Ok(RegistryError::LegMismatch))
         );
@@ -1315,6 +1414,7 @@ fn the_own_leg_twice_is_refused() {
                 &bn::<96>(&env, &r["pkNative"]),
                 &bn::<192>(&env, &r["pop"]),
                 &0,
+                &DEADLINE,
             ),
             Err(Ok(RegistryError::LegMismatch))
         );
@@ -1364,6 +1464,7 @@ fn a_text_with_one_byte_changed_is_refused() {
                 &bn::<96>(&env, &r["pkNative"]),
                 &bn::<192>(&env, &r["pop"]),
                 &0,
+                &DEADLINE,
             );
         },
         "a one-byte-off text",
@@ -1384,6 +1485,7 @@ fn a_secp256k1_signature_on_an_ed25519_account_is_refused() {
             &bn::<96>(&env, &n["stellarTestnet"]["pkNative"]),
             &bn::<192>(&env, &n["stellarTestnet"]["pop"]),
             &0,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::OwnerMismatch))
     );
@@ -1403,7 +1505,8 @@ fn an_ed25519_signature_on_an_evm_account_is_refused() {
             &signed(&env, n),
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
-            &0
+            &0,
+            &DEADLINE
         ),
         Err(Ok(RegistryError::OwnerMismatch))
     );
@@ -1455,7 +1558,8 @@ fn reused_key_rejected_under_a_valid_signature() {
             &signed(&env, &oa(&v, MAKER)["reuseKey0AtNonce1"]),
             &bn::<96>(&env, &rot["pkNative"]),
             &bn::<192>(&env, &rot["pop"]),
-            &1
+            &1,
+            &DEADLINE
         ),
         Err(Ok(RegistryError::KeyPreviouslyUsed))
     );
@@ -1471,6 +1575,7 @@ fn message_of(env: &Env, e: &serde_json::Value) -> KeyMessage {
         "register" => KeyMessage::Register {
             fingerprint: fp(),
             nonce: 0,
+            deadline: e["deadline"].as_str().unwrap().parse().unwrap(),
         },
         "revoke" => KeyMessage::Revoke { nonce: 0 },
         _ => KeyMessage::Retire {
@@ -1482,11 +1587,11 @@ fn message_of(env: &Env, e: &serde_json::Value) -> KeyMessage {
 
 #[test]
 fn text_and_struct_hash_match_every_vector() {
-    let (env, _client, v) = setup();
+    let v = vectors();
     let mut entries = std::vec::Vec::new();
     for who in ["maker", "bridger"] {
         let a = &v["ownerAuth"][who];
-        for k in ["register", "revoke", "retire"] {
+        for k in ["register", "registerLate", "revoke", "retire"] {
             entries.extend(a[k].as_array().unwrap().iter().cloned());
         }
         for k in [
@@ -1494,6 +1599,9 @@ fn text_and_struct_hash_match_every_vector() {
             "onlySepoliaLeg",
             "onlyStellarLeg",
             "duplicateLegs",
+            "sameRegistryTwoNonces",
+            "revokeSameRegistryTwoNonces",
+            "otherEnv",
         ] {
             entries.push(a[k].clone());
         }
@@ -1503,16 +1611,41 @@ fn text_and_struct_hash_match_every_vector() {
     }
     assert!(entries.len() > 50);
     for e in &entries {
-        let account = bn::<32>(&env, &e["account"]);
-        let legs = legs_of(&env, e);
-        let msg = message_of(&env, e);
-        let text = owner::text(&env, &account, &legs, &msg);
-        let mut buf = std::vec![0u8; text.len() as usize];
-        text.copy_into_slice(&mut buf);
-        assert_eq!(std::str::from_utf8(&buf).unwrap(), text_of(e));
+        // each entry's text is rebuilt by a registry initialized for the entry's env (D3)
+        let (env, client, _) = setup_env(e["env"].as_str().unwrap());
+        env.as_contract(&client.address, || {
+            let account = bn::<32>(&env, &e["account"]);
+            let legs = legs_of(&env, e);
+            let msg = message_of(&env, e);
+            let text = owner::text(&env, &account, &legs, &msg);
+            let mut buf = std::vec![0u8; text.len() as usize];
+            text.copy_into_slice(&mut buf);
+            assert_eq!(std::str::from_utf8(&buf).unwrap(), text_of(e));
+            assert_eq!(
+                owner::struct_hash(&env, &account, &legs, &msg).to_vec(),
+                hexval(&e["structHash"])
+            );
+        });
+    }
+}
+
+/// D2: the Valid-until line's calendar arithmetic equals bls-encodings' utcText.
+#[test]
+fn utc_text_matches_the_vectors() {
+    let env = Env::default();
+    let v = vectors();
+    for (unix, want) in v["ownerAuth"]["_meta"]["deadline"]["utc"]
+        .as_object()
+        .unwrap()
+    {
+        let mut t = Bytes::new(&env);
+        owner::push_utc(&mut t, unix.parse().unwrap());
+        let mut buf = std::vec![0u8; t.len() as usize];
+        t.copy_into_slice(&mut buf);
         assert_eq!(
-            owner::struct_hash(&env, &account, &legs, &msg).to_vec(),
-            hexval(&e["structHash"])
+            std::str::from_utf8(&buf).unwrap(),
+            want.as_str().unwrap(),
+            "{unix}"
         );
     }
 }
@@ -1543,17 +1676,30 @@ fn constants_match_the_vectors() {
         owner::RETIRE_KEY_TYPEHASH.to_vec(),
         k(m["typeStrings"]["retireKey"].as_str().unwrap())
     );
-    let mut dom = std::vec::Vec::new();
-    dom.extend_from_slice(&proofbridge_core::eip712::DOMAIN_TYPEHASH_MIN);
-    dom.extend_from_slice(&k("ProofBridge Keys"));
-    dom.extend_from_slice(&k("2"));
-    let sep = env
-        .crypto()
-        .keccak256(&Bytes::from_slice(&env, &dom))
-        .to_array()
-        .to_vec();
-    assert_eq!(owner::KEYS_DOMAIN_SEPARATOR.to_vec(), sep);
-    assert_eq!(sep, hexval(&m["domainSeparator"]));
+    assert_eq!(client_domain(&env, &_client), hexval(&m["domainSeparator"]));
+    assert_eq!(_client.keys_env(), SString::from_str(&env, "testnet"));
+    // D3: each environment's separator, rebuilt here from the salt keccak256("proofbridge:" || env)
+    for name in ["local", "testnet", "mainnet"] {
+        let salt = k(&std::format!("proofbridge:{name}"));
+        assert_eq!(salt, hexval(&m["envs"][name]["salt"]));
+        let mut dom = std::vec::Vec::new();
+        dom.extend_from_slice(&k(m["domainType"].as_str().unwrap()));
+        dom.extend_from_slice(&k("ProofBridge Keys"));
+        dom.extend_from_slice(&k("2"));
+        dom.extend_from_slice(&salt);
+        let sep = env
+            .crypto()
+            .keccak256(&Bytes::from_slice(&env, &dom))
+            .to_array()
+            .to_vec();
+        assert_eq!(sep, hexval(&m["envs"][name]["domainSeparator"]));
+        let (e2, c2, _) = setup_env(name);
+        assert_eq!(client_domain(&e2, &c2), sep, "{name}");
+    }
+}
+
+fn client_domain(_env: &Env, client: &BlsKeyRegistryClient) -> std::vec::Vec<u8> {
+    client.domain_separator().to_array().to_vec()
 }
 
 /// D2: the padded 96-byte key hashes to the vector fingerprint, which is the EVM commitment.
@@ -1597,6 +1743,7 @@ fn a_fresh_secp256k1_signature_over_the_vector_digest_registers() {
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &2,
+        &DEADLINE,
     );
     assert_eq!(
         client.slot_of_key(&account, &fingerprint(&env, &v, BRIDGER, 2)),
@@ -1730,7 +1877,11 @@ fn read_and_write_entry_points_extend_the_instance_ttl() {
 fn initialize_twice_is_already_initialized() {
     let (env, client, _) = setup();
     assert_eq!(
-        client.try_initialize(&Address::generate(&env), &7),
+        client.try_initialize(
+            &Address::generate(&env),
+            &7,
+            &SString::from_str(&env, "testnet")
+        ),
         Err(Ok(RegistryError::AlreadyInitialized))
     );
     assert_eq!(client.chain_id(), CHAIN_ID);
@@ -1754,7 +1905,8 @@ fn an_uninitialized_registry_is_not_initialized() {
                 &owner,
                 &bn::<96>(&env, &r["pkNative"]),
                 &bn::<192>(&env, &r["pop"]),
-                &0
+                &0,
+                &DEADLINE
             )
             .err(),
         e
@@ -1772,4 +1924,229 @@ fn an_uninitialized_registry_is_not_initialized() {
             .err(),
         e
     );
+}
+
+// =============================================================================
+// 2.6 review: D1 (one secp256k1 rule), D2 (deadline), D3 (env), 50-2, 50-3
+// =============================================================================
+
+/// D1: every v / s form of the bridger's register[0] gets the verifiers' shared answer; a refusal
+/// is OwnerMismatch, never a host trap.
+#[test]
+fn secp_forms_accept_v_0_1_27_28_and_refuse_high_s() {
+    let v = vectors();
+    let forms = v["ownerAuth"]["secpForms"]["forms"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(forms.len() >= 8);
+    for f in forms {
+        let (env, client, _) = setup();
+        let e = &oa(&v, BRIDGER)["register"][0];
+        let r = slot_reg(&v, BRIDGER, 0);
+        let got = client.try_register(
+            &slot_account(&env, &v, BRIDGER),
+            &signed_with(
+                &env,
+                legs_of(&env, e),
+                OwnerSig::Secp256k1(bn::<65>(&env, &f["sig"])),
+            ),
+            &bn::<96>(&env, &r["pkNative"]),
+            &bn::<192>(&env, &r["pop"]),
+            &0,
+            &DEADLINE,
+        );
+        let name = f["name"].as_str().unwrap();
+        if f["expect"] == "accept" {
+            assert_eq!(got, Ok(Ok(0)), "{name}");
+        } else {
+            assert_eq!(got, Err(Ok(RegistryError::OwnerMismatch)), "{name}");
+        }
+    }
+}
+
+fn try_register0(
+    env: &Env,
+    client: &BlsKeyRegistryClient,
+    v: &serde_json::Value,
+    who: &str,
+    entry: &str,
+    deadline: u64,
+) -> Result<
+    Result<u32, soroban_sdk::ConversionError>,
+    Result<RegistryError, soroban_sdk::InvokeError>,
+> {
+    let r = slot_reg(v, who, 0);
+    let e = if entry == "register" {
+        oa(v, who)["register"][0].clone()
+    } else {
+        oa(v, who)[entry].clone()
+    };
+    client.try_register(
+        &slot_account(env, v, who),
+        &signed(env, &e),
+        &bn::<96>(env, &r["pkNative"]),
+        &bn::<192>(env, &r["pop"]),
+        &0,
+        &deadline,
+    )
+}
+
+/// D2: accepted from deadline − 7 days through the deadline, refused either side, for both schemes
+/// and for the require_auth path.
+#[test]
+fn register_deadline_window() {
+    let v = vectors();
+    assert_eq!(
+        v["ownerAuth"]["_meta"]["deadline"]["register"],
+        std::string::ToString::to_string(&DEADLINE)
+    );
+    assert_eq!(
+        v["ownerAuth"]["_meta"]["deadline"]["maxTtl"],
+        std::string::ToString::to_string(&MAX_TTL)
+    );
+    for who in [MAKER, BRIDGER] {
+        for (at, want) in [
+            (DEADLINE, Ok(Ok(0))),
+            (DEADLINE - MAX_TTL, Ok(Ok(0))),
+            (DEADLINE + 1, Err(Ok(RegistryError::DeadlineExpired))),
+            (
+                DEADLINE - MAX_TTL - 1,
+                Err(Ok(RegistryError::DeadlineTooFar)),
+            ),
+        ] {
+            let (env, client, _) = setup();
+            env.ledger().set_timestamp(at);
+            assert_eq!(
+                try_register0(&env, &client, &v, who, "register", DEADLINE),
+                want,
+                "{who} at {at}"
+            );
+        }
+    }
+    let (env, client, _) = setup();
+    let r = reg(&v, "makerOnStellarTestnet");
+    let (pk, pop) = (bn::<96>(&env, &r["pkNative"]), bn::<192>(&env, &r["pop"]));
+    let account = bn::<32>(&env, &r["account"]);
+    let owner = OwnerAuth::Stellar(maker_owner(&env, &v));
+    assert_eq!(
+        client.try_register(&account, &owner, &pk, &pop, &0, &(T0 - 1)),
+        Err(Ok(RegistryError::DeadlineExpired))
+    );
+    assert_eq!(
+        client.try_register(&account, &owner, &pk, &pop, &0, &(T0 + MAX_TTL + 1)),
+        Err(Ok(RegistryError::DeadlineTooFar))
+    );
+    // the deadline is inside the signature: a later one under the same signature is refused
+    let (env, client, _) = setup();
+    assert_eq!(
+        try_register0(&env, &client, &v, BRIDGER, "register", DEADLINE + 1),
+        Err(Ok(RegistryError::OwnerMismatch))
+    );
+}
+
+/// D3: a signature for another environment never applies; init refuses an unknown env.
+#[test]
+fn the_environment_is_bound() {
+    let v = vectors();
+    for who in [MAKER, BRIDGER] {
+        // secp256k1 refuses with OwnerMismatch; the host's ed25519 verify traps (no boolean form)
+        let refused = |got: &Result<
+            Result<u32, soroban_sdk::ConversionError>,
+            Result<RegistryError, soroban_sdk::InvokeError>,
+        >| {
+            if who == BRIDGER {
+                *got == Err(Ok(RegistryError::OwnerMismatch))
+            } else {
+                matches!(got, Err(Err(_)))
+            }
+        };
+        let (env, client, _) = setup_env("local");
+        let got = try_register0(&env, &client, &v, who, "register", DEADLINE);
+        assert!(
+            refused(&got),
+            "{who}: a testnet signature on a local registry: {got:?}"
+        );
+        let (env, client, _) = setup();
+        let got = try_register0(&env, &client, &v, who, "otherEnv", DEADLINE);
+        assert!(
+            refused(&got),
+            "{who}: a mainnet signature on a testnet registry: {got:?}"
+        );
+        let (env, client, _) = setup_env("mainnet");
+        assert_eq!(
+            try_register0(&env, &client, &v, who, "otherEnv", DEADLINE),
+            Ok(Ok(0)),
+            "{who}: mainnet on mainnet"
+        );
+    }
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = BlsKeyRegistryClient::new(&env, &env.register(BlsKeyRegistry, ()));
+    for bad in ["staging", "", "Testnet", "testnet2"] {
+        assert_eq!(
+            client.try_initialize(
+                &Address::generate(&env),
+                &CHAIN_ID,
+                &SString::from_str(&env, bad)
+            ),
+            Err(Ok(RegistryError::BadEnv)),
+            "{bad:?}"
+        );
+    }
+}
+
+/// 50-3: a leg list naming this registry twice is refused whatever the nonces, so a malformed
+/// RevokeKeys cannot be replayed after the nonce moves.
+#[test]
+fn a_registry_named_twice_is_refused_at_either_nonce() {
+    let v = vectors();
+    for who in [MAKER, BRIDGER] {
+        let (env, client, _) = setup();
+        assert_eq!(
+            try_register0(&env, &client, &v, who, "sameRegistryTwoNonces", DEADLINE),
+            Err(Ok(RegistryError::LegMismatch)),
+            "{who}"
+        );
+        let account = slot_account(&env, &v, who);
+        let revoke = signed(&env, &oa(&v, who)["revokeSameRegistryTwoNonces"]);
+        assert_eq!(
+            client.try_revoke(&account, &revoke, &0),
+            Err(Ok(RegistryError::LegMismatch))
+        );
+        register_slot(&env, &client, &v, who, 0); // nonce 0 -> 1
+        assert_eq!(
+            client.try_revoke(&account, &revoke, &1),
+            Err(Ok(RegistryError::LegMismatch))
+        );
+    }
+}
+
+/// 50-2: the unlock read keeps the fingerprint row alive with the slot, so a retirement long after
+/// registration needs no restore.
+#[test]
+fn commitment_at_extends_the_keyslot_row() {
+    use proofbridge_core::ttl::{PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD};
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    let fp = fingerprint(&env, &v, MAKER, 0);
+    let ttl = || {
+        env.as_contract(&client.address, || {
+            storage::key_slot_ttl(&env, &account, &fp)
+        })
+    };
+    // age the row below the bump threshold, keeping the instance alive on the way
+    while ttl() >= PERSISTENT_LIFETIME_THRESHOLD {
+        let by = (ttl() - PERSISTENT_LIFETIME_THRESHOLD + 1).min(400_000);
+        env.ledger().with_mut(|l| l.sequence_number += by);
+        client.has_usable_slot(&account);
+    }
+    client.commitment_at(&account, &0);
+    assert_eq!(
+        ttl(),
+        PERSISTENT_BUMP_AMOUNT,
+        "commitment_at did not extend the keyslot row"
+    );
+    set_valid_until(&env, &client, &v, MAKER, 0, true);
 }

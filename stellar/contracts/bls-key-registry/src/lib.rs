@@ -15,11 +15,11 @@ mod storage;
 use soroban_sdk::{
     bytesn, contract, contractclient, contractimpl,
     crypto::bls12_381::{Bls12381G1Affine as G1Affine, Bls12381G2Affine as G2Affine},
-    vec, Address, Bytes, BytesN, ContractExecutable, Env, Vec,
+    vec, Address, Bytes, BytesN, ContractExecutable, Env, String, Vec,
 };
 
 use errors::RegistryError;
-use owner::{check_owner, key_fingerprint, KeyMessage};
+use owner::{check_owner, key_fingerprint, keys_domain_separator, KeyMessage, MAX_REGISTER_TTL};
 pub use owner::{KeyLeg, OwnerAuth, OwnerSig, SignedOwner};
 use proofbridge_core::cross_contract::{self, VerifierClient, LEAF_DOMAIN_REGISTERED};
 use proofbridge_core::eip712::contract_address_to_bytes32;
@@ -49,15 +49,29 @@ pub struct BlsKeyRegistry;
 
 #[contractimpl]
 impl BlsKeyRegistry {
-    pub fn initialize(env: Env, admin: Address, chain_id: u128) -> Result<(), RegistryError> {
+    /// `deploy_env` (local / testnet / mainnet) salts the key messages' domain and names the
+    /// Network line (2.6 review D3): a signature for one environment never applies in another.
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        chain_id: u128,
+        deploy_env: String,
+    ) -> Result<(), RegistryError> {
         if storage::is_initialized(&env) {
             return Err(RegistryError::AlreadyInitialized);
         }
+        let domain = keys_domain_separator(&env, &deploy_env)?;
         storage::set_initialized(&env);
         storage::set_admin(&env, &admin);
         storage::set_chain_id(&env, chain_id);
+        storage::set_keys_env(&env, &deploy_env, &domain);
         proofbridge_core::ttl::extend_instance(&env);
-        events::Initialized { admin, chain_id }.publish(&env);
+        events::Initialized {
+            admin,
+            chain_id,
+            deploy_env,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -171,12 +185,21 @@ impl BlsKeyRegistry {
         bls_pub_key: BytesN<96>,
         pop: BytesN<192>,
         nonce: u64,
+        deadline: u64,
     ) -> Result<u32, RegistryError> {
         if !storage::is_initialized(&env) {
             return Err(RegistryError::NotInitialized);
         }
         if storage::is_paused(&env) {
             return Err(RegistryError::ContractPaused);
+        }
+        // D2: refused past the deadline, and when the deadline sits more than 7 days out.
+        let now = env.ledger().timestamp();
+        if now > deadline {
+            return Err(RegistryError::DeadlineExpired);
+        }
+        if deadline - now > MAX_REGISTER_TTL {
+            return Err(RegistryError::DeadlineTooFar);
         }
         if nonce != storage::get_nonce(&env, &account) {
             return Err(RegistryError::BadNonce);
@@ -195,6 +218,7 @@ impl BlsKeyRegistry {
             KeyMessage::Register {
                 fingerprint: fingerprint.clone(),
                 nonce,
+                deadline,
             },
         )?;
 
@@ -348,7 +372,8 @@ impl BlsKeyRegistry {
         Ok(())
     }
 
-    /// Leaves the protocol: drops every slot. Still guarded (t1-design §1.8).
+    /// Leaves the protocol: drops every slot, guarded (t1-design §1.8). With no slots here it only
+    /// bumps the nonce, killing every outstanding signature at this registry (2.6 review D2).
     pub fn revoke(
         env: Env,
         account: BytesN<32>,
@@ -362,13 +387,12 @@ impl BlsKeyRegistry {
             return Err(RegistryError::ContractPaused);
         }
         let mut entry = storage::get_entry(&env, &account);
-        if entry.live.is_empty() {
-            return Err(RegistryError::NotRegistered);
-        }
         if nonce != storage::get_nonce(&env, &account) {
             return Err(RegistryError::BadNonce);
         }
-        require_no_open_positions(&env, &account)?;
+        if !entry.live.is_empty() {
+            require_no_open_positions(&env, &account)?;
+        }
         check_owner(&env, &account, owner, KeyMessage::Revoke { nonce })?;
 
         for slot_id in entry.live.iter() {
@@ -394,7 +418,7 @@ impl BlsKeyRegistry {
         if slot.valid_until != 0 && env.ledger().timestamp() >= slot.valid_until {
             return Err(RegistryError::SlotExpired);
         }
-        storage::touch(&env, &account, slot_id);
+        storage::touch(&env, &account, slot_id, &slot.fingerprint);
         // C-13: the verifier reads this on every unlock; an idle registry must not archive.
         proofbridge_core::ttl::extend_instance(&env);
         Ok(slot.commitment)
@@ -461,6 +485,16 @@ impl BlsKeyRegistry {
 
     pub fn chain_id(env: Env) -> u128 {
         storage::get_chain_id(&env)
+    }
+
+    /// The environment the registry was initialized for (D3).
+    pub fn keys_env(env: Env) -> String {
+        storage::get_keys_env(&env)
+    }
+
+    /// The key messages' EIP-712 domain separator, salted with the environment (D3).
+    pub fn domain_separator(env: Env) -> BytesN<32> {
+        storage::get_domain(&env)
     }
 
     pub fn admin(env: Env) -> Address {
@@ -542,6 +576,7 @@ fn add_slot(
             commitment: commitment.clone(),
             valid_until: 0,
             registered_at: env.ledger().timestamp(),
+            fingerprint: fingerprint.clone(),
         },
     );
     storage::set_entry(env, account, &entry);
