@@ -70,8 +70,9 @@ pub struct BondRouted {
     pub returned_to_filer: bool,
 }
 
-#[contractevent(topics = ["pay_cred"], data_format = "vec")]
-pub struct PayoutCredited {
+/// A bond payout the token refused, credited for `claim`. 49E-1: not the escrow's `pay_cred`.
+#[contractevent(topics = ["bond_cred"], data_format = "vec")]
+pub struct BondCredited {
     #[topic]
     pub recipient: Address,
     pub amount: u128,

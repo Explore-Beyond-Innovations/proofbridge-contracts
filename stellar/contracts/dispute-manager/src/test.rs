@@ -868,6 +868,37 @@ fn the_bond_claim_event_has_its_own_topic() {
     assert!(!firsts.contains(&sym("pay_clm")), "{firsts:?}");
 }
 
+/// 49E-1 twin: a credited bond payout's topic is `bond_cred`, never the escrow's `pay_cred`.
+#[test]
+fn the_bond_credit_event_has_its_own_topic() {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
+    let f = fixture();
+    let h = hash(&f.env, 61);
+    let bond = file(&f, &h, 1_000);
+    // Drain the module so the payout is refused and credited instead.
+    TokenContractClient::new(&f.env, &f.token).transfer(
+        &f.client.address,
+        &Address::generate(&f.env),
+        &(bond as i128),
+    );
+    f.client
+        .settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false);
+    // `events().all()` holds the last invocation only, so read them before any other call.
+    let got = f.env.events().all().filter_by_contract(&f.client.address);
+    let firsts: std::vec::Vec<ScVal> = got
+        .events()
+        .iter()
+        .map(|e| match &e.body {
+            ContractEventBody::V0(b) => b.topics[0].clone(),
+        })
+        .collect();
+    let sym = |s: &str| ScVal::Symbol(ScSymbol(s.try_into().unwrap()));
+    assert!(firsts.contains(&sym("bond_cred")), "{firsts:?}");
+    assert!(!firsts.contains(&sym("pay_cred")), "{firsts:?}");
+    assert_eq!(f.client.claimable(&f.filer), bond, "credited");
+}
+
 /// Error drift: every code the escrows relay is the same number here and in `proofbridge-core`.
 #[test]
 fn relayed_error_codes_match_the_shared_definitions() {

@@ -487,7 +487,7 @@ impl DisputeManagerContract {
         }
         let owed = storage::get_claimable(env, to);
         storage::set_claimable(env, to, owed + amount);
-        events::PayoutCredited {
+        events::BondCredited {
             recipient: to.clone(),
             amount,
         }
