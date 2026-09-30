@@ -581,26 +581,58 @@
   },
   "ownerAuth": {
     "_meta": {
-      "spec": "docs/engineering/t2/2.6-build/13-owner-signature-unification.md D1–D5",
+      "spec": "docs/engineering/t2/2.6-build/13-owner-signature-unification.md D1–D5, amended by review D1–D3",
+      "env": "testnet",
+      "domainType": "EIP712Domain(string name,string version,bytes32 salt)",
       "domain": {
         "name": "ProofBridge Keys",
-        "version": "2"
+        "version": "2",
+        "salt": "0xfd7d76e497f6a375ab444422d2a39195d3c8de4542b0199067543b27f1a1d0e0"
       },
-      "domainSeparator": "0x6090028e5b0120e79805d81c40093f9c6fdd238807b4ad0268ba2ebcf2e0fcef",
+      "domainSeparator": "0xcc869df6e0e307988f83e7827d13e328a06963ee96ad55660bb6be9e0df344b8",
+      "envs": {
+        "local": {
+          "salt": "0xd656fbe9a4ab530e933db662c08a54ffb719bf15ab7e865deda338e9fbf25525",
+          "domainSeparator": "0xa133b48859649284b46638358f68704581e3a10ba6f4be7c83450b8695f645a4"
+        },
+        "testnet": {
+          "salt": "0xfd7d76e497f6a375ab444422d2a39195d3c8de4542b0199067543b27f1a1d0e0",
+          "domainSeparator": "0xcc869df6e0e307988f83e7827d13e328a06963ee96ad55660bb6be9e0df344b8"
+        },
+        "mainnet": {
+          "salt": "0xf3b6b36e3a067d7f53232431043ccbaece0d105f8cb49392566359a528552ebd",
+          "domainSeparator": "0x04338e6af40f84625f7b0a3ca54c8077b89aade401063c55efb64fb61142925a"
+        }
+      },
+      "deadline": {
+        "rule": "RegisterKey only: refused when chain time > deadline, or deadline > chain time + maxTtl; clients default to defaultTtl",
+        "maxTtl": "604800",
+        "defaultTtl": "259200",
+        "register": "1700259200",
+        "registerChainTime": "1700000000",
+        "registerLate": "2000259200",
+        "registerLateChainTime": "2000000000",
+        "utc": {
+          "0": "1970-01-01 00:00:00 UTC",
+          "951782400": "2000-02-29 00:00:00 UTC",
+          "1700259200": "2023-11-17 22:13:20 UTC",
+          "4102444799": "2099-12-31 23:59:59 UTC"
+        }
+      },
       "typeStrings": {
         "keyLeg": "KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)",
-        "registerKey": "RegisterKey(bytes32 account,bytes32 keyCommitment,KeyLeg[] legs)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)",
+        "registerKey": "RegisterKey(bytes32 account,bytes32 keyCommitment,KeyLeg[] legs,uint64 deadline)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)",
         "revokeKeys": "RevokeKeys(bytes32 account,KeyLeg[] legs)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)",
         "retireKey": "RetireKey(bytes32 account,bytes32 keyCommitment,uint64 validUntil)"
       },
       "typehashes": {
         "keyLeg": "0xfa75af9d4f7f233233f7046e929ef40cd6d17ee3c0f579aeae91b2c8697b9599",
-        "registerKey": "0x964f6fa8c466cc4acced70ddab5ed704a8ca7f71579105427f0fea9d5710b3dd",
+        "registerKey": "0x86b4f5a5d0735e9a7a9eb9dfa32f81364b1602f5098d95182da506eef7027c92",
         "revokeKeys": "0xd2cc9644d4c5bccccd706cafc58d84449d6f6d113297aa878f49d24ac672a825",
         "retireKey": "0x1abc6df038c182ce0998121f306e7bd9a9f4b4a010fc40d909308c8e77cb90fd"
       },
       "text": "lines joined by \\n, no trailing newline; SEP-53 payload = sha256(\"Stellar Signed Message:\\n\" || text)",
-      "layout": "register[i]: slots key i at nonce i on both legs (one signature, both registries); revoke[n]: both legs at nonce n; retire[i*2 + (validUntil==1 ? 0 : 1)]: key i, validUntil 1 or slots.graceTs",
+      "layout": "register[i]: slots key i at nonce i on both legs (one signature, both registries), deadline _meta.deadline.register; registerLate[i]: the same with deadline _meta.deadline.registerLate; revoke[n]: both legs at nonce n; retire[i*2 + (validUntil==1 ? 0 : 1)]: key i, validUntil 1 or slots.graceTs",
       "sigs": "secp256k1: sig = r||s||v (65 B) on both registries. sep53: sig = the bare 64 B (Soroban), evmSig = abi.encode(r, s, edX, edY) (EVM)"
     },
     "maker": {
@@ -609,8 +641,10 @@
       "register": [
         {
           "kind": "register",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de",
+          "deadline": "1700259200",
           "legs": [
             {
               "chainId": "11155111",
@@ -623,18 +657,20 @@
               "nonce": "0"
             }
           ],
-          "structHash": "0x8dc98bba1b5d3678030dd96d4033c6cb7de01a367a48fb38ffd95d67a555451b",
-          "digest": "0x88f8a48c7923fc62e0b40ecc83408a2b6c1cdca3efac2644c94861ff16e3e345",
-          "text": "ProofBridge: register a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
-          "sep53Payload": "0x4f5834dda95a489ed1f4226b96c230b0e3f4bcf8db1fb8c1ab029b98ca8553d8",
+          "structHash": "0x65193b0fb9589991bb72d1077f2b6d846c9213b142c20b7c023864678d62453c",
+          "digest": "0x232d73926b2b48f75139493b275148b3e76a6f1d737ec405957f13c3434e502c",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+          "sep53Payload": "0x5f433ca44c43d20f76ed87b8298a2713c0981ff8d21b5fd194dc764e553501e8",
           "scheme": "sep53",
-          "sig": "0xff37f8abe34bddd20f3d2e9868cb3694605aefe2df206ebf3ed6f4c7016e7774a5576b77806d8c943ef83fc1c8bd37802513d6572e18043bccf3cad12473c208",
-          "evmSig": "0xff37f8abe34bddd20f3d2e9868cb3694605aefe2df206ebf3ed6f4c7016e7774a5576b77806d8c943ef83fc1c8bd37802513d6572e18043bccf3cad12473c208615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0xdb120124a1a0bc45e8aadeb89a615e71f8648d5c8fbf942eeafcf0ee6ec42044090bd6a8d9ee73b1a9d4929fa6d871f550578b2ee94252b014867c8ddfeba80b",
+          "evmSig": "0xdb120124a1a0bc45e8aadeb89a615e71f8648d5c8fbf942eeafcf0ee6ec42044090bd6a8d9ee73b1a9d4929fa6d871f550578b2ee94252b014867c8ddfeba80b615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "register",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0xc50cd3b0fe55d760fd8eb27b2939b5e76cb23ea14cd91fe8a691d1bf277ef1a6",
+          "deadline": "1700259200",
           "legs": [
             {
               "chainId": "11155111",
@@ -647,18 +683,20 @@
               "nonce": "1"
             }
           ],
-          "structHash": "0x4851bcde1f4c0a2f90a779e74d0411b2fc83759ba9dd3472dede99c6cb22a31f",
-          "digest": "0xb0362fc0209feff42b3a4b443e0b953a65ff75a0d0cd698d89b5eda1156c41d1",
-          "text": "ProofBridge: register a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0xc50cd3b0fe55d760fd8eb27b2939b5e76cb23ea14cd91fe8a691d1bf277ef1a6\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
-          "sep53Payload": "0xa86740524cd1098d4ca54c1e23ecc8bffad7057e608feac6a937957f0c384d28",
+          "structHash": "0x3253d8dc234370fe7c72f89f7bcad25708dd1962b485813b5cd0ef5186b701f8",
+          "digest": "0x0c25ccd546831d47ea4fe72548d3bd9af5142cf6648af5294704b54f323b7b90",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0xc50cd3b0fe55d760fd8eb27b2939b5e76cb23ea14cd91fe8a691d1bf277ef1a6\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+          "sep53Payload": "0xce9e6a98d457b5d846c006610b00c76156c5fd648355efc27fdd8d1b4b57111e",
           "scheme": "sep53",
-          "sig": "0x66f8e4f8b91e58a03bfea445583d65cc9517982fadbf9a33ae24c6c976969709eba443ff2bf515c7a2605c61e0516395d3e4b53cadba6cd2d4fd3706d603bf0d",
-          "evmSig": "0x66f8e4f8b91e58a03bfea445583d65cc9517982fadbf9a33ae24c6c976969709eba443ff2bf515c7a2605c61e0516395d3e4b53cadba6cd2d4fd3706d603bf0d615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0xa4709dd9e69f377cec6265896f8ca1fc70e2c3237127ee687113f5f3d06b2c23063a7131795aa2336e99a4643c7fbf9f5d60dd6ad51abf78c352b20af55f4b0e",
+          "evmSig": "0xa4709dd9e69f377cec6265896f8ca1fc70e2c3237127ee687113f5f3d06b2c23063a7131795aa2336e99a4643c7fbf9f5d60dd6ad51abf78c352b20af55f4b0e615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "register",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0xad77e742adc93df30ce4fcca1a2d0c922fe1f86cd9ecd53140ae80515b85fea6",
+          "deadline": "1700259200",
           "legs": [
             {
               "chainId": "11155111",
@@ -671,18 +709,20 @@
               "nonce": "2"
             }
           ],
-          "structHash": "0x80fa041f8c8b50b900cbe7eb2f05ca0678ac90506685425231766683f5c4b8bc",
-          "digest": "0x119d93942119af5f7c038d1ec07f9f73cc7c1d795713870946fc911499082258",
-          "text": "ProofBridge: register a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0xad77e742adc93df30ce4fcca1a2d0c922fe1f86cd9ecd53140ae80515b85fea6\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 2\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 2",
-          "sep53Payload": "0x99d825c7d0fcd1facd9d4bf24655c67a2f5de32729693799bde5452f3d458036",
+          "structHash": "0x08a67843bf6f5378646ca657d01edd6848583d3098ef1322880c352535c7de50",
+          "digest": "0xc218b6870c3a2bc45d1369abece4a8091343bcf84f7ca6310a48bb0f9bea0bc6",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0xad77e742adc93df30ce4fcca1a2d0c922fe1f86cd9ecd53140ae80515b85fea6\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 2\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 2",
+          "sep53Payload": "0x9d16e8f740e0257929f06c7f47a6e77ea565a7529c7b90d0b95fb46aaca95116",
           "scheme": "sep53",
-          "sig": "0x5ed4d946dd65803bbc2e7eb00bcc357b806544c23f53b228596aed2351f535273def45d78300768e9bbbe348a63552c22efb2f9143d30c55bc1c15b14a02050c",
-          "evmSig": "0x5ed4d946dd65803bbc2e7eb00bcc357b806544c23f53b228596aed2351f535273def45d78300768e9bbbe348a63552c22efb2f9143d30c55bc1c15b14a02050c615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0xd25cb599f55afcdd18c345c6e2460eb36107a58a345556e6da7648e9eaee18877ddf2e307f5af63776d7cbbc40a86d5d2f581e3e702aea96e6f02869629de10f",
+          "evmSig": "0xd25cb599f55afcdd18c345c6e2460eb36107a58a345556e6da7648e9eaee18877ddf2e307f5af63776d7cbbc40a86d5d2f581e3e702aea96e6f02869629de10f615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "register",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0x3e81f79046810dd346646225d4feb82aa654e6180f08794000ffcc7e86a12a8a",
+          "deadline": "1700259200",
           "legs": [
             {
               "chainId": "11155111",
@@ -695,18 +735,20 @@
               "nonce": "3"
             }
           ],
-          "structHash": "0xd163b46b38dea51d264366d69c081a8366b177ea5aa957b736ca9a0c395debf9",
-          "digest": "0x0917fa906941ba8ee79afb5e5cd92a04760b683d1f55e9ffb93d4b52501ebc04",
-          "text": "ProofBridge: register a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x3e81f79046810dd346646225d4feb82aa654e6180f08794000ffcc7e86a12a8a\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 3\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 3",
-          "sep53Payload": "0xc76e18a3be48e5001ff8ae83ee500455c9acb3b8e88645b2befd74f6ac81091f",
+          "structHash": "0x8de90296e14d12466c80599b13998d7a6a43c7ae1cb09958750212d5b0bad886",
+          "digest": "0x4d0cc388d7f0f4b04b697551980c8bf6bdfe9ec72344646ed5628b42ec2f04c4",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x3e81f79046810dd346646225d4feb82aa654e6180f08794000ffcc7e86a12a8a\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 3\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 3",
+          "sep53Payload": "0x5cb17b6cab9492c1a0b0b9244972dcdc309b116f16d398bd1ee1b169fc27e24c",
           "scheme": "sep53",
-          "sig": "0x1e40c040d1a9328db40e4d1b82f227115b13a918903393132611a6bebf34ab9c0675531fdba15643b2ab4a09386d3975ce8b2ecccf89720bcc1ba56ec238fa0c",
-          "evmSig": "0x1e40c040d1a9328db40e4d1b82f227115b13a918903393132611a6bebf34ab9c0675531fdba15643b2ab4a09386d3975ce8b2ecccf89720bcc1ba56ec238fa0c615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x45586b10fc8f5522a14f8bca9683f0a16092637d50147bcd0310c3bf9038a2684ed8100ee834a56f6903df7cf38bdd1ffceaf72e1d3473e9cbbbd0e2d84c1600",
+          "evmSig": "0x45586b10fc8f5522a14f8bca9683f0a16092637d50147bcd0310c3bf9038a2684ed8100ee834a56f6903df7cf38bdd1ffceaf72e1d3473e9cbbbd0e2d84c1600615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "register",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0x6ac32b759134e0bfcd62809dd72fb78c932837b956fb98dc0e721363581aa949",
+          "deadline": "1700259200",
           "legs": [
             {
               "chainId": "11155111",
@@ -719,18 +761,20 @@
               "nonce": "4"
             }
           ],
-          "structHash": "0xc03feca639bc91461fd148c82da5df15ae3f3fb15f1e1830a348da6758e0455f",
-          "digest": "0xbcbd29147062b2bd930bf97173f07081dca7ac5efe1969c8f4fe28d32cfb9572",
-          "text": "ProofBridge: register a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x6ac32b759134e0bfcd62809dd72fb78c932837b956fb98dc0e721363581aa949\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 4\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 4",
-          "sep53Payload": "0x2de0570ded8af883e3a46f4515374a065bdbca40752faefd6e35650040366ec9",
+          "structHash": "0xd6770a5a6b29128fb4cd55480b81806cf706095052497d2bd29b2641a8d2fa76",
+          "digest": "0xaf672ed8d4b61d24be28d3860e61cc89a610bbe394e65ed9567362f50e4cf3b2",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x6ac32b759134e0bfcd62809dd72fb78c932837b956fb98dc0e721363581aa949\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 4\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 4",
+          "sep53Payload": "0xabca55b491097a9ebe13eab9f21864423435c00f180063c0092bba4d869e638e",
           "scheme": "sep53",
-          "sig": "0xc3546e878b449b1abe5086b5d8320c21717b026dfccb98132a68b357d468fd71401f258842e3b24890b0c8b21bf1a06801b2315b554edabfbf124fad66994201",
-          "evmSig": "0xc3546e878b449b1abe5086b5d8320c21717b026dfccb98132a68b357d468fd71401f258842e3b24890b0c8b21bf1a06801b2315b554edabfbf124fad66994201615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x1938a3dfcab8d3b2f5012c689e97374b3f6c6f62a407fbbfa5380540cdbaa82f310f782ab5002ab8d22ea037f756e7b5afdc91992d7a2423838d9dec5d0a8a0b",
+          "evmSig": "0x1938a3dfcab8d3b2f5012c689e97374b3f6c6f62a407fbbfa5380540cdbaa82f310f782ab5002ab8d22ea037f756e7b5afdc91992d7a2423838d9dec5d0a8a0b615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "register",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0x7adf91235f102230db5457ac75ec1d3481e8c786cdabcb9de14e77f9c6183380",
+          "deadline": "1700259200",
           "legs": [
             {
               "chainId": "11155111",
@@ -743,18 +787,177 @@
               "nonce": "5"
             }
           ],
-          "structHash": "0x2cf6d978815e7407cacc668d20667a20b8ceda73a00d2708d22db6d6d44b1d09",
-          "digest": "0x096adef0ff580824b9f2b3f78f0410494a47d18382505852a78ddee2720db670",
-          "text": "ProofBridge: register a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x7adf91235f102230db5457ac75ec1d3481e8c786cdabcb9de14e77f9c6183380\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 5\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 5",
-          "sep53Payload": "0xe8dabe48244e153a0781c96aeab4c94a6fb4aee6ebbf1aa22ea3d6ef11682d28",
+          "structHash": "0xc10d79251193d7a3fb142c17aedac671ce92d836f9abbfe29ba06b2eb1de9382",
+          "digest": "0xefada7d763dfdc86323805d2ca6569bdb8a8156697e28d47d1cbdb18c596eb39",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x7adf91235f102230db5457ac75ec1d3481e8c786cdabcb9de14e77f9c6183380\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 5\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 5",
+          "sep53Payload": "0xcd216927dc82a27cd31ef9ee3395d06c6d6ea7e5dc6aa28feafffae1d0b38ad0",
           "scheme": "sep53",
-          "sig": "0x9b65568b486998a5d49b120537e45086cd4baabf5710c9d286a2de8501c1f5ffc765529d1515e7151e42590912a44a356e029b395e70a0253a3a2f75bded330b",
-          "evmSig": "0x9b65568b486998a5d49b120537e45086cd4baabf5710c9d286a2de8501c1f5ffc765529d1515e7151e42590912a44a356e029b395e70a0253a3a2f75bded330b615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x55972122a021d2993d01fa2fa70712b11d2a933757d4b53577cd42d06b79df0befc9bbc25c581f9d74a675868bde0ff0cb74ceda45828c4db4f5d54a5b0dbd0d",
+          "evmSig": "0x55972122a021d2993d01fa2fa70712b11d2a933757d4b53577cd42d06b79df0befc9bbc25c581f9d74a675868bde0ff0cb74ceda45828c4db4f5d54a5b0dbd0d615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        }
+      ],
+      "registerLate": [
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+          "keyCommitment": "0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de",
+          "deadline": "2000259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "0"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "0"
+            }
+          ],
+          "structHash": "0xc7868597b3c99949ce17171a3f580b229f0f9ef93e9ced485e62714d8ed4f58a",
+          "digest": "0x0fd0b2ea1fdca3840cf4017b54c3b80220969947530248c7fb283b0c726ac34f",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\nValid until: 2033-05-21 03:33:20 UTC (2000259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+          "sep53Payload": "0xc8c29cf3cd986f384403222ed7792464fd92e115eb3b92879994f49856bb0fc5",
+          "scheme": "sep53",
+          "sig": "0xb4140d3bffee25e100210100c4e44bc72c8db63536d653e39bf49f6cc252e26ea6290106c76f81aa16c86edbf3065e92eb39324f63a20fc339ca8157c0fd1e0f",
+          "evmSig": "0xb4140d3bffee25e100210100c4e44bc72c8db63536d653e39bf49f6cc252e26ea6290106c76f81aa16c86edbf3065e92eb39324f63a20fc339ca8157c0fd1e0f615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        },
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+          "keyCommitment": "0xc50cd3b0fe55d760fd8eb27b2939b5e76cb23ea14cd91fe8a691d1bf277ef1a6",
+          "deadline": "2000259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "1"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "1"
+            }
+          ],
+          "structHash": "0xce0cc63578ad7f755ccc7e86f315e5cd51ae793274e1e4759ab7e3519a1c0ddc",
+          "digest": "0x94f74700791920d25032ed746450379719ab2518b5e7fba2eca16258024ae960",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0xc50cd3b0fe55d760fd8eb27b2939b5e76cb23ea14cd91fe8a691d1bf277ef1a6\nValid until: 2033-05-21 03:33:20 UTC (2000259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+          "sep53Payload": "0x125c572a0baa35f5c0f7d794df58353a6d3722128aa6bdf664dcaa09fe95c769",
+          "scheme": "sep53",
+          "sig": "0x1fbd32646c9d1cb3dc20c43a02929a96fe094d33177bb29b9b1eab867492570f23d93f60ac96f15abaac79a3767432031cee3314eaed81597876b99d85f49f08",
+          "evmSig": "0x1fbd32646c9d1cb3dc20c43a02929a96fe094d33177bb29b9b1eab867492570f23d93f60ac96f15abaac79a3767432031cee3314eaed81597876b99d85f49f08615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        },
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+          "keyCommitment": "0xad77e742adc93df30ce4fcca1a2d0c922fe1f86cd9ecd53140ae80515b85fea6",
+          "deadline": "2000259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "2"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "2"
+            }
+          ],
+          "structHash": "0x2ecf3f7178ea8be25adfa189721b8cf8bbda24a484feed5ecf63caf06a86eae0",
+          "digest": "0x7a78b025beea701b877ac260ce6a8da992eff29e707548c78472a4a6eba11d94",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0xad77e742adc93df30ce4fcca1a2d0c922fe1f86cd9ecd53140ae80515b85fea6\nValid until: 2033-05-21 03:33:20 UTC (2000259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 2\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 2",
+          "sep53Payload": "0x560775050dee9c61994debbe7922d31cd5d027e2f8d807d15f24392a26f8680d",
+          "scheme": "sep53",
+          "sig": "0xb1fc44ff088fd50110d93e9b9336946280cb6339cfac53b30f63f6035b2b3dd4f7d94fcb74506007ea24e501ed68c859366e9ca3e55fb02c8ae842ece671f103",
+          "evmSig": "0xb1fc44ff088fd50110d93e9b9336946280cb6339cfac53b30f63f6035b2b3dd4f7d94fcb74506007ea24e501ed68c859366e9ca3e55fb02c8ae842ece671f103615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        },
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+          "keyCommitment": "0x3e81f79046810dd346646225d4feb82aa654e6180f08794000ffcc7e86a12a8a",
+          "deadline": "2000259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "3"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "3"
+            }
+          ],
+          "structHash": "0x063695fea4daf46488d4aacb00bfeb3218933651df1bb71ec5b9328d6bba8aea",
+          "digest": "0xafc2d9bdf0b282f1937f160a30499684b270d380b0959ba99acf522d59dd6a90",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x3e81f79046810dd346646225d4feb82aa654e6180f08794000ffcc7e86a12a8a\nValid until: 2033-05-21 03:33:20 UTC (2000259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 3\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 3",
+          "sep53Payload": "0xd9a9853b64abf0a588b5d85293bfbe3a5e0610f3849a243e36b1d381d5e1a32c",
+          "scheme": "sep53",
+          "sig": "0xf571bdc0d4f070cbd224732f1a4e7b3de59e1fe707ac7b7c5267949d7f24026640506f62ebbccd189d4aa9bfc96a3e6c6fe75724d5f6439a14d2a26e2412010c",
+          "evmSig": "0xf571bdc0d4f070cbd224732f1a4e7b3de59e1fe707ac7b7c5267949d7f24026640506f62ebbccd189d4aa9bfc96a3e6c6fe75724d5f6439a14d2a26e2412010c615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        },
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+          "keyCommitment": "0x6ac32b759134e0bfcd62809dd72fb78c932837b956fb98dc0e721363581aa949",
+          "deadline": "2000259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "4"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "4"
+            }
+          ],
+          "structHash": "0x891d7c8836cce88de6d91f2ee6979ab365837cd9c1b8fbb6e2805145f3dc02de",
+          "digest": "0x9ddd6a0268a216af7767f8a61d65d42fde0c42ee64bca116190a4b8f7ca846ea",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x6ac32b759134e0bfcd62809dd72fb78c932837b956fb98dc0e721363581aa949\nValid until: 2033-05-21 03:33:20 UTC (2000259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 4\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 4",
+          "sep53Payload": "0x072653261c7a91b644f4cb3747c576f72db3af629e4944ebac24cbdf12f71cf8",
+          "scheme": "sep53",
+          "sig": "0xf14b2f5a4fb8c615b94eddef331881a6c25361191e44368b093de64b720344ed4100a09c7b8a378e82399646e5addc21e8826ba77a4a182b8f93d4b614f47b03",
+          "evmSig": "0xf14b2f5a4fb8c615b94eddef331881a6c25361191e44368b093de64b720344ed4100a09c7b8a378e82399646e5addc21e8826ba77a4a182b8f93d4b614f47b03615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        },
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+          "keyCommitment": "0x7adf91235f102230db5457ac75ec1d3481e8c786cdabcb9de14e77f9c6183380",
+          "deadline": "2000259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "5"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "5"
+            }
+          ],
+          "structHash": "0xdcc69649f8d8c6b6af34f98ad7acc8593ea0b98ded0b6035a8a2ee69d11e85a8",
+          "digest": "0xa3b66e709d0e0f5f95cb198d189a03385609c44f36eda3f41ae1c5161202f1a9",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x7adf91235f102230db5457ac75ec1d3481e8c786cdabcb9de14e77f9c6183380\nValid until: 2033-05-21 03:33:20 UTC (2000259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 5\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 5",
+          "sep53Payload": "0xccdbe4ebd99ba80b6d0c8cb353b8c452fbb75d95493ede6c52f800c65c3db3ec",
+          "scheme": "sep53",
+          "sig": "0x73cf8cad04b0e263ce070bd574cdf6d43755c45c96de533d29e29d048a7c591b50ef4903af09a21523e063b5ec2b434b3ef81dd98a6c7eaa618404f1f9a2a700",
+          "evmSig": "0x73cf8cad04b0e263ce070bd574cdf6d43755c45c96de533d29e29d048a7c591b50ef4903af09a21523e063b5ec2b434b3ef81dd98a6c7eaa618404f1f9a2a700615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         }
       ],
       "revoke": [
         {
           "kind": "revoke",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "legs": [
             {
@@ -769,15 +972,16 @@
             }
           ],
           "structHash": "0xf7b109d3bd94bd31724d9bf6a73d6532f90027fbcfb740b3455e9f2ba63de57e",
-          "digest": "0x563981efdfa21f0d02c69a637ac253fa46d443f35f41255f7825c948a1cd85dd",
-          "text": "ProofBridge: remove every settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
-          "sep53Payload": "0x252936e9c72caf6a1972acca6eab33d406c4688d1d9565c58981a02e1a1eef5c",
+          "digest": "0x1f67abea0abe30439bd85d9c9622c8f612c384ac5654e31c96a86c5e1daf0a9c",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+          "sep53Payload": "0x5b502f50de1e06c1b3eae27792f57c4200d4873530e7d98a2a8e30595de8cb4a",
           "scheme": "sep53",
-          "sig": "0x0250192c4c6a2be677559bad38e8fd3bb6c447968af77f10615cc1b6dc64a122e7287592a73bee87ebcbaa9ff693f05e02b37641725921052456247899126008",
-          "evmSig": "0x0250192c4c6a2be677559bad38e8fd3bb6c447968af77f10615cc1b6dc64a122e7287592a73bee87ebcbaa9ff693f05e02b37641725921052456247899126008615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x92108456cf6f8c8783cda86f75675a99311ea133949a2e92e1bfd611964ef0dc64918897995af09643de6a0affaf9d2083132136e35ae1e1f01061020c11ab0d",
+          "evmSig": "0x92108456cf6f8c8783cda86f75675a99311ea133949a2e92e1bfd611964ef0dc64918897995af09643de6a0affaf9d2083132136e35ae1e1f01061020c11ab0d615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "revoke",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "legs": [
             {
@@ -792,15 +996,16 @@
             }
           ],
           "structHash": "0xbd247c158186f827c2e64567e42001983d01863c65d2804cfaa419026295f650",
-          "digest": "0x040244c67ee46dcf5906c3288bc08e8bf73ce64937bc08b588f89bdf36da7244",
-          "text": "ProofBridge: remove every settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
-          "sep53Payload": "0xee7affa0d1e8fc4d17c00bd3acbd3ca5ab09f20446d4f319f19aa24f2332a055",
+          "digest": "0xd4e223cb30046c2a69c104dead37f73a4abe26656b8cb19fbb9194032753b6e3",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+          "sep53Payload": "0x5ba3962bc9dbe0dea830bae7c4f7458270c851bb56678c472b25410d69f55056",
           "scheme": "sep53",
-          "sig": "0x866488d74f76809f1137a3992afeb33a5d8c9d62154497f74c72c03a7c7deb389ba9a57d97b29c2914d66a7df7b16e1d450260091cbf1770cb3907f29b344705",
-          "evmSig": "0x866488d74f76809f1137a3992afeb33a5d8c9d62154497f74c72c03a7c7deb389ba9a57d97b29c2914d66a7df7b16e1d450260091cbf1770cb3907f29b344705615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x5268cd42bea87e481634a1220c248eea5ceed19aadbb06c847c2d88b573ad3654d82146f6557cc29b2e023b182023ecf809153e8a429bf94bdd66c6e79959206",
+          "evmSig": "0x5268cd42bea87e481634a1220c248eea5ceed19aadbb06c847c2d88b573ad3654d82146f6557cc29b2e023b182023ecf809153e8a429bf94bdd66c6e79959206615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "revoke",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "legs": [
             {
@@ -815,15 +1020,16 @@
             }
           ],
           "structHash": "0xc278873aeb4202c8bbb86097057aa9bddce1762b139c30ef7cb823f6bfae05c6",
-          "digest": "0x3122136ff31262d1a7c7581a00623041ba3955013ad5d2dc98ff999e8edd791f",
-          "text": "ProofBridge: remove every settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 2\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 2",
-          "sep53Payload": "0x3811fb7f41e2ddfb3082285be3f3e74cb26ac6c6f04ccac3804e4560547ff395",
+          "digest": "0xa97628459798031178a86e84a4a21278ebf455b167d083236ec20a012ee8da71",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 2\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 2",
+          "sep53Payload": "0x2e3d8a6e443b224e8e89d1c94327ce0620f634a2612fbe980cedcf84ffc5cb41",
           "scheme": "sep53",
-          "sig": "0x01458ad7b7a0d9827a20b73b07a5b9abd38097094ede12f9e70cec8dfdc0feb626ea8a44a1a586ca58b46c96c4571806883a2c9129dc317d34cf03a0aa578805",
-          "evmSig": "0x01458ad7b7a0d9827a20b73b07a5b9abd38097094ede12f9e70cec8dfdc0feb626ea8a44a1a586ca58b46c96c4571806883a2c9129dc317d34cf03a0aa578805615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0xdaf7085da8bac090bb581e4c235f72c72fd4d6a7bfb916b1b7ae6677c0f3c2dd875a8f5b2abd7bf816081bbb18504cc8cc331be7965421fce678c9ecd3461a0a",
+          "evmSig": "0xdaf7085da8bac090bb581e4c235f72c72fd4d6a7bfb916b1b7ae6677c0f3c2dd875a8f5b2abd7bf816081bbb18504cc8cc331be7965421fce678c9ecd3461a0a615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "revoke",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "legs": [
             {
@@ -838,15 +1044,16 @@
             }
           ],
           "structHash": "0xe6bb1ab92b82cf7d72a27bd448a8e31c7dc8d5a2f015f756d28253eff5bc2e1d",
-          "digest": "0xd9710bcce7cd483bf06593c72b6a1ae9505d0d077aa34434f376fb58c5fcef2b",
-          "text": "ProofBridge: remove every settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 3\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 3",
-          "sep53Payload": "0x8c625396af6da19687f8d5efc708d6af580936e80bb7ee3718816a49b9a7a999",
+          "digest": "0x90dc58ea822521ed54cdc318081d753196498ee907fb7ea6c8352a36743d75a2",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 3\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 3",
+          "sep53Payload": "0x6a5c0ee8d1a50e372dd75d929ce8ccb0fc636991f98505089242a3a361109c23",
           "scheme": "sep53",
-          "sig": "0x260e60b01c5449bcf61443ee431297b515272249a6ef0b05221e82bcff273748d8171982199b69d3cf404dd94c4484434b93459ad2730458e832b81a476b9e0b",
-          "evmSig": "0x260e60b01c5449bcf61443ee431297b515272249a6ef0b05221e82bcff273748d8171982199b69d3cf404dd94c4484434b93459ad2730458e832b81a476b9e0b615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x0a7882c43827a270d454a766a31c222f8c0a995dfe60ee516c70880f4091108a56680668bf2af380fb1f897727f4111809df0682b4bbb7594a94e44e7ba9e402",
+          "evmSig": "0x0a7882c43827a270d454a766a31c222f8c0a995dfe60ee516c70880f4091108a56680668bf2af380fb1f897727f4111809df0682b4bbb7594a94e44e7ba9e402615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "revoke",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "legs": [
             {
@@ -861,15 +1068,16 @@
             }
           ],
           "structHash": "0xfab3418cfb72da17d7733720e5f860a58ceb4e9cbdd9caf6738e5d2bb9454ac4",
-          "digest": "0xc17cf35c3526433165d0bf7379fdad5750d48938602c62b4e858c58eb24fd599",
-          "text": "ProofBridge: remove every settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 4\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 4",
-          "sep53Payload": "0x1691241861877a1a547be2d656df08af09cd42351eeb26a613a7f85e51b19ca2",
+          "digest": "0xcf15b2f79f20e42add0f8cfeb8bfdf4746d1fd260e63d96a0ba7e635f288e926",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 4\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 4",
+          "sep53Payload": "0xff4e2ddc7a4eb02fd30f7fdb0b8fad0bad43ed285e99e63119c0fa95a08e84b3",
           "scheme": "sep53",
-          "sig": "0x4ae9a191217480ff9fde37a85e13475a555964c77d72c31bce49d4b3cc1b7d02d0b9fbdc82d3a02dc11b569e4f8dd1810bb5987618e0bfe745bc97d73b5ede0c",
-          "evmSig": "0x4ae9a191217480ff9fde37a85e13475a555964c77d72c31bce49d4b3cc1b7d02d0b9fbdc82d3a02dc11b569e4f8dd1810bb5987618e0bfe745bc97d73b5ede0c615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x01e4a91b79c5c468fe5add51d88ae663cc822957fa71422470f258d3a29460b9073de62e4529d38d0b49af71f21030c7db92c3fd495d699999d22ce7d77c060b",
+          "evmSig": "0x01e4a91b79c5c468fe5add51d88ae663cc822957fa71422470f258d3a29460b9073de62e4529d38d0b49af71f21030c7db92c3fd495d699999d22ce7d77c060b615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "revoke",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "legs": [
             {
@@ -884,15 +1092,16 @@
             }
           ],
           "structHash": "0xb13cc71fe35c83e98c18c9b6071ec3a34ffefae3c02c2b27a9be3ad0cadc2370",
-          "digest": "0x83f7d7360402f54a23f96e9d47f93c607bc8c5e4d06318eabd00641f838a1504",
-          "text": "ProofBridge: remove every settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 5\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 5",
-          "sep53Payload": "0xf93b27a91fbb50f548245d8d7baad021c214fbe75b569cf9f40445d9332215c6",
+          "digest": "0x2188096510d894d61231bf738b28106cb5bd4fd785dea5984c7f7a2d8c8c4771",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 5\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 5",
+          "sep53Payload": "0xabbab439fc0bd848711a98b258519fbd4482cab2594cc613b9365ba651a405dd",
           "scheme": "sep53",
-          "sig": "0x8b5850762a302aed83b122dc814c1945ec33b6449dd27998413e8f190a20aa71dd0f96c151f3f1f5a91571ab1f8f995a187773420a51858efa64211117070e05",
-          "evmSig": "0x8b5850762a302aed83b122dc814c1945ec33b6449dd27998413e8f190a20aa71dd0f96c151f3f1f5a91571ab1f8f995a187773420a51858efa64211117070e05615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x909be0f34d9f5e1e75e3b6ded5821a6fcdbdf1bd5b6db837b908de7e28d5edb88aab149da8e981d3c61a860be068acb2f25c0fe0e1fd6e957d9ecf6d23fab60f",
+          "evmSig": "0x909be0f34d9f5e1e75e3b6ded5821a6fcdbdf1bd5b6db837b908de7e28d5edb88aab149da8e981d3c61a860be068acb2f25c0fe0e1fd6e957d9ecf6d23fab60f615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "revoke",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "legs": [
             {
@@ -907,176 +1116,190 @@
             }
           ],
           "structHash": "0x078e0caf7503ba520fff041cb2b6fa85782f432a70630e6c83c3409e858c99e7",
-          "digest": "0xb5192049a83734a7c195a898a4bf2bbd3fd3c47cbbdc5490a9e4084810e06fa2",
-          "text": "ProofBridge: remove every settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 6\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 6",
-          "sep53Payload": "0x2eb864ce32c4bc874257926d45836979f4a61d3a28e70f6ea9e3d285c2ba3a19",
+          "digest": "0x8d3d5707d31a508084487c92259c6d1f929bc8337a88783bc28b7d70e57c1efd",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 6\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 6",
+          "sep53Payload": "0xe26430b2aea53155e305ca0e8f35ef4efa46f1d7d49e9d01e14b355ca7955620",
           "scheme": "sep53",
-          "sig": "0x07834a3585bc6277557c342203fd99beaaab87379d7e514143ee7e56076499ce2e366d1bcf9182bbeddcc5bb77d2895540dc0c391cef16227954afa2b04bf404",
-          "evmSig": "0x07834a3585bc6277557c342203fd99beaaab87379d7e514143ee7e56076499ce2e366d1bcf9182bbeddcc5bb77d2895540dc0c391cef16227954afa2b04bf404615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x4f8d35dd7610b65d431aca919c66d2a6134da4eeafb3ffe1caea1d93e5d4dbc4c3561354638aa53cea1deaf93b91ea9fba7c9cc593a39cc99294a03cb2f97a0e",
+          "evmSig": "0x4f8d35dd7610b65d431aca919c66d2a6134da4eeafb3ffe1caea1d93e5d4dbc4c3561354638aa53cea1deaf93b91ea9fba7c9cc593a39cc99294a03cb2f97a0e615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         }
       ],
       "retire": [
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de",
           "validUntil": "1",
           "structHash": "0xde17142f7b8a78a29f744caf7356d82542da8726db20377edc3e80ce7dda1674",
-          "digest": "0x1d42af8b2779c794a70fd3cdb5f8ac715e28dd76ead07856671875edd0eba516",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\n\nValid until: 1",
-          "sep53Payload": "0xdf1f3cfb07e3415b1cbd5644df305781c066f6cfc8f1dad9b43ece03e055de80",
+          "digest": "0x6514efa7b547fe4991f05a5eca4767c0e67ccbf4b05e09fc2e28456c2fef0b40",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\n\nValid until: 1",
+          "sep53Payload": "0x714638e92af0151cb1d13c9c9f88591b2e53d0ebaf9be877133aadbb487ba6f6",
           "scheme": "sep53",
-          "sig": "0xef96ee98dcbd4337ec173ace0507868ff0bc7f9214537ae95ef976781b48402a1af40369130613be148a3a556cc2fbb544a5e2d2fd418dda8fbabe6e8dd17b06",
-          "evmSig": "0xef96ee98dcbd4337ec173ace0507868ff0bc7f9214537ae95ef976781b48402a1af40369130613be148a3a556cc2fbb544a5e2d2fd418dda8fbabe6e8dd17b06615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0xfa2911b08b6036027a3f04dc5922512a83397e6fc9e4002ecfa081a5c6d0451aa826645c4237009c9bbdabfc5e0846f4f5cdd9359ecf05498a5b5f9e1aa14103",
+          "evmSig": "0xfa2911b08b6036027a3f04dc5922512a83397e6fc9e4002ecfa081a5c6d0451aa826645c4237009c9bbdabfc5e0846f4f5cdd9359ecf05498a5b5f9e1aa14103615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de",
           "validUntil": "2000000000",
           "structHash": "0x07d3b988112bffca94934d4d094d88a14ee61e51a87bd5f222c9b1432655ef14",
-          "digest": "0x5a7628769a75b43a9b637d385147f5dbba823a13d8c2285dd4a97d8c199d42df",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\n\nValid until: 2000000000",
-          "sep53Payload": "0x5c959000d45ee1d9c9687261eb281b47cf628f695dc90b32f122084a40c50182",
+          "digest": "0x1944de57c1b078172d34bb1f00a3a68097ba7d1fe0832d78b7b836d5af31a987",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\n\nValid until: 2000000000",
+          "sep53Payload": "0x1229e463030b93e1721021fef353a7119e9b65ba0ab62840ef954cfb47b81835",
           "scheme": "sep53",
-          "sig": "0x23936a8617276458cae8091b99813d5f8d03a92b46179df33e61ad6a31077a030bf0586b6520b17baeb9bba5c9fc81dc035cd899ab95f49ec3a0f9357ced6705",
-          "evmSig": "0x23936a8617276458cae8091b99813d5f8d03a92b46179df33e61ad6a31077a030bf0586b6520b17baeb9bba5c9fc81dc035cd899ab95f49ec3a0f9357ced6705615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0xd2422080e0e8ab73c86f4d76767df232fd3f79933fdb1b61849d6626baef765dee02dc7b7033c15d704807e4cfc87879e0c889ba075b194e12219e796b908906",
+          "evmSig": "0xd2422080e0e8ab73c86f4d76767df232fd3f79933fdb1b61849d6626baef765dee02dc7b7033c15d704807e4cfc87879e0c889ba075b194e12219e796b908906615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0xc50cd3b0fe55d760fd8eb27b2939b5e76cb23ea14cd91fe8a691d1bf277ef1a6",
           "validUntil": "1",
           "structHash": "0xd3a62a17b97fbe695226dbedbbe4b5a8834029977991fc747ca8f8ce1274e958",
-          "digest": "0xb482a6d47bc3d28ae99c934744be79c283f7605ab8874ec5ef83ebe64b3135e0",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0xc50cd3b0fe55d760fd8eb27b2939b5e76cb23ea14cd91fe8a691d1bf277ef1a6\n\nValid until: 1",
-          "sep53Payload": "0x7d87f8014f5377ba36c420d22503ddf8efde47d92479b85b1ad6c3214be1ff7b",
+          "digest": "0xe45e346a42d64a9e87dec8271b68b5d2a41e85a7b13234ff58745e2716f06877",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0xc50cd3b0fe55d760fd8eb27b2939b5e76cb23ea14cd91fe8a691d1bf277ef1a6\n\nValid until: 1",
+          "sep53Payload": "0xedb569eb5b5fb615275edd611a9b0660198578481045c8047b15644cadf5afd7",
           "scheme": "sep53",
-          "sig": "0xb7e3980628f2daf58456a22d7a830dbbd035ab89cfb9e5e745e068a2f6a26ab54db3d9ccf11590bd6bc12b1e39063cb464881f07a21685b1184bd0062e76d80a",
-          "evmSig": "0xb7e3980628f2daf58456a22d7a830dbbd035ab89cfb9e5e745e068a2f6a26ab54db3d9ccf11590bd6bc12b1e39063cb464881f07a21685b1184bd0062e76d80a615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x90faf1fec24a52f8627e2bb1d0fd2c7d2a633a9b5574f9cd4db63570ca909ce3bf3867eedc0de7ab4d192f699eb7849d82b640bd776963440054c6e352032d0e",
+          "evmSig": "0x90faf1fec24a52f8627e2bb1d0fd2c7d2a633a9b5574f9cd4db63570ca909ce3bf3867eedc0de7ab4d192f699eb7849d82b640bd776963440054c6e352032d0e615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0xc50cd3b0fe55d760fd8eb27b2939b5e76cb23ea14cd91fe8a691d1bf277ef1a6",
           "validUntil": "2000000000",
           "structHash": "0xd02de53883f8ddb64d0a727c6adb2399418281b4f6290696f87768b55dcdfc03",
-          "digest": "0x7820a6460d00fda1edb049200dc033fd8e2dbe5ed4d4c869f43e0810c001c208",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0xc50cd3b0fe55d760fd8eb27b2939b5e76cb23ea14cd91fe8a691d1bf277ef1a6\n\nValid until: 2000000000",
-          "sep53Payload": "0xcc40166ec5c4fba556247e5acb29929b6a59ade35231fcc74ce87155f16992ee",
+          "digest": "0x4139679daec2b2dfa91e8e05735de3b79b44a2ace19a5a58b528a9622c6e8bf2",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0xc50cd3b0fe55d760fd8eb27b2939b5e76cb23ea14cd91fe8a691d1bf277ef1a6\n\nValid until: 2000000000",
+          "sep53Payload": "0x4969b04380b29011f1f2a47467c777c36bef51ec10a7274075b56392e5b3ebba",
           "scheme": "sep53",
-          "sig": "0x393ff70c34a8284fd654593462a8888023fc71c65aed58e8aa76bf471805e7bd229a2f8157b0a17e7b025b4b715d45f65d2f9b419d2d509e6aaec729e561090b",
-          "evmSig": "0x393ff70c34a8284fd654593462a8888023fc71c65aed58e8aa76bf471805e7bd229a2f8157b0a17e7b025b4b715d45f65d2f9b419d2d509e6aaec729e561090b615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x237105393afb755234c2f83e40e8c2d966530b16f6a9dc2c5a139582b44cdffa4bcd62cd57bae6bdad26131f7b822e9c72bcc62419f4f4239bbb550c6796e802",
+          "evmSig": "0x237105393afb755234c2f83e40e8c2d966530b16f6a9dc2c5a139582b44cdffa4bcd62cd57bae6bdad26131f7b822e9c72bcc62419f4f4239bbb550c6796e802615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0xad77e742adc93df30ce4fcca1a2d0c922fe1f86cd9ecd53140ae80515b85fea6",
           "validUntil": "1",
           "structHash": "0x0bae6637d6e107b4c842a743bfa80f78760c0d2341da207863f8795b3d5d97b8",
-          "digest": "0x3cf07ad7c6bf61321b1809e8b9a9d2e0f2560410d18582c8b74bf43aac0ebefb",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0xad77e742adc93df30ce4fcca1a2d0c922fe1f86cd9ecd53140ae80515b85fea6\n\nValid until: 1",
-          "sep53Payload": "0xec4550461eac81fe774d1b8d0cfed7b2d817c45adfb89ab117892fc5ae956434",
+          "digest": "0x21cc7c9cc7192b099b64d2875d6908bc11300ebde76ceab5dae63f0eda5f6b94",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0xad77e742adc93df30ce4fcca1a2d0c922fe1f86cd9ecd53140ae80515b85fea6\n\nValid until: 1",
+          "sep53Payload": "0x18763ea362aa86e1da6b2b9240daab0c24d86d32394ad59ae92058484e8474ec",
           "scheme": "sep53",
-          "sig": "0xdcda02e97a157d52142dd1dd8631095f97af87ba625abf5c2024c5340c1c465f8898de4ce2db220aa390b79d6030aeb8f524cd590f6f79c0424828a48389f300",
-          "evmSig": "0xdcda02e97a157d52142dd1dd8631095f97af87ba625abf5c2024c5340c1c465f8898de4ce2db220aa390b79d6030aeb8f524cd590f6f79c0424828a48389f300615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x89bf58bc5a570c67fff4449e633379e8a4c8e58d1ff17abd72aa9d9a37f151bec63d4e44f96b03fe867be46fcf7a0632ac6642efa7b42dfb4d9db6db7917e40a",
+          "evmSig": "0x89bf58bc5a570c67fff4449e633379e8a4c8e58d1ff17abd72aa9d9a37f151bec63d4e44f96b03fe867be46fcf7a0632ac6642efa7b42dfb4d9db6db7917e40a615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0xad77e742adc93df30ce4fcca1a2d0c922fe1f86cd9ecd53140ae80515b85fea6",
           "validUntil": "2000000000",
           "structHash": "0xe690b512ece02644737c8065f8c4921a5e808249db0285d8ebf101d221b9f9f9",
-          "digest": "0xd249069331dd380f3f1679a8f667c00608862303bc9882383297a55d98e527b4",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0xad77e742adc93df30ce4fcca1a2d0c922fe1f86cd9ecd53140ae80515b85fea6\n\nValid until: 2000000000",
-          "sep53Payload": "0x0ebefa18b398ba56cadead14103a349cb73aec3c0db11092ce3f9537d88d2fd9",
+          "digest": "0xa87c05cbc6e3f35f4e7c5c2cc718f64098d156046c966c990b054a06b77336f7",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0xad77e742adc93df30ce4fcca1a2d0c922fe1f86cd9ecd53140ae80515b85fea6\n\nValid until: 2000000000",
+          "sep53Payload": "0x2c936f421b02101aead73c8f354e2ace759af4748761b977e7e321f1f4649747",
           "scheme": "sep53",
-          "sig": "0x079ea0fa1033d4f6bf4c84578d90c083f62b021b80917df8953885a5c6589795cabc1f7549a9c59749c9a15b9261a01d9fd477dd6461eab1f284eb02cfcad80d",
-          "evmSig": "0x079ea0fa1033d4f6bf4c84578d90c083f62b021b80917df8953885a5c6589795cabc1f7549a9c59749c9a15b9261a01d9fd477dd6461eab1f284eb02cfcad80d615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x3e96600164c26f4cce4e9b673e301e7b2ab4a863d95be4366c62d24d81330b31064d0018a177907e1812f1892e7f1b55504075008f8e539b9adf2e206690fc07",
+          "evmSig": "0x3e96600164c26f4cce4e9b673e301e7b2ab4a863d95be4366c62d24d81330b31064d0018a177907e1812f1892e7f1b55504075008f8e539b9adf2e206690fc07615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0x3e81f79046810dd346646225d4feb82aa654e6180f08794000ffcc7e86a12a8a",
           "validUntil": "1",
           "structHash": "0x7feb7c50949ce19ab0b94e7e3af1b43cf83e88354cfa38a2e35f65ff3c9597ae",
-          "digest": "0xdf1b13b7f696cc57601c33099e1cf8fda28d776c69a54e29123c720f2003fcf9",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x3e81f79046810dd346646225d4feb82aa654e6180f08794000ffcc7e86a12a8a\n\nValid until: 1",
-          "sep53Payload": "0x097ebc2df2e1f5004b55c60fbc88a6a6992d7d15403eb452259a7e04bbd3859e",
+          "digest": "0x4f308529d2a044bc6a8ded569e2503841248adaf317061077d61625059cbdeac",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x3e81f79046810dd346646225d4feb82aa654e6180f08794000ffcc7e86a12a8a\n\nValid until: 1",
+          "sep53Payload": "0x8fd8da3abea228c8213637d0a439c1417ead52fc393db90d0fa47d9e56770f8d",
           "scheme": "sep53",
-          "sig": "0xd77c6d869aa8ba3b36d08ffbf7d0f46c399ec4c782c769ad59f1361a1eade68ea0b81c83358dc451c37fa794b3b29851436bd3abe7fdcf3339d988936b1f7803",
-          "evmSig": "0xd77c6d869aa8ba3b36d08ffbf7d0f46c399ec4c782c769ad59f1361a1eade68ea0b81c83358dc451c37fa794b3b29851436bd3abe7fdcf3339d988936b1f7803615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x7319dfa70ed97bfa0a95ec9d2dd49dd4819d4ee4f68f83ad3491d28b0240b0b3e43e46a8f77f43607b04b2e71c1a912f950528b9e7bd054e9b8a360e0637b80a",
+          "evmSig": "0x7319dfa70ed97bfa0a95ec9d2dd49dd4819d4ee4f68f83ad3491d28b0240b0b3e43e46a8f77f43607b04b2e71c1a912f950528b9e7bd054e9b8a360e0637b80a615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0x3e81f79046810dd346646225d4feb82aa654e6180f08794000ffcc7e86a12a8a",
           "validUntil": "2000000000",
           "structHash": "0xc296c93012b0c39e38aecbc695073b48be4218341ba5a45cf6f8acc8bb0cb2a9",
-          "digest": "0x5a3b8ae8a8db29c5602340e117defd2dee99eacb602bb293b5617029501f9447",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x3e81f79046810dd346646225d4feb82aa654e6180f08794000ffcc7e86a12a8a\n\nValid until: 2000000000",
-          "sep53Payload": "0x54e319635adc4da6fc789d18b519bea25c672ecc5f2c6ee7fa43f0c9545cbd19",
+          "digest": "0xc4c6545ee7cd4761115ec3d75f7bdd6fcadea086738f125d45e0ba5b8794c542",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x3e81f79046810dd346646225d4feb82aa654e6180f08794000ffcc7e86a12a8a\n\nValid until: 2000000000",
+          "sep53Payload": "0x3f152ddd688995fc9a0e52509a2227fe994e3e697fa50aa5264722eb1edc875b",
           "scheme": "sep53",
-          "sig": "0x214737a4d61d127b051138ae6ebee74c26c69e6b7fd2c659cbf82e35cb1e4e47dfb7ceedaf95026264879ff48169a9a6a99fcb1109851df189b2b9dd79b42106",
-          "evmSig": "0x214737a4d61d127b051138ae6ebee74c26c69e6b7fd2c659cbf82e35cb1e4e47dfb7ceedaf95026264879ff48169a9a6a99fcb1109851df189b2b9dd79b42106615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x3b4f8088638cf9bf4aadc48f96bb3d2b3e79a4e8b01a53c9305c200ddddef6ebf0ae7c9c31d98902672e87bd4947267e861bf85d3805219a19ffb103f0a8620f",
+          "evmSig": "0x3b4f8088638cf9bf4aadc48f96bb3d2b3e79a4e8b01a53c9305c200ddddef6ebf0ae7c9c31d98902672e87bd4947267e861bf85d3805219a19ffb103f0a8620f615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0x6ac32b759134e0bfcd62809dd72fb78c932837b956fb98dc0e721363581aa949",
           "validUntil": "1",
           "structHash": "0x5e3752a2f53abdbf3eceb38137f36e30292f7ebf2782a8cd3a3cb07152cef5b3",
-          "digest": "0xebbc1af431132f31246c42719eb547b98318d97f27499cacba720e4da5d1aaa8",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x6ac32b759134e0bfcd62809dd72fb78c932837b956fb98dc0e721363581aa949\n\nValid until: 1",
-          "sep53Payload": "0xc51525c9fd7a90c938ef03e2698228876246c108f36d92e9615ba545fec6d4f4",
+          "digest": "0x7b70e0194ac4ed116cf12e1266f813405044204d81236003eed08d2d5b942aac",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x6ac32b759134e0bfcd62809dd72fb78c932837b956fb98dc0e721363581aa949\n\nValid until: 1",
+          "sep53Payload": "0x3ebca702bdadb86d074d3a235fd67f73b94c434d001a0eb42034dbe148b7b400",
           "scheme": "sep53",
-          "sig": "0x68d20eb20dfcfb1238a1a33bc43cf97da6bebe44f73b64157698ada30de4c48156b10c3a124b7a9e7fc65512a36e48bf8884894b25c2adfa40e7442faba2eb0f",
-          "evmSig": "0x68d20eb20dfcfb1238a1a33bc43cf97da6bebe44f73b64157698ada30de4c48156b10c3a124b7a9e7fc65512a36e48bf8884894b25c2adfa40e7442faba2eb0f615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x192925c15dbf54a0de3944a260724ddb73aaa6f4eb63fca62ff5c2c016e9b1903eaea2ed3d5e627a1903e49220bda93f5e3f80dda6cb98576217f8c5381daf0c",
+          "evmSig": "0x192925c15dbf54a0de3944a260724ddb73aaa6f4eb63fca62ff5c2c016e9b1903eaea2ed3d5e627a1903e49220bda93f5e3f80dda6cb98576217f8c5381daf0c615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0x6ac32b759134e0bfcd62809dd72fb78c932837b956fb98dc0e721363581aa949",
           "validUntil": "2000000000",
           "structHash": "0xcd7aa937dfc1ada73a90182e119f4585b57a11baec91661ea64dacec98d5b29f",
-          "digest": "0xf5f2642a87e9ec842d7c31dca71ebb100fdd7470a1d47b7b7771df353d9a1180",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x6ac32b759134e0bfcd62809dd72fb78c932837b956fb98dc0e721363581aa949\n\nValid until: 2000000000",
-          "sep53Payload": "0xf8347c6f123b006c6c5cb78148ecc886393460bb0c7da0da059fd4474e582d6d",
+          "digest": "0x84f73f6005c8f31b825f2d23bcd38b1b95c4e2e4fbc2d7355239267550073e73",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x6ac32b759134e0bfcd62809dd72fb78c932837b956fb98dc0e721363581aa949\n\nValid until: 2000000000",
+          "sep53Payload": "0xa9d7d75721d367f2a33bedb31e3277ca6df96045a3c698ef107981cbf898dfb6",
           "scheme": "sep53",
-          "sig": "0x3be96a4b5f8613550441b2cb65c861e589d7a0744efa04a8daf5b40597e5874575c29587ba73c8a7865291b66d34697a061d88a2f384a8ea4579119177007308",
-          "evmSig": "0x3be96a4b5f8613550441b2cb65c861e589d7a0744efa04a8daf5b40597e5874575c29587ba73c8a7865291b66d34697a061d88a2f384a8ea4579119177007308615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x01687f24b7d92bd6e52d6299708ed6dbc2e85601702d6fdb3dac9a6a78c1d05a7bfd1df8243312b4d6c6373069b836adb577d6248dba28daee2351d23e77de00",
+          "evmSig": "0x01687f24b7d92bd6e52d6299708ed6dbc2e85601702d6fdb3dac9a6a78c1d05a7bfd1df8243312b4d6c6373069b836adb577d6248dba28daee2351d23e77de00615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0x7adf91235f102230db5457ac75ec1d3481e8c786cdabcb9de14e77f9c6183380",
           "validUntil": "1",
           "structHash": "0x9dad34b428153c648d50252a5c7710061018ee772aadd9261560e6c4ea0f089d",
-          "digest": "0x7f7a064022ca4cbc48464276e2a3157391e6438b585fb959b546d91a1862aeb3",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x7adf91235f102230db5457ac75ec1d3481e8c786cdabcb9de14e77f9c6183380\n\nValid until: 1",
-          "sep53Payload": "0x88be8f4daa18a887abd436e1cdb9f49d144090014c689822cee0dfbf6fc41bd8",
+          "digest": "0x6abb22bc602317f2e95de106352a223f5cb86169d60a55a1fd63e8b95d2b4ee9",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x7adf91235f102230db5457ac75ec1d3481e8c786cdabcb9de14e77f9c6183380\n\nValid until: 1",
+          "sep53Payload": "0x927b5e356d8d2a4e3d6c6fa1512ce790c8de6170993c4cc7e331cf41d9af9647",
           "scheme": "sep53",
-          "sig": "0xe52ce3c20bdd6ce7b7850bab002962d2986ab14345385e68490471cd069830bfd9a66cbd6221fd26510c97e91b2af01cc1ec6558bd07e503bfbf9d5655b57b05",
-          "evmSig": "0xe52ce3c20bdd6ce7b7850bab002962d2986ab14345385e68490471cd069830bfd9a66cbd6221fd26510c97e91b2af01cc1ec6558bd07e503bfbf9d5655b57b05615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0xa553f0af848cd8c00e14094bfdc2a89e14dcb620fae864493e24f0ab52059adc9fefe40be43590f0cbfc98eee363802aba587a27b876958216d71149f0561906",
+          "evmSig": "0xa553f0af848cd8c00e14094bfdc2a89e14dcb620fae864493e24f0ab52059adc9fefe40be43590f0cbfc98eee363802aba587a27b876958216d71149f0561906615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
           "keyCommitment": "0x7adf91235f102230db5457ac75ec1d3481e8c786cdabcb9de14e77f9c6183380",
           "validUntil": "2000000000",
           "structHash": "0x8cfbf953f5b4fd21f4ea7c88dc8d3510ca378442943ac836c8686e7c25ea559f",
-          "digest": "0x34ed895fb7d853da0ed38c56d0f78f89589c8ae67c0b168db54a9d0c5cff287c",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x7adf91235f102230db5457ac75ec1d3481e8c786cdabcb9de14e77f9c6183380\n\nValid until: 2000000000",
-          "sep53Payload": "0xdbdb9f09034e4a8364e0ed019fdb7ca53864342605389346162a82a995e5363b",
+          "digest": "0x055f99af0d6cdf3a9b2c2fe29b1a0c37cfe5b502c2dbe21526a05e77d976e9b2",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x7adf91235f102230db5457ac75ec1d3481e8c786cdabcb9de14e77f9c6183380\n\nValid until: 2000000000",
+          "sep53Payload": "0x307e94051522dd3c9fbac4b674ba5c9670823341e8cdfd91466d69d15661aea2",
           "scheme": "sep53",
-          "sig": "0xe9f2fe222f0979c5d9f3c5a14580c5229f9971fd331add453c13649f7817745faadd3de60184c5535767a63dde9382ef96c3a34966e6bf0d3919d65603f4e80a",
-          "evmSig": "0xe9f2fe222f0979c5d9f3c5a14580c5229f9971fd331add453c13649f7817745faadd3de60184c5535767a63dde9382ef96c3a34966e6bf0d3919d65603f4e80a615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+          "sig": "0x02ebaa183299701281720e99a353bbe8eb2d27607947689189327343ccdf6a721ec7a866833cb7f9e7a5f1e1f8e18a40a6de13c50af87fd6009731f1a6cfa407",
+          "evmSig": "0x02ebaa183299701281720e99a353bbe8eb2d27607947689189327343ccdf6a721ec7a866833cb7f9e7a5f1e1f8e18a40a6de13c50af87fd6009731f1a6cfa407615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         }
       ],
       "reuseKey0AtNonce1": {
         "kind": "register",
+        "env": "testnet",
         "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
         "keyCommitment": "0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de",
+        "deadline": "1700259200",
         "legs": [
           {
             "chainId": "11155111",
@@ -1089,18 +1312,20 @@
             "nonce": "1"
           }
         ],
-        "structHash": "0x005766eb63a681834a949b91bfeda3f51069f860f50e764433005eae085859c5",
-        "digest": "0xc74decd2226ec495ca1f0f0d9d9c7e82474465c2be40bd612379d8300b501d8d",
-        "text": "ProofBridge: register a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
-        "sep53Payload": "0x999c275080746ac5fd4ca647238917e9255ff1dac554105637fd9b65c825c165",
+        "structHash": "0x17fff00bdfbb3f36a1fc5ff8534318e9583c0f77a3d64b43c76cc4d61a4a31a8",
+        "digest": "0xcf388d6dd8e1a2e44729e987167bcabef6242b6c22eace56e301608a619fa039",
+        "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+        "sep53Payload": "0x29d3c1336465bea17b9af99c9a2ed9a410e98609280b9193bd461b37a6d11b65",
         "scheme": "sep53",
-        "sig": "0x3d17bf5adf714a7970746811172ea5beb47703d95a323778405a8fca263e1fba6996df1be7971369cb145ebadd981eb70d0e146eaee5e9b26c4ce0d15df9c001",
-        "evmSig": "0x3d17bf5adf714a7970746811172ea5beb47703d95a323778405a8fca263e1fba6996df1be7971369cb145ebadd981eb70d0e146eaee5e9b26c4ce0d15df9c001615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        "sig": "0x7f785543b6f0a18d93d8c8e5cc353a8f7a10a5bb3fa90ddce16a208aa4639266f751510191f61d822d4425a760571e52bff1480129287fb4e00dccb6889a2a01",
+        "evmSig": "0x7f785543b6f0a18d93d8c8e5cc353a8f7a10a5bb3fa90ddce16a208aa4639266f751510191f61d822d4425a760571e52bff1480129287fb4e00dccb6889a2a01615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
       },
       "onlySepoliaLeg": {
         "kind": "register",
+        "env": "testnet",
         "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
         "keyCommitment": "0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de",
+        "deadline": "1700259200",
         "legs": [
           {
             "chainId": "11155111",
@@ -1108,18 +1333,20 @@
             "nonce": "0"
           }
         ],
-        "structHash": "0xe72a608978c7196797a79b4fa089467098c10021f1dee1e619b1821ed775b5f5",
-        "digest": "0xda234184ba27f4b39452c4a89e16a71271e1050f4d78c824e808c202aa9d1a3d",
-        "text": "ProofBridge: register a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0",
-        "sep53Payload": "0xf647e6090c726a5f57840101e53216c1d44332bb4be72c53fada664d828ff680",
+        "structHash": "0xa247e408d0e6b938f3bf0702cc7d2c956aecbab80e48844f616d1ab04d841bc8",
+        "digest": "0x5d3c81403c94b9cbeddd12142f665347a250a4fb4acd6b434099599311f471f7",
+        "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0",
+        "sep53Payload": "0x140931f741b5527198c645dd618acad5e3ae340ead8c32142e5600d9e5a62067",
         "scheme": "sep53",
-        "sig": "0xdd242ec6a132a18d077c79d77bd3b5b116239eb66d99ddc3a7e535ca83f08daa5201c47f807e32992714bfda05fd04c499d25ca8b44479c42906f2d3841eb70d",
-        "evmSig": "0xdd242ec6a132a18d077c79d77bd3b5b116239eb66d99ddc3a7e535ca83f08daa5201c47f807e32992714bfda05fd04c499d25ca8b44479c42906f2d3841eb70d615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        "sig": "0xa18c283a4d395367db4c2c9040288e85f341961abecfbdb8e3ed6d08b5eca34653a72084d199473d9d3787debba917a1f52d9bda1f3ac62c6d2acf1cfcff2c08",
+        "evmSig": "0xa18c283a4d395367db4c2c9040288e85f341961abecfbdb8e3ed6d08b5eca34653a72084d199473d9d3787debba917a1f52d9bda1f3ac62c6d2acf1cfcff2c08615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
       },
       "onlyStellarLeg": {
         "kind": "register",
+        "env": "testnet",
         "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
         "keyCommitment": "0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de",
+        "deadline": "1700259200",
         "legs": [
           {
             "chainId": "1000002",
@@ -1127,18 +1354,20 @@
             "nonce": "0"
           }
         ],
-        "structHash": "0x072728ca6bcd6d4c9f9ec4250eed9d8f708912401dab27e2d2e56d3cff7cc469",
-        "digest": "0x94aec674dc7d0523c6e89acd33d6d9ff11ba6daa6ba90d04f6906dec7fab69f7",
-        "text": "ProofBridge: register a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\n\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
-        "sep53Payload": "0x34d78c639f13aa4a17ee921f0a93a1374a4ac9f073bf3cae29eec780f8bb1391",
+        "structHash": "0x758d212a7603eb6d8912745559cbd356234714677c7b8f01c388e449355e0a06",
+        "digest": "0x95417d4bc10ab0e69e2b00b1a5c69c965aeeca9c2e159535c3d4543307c75424",
+        "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+        "sep53Payload": "0xdf56f388071abd08c5b370eff5094b07d4bcb183de4c3f659389350bbb6db65d",
         "scheme": "sep53",
-        "sig": "0xe7e98935cb4b2c68ef9b7737a3fd4b801c3215e8d8e26a377fc4f8ececb7a45bc6c5893c26663555b1cf3ad22e4478b2ea077a879e16ed9cf8e58a146f409103",
-        "evmSig": "0xe7e98935cb4b2c68ef9b7737a3fd4b801c3215e8d8e26a377fc4f8ececb7a45bc6c5893c26663555b1cf3ad22e4478b2ea077a879e16ed9cf8e58a146f409103615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        "sig": "0x91695905a83ddf8c80a09a9cef35b15572eb8785b917a254cf081e05a7c6505fc3bc05dc7e9bcac90dbe11859f4f6de87e7d0e88df7fda8398892d8d8ef3460a",
+        "evmSig": "0x91695905a83ddf8c80a09a9cef35b15572eb8785b917a254cf081e05a7c6505fc3bc05dc7e9bcac90dbe11859f4f6de87e7d0e88df7fda8398892d8d8ef3460a615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
       },
       "duplicateLegs": {
         "kind": "register",
+        "env": "testnet",
         "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
         "keyCommitment": "0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de",
+        "deadline": "1700259200",
         "legs": [
           {
             "chainId": "11155111",
@@ -1161,13 +1390,109 @@
             "nonce": "0"
           }
         ],
-        "structHash": "0x9dbeba9c89a5438509f90d709114df630639fb123b115892fde1b6ac96fffa80",
-        "digest": "0x0e863db666b3fd9d0dc3ad2135d38f9a395fac71a723eea503ac61f62a19b638",
-        "text": "ProofBridge: register a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
-        "sep53Payload": "0x2a042834614426dd7e8a8100e2b9258d8f86eee5259cc7dc9525f99bd96b2a94",
+        "structHash": "0x3053bd9ac3e30875c37b18f277e4e65d24a62769f0e65020b22b9b675e99ed43",
+        "digest": "0xa9615f0d9395cab4fa30e95e9af3e482aacf4b454c1fdd3bbadd43f092e12563",
+        "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+        "sep53Payload": "0x893231ad21372a218bf607d21fffeefbe99b453328440cc4ba9cce07fd1518c3",
         "scheme": "sep53",
-        "sig": "0x0b11391a4c0e69b3e8d34c709f3d589d20b17a8d0b0ef9da78daced5dab7c9462275ca5292b70d67008ba51bc61d58576ecdace7873d0c952bb7decfe36edc0e",
-        "evmSig": "0x0b11391a4c0e69b3e8d34c709f3d589d20b17a8d0b0ef9da78daced5dab7c9462275ca5292b70d67008ba51bc61d58576ecdace7873d0c952bb7decfe36edc0e615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        "sig": "0x22f3b73370560a2e02fedbc64d9f5b9d52474fc0c5cc4ce20120f73bf9815172069426088cdeb871d4753ed8b407552743e9503e5c42c7d72823d0fc2ab41f0c",
+        "evmSig": "0x22f3b73370560a2e02fedbc64d9f5b9d52474fc0c5cc4ce20120f73bf9815172069426088cdeb871d4753ed8b407552743e9503e5c42c7d72823d0fc2ab41f0c615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+      },
+      "sameRegistryTwoNonces": {
+        "kind": "register",
+        "env": "testnet",
+        "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+        "keyCommitment": "0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de",
+        "deadline": "1700259200",
+        "legs": [
+          {
+            "chainId": "11155111",
+            "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+            "nonce": "0"
+          },
+          {
+            "chainId": "1000002",
+            "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "nonce": "0"
+          },
+          {
+            "chainId": "11155111",
+            "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+            "nonce": "1"
+          },
+          {
+            "chainId": "1000002",
+            "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "nonce": "1"
+          }
+        ],
+        "structHash": "0x9745e76f42e76719bc36f62bc7b6b54856b5a18b4f4da039555357124020cb39",
+        "digest": "0x291273037573cfc1666bf9a5c6347632d871edbabf55424a17eb61f42ffd1641",
+        "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+        "sep53Payload": "0x1da28c41be3d4fa4b35f91e41838249552324c4d8151a9a5f689f8064f8f17c5",
+        "scheme": "sep53",
+        "sig": "0x77a5797873410bc766c26fa9254c99c6df7ea1744504ff154f648bf2b68fbab4366b8bc5665d845b65d876257f81f38e824b5edeede8cdb3799c477d412ca403",
+        "evmSig": "0x77a5797873410bc766c26fa9254c99c6df7ea1744504ff154f648bf2b68fbab4366b8bc5665d845b65d876257f81f38e824b5edeede8cdb3799c477d412ca403615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+      },
+      "revokeSameRegistryTwoNonces": {
+        "kind": "revoke",
+        "env": "testnet",
+        "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+        "legs": [
+          {
+            "chainId": "11155111",
+            "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+            "nonce": "0"
+          },
+          {
+            "chainId": "1000002",
+            "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "nonce": "0"
+          },
+          {
+            "chainId": "11155111",
+            "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+            "nonce": "1"
+          },
+          {
+            "chainId": "1000002",
+            "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "nonce": "1"
+          }
+        ],
+        "structHash": "0x1fa58531c580db4481d677aa642766a53c296750208f7da035ae691d67b5caf7",
+        "digest": "0xe158564da0fdf0564fe39bfa4ccf62660539ccc6c55ad8ebe12c9fa302e780cb",
+        "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+        "sep53Payload": "0xd214540fb8e3d65707ef945b41f3c4bca66db4926c26aae6b82a6a7d372076be",
+        "scheme": "sep53",
+        "sig": "0x4cb3e00ca74057eec71609f280d76522a068eb924b634ecba0f4ceca62a9b0d1d742a75ba7749dd3cd5970eda02a8ba2ef9948943e2c4d637b8bcac9e540a60b",
+        "evmSig": "0x4cb3e00ca74057eec71609f280d76522a068eb924b634ecba0f4ceca62a9b0d1d742a75ba7749dd3cd5970eda02a8ba2ef9948943e2c4d637b8bcac9e540a60b615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+      },
+      "otherEnv": {
+        "kind": "register",
+        "env": "mainnet",
+        "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+        "keyCommitment": "0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de",
+        "deadline": "1700259200",
+        "legs": [
+          {
+            "chainId": "11155111",
+            "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+            "nonce": "0"
+          },
+          {
+            "chainId": "1000002",
+            "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "nonce": "0"
+          }
+        ],
+        "structHash": "0x65193b0fb9589991bb72d1077f2b6d846c9213b142c20b7c023864678d62453c",
+        "digest": "0x0b33678bbf9aa25290bb5c7a229e282adacd1769942fc1442e720ca9c31c3995",
+        "text": "ProofBridge: register a settlement key\n\nNetwork: mainnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+        "sep53Payload": "0xd4b5390eff2f0c46bcd7d0ed7c99ad048bd308fd04083b0824962517ef3457fb",
+        "scheme": "sep53",
+        "sig": "0x8df0c89c6bf635e0f6809ddd445cadbc077386532919f39e182d8abd46c6fb3f37f5880b7e9d2e3951704f3569410e6585970668403c8f39f8a6cb7b70449405",
+        "evmSig": "0x8df0c89c6bf635e0f6809ddd445cadbc077386532919f39e182d8abd46c6fb3f37f5880b7e9d2e3951704f3569410e6585970668403c8f39f8a6cb7b70449405615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
       }
     },
     "bridger": {
@@ -1176,8 +1501,10 @@
       "register": [
         {
           "kind": "register",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a",
+          "deadline": "1700259200",
           "legs": [
             {
               "chainId": "11155111",
@@ -1190,17 +1517,19 @@
               "nonce": "0"
             }
           ],
-          "structHash": "0x8440017523ec59a928fa22ab6f264e95412bdc768b59e94728fa718e0402f76d",
-          "digest": "0xb6c33f601cf307011b60ed852e3dd3d9fd55aaaa12ec37e61b12318e9aaebedd",
-          "text": "ProofBridge: register a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
-          "sep53Payload": "0x64811df16dd0388f3a60e926dba6571df64c6e09bd92133d64757ec6207a0be7",
+          "structHash": "0xec3c8973be977ce22646d1b1814102949d8f2f6cbd771af7b154fdadf8f6d6f1",
+          "digest": "0x84a9ba8a0c34ec1ef08d11923d803d587030f98b44da0ff006674e3a55816bca",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+          "sep53Payload": "0x9feeb99f550175a2daf39f5a2f7ed4adfcf046e7dd82d4341bf9903f49658d6a",
           "scheme": "secp256k1",
-          "sig": "0xc10a8d3f383b784fcec1de062514daeb41daee852a1a758cf319e7bd6cf143943085023c0c1aefcc84986e28379278a6aacbc7f105978bb0b137a32d7b7ff5141b"
+          "sig": "0xb0d142ac46d82b00fc8e536e1e45cb283a8155ca3a843c0463730b41c3054c577588431e2b91d6b35539099ebee21dd4da27a4030300eeb576a7ed9adea331201c"
         },
         {
           "kind": "register",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0x8ee29e572deb9aa152c5cfb10151bdf9789ac63cb43716b5eaca530f47c27cc1",
+          "deadline": "1700259200",
           "legs": [
             {
               "chainId": "11155111",
@@ -1213,17 +1542,19 @@
               "nonce": "1"
             }
           ],
-          "structHash": "0xb79d2f4a5c1ed0130f64a18493450910da8c3782efceae0a59983b3d19776dee",
-          "digest": "0x5b03e7fd40d186e9c149ee3f49c700304831559b546b2d92be3e43daf4fc6db4",
-          "text": "ProofBridge: register a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0x8ee29e572deb9aa152c5cfb10151bdf9789ac63cb43716b5eaca530f47c27cc1\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
-          "sep53Payload": "0x535d9c4c5cef457babcda7273452c60a2b1b84f40e11530d976254f2b395084a",
+          "structHash": "0x63a4b6c0bd22856e7c2ec6f8990421ffd1f5dbab3dccdadd9d31eda498edb2aa",
+          "digest": "0x542b8efb99c78fec0144724bc27e9280fc8503c6f8538743c254cf5c6bd8281d",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0x8ee29e572deb9aa152c5cfb10151bdf9789ac63cb43716b5eaca530f47c27cc1\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+          "sep53Payload": "0x7ff84afabeb2a4da30b402d1a347b75f63e4cc66a3f7fd5113976331eeb89b60",
           "scheme": "secp256k1",
-          "sig": "0x93963298575a3dfb4bc55c27d93e32ab385556f3b0731fc8eb2e2961114ca26748bb55fcf1c9cf6adacae7fd0444edca387aa11c8fd8946467d0540d6716b6661b"
+          "sig": "0xcfb21fc7a7c042b2042a892163a43c8c6b9738ea6e87876902c8e8829bf8dd724359cd8e2bbc00ba85c3a34f683e4aa99221e543b4279c6ad532681c2ab09edc1b"
         },
         {
           "kind": "register",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0x3c157f83b291666c5dbb4cc0947c2fcfff10826e86399cfb9dbb3230d9b8d7de",
+          "deadline": "1700259200",
           "legs": [
             {
               "chainId": "11155111",
@@ -1236,17 +1567,19 @@
               "nonce": "2"
             }
           ],
-          "structHash": "0x3a59ba77ba886630f33fd3a9ad8c6a0b09ab2bf2b40949ce83de5507ac334c61",
-          "digest": "0x8aa7c5887c296cb6eae5628ca6dde63e76aa3f123c87286dbf81b6b08bb0aead",
-          "text": "ProofBridge: register a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0x3c157f83b291666c5dbb4cc0947c2fcfff10826e86399cfb9dbb3230d9b8d7de\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 2\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 2",
-          "sep53Payload": "0x5376afaa41a3ba0fbcaa669b2e636094e8135e19a5ff2ca07ce9006f0699bb32",
+          "structHash": "0x27d5540c1e7b9ec4a9eb4a2fa9a34c28b3c796f33857e7fc3ebe7d678182699c",
+          "digest": "0xf0eae1c3ce43d5d0a2e8e363f473f9d925df5b9272e73012c816f01d51a4f727",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0x3c157f83b291666c5dbb4cc0947c2fcfff10826e86399cfb9dbb3230d9b8d7de\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 2\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 2",
+          "sep53Payload": "0x9f57c20562f7d43fef27db85425b039a193e887bfa251880d9daeb40865440a2",
           "scheme": "secp256k1",
-          "sig": "0xd4479315441429006cec889e52c58b23dbbe4f397701fe4fdcb739cd8cd896d638f47490b5bbb4f4e514694aef2fb30cb706358998c651c16e44a5336fe2dd981c"
+          "sig": "0x7110455f607d233bc1980d6a5890df9274ad4971db0cab9cf4ea6c5c614227132431bea52d6943bca4d90a7b38d21ae83e76dfcc74eae6adba5f4a2839b8b2df1c"
         },
         {
           "kind": "register",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0xf2b97388b86b7d8d3da0defe8e6372a45ff8596be72b7db06eacbbc301f251d8",
+          "deadline": "1700259200",
           "legs": [
             {
               "chainId": "11155111",
@@ -1259,17 +1592,19 @@
               "nonce": "3"
             }
           ],
-          "structHash": "0xda01ecd06e5c43bbacccd4a6206918c2a814cb4cf88e48e286be8b2c9203b53b",
-          "digest": "0x7fef84d1dd3ddf1666523a8089a27d04c852ba8425ae652b85a1ecaba54b2a30",
-          "text": "ProofBridge: register a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xf2b97388b86b7d8d3da0defe8e6372a45ff8596be72b7db06eacbbc301f251d8\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 3\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 3",
-          "sep53Payload": "0x6800fb045117f030daffbbbcaf9fb0a42e02338a2574abf191f0462d5f8202c1",
+          "structHash": "0xad56ff29f9bb35073513830344da823809c665b7f1b51902c997cc58d0a7521c",
+          "digest": "0x87bb8b9957fe1395a90fd12a7b29256236e8aa691673755c08fdb7152e7ee1e6",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xf2b97388b86b7d8d3da0defe8e6372a45ff8596be72b7db06eacbbc301f251d8\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 3\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 3",
+          "sep53Payload": "0x53c9bcbff0f74d15ac9a0195cdd75ccffcc9f7686f1a8d841a567e3d7afef2e3",
           "scheme": "secp256k1",
-          "sig": "0x8afc4a733f50260de30f550daf6a46f5f70caf3c60f7c24db76f5ddeeff737881758df0138c97500ccd09becadbb53cc804fe5946c84a60fd2970818b5ecad281c"
+          "sig": "0x83989806504052f2e44b863d2c77cc0a65c3e25869c972c8cecd0749f28b2e35121c2cdca7988799ee4429c68ea21767aaa1eb82512818f9b01af09346e7be121c"
         },
         {
           "kind": "register",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0xf7a9e5295eacbe0acafbaafc78b78eec442beba7514e6147c152592bb2f75c8b",
+          "deadline": "1700259200",
           "legs": [
             {
               "chainId": "11155111",
@@ -1282,17 +1617,19 @@
               "nonce": "4"
             }
           ],
-          "structHash": "0x0f6cf4111337bb4df40d2deda85c5daad725c795396b578cfc1b4606018bb082",
-          "digest": "0xc83d4e0b431a152847e0c636bb39490b520ec956b89a52024cd835c5f0ca1af9",
-          "text": "ProofBridge: register a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xf7a9e5295eacbe0acafbaafc78b78eec442beba7514e6147c152592bb2f75c8b\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 4\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 4",
-          "sep53Payload": "0xc5c8d9799592a30a759026dd3511389539cd41d1201395672aa0ec9f91026448",
+          "structHash": "0x263b7542de1e30c79a0fac9042b8888b9a7c676506f2c3e7d78eecaffe982a1c",
+          "digest": "0xf87b4a223869f6b583a51b783ad580a7f1b00359e0541eb87f676644cc2b1a31",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xf7a9e5295eacbe0acafbaafc78b78eec442beba7514e6147c152592bb2f75c8b\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 4\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 4",
+          "sep53Payload": "0x8617245288e013ebe8e8ff1b4852998acbc554de59813c4f58977b368b1e006f",
           "scheme": "secp256k1",
-          "sig": "0x456c981c679319be4e79df855090d7a3f7cb8b596b6b557df89bdf12b39524b82e33d33d3bf6b24a5f86067cf791cab8d0c0fbc913f6176ad73fbe4ac1282d4f1c"
+          "sig": "0x8cd2374853227a0b47487b4882f0a6c85571f5736548ccf6e8cc5e900cd1bc213efa3d2f573a227fe69581328649f02882abf266fcafcb6eefb360fd0197136a1b"
         },
         {
           "kind": "register",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0xd6e8a103c12202dd381b96562722ae4bb344260726f69194c9091403a07b5a14",
+          "deadline": "1700259200",
           "legs": [
             {
               "chainId": "11155111",
@@ -1305,17 +1642,170 @@
               "nonce": "5"
             }
           ],
-          "structHash": "0x0099cbbdea6c4c1635ac1ccb4028e0cffe3e36f4cb476cfaae4c74aa0731e2e4",
-          "digest": "0xb9d14041b82805e48129b15d6bc120b60ba72234799bde00e83450a253e9edf2",
-          "text": "ProofBridge: register a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xd6e8a103c12202dd381b96562722ae4bb344260726f69194c9091403a07b5a14\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 5\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 5",
-          "sep53Payload": "0x56e2c76f11887dba08830cc3f35a317396a2ab67fa8c247c0d97e8da17e5f1f9",
+          "structHash": "0x6ea1f4fc3729910733de62bb5e0842b8514ec5552d0f5b1745fddfab30f07959",
+          "digest": "0xdfa74fd2658bd7a7de839ace7742e628ef72d7a944c5b60867a9432d2e0e22ce",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xd6e8a103c12202dd381b96562722ae4bb344260726f69194c9091403a07b5a14\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 5\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 5",
+          "sep53Payload": "0xf044f7b2d3ff7dcc897944453dd347e69b37a810d6b479645a33028cdbe247db",
           "scheme": "secp256k1",
-          "sig": "0x5436325f89b76da59ee0401b9cb04e7b3f245dfed42873f1b1d5e3e569b78f1c18b797497f7ea2f5faad0bde571948a13550fa123fa289505c344f2b5d5a64c61c"
+          "sig": "0x17b95128c90b4a2b47d306370082855a9007c17eb6ecf06ae4b35974f9e87af566652ea8b4a738c769f50eadd077862a8aed4bef94391e1b813c7a23a0d0d26e1b"
+        }
+      ],
+      "registerLate": [
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+          "keyCommitment": "0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a",
+          "deadline": "2000259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "0"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "0"
+            }
+          ],
+          "structHash": "0x2714b9dd58d65da4e1d5f0ced4b1d91bb96dc8fbd4f1b095ba07466043308911",
+          "digest": "0x4dd44bdbc7a94f785d7837d0e9e3364c6d4001ae9083b62eb0c4764eac5c8001",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\nValid until: 2033-05-21 03:33:20 UTC (2000259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+          "sep53Payload": "0x58f898c614fc12db75555dc5e77bb8a6108958d002d7096dd0daf6c856407245",
+          "scheme": "secp256k1",
+          "sig": "0x654b283424d09568a91da9442825f5b07ade0d2479350dbdaa18740d5a0b41d561270964231d10f828d0394c92c4f784eda182c04791f2c00758b1f60027308a1b"
+        },
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+          "keyCommitment": "0x8ee29e572deb9aa152c5cfb10151bdf9789ac63cb43716b5eaca530f47c27cc1",
+          "deadline": "2000259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "1"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "1"
+            }
+          ],
+          "structHash": "0x7f83039215abbad70848b88e1c3623f67e4fffcf7c19acfb19eca8b4c1e2877d",
+          "digest": "0x74b337974d825bee394b609db53cd0817177b4522825b4a4f7eceac9a540fb84",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0x8ee29e572deb9aa152c5cfb10151bdf9789ac63cb43716b5eaca530f47c27cc1\nValid until: 2033-05-21 03:33:20 UTC (2000259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+          "sep53Payload": "0x909760b99a9dce5d58532284d12a7c8c7a49156a26d3212ffca539548f5b817e",
+          "scheme": "secp256k1",
+          "sig": "0x46350a58a084e86dd862aa9c0d043a2ea47d91d04c897aa5857de97d65271cb365e5de3b457b12f14338c03ab4f092d1520de560b658d8594e5eeb47e72ca16d1b"
+        },
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+          "keyCommitment": "0x3c157f83b291666c5dbb4cc0947c2fcfff10826e86399cfb9dbb3230d9b8d7de",
+          "deadline": "2000259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "2"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "2"
+            }
+          ],
+          "structHash": "0x576a8bcaf9cf793cc62870dd665428dda4ac77c2b4b3dec78a2e5a5cebb5e607",
+          "digest": "0x8ff3f9771cb84700793e3389926013667272ee5c736a39e1338856a151e64630",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0x3c157f83b291666c5dbb4cc0947c2fcfff10826e86399cfb9dbb3230d9b8d7de\nValid until: 2033-05-21 03:33:20 UTC (2000259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 2\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 2",
+          "sep53Payload": "0x3592ad45b95760d7bd40b5d3009c84e54941afd60f2042cdd7b1f15c52b2593f",
+          "scheme": "secp256k1",
+          "sig": "0x328127d3ea077ac530fe071cc6296f22d9af192c2f2c612f004b181bc5d6dea97b3b765662eb206c70b9b19ac4a5bdee56072373165154e20821d7eaebaccc541c"
+        },
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+          "keyCommitment": "0xf2b97388b86b7d8d3da0defe8e6372a45ff8596be72b7db06eacbbc301f251d8",
+          "deadline": "2000259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "3"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "3"
+            }
+          ],
+          "structHash": "0xd619165bfb7072ec74d6654c4c40df8affb1e5bed60c05df4429bb008ae2b0ff",
+          "digest": "0x77337e37248c0f1ada82fb9aa63fcea76f293ae32164926418d941ff56e5241e",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xf2b97388b86b7d8d3da0defe8e6372a45ff8596be72b7db06eacbbc301f251d8\nValid until: 2033-05-21 03:33:20 UTC (2000259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 3\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 3",
+          "sep53Payload": "0x137bda0e18e58c6928e23fe9bbf9354a75cc7e8b41bc350cc8782949ee55a3b6",
+          "scheme": "secp256k1",
+          "sig": "0x059c77337c0379d758134a428e6bef9645498bfbd820aa67e17ed202b4a16aae29d66c2eec3996efe2e9e03e74eaf75d012f6c32bf4072e5ff3529f898cfac291c"
+        },
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+          "keyCommitment": "0xf7a9e5295eacbe0acafbaafc78b78eec442beba7514e6147c152592bb2f75c8b",
+          "deadline": "2000259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "4"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "4"
+            }
+          ],
+          "structHash": "0xff8b5e323669743a2024fd010e1dc881c30be37a4a38e94f7b178d5c0d95463a",
+          "digest": "0x4c163a413c7640b13481550ea764570ec87510617ed1e5e0bd69da8bf21d3131",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xf7a9e5295eacbe0acafbaafc78b78eec442beba7514e6147c152592bb2f75c8b\nValid until: 2033-05-21 03:33:20 UTC (2000259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 4\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 4",
+          "sep53Payload": "0xe5962f1c9f9d3b151c2faf02c72e9e9b12c90b25e7be49d87afda44863202665",
+          "scheme": "secp256k1",
+          "sig": "0x1173d4e7d1c3cbcd2e71ca4b8be4a4bce38f63e01e537b93819ad4ec968cab8042da8eb1616b0cc5195e4cecb10966123177427cf1644aae7ba1af8b224e96e81b"
+        },
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+          "keyCommitment": "0xd6e8a103c12202dd381b96562722ae4bb344260726f69194c9091403a07b5a14",
+          "deadline": "2000259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "5"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "5"
+            }
+          ],
+          "structHash": "0x9ca4abf50632ddfb351fc7345bed88d5d562c345f8575208c338b78a77b11ff5",
+          "digest": "0xb4d9df3e0a7f50982abef7db4858bc108f992d51f90d82b6637df0bef88e2ca2",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xd6e8a103c12202dd381b96562722ae4bb344260726f69194c9091403a07b5a14\nValid until: 2033-05-21 03:33:20 UTC (2000259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 5\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 5",
+          "sep53Payload": "0xc1ddb3a27b810fff1616fea1ed747fa6cb4fb987f32d263fc4a884b5fc8a0ac1",
+          "scheme": "secp256k1",
+          "sig": "0x5bdcf91a642eec175b84832c7513ff6181132b2ed0b35a69e2909bbd806af7e806829dd308eddf9c2394db2ace837569812afecaf2bfaedac81b8bc96d2b5b731b"
         }
       ],
       "revoke": [
         {
           "kind": "revoke",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "legs": [
             {
@@ -1330,14 +1820,15 @@
             }
           ],
           "structHash": "0x29cb42bd79716d71cfdc1c3fb21726239a9a4caafbe3d0fe4b272a446f5d3647",
-          "digest": "0xbcd62b15cb3e59fac99986ca54d072f8d7ba282b154c9f04ccec313811179edb",
-          "text": "ProofBridge: remove every settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
-          "sep53Payload": "0xb1be563ce7a71a6be7b0f2550df7c0c7f741abae3efcfafb333df6bb44837c72",
+          "digest": "0x45c39fcef18fab8a8ca52d581c58e13844a0eb905fff3913574b43848d6157e6",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+          "sep53Payload": "0xa55065f100bfef99e45311c991089a27a73f129abf17360d67f6aab3f49d9781",
           "scheme": "secp256k1",
-          "sig": "0xb5a6a5f0be2e5396f7625f3db32ad7ed7807c8d8a809ca5ab39eef9d5eaf3f9074d984312bdf8910ed3ff22e7cc1dcda086086310b305b946c562dd36c7166831b"
+          "sig": "0xf543446a1583df365cca3f1027864b82ae0a25f5618eafe20c18803afe544aa7742d9a1e17c75ed0451683b2fe0cd6e2ff80fc6b29a3c464cbf59f998d8acc3d1c"
         },
         {
           "kind": "revoke",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "legs": [
             {
@@ -1352,14 +1843,15 @@
             }
           ],
           "structHash": "0x12a9cbd0432d9b353495e22cc2671c723b38aa0808945d183707a705679bdcdd",
-          "digest": "0x4ebb576c98cdb228dcaafbe9a34fb85481e037cc5b86611d51cbee7d9000bf37",
-          "text": "ProofBridge: remove every settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
-          "sep53Payload": "0xf341f4ea6d54e826b61d0ffae1b872778762e37a544bc1e2011e340fca5653ba",
+          "digest": "0x6537cb9b1b81c92805db0ee04b13506649c3b8aa9cad92b664f8cd22dc04aa89",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+          "sep53Payload": "0xe1a709a98686f11b6daed39d72c694d56df5a14efe9e29cdf9de46f0d0b3a5bc",
           "scheme": "secp256k1",
-          "sig": "0xaaea5d753b2dccd8d9e1db96321d4d1b6e2d57258decbce838571e39264e40f1101d2dc9ebceb095dc6fa9ef316849b2ec0a713ea50dafa44d20e4a2b0ca98f11b"
+          "sig": "0x3e13484e98d66c2d51fa99b280e64167e7501c59deb6cccc3341ed33232300153686d7d562227010fcb615a2e92c227e658350412e3fd84c70ad8e81fab177401b"
         },
         {
           "kind": "revoke",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "legs": [
             {
@@ -1374,14 +1866,15 @@
             }
           ],
           "structHash": "0x82e47f643ae670a76bfd1fc4d5f310532ee49eaa258ea1ac2e9546792186f3e8",
-          "digest": "0x36c2d0c5723ee07b101cda667d8e5b36b0c85f3e33d913c0647d8fffb691fa3c",
-          "text": "ProofBridge: remove every settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 2\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 2",
-          "sep53Payload": "0x60270e9a6b461b9d9a626dca35aa8b1c28a0c415668aa1b2769d9c82800bd1c3",
+          "digest": "0xc757444805960f674bbd3d2f2654518fa419469753d4f06e32ee52828f1f30d4",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 2\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 2",
+          "sep53Payload": "0xf6f51ea80a8835c5bd8feba0df8d77ac6faace004d67dcd3e80e3d3c5c8e7bd0",
           "scheme": "secp256k1",
-          "sig": "0xbea4098b0dea4c08770072ec3ede2517f2777e9997ec4a9271437e3a76b30fe806d1f3f903ee7d59a47fc42f1a8c1ba1c5c1f97b510364a8920cdcfdd0cc31021c"
+          "sig": "0x2c45d98b9a0dcb88635cd23d105797b88f7f12778e665926f2ff732a9b50e8af7a5855d788a46ed5ffd01d43990b7d07f819e223807dc70456b5e52691e903741b"
         },
         {
           "kind": "revoke",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "legs": [
             {
@@ -1396,14 +1889,15 @@
             }
           ],
           "structHash": "0x4aff0a8bb16d052d47f8565afc7f09bbd28e2e83eab7c34fa9aeb56649143810",
-          "digest": "0xe5b118437459d1a64ae1a92ec01d18d7bf07d0d9b18b1993834adb1685e0c192",
-          "text": "ProofBridge: remove every settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 3\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 3",
-          "sep53Payload": "0x71c6f41d0571fae8b08e93d73d6726df480d31484c2d4c17fa55343468f0d7fd",
+          "digest": "0x8017289fc4d8d935ad81c66832510dd104f57fb3b9feaa51b6ae432b8bf47a5f",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 3\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 3",
+          "sep53Payload": "0xe739b3725b0c713640bb9858f4e5278b0a75dcf1ba5a201d58e7da85284d2d59",
           "scheme": "secp256k1",
-          "sig": "0xff2e9f3865af3b8ccaa1397a5870c3e2d7b3ad6857f9ae48c41f8b96b8d78ab823fff0e151e7405d1c54f0b6e1314bfce9de5d1ef5103b5ce7c733687f7ef1071b"
+          "sig": "0x9fbf6addae2b4180b2c13042b0fa2f326ec86bf805a33b88ef403496837af9365db25edb888e192f59cce39da9a7e2eb885c7916b34efdaf34f662beff74eac61c"
         },
         {
           "kind": "revoke",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "legs": [
             {
@@ -1418,14 +1912,15 @@
             }
           ],
           "structHash": "0x2c1aad67889af88d0a5114382f7dd2c7e9e0cb9d87688fc50ed51a1cdd22e869",
-          "digest": "0xe96f6d45cf2046ced69358e4eb3125fa5a5b34f64a346e53e7b5da0fe8f3505e",
-          "text": "ProofBridge: remove every settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 4\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 4",
-          "sep53Payload": "0x3b8ec35708f31392cb25c1056d4c1f3a074af990193e4efc386d3086102e7887",
+          "digest": "0xfb95a8608629e04215e173886f2d73896ec15c8966ba12728b8752bf8fbacc79",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 4\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 4",
+          "sep53Payload": "0xd0d65900f300c79d7abeb1b38f461c564395639872bd8997d4afbf30efd2e510",
           "scheme": "secp256k1",
-          "sig": "0x08b4d34b92ebcfdbaba9b3e01ddc06966f570292cea605c4938c2fb2bed445317df8bded64472d6db6cdfee2cf9805ce4e09f65f80ac9120efc7b29e7b39a4e51c"
+          "sig": "0xab240e8aff6f18d448a55cea21cda42a2b5a4017c499e60247e00710834e518326ac61e0a1474fae927bbc5ca40ea0d8d04d9ef576eaf4c9ad5d6abbc600a4461b"
         },
         {
           "kind": "revoke",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "legs": [
             {
@@ -1440,14 +1935,15 @@
             }
           ],
           "structHash": "0xdf0a3d2c5595d76084b53875d61852b9483aa31b5a9e213cce1de0920f09e4d1",
-          "digest": "0xa489c45129ff6e19825a7cba1f37dc7039e5fbcf9d824fb85d94166a98f899bd",
-          "text": "ProofBridge: remove every settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 5\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 5",
-          "sep53Payload": "0x989f14d62c2f4cb8c9051b2f2996bd1a1099e1e0da6f52b401d21312011d577a",
+          "digest": "0xa4c4a0339d985bebea95aff4021e81e8df94ab697126767b188743ab69dc037c",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 5\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 5",
+          "sep53Payload": "0x534b5d60a140c7cc2afccf8aa60cb9b4bad8b8276b4c2177ccbb0eb45cc43f6f",
           "scheme": "secp256k1",
-          "sig": "0x21b42e2ef1a2c3ab9d72ae107c895dc4c5920d199cfd91ec931f3e0584f2d3725eb427336e2901b3f109fe4486276d9322bd63f0b1a20aaa396a349bdfcd4d081b"
+          "sig": "0x545d3afce40294c65f86ceaeb856075897abd300dd72a722a155b6659d855d1b1f111cd3b3772bbf4a3a41268fc1a997da46328843361bd870a43d654b706ba81b"
         },
         {
           "kind": "revoke",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "legs": [
             {
@@ -1462,163 +1958,177 @@
             }
           ],
           "structHash": "0x94eeabf75767a9d9f296f8f2db91eacf43822af577a63bd53a2722518ee5d239",
-          "digest": "0x65b72e5007b74740629d00075e8118435271dffc8de9075aec58acef559a1a7e",
-          "text": "ProofBridge: remove every settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 6\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 6",
-          "sep53Payload": "0xd9b3da41ccaf4ea60c4979a35dbcd698eabbf9d57d26401adb46a52a9a75346d",
+          "digest": "0xc9ddf02f6a1ae8f3b015c0c6fe7a49e8f08adfd272d2fd9baf3b56f9458a502e",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 6\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 6",
+          "sep53Payload": "0x8d8d345cff39df94f9cfdfafe69620ad20c685cc390a4b808e3e4ee9378d1cf0",
           "scheme": "secp256k1",
-          "sig": "0xcea9c159cfb08b5a71f5c7666fa2eeab2f438eb189f443bc4ad75c06e00c88a42e55293603cc0ab36703ca74f5385e1c2e80801f708ad1f3b16c3303b918b4d31b"
+          "sig": "0x410874b943482968140f59f9061e8fc68419aeeded66f4331dc8fdaee143eb407c58f786d2ff82cc369544c1a1d1b6e3c5174a721aa429cb12436f93c28251941b"
         }
       ],
       "retire": [
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a",
           "validUntil": "1",
           "structHash": "0xd9ce585dc4e92fdc2920fcd08dd61cd385c9ebb604986c9a038d5cc82686b6f4",
-          "digest": "0x1c52ebe748510264d7d9f9ec7c51e2c418808334a3079c974d511bcbae9f3081",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\n\nValid until: 1",
-          "sep53Payload": "0x9251fafd5b3072cd8ddfb40da41d37aca64044563f04e4a90c7753be77df32ee",
+          "digest": "0x870f91f9603870dfe51fda6a12845e0834b5e01a9bb26f3a191371b8edab2acf",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\n\nValid until: 1",
+          "sep53Payload": "0xad08e4c2c4405688cc1a77da2b2eb889af0faea785caf64249c768a72249d1f2",
           "scheme": "secp256k1",
-          "sig": "0x37a895dd569655a17b21c097b262438cd24d9df91a01502efa25e9a2f3ea155613ec96a6d66b1c730fa6e2a63013974bac59496e81e899c20cb96a92bbd0b3261b"
+          "sig": "0x32e27515dd5899b46f0f8d58c0c43c36fd2da42585b0cde45a49a0242d9c9430664e70ae71e9ee421b6e392402b14a916c025a176e8437e36d208a98d9f22f191c"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a",
           "validUntil": "2000000000",
           "structHash": "0xa59258e9b8370f0c960ce527e56bcb2e0d399cdfe2276bd99e41f442b6deab06",
-          "digest": "0x848c93ca79523635f9fa3e65a40ced8be0c056f32eb46ab073c8d8cf06ea2401",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\n\nValid until: 2000000000",
-          "sep53Payload": "0x1e0b751adc388d98a554b259de7a75607169a7bd274cf01852553dcebf17ad3d",
+          "digest": "0xcecf7ee16c3e8a26c7a19e02d78e2d8f118108d067310e395d09e2ddb9ed2e1c",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\n\nValid until: 2000000000",
+          "sep53Payload": "0xce1e7189d8ed56f2477c77ab6afb345487b2c7f1b16dad3373129291ed858f06",
           "scheme": "secp256k1",
-          "sig": "0xa37db6de02bd33ce4b1b1b6ad2cff94448edc769f1766698f05edc50d59817000984f770c288af6db16db3c84a6a677a9fd343fefe7b85f6a33e9428543e11ef1b"
+          "sig": "0x042e662b0a912eef8dd2c56fb70d9d69417321e6cac2f88f9437f171703a487d7cfb92a385d9d6596075ca6427ce0c5d2fded8fcd603b25f5b4fe4d4bd500b431c"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0x8ee29e572deb9aa152c5cfb10151bdf9789ac63cb43716b5eaca530f47c27cc1",
           "validUntil": "1",
           "structHash": "0xa73cf882ff798185078770f4cfd9829c60db1de1356136b4f352bdd49942d2bb",
-          "digest": "0x870725ba4c510ebb2d552843d8ea8cec2ba05fdcea7ae2c6a3ce79bf0fb6b862",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0x8ee29e572deb9aa152c5cfb10151bdf9789ac63cb43716b5eaca530f47c27cc1\n\nValid until: 1",
-          "sep53Payload": "0xaf3c0ff30517ae1b5d1e0fdf5c28dc4f6fd453e632cddddd50b5e9a3b5679a8c",
+          "digest": "0xf10f1775d24a0215c650611e6eddd33ccc6acd63b86c58118fcb0285996e463b",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0x8ee29e572deb9aa152c5cfb10151bdf9789ac63cb43716b5eaca530f47c27cc1\n\nValid until: 1",
+          "sep53Payload": "0xc471675e1d089d64da40ebeee863946a3fd15a8f3316a964c16b9667f8e4f7ab",
           "scheme": "secp256k1",
-          "sig": "0xca208d6d688dd7c2a03c21e7af71934b9efe2170f5e23827af747587673099e2570a1d0b807cc74c81b3895ff9021f9d1069e770f9d5a121ce104f9c5ff1bb711c"
+          "sig": "0xf0330d6b4613478b63e4694db23b2d3143186f5648abfaaf25bf57d4dd28dd0053b2785f959e203e3be17ad17e50654c88eecb1abf6a742f0366274d5d9854a21b"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0x8ee29e572deb9aa152c5cfb10151bdf9789ac63cb43716b5eaca530f47c27cc1",
           "validUntil": "2000000000",
           "structHash": "0xe0f9f94c64732ec0502b4985cfdd9d0928c8f689d80b4870c69ce3c6f50d3747",
-          "digest": "0x42a0c77d5e79ef7bd80cf68f9304a7b4a2fa471b3e71f7da85da7aa796f1502f",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0x8ee29e572deb9aa152c5cfb10151bdf9789ac63cb43716b5eaca530f47c27cc1\n\nValid until: 2000000000",
-          "sep53Payload": "0xbeee795b147508a4277d3f9006a9b68d36e669317cc7954daa9609d646066cdd",
+          "digest": "0xb16971da0507b55b2bb171aee797ce2b5ce99ef32b65982c7d8d727572ed47e5",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0x8ee29e572deb9aa152c5cfb10151bdf9789ac63cb43716b5eaca530f47c27cc1\n\nValid until: 2000000000",
+          "sep53Payload": "0xab2b3ff04d75c74dd3e75396ba6881767205ddb635cd739e53565ec696b6b3ac",
           "scheme": "secp256k1",
-          "sig": "0x8095adff6de27f9694363d7c0b82bcbb4f9d064f2e6cca0dd6b8988a2544454a749d8d5dcf6eb12467e0974f42ec878069573d8f84e9868f81c21dccd65da0a71c"
+          "sig": "0x1101a2337a23a2d452fc795f309f5970a45ed119467bbdd4c7fb7ea631e4ffa957023584c16a81e28b0a21ded9757c36e5ec4bdcb4dffeccba6cf85cf7a38d8d1b"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0x3c157f83b291666c5dbb4cc0947c2fcfff10826e86399cfb9dbb3230d9b8d7de",
           "validUntil": "1",
           "structHash": "0x67abb33b54cc39b1f1895e4f44fd31ec3dab958311d0da81ea9cc8bd7c636032",
-          "digest": "0xd240939003e20745f624de73ee93b5947c2c2bb40e9d74f08e447f8e4edc5af9",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0x3c157f83b291666c5dbb4cc0947c2fcfff10826e86399cfb9dbb3230d9b8d7de\n\nValid until: 1",
-          "sep53Payload": "0x53f4447ea32d4ab7eefe37aa88842924f4911077d926f3e7400f971081ffbba5",
+          "digest": "0xad87f6e9a5d092f5c4bad9afecaafdd16a5557f0cfb336b18f9f45b17941266b",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0x3c157f83b291666c5dbb4cc0947c2fcfff10826e86399cfb9dbb3230d9b8d7de\n\nValid until: 1",
+          "sep53Payload": "0xe08a618c5e7067d4a9bc9a9260c1bd241121992446a1a04312d7378b666105d8",
           "scheme": "secp256k1",
-          "sig": "0x75036fba590bcea30691c655dc5716f25c7f99ce20f46a8ace923c9307a81b714f5e383f01e2291995c1a5a82b40e09d4bca5a73cd73750f2a6793d4cce3a6701b"
+          "sig": "0x4e22362fb69404c476145506cae4057f61e7e74eda6d1e1f9dddf3c71292712504f316a2bf3b3e02358aebef85d6b13b74857964a9ead50206ae38c89f8279f21b"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0x3c157f83b291666c5dbb4cc0947c2fcfff10826e86399cfb9dbb3230d9b8d7de",
           "validUntil": "2000000000",
           "structHash": "0x4199e788c2b663fac302109912870a7542f4023010d37b2cd00db34998a7c150",
-          "digest": "0xfec1b8ca82f7721fba8f15758c2481c076b546164078eea7d335568b1ca84f5a",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0x3c157f83b291666c5dbb4cc0947c2fcfff10826e86399cfb9dbb3230d9b8d7de\n\nValid until: 2000000000",
-          "sep53Payload": "0x26bf731575c01cda4fab8f6d886bee5adc197118d3fa2b755ee623cddea6f1c4",
+          "digest": "0x52f0adede56cee7f90b9ccd8f6d2c42ba2b0dedfa73faaa9ae9f7243da271704",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0x3c157f83b291666c5dbb4cc0947c2fcfff10826e86399cfb9dbb3230d9b8d7de\n\nValid until: 2000000000",
+          "sep53Payload": "0x646792f4b111a476e770e141a8e781bb49f3f4037345fddcb98e22c22966580c",
           "scheme": "secp256k1",
-          "sig": "0x0f83ad2abc8d2eb5ef2fa87551d5348843b97b915f851f5fac3beb38684a884f70a1890465e14e9fe5c7bbedeb1b215446474da84c6a0cc32a409b2d7a05e1de1b"
+          "sig": "0x90fa10e431e2d3c5086f7b09799b4514d9cc760509dfd4918eaa39a14f4a805761b8f6de6f75747d79be0f84dec7e005139da9f79ee840023a20d0bf476eadd61c"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0xf2b97388b86b7d8d3da0defe8e6372a45ff8596be72b7db06eacbbc301f251d8",
           "validUntil": "1",
           "structHash": "0x01ef66aa25fd83c00c5d2db26ddebae7979abc71b9c6cc672c5934fd66cfb637",
-          "digest": "0x875647bbfa8bb51a1fba5b6addf759a04519edee872619d5e1aba6de4620d41f",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xf2b97388b86b7d8d3da0defe8e6372a45ff8596be72b7db06eacbbc301f251d8\n\nValid until: 1",
-          "sep53Payload": "0x68eb9772f7f33bc59d084cc8b9f066a8a70f173bc69e80deb965db337fd8d9dd",
+          "digest": "0x0fdbeb07a8ffc9c5f2f32136a937eb92b32d052f3c71b6ca11c737d958b6a6ea",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xf2b97388b86b7d8d3da0defe8e6372a45ff8596be72b7db06eacbbc301f251d8\n\nValid until: 1",
+          "sep53Payload": "0xfe32e5d81e21901be38a52083f2593ec362267811c15542d851db3505cbe3c82",
           "scheme": "secp256k1",
-          "sig": "0xf5458187f20a8f2377cf5ce807acbf6ae8610a7cbd9b566b9ce766f17206d0e11e4628beb4d5feb52ecbbf739d9705f97bde42ea7c0a9a58c69d6dbaf3b17e291c"
+          "sig": "0x6a40c66084d781ddab348ddc42e4d89b107c51d160d5359c8daedb3f571afeaa6c17e8580738426dc1572d53287dc127c76ec766049832c564672669dd95ed111c"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0xf2b97388b86b7d8d3da0defe8e6372a45ff8596be72b7db06eacbbc301f251d8",
           "validUntil": "2000000000",
           "structHash": "0xecc5e8cc66e852e2f7397726233591f15365a30d95f2198bc8c2fa4822e3d10a",
-          "digest": "0xe402031fd0a448a36699db2c62c5947d2d83e331cdb088651b93886fcb7f3c2c",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xf2b97388b86b7d8d3da0defe8e6372a45ff8596be72b7db06eacbbc301f251d8\n\nValid until: 2000000000",
-          "sep53Payload": "0x249f753b31ba2bbd6a5a56d706a85bd43d864172d37fd971db604cc865addc11",
+          "digest": "0xa38302cacceba0f315f1779ab0ef8fa98db76e7337a564a8c99cfe3bbaff9d43",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xf2b97388b86b7d8d3da0defe8e6372a45ff8596be72b7db06eacbbc301f251d8\n\nValid until: 2000000000",
+          "sep53Payload": "0x8e06724d0d20908a326aa139e57d10a5ab75ec709414404924886fb5b9264274",
           "scheme": "secp256k1",
-          "sig": "0x68344efd0f85121a3294d65eab9a8381b4e1ed8136085140260e4c73fa44233f6dbbf3e0da1a6d1b4e13fb08af3979a01764c2b0784870c429ae0a980fe55c431b"
+          "sig": "0xb6f968418f80906c15e1e1a5bab2a8e0587de2eb9361a26ee03db6b229b9faab4809dfd06db31e3ee7e7a7981db424b520410cb5e5931326572f3273218a6bc91b"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0xf7a9e5295eacbe0acafbaafc78b78eec442beba7514e6147c152592bb2f75c8b",
           "validUntil": "1",
           "structHash": "0x7c1898b92740e434e84dbd1f8d146cd85eae2918abcd23c191d5c827fba57d4b",
-          "digest": "0xdababb0c59ea2f3cf49de8b6b944dabaf02aeb95bbd3dd35a2869c8e3e5ccefa",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xf7a9e5295eacbe0acafbaafc78b78eec442beba7514e6147c152592bb2f75c8b\n\nValid until: 1",
-          "sep53Payload": "0xa5e8e8a16629081ffc5a6f5db28a70ca4270980ef0ee3dce2d4640bfc926d884",
+          "digest": "0xe0122303ecdd520fdb8a3d632a9a9e05e5c61ba571ffad44cba86a93cde7a5a3",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xf7a9e5295eacbe0acafbaafc78b78eec442beba7514e6147c152592bb2f75c8b\n\nValid until: 1",
+          "sep53Payload": "0x079b3011612b4bd655607e381430f995efdcf3a8387362f43a97ca0462466f47",
           "scheme": "secp256k1",
-          "sig": "0xd9e2ef8117d6230933b9c4b6921c0489a1f5695420506258eccb4324287c052d6dc7961045ae0af5e3b8fbf154260b84a137afd9c60767876586595fcb428f101c"
+          "sig": "0x1eeb8b17fe5bd888bb33347cd11090334dae8b0a853123af44a13f5ba4893d0e0fbd261e16e7563b3e4478d53686696951bd4b11fccf6b1cf205bb5559dc32a21b"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0xf7a9e5295eacbe0acafbaafc78b78eec442beba7514e6147c152592bb2f75c8b",
           "validUntil": "2000000000",
           "structHash": "0xea3be1a66159d12c0306a67121b56df0b0ee45c20ee68308e3d60d45430a2d83",
-          "digest": "0x1f1f1eb1c4a3cf3d3fd1e72042de65dec136d66b23e654a31e1e93fe80412d0d",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xf7a9e5295eacbe0acafbaafc78b78eec442beba7514e6147c152592bb2f75c8b\n\nValid until: 2000000000",
-          "sep53Payload": "0xce25bd13bab20e93e0fc6c857e44bea90f31876f33c63553fc5ff3930361877d",
+          "digest": "0x9c0f3e2acd79a7e704561ef8c3d6d00e69a4cce4459eb70cc31cea11788b13fd",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xf7a9e5295eacbe0acafbaafc78b78eec442beba7514e6147c152592bb2f75c8b\n\nValid until: 2000000000",
+          "sep53Payload": "0x92d3da1028ad77a53741e6a57453816ca661a1422ef46252c909c8c09e8916cc",
           "scheme": "secp256k1",
-          "sig": "0x0e2c36fa9f1a0ba89923aa60a166ab462e6cc89eb43319a5c125d199088a68b21bfaa60091b01ba173c39b4a1ad9d40a42bd4886b7a0e70da9d36a63b2122e1e1b"
+          "sig": "0x884b915bb39f6fb4da4d560fd17242ff1000f2fc2c044456557d69272445cc635aa860696563788a0b4978c7648d19b11705a9e2d43246422f82788364c5c7321c"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0xd6e8a103c12202dd381b96562722ae4bb344260726f69194c9091403a07b5a14",
           "validUntil": "1",
           "structHash": "0xe89fea8ed5aac2891b07668055b31196271ac1388cd50835d0544663db6d327c",
-          "digest": "0x26492cf48791cdd541d120ae9f449e925105988ccc30b819c5bd2e509ef7a3b3",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xd6e8a103c12202dd381b96562722ae4bb344260726f69194c9091403a07b5a14\n\nValid until: 1",
-          "sep53Payload": "0xfea7efec2981db6e4df5e8d2515def30faa571ca32ae65c68f51ab33e7251799",
+          "digest": "0x19e14457ea38398e04c2f0084e2694fbd840207f00fa06e6105d5f2729e46273",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xd6e8a103c12202dd381b96562722ae4bb344260726f69194c9091403a07b5a14\n\nValid until: 1",
+          "sep53Payload": "0xac84a1d0350fb897cbe37f13ca12814429e4d29ede3247d1ddfb36861b449524",
           "scheme": "secp256k1",
-          "sig": "0x56b3940fe8609cd487e68a89d0591dd609d9a58fd5af75564a80ae4f84682f87487790b427c5a195dbfad0761598ff072560ec9959567ceb510348b9fbb285a11b"
+          "sig": "0x9f33d27a2bac1add346b98bf9c178aa38b6af2dc38e8f5a2ae2615a66651bb7d793403319a4c39541499d7c425f570bb114717e400166f683a91c3bdb8a643a31c"
         },
         {
           "kind": "retire",
+          "env": "testnet",
           "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
           "keyCommitment": "0xd6e8a103c12202dd381b96562722ae4bb344260726f69194c9091403a07b5a14",
           "validUntil": "2000000000",
           "structHash": "0xae6c0ec843becc01284c41e4e64afc8fd80ec52d7a630176fa8c62f4d2ae2f9e",
-          "digest": "0x6685aa60d55184a9f1963f5349cb70f6ba0f74d00a793f234105902747478f72",
-          "text": "ProofBridge: retire a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xd6e8a103c12202dd381b96562722ae4bb344260726f69194c9091403a07b5a14\n\nValid until: 2000000000",
-          "sep53Payload": "0xba6197bedd2208b99a01ded16be2425b97c56f38e3231181eb49b8b9bb63e801",
+          "digest": "0x8b86c16e75d03a1523f1808eee9e936d3ccf553f6eecbd80e93f0a96b78c79d2",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xd6e8a103c12202dd381b96562722ae4bb344260726f69194c9091403a07b5a14\n\nValid until: 2000000000",
+          "sep53Payload": "0x8fb93c03563a6c4f73b7419f3fa6604212502e04e88c4d7ee2c00b7f89b4db88",
           "scheme": "secp256k1",
-          "sig": "0x48c86690f934656475b5f09b3b05e24cf73a2ea89bed3f35ed92253f5a1390254b10a0fe4dea9de6393c1dd18edfcc7c8e65903520ea59473e27d60e89a9cf521b"
+          "sig": "0x97ef86b166079443e69cdc5cb9f4037eb009e3137bd85622b292ea15ddf3719b34c3e495a57c813026339ef323de44c623ea104b21a943808394c21f016a607f1b"
         }
       ],
       "reuseKey0AtNonce1": {
         "kind": "register",
+        "env": "testnet",
         "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
         "keyCommitment": "0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a",
+        "deadline": "1700259200",
         "legs": [
           {
             "chainId": "11155111",
@@ -1631,17 +2141,19 @@
             "nonce": "1"
           }
         ],
-        "structHash": "0x04c249bbb973f68426bbf3c5fa5639def790a7e365c7550c0517c53fead97af2",
-        "digest": "0x5e52855d3391fed309ceaa6baccc39bcef1fe8fd9293c5c2ab43c9d60ee8e97e",
-        "text": "ProofBridge: register a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
-        "sep53Payload": "0xb35b65d566596f7fd30802d859422fa06c748b1f1378f95b81065225d05b829c",
+        "structHash": "0x0986225faea24113595e2f735ee4208b14032d1d8e883e0abae446e634f17141",
+        "digest": "0xa54e83351fff54003fde9a777f1e57c86610b79b0ddc139ef04c2b847e7aaa9a",
+        "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+        "sep53Payload": "0xd928357e4c5fe4164a528a996b0353db9fa131d584b581f0ad92efd4512ee0c1",
         "scheme": "secp256k1",
-        "sig": "0xfbe0aca3fc2a7ad487e327418232852bb17c124fcdd8d35093fb77318b7b95c303a53c605ee4c71e59ad2f5b21df111bee98173cad9ee8124a48f49d05616a861c"
+        "sig": "0x875f848bde1b8e74a504e8a7197c4b2067648bf4b1d8f3393fa8210442a5cb5e419a832e4bfb02f85cac67fa22a3fbec059d94a10f7f07268d7179bde91fd7301c"
       },
       "onlySepoliaLeg": {
         "kind": "register",
+        "env": "testnet",
         "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
         "keyCommitment": "0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a",
+        "deadline": "1700259200",
         "legs": [
           {
             "chainId": "11155111",
@@ -1649,17 +2161,19 @@
             "nonce": "0"
           }
         ],
-        "structHash": "0xa41aba5154627f85702c2c0c26dc9345f9dd5ec1aa6316f2d8468a34cace803d",
-        "digest": "0xd1bb08889b9bb1d8f71964731ce897394a2bc87bad16658870a3036b45954e57",
-        "text": "ProofBridge: register a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0",
-        "sep53Payload": "0xcc4e2618b3d7f0aa65ef2f00b141d9a5e1298e2e44c14fe5f1f32b5f3ce87969",
+        "structHash": "0x801838409e0b28a76bc7b21cc9d34c5f200242d8bc3f0d8fb6dcdfce7f222720",
+        "digest": "0x87f71794e180b2729ca6aefeda4c0e888b9bc8be002c28096d2c880819093c55",
+        "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0",
+        "sep53Payload": "0x83252f28d749147e1045998570ab21b6bdbf7eeb063354816cd6d36da8b0f6d5",
         "scheme": "secp256k1",
-        "sig": "0x0158288df600ce194c91c0a1a1273ed927d1ffc8fea2a55cf8fcbd7cb844ed6b6f1d80bf251da6a8679eff9e31a07f167877f7ea383a77ad1f7cd3d61472cf2a1c"
+        "sig": "0x049638b4272c24dfa46cc2cb578fd46603e268cd437bf9c5757e909134cb71511b199fb737ac9bc7cad87b5fbd6dc402aa2af514e633983de08592c13272f69b1b"
       },
       "onlyStellarLeg": {
         "kind": "register",
+        "env": "testnet",
         "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
         "keyCommitment": "0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a",
+        "deadline": "1700259200",
         "legs": [
           {
             "chainId": "1000002",
@@ -1667,17 +2181,19 @@
             "nonce": "0"
           }
         ],
-        "structHash": "0xa0ae1fd5c6b5142687bb3408c7a0c9db3e76546eb344119b5c3ac9b4cb55198d",
-        "digest": "0x3fb316abefbeaddbffb29491607ea6392780d8fae89a16446650f3701192544a",
-        "text": "ProofBridge: register a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\n\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
-        "sep53Payload": "0x0f1590aaf6139d8135fd0dac987aa542fd2ba87f0eaeb13a04e1d43f57dfec7d",
+        "structHash": "0x838f1795a21bbf7dba833c7c4a5d68bf4b12c5706fa0ec734bcf84d1aac23039",
+        "digest": "0x8508d44de813d7cc1a29ce627b75fae2fd281930bdcc5d261c4d115c113f6131",
+        "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+        "sep53Payload": "0xde0be8bde52361c01d1d79c6f246ee7928c22444b5356e09dcd0cbbdfed5ac09",
         "scheme": "secp256k1",
-        "sig": "0x4a5c0c7d643d37fda5a1874d96f45570741bd70e8f4c8b069157be8693683bb45b6a0c87ed32558bd10959934065f9bb513196c6d7ed9e2e072290ccc19e5f5d1b"
+        "sig": "0x43e8a5ca64d54d838024c1b4cf0907016d2ec2733aa2b390127104f58aafd68029697fbbb44c0a38eb3b3e7f5cae5d7228ef321297c85bc870fb56d05063d4361b"
       },
       "duplicateLegs": {
         "kind": "register",
+        "env": "testnet",
         "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
         "keyCommitment": "0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a",
+        "deadline": "1700259200",
         "legs": [
           {
             "chainId": "11155111",
@@ -1700,20 +2216,161 @@
             "nonce": "0"
           }
         ],
-        "structHash": "0xaf174bca821b9beb8e0b22a9c2b344f868e394bfa8fa53f709d85925bbf7e400",
-        "digest": "0x43953f512f290e0ad956a899f4847878f54d8ca4f2ccd99022a367260b8519e6",
-        "text": "ProofBridge: register a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
-        "sep53Payload": "0xe5830995b1f3cec80fed5aed64cf9919a3bf377285d4fc8f976fa6011bcc0d06",
+        "structHash": "0x9b426914a5c3966dac25da87e49a2ee58f6150a8e357659363bac980dc5c678c",
+        "digest": "0x863938a230942ef71954d187cb16703afc04b8da2146ec52dfb208215daa9668",
+        "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+        "sep53Payload": "0xfa8661604f54c82343acc87bd6263afda295c2147e09045eb3af52cc2c5faaf6",
         "scheme": "secp256k1",
-        "sig": "0xef051e2936a5649d444f14b4eb68d9a2898b79dcb386b6a964ad6e9af70dce8f5ed027a3e085b5bbfdb98322dbf7a9a2953b1d3b201dd0d3cbd49019cd30b4311b"
+        "sig": "0x1bc966c80578832bd8af3e93144351ad85a134e122affbb24d2febfc459e7120711085aa7f5a947b191a7f231f4f3e43de25ccdc9a0b70bb96d380d0ec7ff6bf1c"
+      },
+      "sameRegistryTwoNonces": {
+        "kind": "register",
+        "env": "testnet",
+        "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+        "keyCommitment": "0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a",
+        "deadline": "1700259200",
+        "legs": [
+          {
+            "chainId": "11155111",
+            "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+            "nonce": "0"
+          },
+          {
+            "chainId": "1000002",
+            "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "nonce": "0"
+          },
+          {
+            "chainId": "11155111",
+            "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+            "nonce": "1"
+          },
+          {
+            "chainId": "1000002",
+            "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "nonce": "1"
+          }
+        ],
+        "structHash": "0x8c4fd5d18accab892ab74608cc64d0cdde4d805b7de66800a835533a495c27d9",
+        "digest": "0x863307c7877cd9d6bce4f7c00c048dabe8494b4e3d147567ae79592620ec7bcd",
+        "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+        "sep53Payload": "0xd73b4106301c84372162a594cb2e0bb3b955e24f1b9e9a25df4c28521b5194b3",
+        "scheme": "secp256k1",
+        "sig": "0x10c12485fc3585642f46c6a326af69f60ef19a9f24a179c44576ea98e34070e363728e161a77f67d6a07819cad386bfa609afd57c9569cfff3f7e61904f69b731c"
+      },
+      "revokeSameRegistryTwoNonces": {
+        "kind": "revoke",
+        "env": "testnet",
+        "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+        "legs": [
+          {
+            "chainId": "11155111",
+            "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+            "nonce": "0"
+          },
+          {
+            "chainId": "1000002",
+            "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "nonce": "0"
+          },
+          {
+            "chainId": "11155111",
+            "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+            "nonce": "1"
+          },
+          {
+            "chainId": "1000002",
+            "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "nonce": "1"
+          }
+        ],
+        "structHash": "0xc659055b7d5c3e920ac6b1efc96d54853e36f1fe0479c0ca7594262bde00e631",
+        "digest": "0x754466721aca742d1dbea16b3df31186c5e9a236e47e1a587323d4b7e995022f",
+        "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+        "sep53Payload": "0x80498ea208d4a2e3674b8903ae5adab0d6f3d9e9fd624a7f6a44a650a0aeb40a",
+        "scheme": "secp256k1",
+        "sig": "0x866f1f2d0de93b2bc199c11ce183ceaf3e8cef0eb858c518540cea77e34c9f9f544d61fb5156509d74ad808b3b6a979d040c9760971305b0ccda4100f383b0051c"
+      },
+      "otherEnv": {
+        "kind": "register",
+        "env": "mainnet",
+        "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+        "keyCommitment": "0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a",
+        "deadline": "1700259200",
+        "legs": [
+          {
+            "chainId": "11155111",
+            "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+            "nonce": "0"
+          },
+          {
+            "chainId": "1000002",
+            "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "nonce": "0"
+          }
+        ],
+        "structHash": "0xec3c8973be977ce22646d1b1814102949d8f2f6cbd771af7b154fdadf8f6d6f1",
+        "digest": "0x48d24512970c66326e7e2323b42564470ae56d6baf54d6c724cf79d1569c0c39",
+        "text": "ProofBridge: register a settlement key\n\nNetwork: mainnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+        "sep53Payload": "0x95562f3f83298c9c6e7f9e743653fabf10862e16964bbdaa46f8087d8cd74f07",
+        "scheme": "secp256k1",
+        "sig": "0xf614b60dd838ae59f2897af7416ddb15e09b14933a6dd5dde7d5a0f96488c4731a3d010954fc53c0a09b2c5dfec78bb142cd4cfdf1c009a9104d7405bc7e51211c"
       }
+    },
+    "secpForms": {
+      "rule": "bridger register[0] (entry fields = ownerAuth.bridger.register[0]) with only `sig` changed; `expect` is every verifier's answer (refuse = OwnerMismatch)",
+      "recoveryV": 28,
+      "forms": [
+        {
+          "name": "v27or28",
+          "sig": "0xb0d142ac46d82b00fc8e536e1e45cb283a8155ca3a843c0463730b41c3054c577588431e2b91d6b35539099ebee21dd4da27a4030300eeb576a7ed9adea331201c",
+          "expect": "accept"
+        },
+        {
+          "name": "v0or1",
+          "sig": "0xb0d142ac46d82b00fc8e536e1e45cb283a8155ca3a843c0463730b41c3054c577588431e2b91d6b35539099ebee21dd4da27a4030300eeb576a7ed9adea3312001",
+          "expect": "accept"
+        },
+        {
+          "name": "otherParity27or28",
+          "sig": "0xb0d142ac46d82b00fc8e536e1e45cb283a8155ca3a843c0463730b41c3054c577588431e2b91d6b35539099ebee21dd4da27a4030300eeb576a7ed9adea331201b",
+          "expect": "refuse"
+        },
+        {
+          "name": "otherParity0or1",
+          "sig": "0xb0d142ac46d82b00fc8e536e1e45cb283a8155ca3a843c0463730b41c3054c577588431e2b91d6b35539099ebee21dd4da27a4030300eeb576a7ed9adea3312000",
+          "expect": "refuse"
+        },
+        {
+          "name": "highS",
+          "sig": "0xb0d142ac46d82b00fc8e536e1e45cb283a8155ca3a843c0463730b41c3054c578a77bce1d46e294caac6f661411de229e08738e3ac47b186492a70f1f19310211b",
+          "expect": "refuse"
+        },
+        {
+          "name": "highSv0or1",
+          "sig": "0xb0d142ac46d82b00fc8e536e1e45cb283a8155ca3a843c0463730b41c3054c578a77bce1d46e294caac6f661411de229e08738e3ac47b186492a70f1f193102100",
+          "expect": "refuse"
+        },
+        {
+          "name": "v29",
+          "sig": "0xb0d142ac46d82b00fc8e536e1e45cb283a8155ca3a843c0463730b41c3054c577588431e2b91d6b35539099ebee21dd4da27a4030300eeb576a7ed9adea331201d",
+          "expect": "refuse"
+        },
+        {
+          "name": "v2",
+          "sig": "0xb0d142ac46d82b00fc8e536e1e45cb283a8155ca3a843c0463730b41c3054c577588431e2b91d6b35539099ebee21dd4da27a4030300eeb576a7ed9adea3312002",
+          "expect": "refuse"
+        }
+      ]
     },
     "negative": {
       "secpOnNonEvmAccount": {
         "rule": "a secp256k1 signature for an account that is not 12 zero bytes ‖ address must be refused (OwnerMismatch)",
         "kind": "register",
+        "env": "testnet",
         "account": "0x010101010101010101010101d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
         "keyCommitment": "0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a",
+        "deadline": "1700259200",
         "legs": [
           {
             "chainId": "11155111",
@@ -1726,12 +2383,12 @@
             "nonce": "0"
           }
         ],
-        "structHash": "0xb30950ef103f230437b25fdea7e5ddf67598172ddcc1924d43c5d49df0aff0d5",
-        "digest": "0x849d88a64a6775d829a043ccc6e23af4289be128d5b2b80624b0b69b7b196b79",
-        "text": "ProofBridge: register a settlement key\n\nAccount: 0x010101010101010101010101d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
-        "sep53Payload": "0x6721a249f4dc3780c5c1a7e047a70e23a71e67a28de1952be4bcbcb34ad854c3",
+        "structHash": "0xaac40b7c6211d1ff2d2b9b1aed51bf9712761c45ff1aa7f51a196688bab0179a",
+        "digest": "0xe0938616ad028d6fdbfee3df4c1dd6a8eb2d47edafc719f9910b6966fefc738d",
+        "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x010101010101010101010101d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+        "sep53Payload": "0x09fe9eb7b92e366467f5ab46f84b5dbc9369809415b60104d88cb645128c2337",
         "scheme": "secp256k1",
-        "sig": "0xc19ef06514ce17daafbe427498f7a16db9768bfe72544cc226f8de5423b3eb6c37a0229d971098c7f961f112f844548c5eba448d59e1a0cd64e0f73d1f6e62691c",
+        "sig": "0x95bee83fb196a294217640a7d840c3970b26d91d63a8c13852775da7dbefc82b0c41e8052b2b48a42497020509611ed68b03a10ca579a348fc9adc8a5ad8fb651c",
         "sepolia": {
           "pkNative": "0x000000000000000000000000000000000955dbd6d4daef5d3623b3c934ea240a1c74d53fce884f241b8cee611c529eb85887ac586e9d1f3f1ac845835252e85a000000000000000000000000000000000644d6553c0f5b9c65b68aa39fd1e503bbeb44e4bdb29ec6a940d3127c99ef9a1e35e7fd14c4a9f59a0bcbcde58ada9e",
           "pop": "0x00000000000000000000000000000000193df1d21637317859d58df64701a1751dec59f8e485f0dd9a884cbd15ed336cf7a3732a015c57ad477abcf389556da1000000000000000000000000000000000f915f39494b91505181eac975f188b441728712b6f3d323a4d460b1174f2f9f544c30177b1c5b29f618c4539d0e6de4000000000000000000000000000000001394823cec58edde3f8796f23bedb5632544977a4706232dfa1f4659f239382d3141c2c920608f2b65e0c7a88cdd6f910000000000000000000000000000000002a211c75f9cdc1544410b6fc93109e57669f596a0b17acf78b485c5404afff9835774deb39496a9d117feb7ef41b911"
@@ -1744,8 +2401,10 @@
       "sep53OnEvmAccount": {
         "rule": "an ed25519 signature for an EVM-shaped account must be refused (OwnerMismatch); PoPs = slots.bridgerOn*.registrations[0]",
         "kind": "register",
+        "env": "testnet",
         "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
         "keyCommitment": "0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a",
+        "deadline": "1700259200",
         "legs": [
           {
             "chainId": "11155111",
@@ -1758,26 +2417,27 @@
             "nonce": "0"
           }
         ],
-        "structHash": "0x8440017523ec59a928fa22ab6f264e95412bdc768b59e94728fa718e0402f76d",
-        "digest": "0xb6c33f601cf307011b60ed852e3dd3d9fd55aaaa12ec37e61b12318e9aaebedd",
-        "text": "ProofBridge: register a settlement key\n\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
-        "sep53Payload": "0x64811df16dd0388f3a60e926dba6571df64c6e09bd92133d64757ec6207a0be7",
+        "structHash": "0xec3c8973be977ce22646d1b1814102949d8f2f6cbd771af7b154fdadf8f6d6f1",
+        "digest": "0x84a9ba8a0c34ec1ef08d11923d803d587030f98b44da0ff006674e3a55816bca",
+        "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nKey fingerprint: 0xb1d080d7baa50b1e3469736e5018e396fb0bce5617909c8908bda916d46cef2a\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+        "sep53Payload": "0x9feeb99f550175a2daf39f5a2f7ed4adfcf046e7dd82d4341bf9903f49658d6a",
         "scheme": "sep53",
-        "sig": "0x99ec2846df43fffdbb1c4b4f4f161518bf1305f86836943774e2f6fe66ed2511fd58b8fc4fe09d92835a94c95b3f3996215352781f1a37bd43bfd3c4bcaf6f09",
-        "evmSig": "0x99ec2846df43fffdbb1c4b4f4f161518bf1305f86836943774e2f6fe66ed2511fd58b8fc4fe09d92835a94c95b3f3996215352781f1a37bd43bfd3c4bcaf6f09615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        "sig": "0xabf5371b990ebfeb1b254542bb3c579c6fe1fc2aca11ced6ccd96285d02c2b0025d9f999115c67fe3bc8ce5d7e6f272852c3507fd44d922ac02b1bf39d001902",
+        "evmSig": "0xabf5371b990ebfeb1b254542bb3c579c6fe1fc2aca11ced6ccd96285d02c2b0025d9f999115c67fe3bc8ce5d7e6f272852c3507fd44d922ac02b1bf39d001902615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
       },
       "tamperedText": {
         "rule": "the maker's signature over `signedText` (one byte off the text the registries rebuild for register[0]) must be refused",
-        "signedText": "ProofBridge: register a settlement key\n\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
-        "sig": "0x60b003f05cf00501003e416573af94c1e5425f7e5821be1be8f0188d281d4d9e209ea875f60ca464c0c793e9477883956a86cddcafbcc216c5e51a4fd9c22709",
-        "evmSig": "0x60b003f05cf00501003e416573af94c1e5425f7e5821be1be8f0188d281d4d9e209ea875f60ca464c0c793e9477883956a86cddcafbcc216c5e51a4fd9c22709615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        "signedText": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nKey fingerprint: 0x355de0eb9f7609b52c90d3891e9cc2d274c028836d8bf7eb6ff12f83ac8344de\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+        "sig": "0xff31ceeb7db03973e201cbe28b272a1e1defb5c83183cb808d88b137f26230f8b13715c95411a24235b1ae05d4e85dd89e104a79e6d14a6008bd4cf44c02d70f",
+        "evmSig": "0xff31ceeb7db03973e201cbe28b272a1e1defb5c83183cb808d88b137f26230f8b13715c95411a24235b1ae05d4e85dd89e104a79e6d14a6008bd4cf44c02d70f615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
       }
     }
   },
   "identity": {
     "_meta": {
       "spec": "docs/engineering/t2/2.6-build/13-owner-signature-unification.md D8",
-      "evm": "eth_signTypedData_v4, domain (ProofBridge Keys, 2), SettlementIdentity(string statement,uint32 index), statement \"ProofBridge Settlement Identity\"",
+      "evm": "eth_signTypedData_v4, domain (ProofBridge Keys, 2) with no salt, SettlementIdentity(string statement,uint32 index), statement \"ProofBridge Settlement Identity\"",
+      "domainSeparator": "0x6090028e5b0120e79805d81c40093f9c6fdd238807b4ad0268ba2ebcf2e0fcef",
       "stellar": "SEP-53 signMessage over settlementIdentityText(N) = statement + \\n\\n + Index: N",
       "kdf": "ikm = r || low-s (secp256k1, v dropped) or the 64-byte ed25519 sig; okm = HKDF-SHA256(ikm, salt = empty, info = \"ProofBridge.SettlementIdentity.v1\", 48); sk = (okm mod (n-1)) + 1"
     },
@@ -1824,6 +2484,23 @@
     "highSVariant": {
       "rule": "high-s, v in 0/1 form: derives bridger[0]'s M",
       "walletSig": "0x98f04cb6381024072b37feb11b43af8292c290db0f89f7885a66bb880ed6aed08784dc1104f361e857c477dd87f73ef927241c6e8b565a870797c1664373bd7e00"
+    },
+    "eip2098": {
+      "rule": "the bridger's identity signature for `index` in EIP-2098 form: derives `secretKey`, the same M as the 65-byte form",
+      "entries": [
+        {
+          "index": 0,
+          "yParity": 1,
+          "compact": "0x98f04cb6381024072b37feb11b43af8292c290db0f89f7885a66bb880ed6aed0f87b23eefb0c9e17a83b88227808c105938ac07823f245b4b83a9d268cc283c3",
+          "secretKey": "0x24bd43e17b8b3bb71e8a57182b07ff3111713c38370c2a29056ecb965c6918c3"
+        },
+        {
+          "index": 2,
+          "yParity": 0,
+          "compact": "0x8a111af18a597e3d3d475dd6777fce176590e57ca6cf4db311841d168100cf277bf4a4ad56d63f9209868693c41b2d4dc862746c56d0a505e87f40b959e5b3b1",
+          "secretKey": "0x075758caa8889619efc354f50ef63c7588d9bc444c138a702e768ac73076f605"
+        }
+      ]
     }
   }
 }
