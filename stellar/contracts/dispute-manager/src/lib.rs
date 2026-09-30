@@ -438,7 +438,7 @@ impl DisputeManagerContract {
             )
             .map_err(|_| Error::BondTransferFailed)?
             .map_err(|_| Error::BondTransferFailed)?;
-        events::PayoutClaimed { recipient, amount }.publish(&env);
+        events::BondClaimed { recipient, amount }.publish(&env);
         Ok(())
     }
 

@@ -675,9 +675,9 @@ fn the_filing_event_carries_the_evidence_hash() {
     );
 }
 
-/// C-34: withdrawing a credited bond payout is observable.
+/// C-34: withdrawing a credited bond payout is observable (as `BondClaimed`).
 #[test]
-fn claim_publishes_payout_claimed() {
+fn claim_publishes_bond_claimed() {
     use soroban_sdk::{events::Event as _, testutils::Events as _};
     let f = fixture();
     let who = Address::generate(&f.env);
@@ -689,13 +689,13 @@ fn claim_publishes_payout_claimed() {
 
     f.client.claim(&who);
 
-    let want = events::PayoutClaimed {
+    let want = events::BondClaimed {
         recipient: who.clone(),
         amount: 500,
     }
     .to_xdr(&f.env, &f.client.address);
     let got = f.env.events().all().filter_by_contract(&f.client.address);
-    assert!(got.events().contains(&want), "no PayoutClaimed: {got:?}");
+    assert!(got.events().contains(&want), "no BondClaimed: {got:?}");
     assert_eq!(token::Client::new(&f.env, &f.token).balance(&who), 500);
     assert_eq!(f.client.claimable(&who), 0);
 }
@@ -841,6 +841,31 @@ fn a_refused_claim_is_bond_transfer_failed_and_keeps_the_credit() {
     });
     assert_eq!(f.client.try_claim(&who), Err(Ok(Error::BondTransferFailed)));
     assert_eq!(f.client.claimable(&who), 500);
+}
+
+/// 49E-1 twin: the bond claim's topic is `bond_clm`, never the escrow's `pay_clm`.
+#[test]
+fn the_bond_claim_event_has_its_own_topic() {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
+    let f = fixture();
+    let who = Address::generate(&f.env);
+    f.env.as_contract(&f.client.address, || {
+        storage::set_claimable(&f.env, &who, 500)
+    });
+    TokenContractClient::new(&f.env, &f.token).mint(&f.client.address, &500);
+    f.client.claim(&who);
+    let got = f.env.events().all().filter_by_contract(&f.client.address);
+    let firsts: std::vec::Vec<ScVal> = got
+        .events()
+        .iter()
+        .map(|e| match &e.body {
+            ContractEventBody::V0(b) => b.topics[0].clone(),
+        })
+        .collect();
+    let sym = |s: &str| ScVal::Symbol(ScSymbol(s.try_into().unwrap()));
+    assert!(firsts.contains(&sym("bond_clm")), "{firsts:?}");
+    assert!(!firsts.contains(&sym("pay_clm")), "{firsts:?}");
 }
 
 /// Error drift: every code the escrows relay is the same number here and in `proofbridge-core`.
