@@ -17,6 +17,20 @@ pub const MAX_BOND_BPS: u32 = 1000;
 
 const BPS_DENOMINATOR: u128 = 10_000;
 
+/// The DisputeManager's `#[contracterror]` numbers the escrows relay (49S-3), defined once. The
+/// module's enum needs literals, so its test pins each variant to the constant here.
+pub mod error_code {
+    pub const NOT_ESCROW: u32 = 3;
+    pub const DISPUTE_EXISTS: u32 = 10;
+    pub const BOND_TOO_SMALL: u32 = 13;
+    pub const CHALLENGE_OPEN: u32 = 14;
+    pub const CHALLENGE_CLOSED: u32 = 15;
+    pub const NOT_RESPONDER: u32 = 16;
+    pub const NO_DISPUTE_PARAMS: u32 = 17;
+    pub const WRONG_ESCROW: u32 = 21;
+    pub const BOND_TRANSFER_FAILED: u32 = 24;
+}
+
 /// Which field failed: 1 challenge_period, 2 bond_floor, 3 bond_bps.
 ///
 /// Fail-closed, the same shape as `timing::validate`: a zero `challenge_period` is what an unset

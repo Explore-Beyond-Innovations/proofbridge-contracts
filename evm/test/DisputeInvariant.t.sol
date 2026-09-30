@@ -37,6 +37,11 @@ import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Posei
 /// and `invariant_noTerminalOrderKeepsItsDispute` checked nothing. It now also finalizes, presents
 /// evidence, unlocks, cancels, claims, responds and pauses (then unpauses); either party files; and
 /// `afterInvariant` fails the run if any terminal state was never reached.
+///
+/// 49E-4: the admin may also swap the dispute module mid-campaign (C-11: an open dispute stays on
+/// the module it was filed under), the recipient refuses native so its bond refunds are credited,
+/// and it withdraws them with `claimTo` (C-16). `afterInvariant` requires every finalized outcome,
+/// a swap with a dispute finalized on an older module, and a `claimTo`.
 contract DisputeInvariantTest is Test {
     AdManager internal adManager;
     DisputeManager internal dm;
@@ -48,7 +53,10 @@ contract DisputeInvariantTest is Test {
     address internal admin = makeAddr("admin");
     address internal maker = makeAddr("maker");
     address internal bridger = makeAddr("bridger");
-    address internal recipient = makeAddr("recipient");
+    /// A contract that refuses native, so the module credits its bond refunds (set in setUp).
+    address internal recipient;
+    /// Where the recipient's credit goes with `claimTo`; only that call ever pays it.
+    address internal recipientWallet = makeAddr("recipientWallet");
     address internal arbiter = makeAddr("arbiter");
     address internal feePool = makeAddr("feePool");
     address internal orderPortal = makeAddr("orderPortal");
@@ -59,8 +67,14 @@ contract DisputeInvariantTest is Test {
     uint128 internal constant BOND_FLOOR = 1 ether;
     uint16 internal constant BOND_BPS = 100;
     uint256 internal constant LOCK = 1 ether;
-    /// Bounded so every invariant's loop stays cheap; a campaign locks well under this many.
+    /// Bounded so every invariant's loop stays cheap.
+    /// The last slots only the steps `afterInvariant` counts on (outcomes, evidence, swap, unlock,
+    /// cancel) may use, so the general locks never crowd them out.
     uint256 internal constant MAX_ORDERS = 64;
+    uint256 internal constant RESERVED = 16;
+    /// One swap is what C-11 needs (a dispute left on the old module); every invariant walks each
+    /// module, so more would only slow the campaign.
+    uint256 internal constant MAX_MODULES = 2;
     /// One notarized root, reused: the mock verifier accepts any event proof against it.
     bytes32 internal constant EVIDENCE_ROOT = bytes32(uint256(0xe71d));
 
@@ -69,8 +83,13 @@ contract DisputeInvariantTest is Test {
     IAdManager.OrderParams[] internal orders;
     bytes32[] internal hashes;
     uint256 internal nonce;
+    /// Every module the escrow was ever wired to, the first included.
+    DisputeManager[] internal modules;
+    /// Ghost: the total `claimTo` moved to `recipientWallet`.
+    uint256 internal claimedTo;
 
     function setUp() public {
+        recipient = address(new NativeRefuser());
         merkleManager = new MerkleManager(admin, address(new Poseidon2Yul()));
         wNative = new wNativeToken("Wrapped Native Token", "WNATIVE", 18);
         MockKeyRegistry keyRegistry = new MockKeyRegistry();
@@ -83,6 +102,7 @@ contract DisputeInvariantTest is Test {
             IwNativeToken(address(wNative))
         );
         dm = new DisputeManager(admin, IwNativeToken(address(wNative)));
+        modules.push(dm);
         address[] memory signers = new address[](1);
         signers[0] = address(this);
         anchor = new RootAnchor(admin, signers, 1);
@@ -129,7 +149,16 @@ contract DisputeInvariantTest is Test {
     /// A fresh order. Each gets its own salt and deadline, fixed here, so later actions rebuild the
     /// same hash however far the clock has moved.
     function handlerLock(uint256 seed) public returns (uint256 i) {
-        require(orders.length < MAX_ORDERS, "full");
+        require(orders.length < MAX_ORDERS - RESERVED, "full");
+        i = _lockOrder(seed);
+    }
+
+    function _lockOrder(uint256 seed) internal returns (uint256 i) {
+        i = _lockOrderWithin(seed, MAX_ORDERS);
+    }
+
+    function _lockOrderWithin(uint256 seed, uint256 cap) internal returns (uint256 i) {
+        require(orders.length < cap, "full");
         IAdManager.OrderParams memory p = _params(nonce++, block.timestamp + 1 hours + seed % 6 days);
         // The maker locks its own ad's liquidity; the suite pranks for the same reason.
         vm.prank(maker);
@@ -151,14 +180,15 @@ contract DisputeInvariantTest is Test {
 
     function handlerRule(uint256 pick, uint8 outcome) external {
         uint256 i = _pick(pick, _mask(IEscrow.Status.Disputed));
+        DisputeManager m = _moduleOf(i); // read before the prank, which the next call consumes
         vm.prank(arbiter);
-        dm.resolveDispute(hashes[i], Dispute.Outcome(outcome % 5));
+        m.resolveDispute(hashes[i], Dispute.Outcome(outcome % 5));
     }
 
     /// The party that did not file answers.
     function handlerRespond(uint256 pick) external {
         uint256 i = _pick(pick, _mask(IEscrow.Status.Disputed));
-        address other = dm.initiatorOf(hashes[i]) == maker ? recipient : maker;
+        address other = _moduleOf(i).initiatorOf(hashes[i]) == maker ? recipient : maker;
         vm.prank(other);
         adManager.respondToDispute(orders[i], bytes32("answer"));
     }
@@ -166,17 +196,93 @@ contract DisputeInvariantTest is Test {
     /// Nobody ruled: anyone opens the fallback once the window is over.
     function handlerClaim(uint256 pick) external {
         uint256 i = _pick(pick, _mask(IEscrow.Status.Disputed));
-        _warpTo(dm.effectiveChallengeDeadline(hashes[i]));
-        dm.claimDispute(hashes[i]);
+        _warpTo(_moduleOf(i).effectiveChallengeDeadline(hashes[i]));
+        _moduleOf(i).claimDispute(hashes[i]);
     }
 
-    /// Run the window out and finalize. Returns the outcome applied (no ruling means MutualRefund).
-    function handlerFinalize(uint256 pick) external returns (uint8 outcome) {
-        uint256 i = _pick(pick, _mask(IEscrow.Status.Disputed));
-        _warpTo(dm.effectiveChallengeDeadline(hashes[i]));
-        (Dispute.Outcome o,,) = dm.outcomeOf(hashes[i], adManager.pausedSeconds());
+    /// Run the window out and finalize. Returns the outcome applied (no ruling means MutualRefund),
+    /// and whether the dispute was filed under a module the escrow has since swapped out.
+    function handlerFinalize(uint256 pick) external returns (uint8 outcome, bool onOldModule) {
+        return _finalize(_pick(pick, _mask(IEscrow.Status.Disputed)));
+    }
+
+    /// Every finalize outcome in one step (a forfeit each way, and an unruled MutualRefund), so each is
+    /// reached in every run: ruling needs an open window, which the warps elsewhere close.
+    function handlerEveryOutcome(uint256 seed) external returns (bool onOldModule) {
+        bool a;
+        bool b;
+        bool c;
+        (, a) = _fileRuleFinalize(seed, Dispute.Outcome.MakerForfeit);
+        (, b) = _fileRuleFinalize(seed + 1, Dispute.Outcome.BridgerForfeit);
+        (, c) = _fileRuleFinalize(seed + 2, Dispute.Outcome.None);
+        onOldModule = a || b || c;
+    }
+
+    /// File, then close the dispute with evidence, in one step: the forfeit and swap steps finalize
+    /// disputes too, so evidence closing one has to be reachable in every run on its own.
+    function handlerFileAndPresent(uint256 seed, bool byBridger) external {
+        uint256 i = _lockOrder(seed);
+        _file(i, byBridger);
+        adManager.presentSettled(orders[i], EVIDENCE_ROOT, hex"");
+    }
+
+    /// The party a ruling vindicates files (the maker for a BridgerForfeit); `None` leaves it unruled.
+    function _fileRuleFinalize(uint256 seed, Dispute.Outcome ruling)
+        internal
+        returns (uint8 outcome, bool onOldModule)
+    {
+        uint256 i = _lockOrder(seed);
+        _file(i, ruling != Dispute.Outcome.BridgerForfeit);
+        if (ruling != Dispute.Outcome.None) {
+            DisputeManager m = _moduleOf(i); // read before the prank, which the next call consumes
+            vm.prank(arbiter);
+            m.resolveDispute(hashes[i], ruling);
+        }
+        (outcome, onOldModule) = _finalize(i);
+        Dispute.Outcome want = ruling == Dispute.Outcome.None ? Dispute.Outcome.MutualRefund : ruling;
+        require(outcome == uint8(want), "ruling lost");
+    }
+
+    function _finalize(uint256 i) internal returns (uint8 outcome, bool onOldModule) {
+        DisputeManager m = _moduleOf(i);
+        onOldModule = address(m) != address(adManager.disputeManager());
+        _warpTo(m.effectiveChallengeDeadline(hashes[i]));
+        (Dispute.Outcome o,,) = m.outcomeOf(hashes[i], adManager.pausedSeconds());
         adManager.finalizeDispute(orders[i]);
         outcome = uint8(o == Dispute.Outcome.None ? Dispute.Outcome.MutualRefund : o);
+    }
+
+    /// C-11: the admin wires a fresh module. New filings go to it; open disputes stay where they are.
+    /// One left-behind dispute is finalized in the same step (so every run reaches that path); any
+    /// others stay open on the old module for the rest of the campaign.
+    function handlerSwapModule(uint256 pick) external returns (uint8 outcome) {
+        require(modules.length < MAX_MODULES, "enough modules");
+        // With a dispute open on the old module, filed here if there is none, so one is left behind.
+        if (!_hasAny(_mask(IEscrow.Status.Disputed))) {
+            // One slot past the cap is the swap's own: it happens once, and must not depend on room.
+            _file(_lockOrderWithin(pick, MAX_ORDERS + 1), false);
+        }
+        DisputeManager next = new DisputeManager(admin, IwNativeToken(address(wNative)));
+        vm.startPrank(admin);
+        next.setEscrow(address(adManager), true);
+        next.setArbiter(arbiter);
+        next.setProtocolFeePool(feePool);
+        next.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        adManager.setDisputeManager(IDisputeManager(address(next)));
+        vm.stopPrank();
+        modules.push(next);
+        bool onOldModule;
+        (outcome, onOldModule) = _finalize(_pick(pick, _mask(IEscrow.Status.Disputed)));
+        require(onOldModule, "finalized on the new module");
+    }
+
+    /// C-16: the recipient refuses native, so its refunds are credited; it redirects its own credit.
+    function handlerClaimTo(uint256 pick) external {
+        DisputeManager m = modules[pick % modules.length];
+        uint256 amount = m.claimable(recipient);
+        vm.prank(recipient);
+        m.claimTo(recipientWallet);
+        claimedTo += amount;
     }
 
     /// Evidence: the order chain's SETTLED leaf. Beats any dispute, at any time.
@@ -189,7 +295,8 @@ contract DisputeInvariantTest is Test {
     /// The co-signed unlock, which is evidence too.
     function handlerUnlock(uint256 pick) external returns (bool wasDisputed) {
         uint256 i = _pickInTime(pick);
-        if (i == type(uint256).max) i = handlerLock(pick);
+        // The reserve too: with the general slots full, the exit paths must stay reachable.
+        if (i == type(uint256).max) i = _lockOrder(pick);
         wasDisputed = adManager.orders(hashes[i]) == IEscrow.Status.Disputed;
         vm.prank(bridger);
         adManager.unlock(orders[i], _nullifier(hashes[i]), bytes32(uint256(1)), hex"", hex"");
@@ -198,7 +305,8 @@ contract DisputeInvariantTest is Test {
     /// The clock path: claim at the deadline, finalize once the window is over.
     function handlerCancel(uint256 pick) external {
         // Open orders are what every other action consumes, so lock one when none is left.
-        uint256 i = _hasAny(_mask(IEscrow.Status.Open)) ? _pick(pick, _mask(IEscrow.Status.Open)) : handlerLock(pick);
+        // The reserve too: with the general slots full, the exit paths must stay reachable.
+        uint256 i = _hasAny(_mask(IEscrow.Status.Open)) ? _pick(pick, _mask(IEscrow.Status.Open)) : _lockOrder(pick);
         _warpTo(orders[i].deadline);
         adManager.claimCancel(orders[i]);
         _warpTo(adManager.cancelFinalizesAt(orders[i]));
@@ -227,7 +335,7 @@ contract DisputeInvariantTest is Test {
         vm.deal(who, bond);
         vm.prank(who);
         adManager.dispute{value: bond}(orders[i], bytes32("e"));
-        bridgerFiled = dm.initiatorOf(hashes[i]) == recipient;
+        bridgerFiled = _moduleOf(i).initiatorOf(hashes[i]) == recipient;
     }
 
     /// The first order at or after `pick` (mod the count) whose status is in `mask`.
@@ -255,6 +363,19 @@ contract DisputeInvariantTest is Test {
     function _hasAny(uint256 mask) internal view returns (bool) {
         for (uint256 i = 0; i < hashes.length; i++) {
             if (mask & _mask(adManager.orders(hashes[i])) != 0) return true;
+        }
+        return false;
+    }
+
+    /// The module the order's dispute was filed under (D5); zero if it never was.
+    function _moduleOf(uint256 i) internal view returns (DisputeManager) {
+        return DisputeManager(payable(address(adManager.disputeModuleOf(hashes[i]))));
+    }
+
+    /// Whether any module the escrow was ever wired to holds a record for `h`.
+    function _anyRecord(bytes32 h) internal view returns (bool) {
+        for (uint256 k = 0; k < modules.length; k++) {
+            if (modules[k].isDisputed(h)) return true;
         }
         return false;
     }
@@ -303,19 +424,31 @@ contract DisputeInvariantTest is Test {
     function invariant_disputedIffModuleHasARecord() public view {
         for (uint256 i = 0; i < hashes.length; i++) {
             bytes32 h = hashes[i];
-            assertEq(adManager.orders(h) == IEscrow.Status.Disputed, dm.isDisputed(h), "escrow and module disagree");
+            bool disputed = adManager.orders(h) == IEscrow.Status.Disputed;
+            assertEq(disputed, _anyRecord(h), "escrow and modules disagree");
+            // C-11: and the record is on the module the order was filed under, whatever is wired now.
+            if (disputed) assertTrue(_moduleOf(i).isDisputed(h), "the record is not on the order's own module");
         }
     }
 
     /// Every bond the module recorded, and every payout it credited, is backed by wrapped native it
     /// holds.
+    /// Per module, swapped-out ones included: exactly, since a module takes in nothing but bonds.
     function invariant_moduleIsSolventForItsBonds() public view {
-        uint256 owed = dm.claimable(maker) + dm.claimable(recipient) + dm.claimable(feePool);
-        for (uint256 i = 0; i < hashes.length; i++) {
-            (, uint128 bond,,,,,,,) = dm.disputes(hashes[i]);
-            owed += bond;
+        for (uint256 k = 0; k < modules.length; k++) {
+            DisputeManager m = modules[k];
+            uint256 owed = m.claimable(maker) + m.claimable(recipient) + m.claimable(feePool);
+            for (uint256 i = 0; i < hashes.length; i++) {
+                (, uint128 bond,,,,,,,) = m.disputes(hashes[i]);
+                owed += bond;
+            }
+            assertEq(wNative.balanceOf(address(m)), owed, "a module holds other than its bonds and credits");
         }
-        assertGe(wNative.balanceOf(address(dm)), owed, "module cannot cover its bonds");
+    }
+
+    /// C-16: `claimTo` moves only the caller's own credit: the wallet holds exactly what it claimed.
+    function invariant_claimToPaysOnlyTheCallersCredit() public view {
+        assertEq(recipientWallet.balance, claimedTo, "claimTo paid other than the caller's credit");
     }
 
     /// No order may sit in a terminal state while the module still holds its dispute. This is the
@@ -329,7 +462,7 @@ contract DisputeInvariantTest is Test {
             IEscrow.Status st = adManager.orders(h);
             bool terminal =
                 st == IEscrow.Status.Filled || st == IEscrow.Status.Cancelled || st == IEscrow.Status.Resolved;
-            if (terminal) assertFalse(dm.isDisputed(h), "terminal order still holds a dispute");
+            if (terminal) assertFalse(_anyRecord(h), "terminal order still holds a dispute");
         }
     }
 
@@ -339,10 +472,11 @@ contract DisputeInvariantTest is Test {
     function invariant_noDisputeFinalizesBeforeTheDeadline() public view {
         for (uint256 i = 0; i < hashes.length; i++) {
             bytes32 h = hashes[i];
-            if (!dm.isDisputed(h)) continue;
-            (,,,,,,, uint64 orderDeadline, uint64 buffer) = dm.disputes(h);
+            if (adManager.orders(h) != IEscrow.Status.Disputed) continue;
+            DisputeManager m = _moduleOf(i);
+            (,,,,,,, uint64 orderDeadline, uint64 buffer) = m.disputes(h);
             assertGe(
-                dm.effectiveChallengeDeadline(h),
+                m.effectiveChallengeDeadline(h),
                 uint256(orderDeadline) + buffer,
                 "a dispute could finalize before deadline + buffer"
             );
@@ -372,6 +506,13 @@ contract DisputeInvariantTest is Test {
         assertGt(handler.disputesClosedByEvidence(), 0, "evidence never closed a dispute");
         assertGt(handler.cancelled(), 0, "no order was ever cancelled");
         assertGt(handler.pauses(), 0, "the escrow was never paused");
+        // 49E-4: every outcome a finalize can apply, not only "something resolved".
+        assertGt(handler.resolvedAs(uint8(Dispute.Outcome.MutualRefund)), 0, "no dispute finalized as MutualRefund");
+        assertGt(handler.resolvedAs(uint8(Dispute.Outcome.BridgerForfeit)), 0, "no dispute finalized as BridgerForfeit");
+        assertGt(handler.resolvedAs(uint8(Dispute.Outcome.MakerForfeit)), 0, "no dispute finalized as MakerForfeit");
+        assertGt(handler.swaps(), 0, "the dispute module was never swapped");
+        assertGt(handler.finalizedOnOldModule(), 0, "no dispute finalized on a swapped-out module");
+        assertGt(handler.claimsTo(), 0, "claimTo never paid");
     }
 
     /// Proves the harness reaches the state the invariants police. Without this a handler that
@@ -405,6 +546,36 @@ contract DisputeInvariantTest is Test {
         assertEq(handler.cancelled(), 1);
         assertEq(handler.pauses(), 1);
     }
+
+    /// 49E-4: a swap with a dispute open on the old module, both forfeits finalized, and the
+    /// recipient's credited refund redirected with `claimTo`.
+    function test_swapForfeitsAndClaimToAreReachable() public {
+        handler.file(1, true); // order 0, filed by the bridger side on the first module
+        handler.file(2, true); // order 1, the same
+        handler.rule(0, uint8(Dispute.Outcome.MakerForfeit)); // the bridger side's filing vindicated
+        handler.swapModule(0); // finalizes order 0 on the old module; order 1 stays open there
+        handler.finalize(1); // and is finalized later, still on the old module
+        handler.everyOutcome(3); // orders 2..4 on the new module, one per outcome
+        assertEq(handler.swaps(), 1);
+        assertEq(handler.finalizedOnOldModule(), 2, "orders 0 and 1 finalized on the swapped-out module");
+        assertEq(handler.resolvedAs(uint8(Dispute.Outcome.MakerForfeit)), 2);
+        assertEq(handler.resolvedAs(uint8(Dispute.Outcome.BridgerForfeit)), 1);
+        assertEq(handler.resolvedAs(uint8(Dispute.Outcome.MutualRefund)), 2);
+        assertGt(dm.claimable(recipient), 0, "the refused refund was credited on the first module");
+        handler.claimTo(0);
+        assertEq(handler.claimsTo(), 1);
+        assertEq(dm.claimable(recipient), 0);
+        invariant_claimToPaysOnlyTheCallersCredit();
+        invariant_moduleIsSolventForItsBonds();
+        invariant_disputedIffModuleHasARecord();
+    }
+}
+
+/// A payout address that refuses native, so its bond refunds become credits on the module.
+contract NativeRefuser {
+    receive() external payable {
+        revert("refusing native");
+    }
 }
 
 /// Drives the dispute surface, swallowing reverts so only successful paths shape state. Counts
@@ -421,6 +592,9 @@ contract DisputeHandler {
     uint256 public disputesClosedByEvidence;
     uint256 public cancelled;
     uint256 public pauses;
+    uint256 public swaps;
+    uint256 public finalizedOnOldModule;
+    uint256 public claimsTo;
 
     constructor(DisputeInvariantTest t_) {
         t = t_;
@@ -455,9 +629,10 @@ contract DisputeHandler {
     }
 
     function finalize(uint256 pick) external {
-        try t.handlerFinalize(pick) returns (uint8 outcome) {
+        try t.handlerFinalize(pick) returns (uint8 outcome, bool onOldModule) {
             resolved++;
             resolvedAs[outcome]++;
+            if (onOldModule) finalizedOnOldModule++;
         } catch {}
     }
 
@@ -489,6 +664,43 @@ contract DisputeHandler {
 
     function warp(uint32 by) external {
         try t.handlerWarp(by) {} catch {}
+    }
+
+    function fileAndPresent(uint256 seed, bool byBridger) external {
+        try t.handlerFileAndPresent(seed, byBridger) {
+            _countFiling(byBridger);
+            filledByEvidence++;
+            disputesClosedByEvidence++;
+        } catch {}
+    }
+
+    function everyOutcome(uint256 seed) external {
+        try t.handlerEveryOutcome(seed) returns (bool onOldModule) {
+            // Filed by the bridger side, the maker, the bridger side.
+            _countFiling(true);
+            _countFiling(false);
+            _countFiling(true);
+            resolved += 3;
+            resolvedAs[uint8(Dispute.Outcome.MakerForfeit)]++;
+            resolvedAs[uint8(Dispute.Outcome.BridgerForfeit)]++;
+            resolvedAs[uint8(Dispute.Outcome.MutualRefund)]++;
+            if (onOldModule) finalizedOnOldModule++;
+        } catch {}
+    }
+
+    function swapModule(uint256 pick) external {
+        try t.handlerSwapModule(pick) returns (uint8 outcome) {
+            swaps++;
+            resolved++;
+            resolvedAs[outcome]++;
+            finalizedOnOldModule++;
+        } catch {}
+    }
+
+    function claimTo(uint256 pick) external {
+        try t.handlerClaimTo(pick) {
+            claimsTo++;
+        } catch {}
     }
 
     function _countFiling(bool byBridger) internal {

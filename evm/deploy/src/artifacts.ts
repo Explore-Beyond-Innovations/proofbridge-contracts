@@ -17,15 +17,7 @@ interface Artifact {
   deployedBytecode?: {
     object?: string;
     linkReferences?: Record<string, Record<string, LinkReference[]>>;
-    /** Immutable slots, filled at deploy time: zero in the artifact, a value on chain. */
-    immutableReferences?: Record<string, LinkReference[]>;
   };
-}
-
-/** Runtime code as the artifact records it, plus the byte ranges a deploy fills in (immutables, libraries). */
-export interface RuntimeCode {
-  code: string;
-  masks: LinkReference[];
 }
 
 function loadArtifact(contractFile: string, contractName: string): Artifact {
@@ -43,17 +35,22 @@ function loadArtifact(contractFile: string, contractName: string): Artifact {
 }
 
 /**
- * The runtime bytecode the artifact says a fresh deploy leaves on chain (`deployedBytecode`), with the
- * ranges that differ per deployment: immutables (written by the constructor) and linked library
- * addresses. A comparison with `getCode` has to skip those and nothing else.
+ * The runtime code a fresh deploy of this artifact leaves on chain, asked of the node itself: the
+ * creation code (with the deploy's constructor args) runs as an `eth_call`, so immutables are filled
+ * exactly as a deploy fills them and the answer compares byte for byte with `getCode`.
  */
-export function deployedBytecodeOf(contractFile: string, contractName: string): RuntimeCode {
-  const db = loadArtifact(contractFile, contractName).deployedBytecode;
-  if (!db?.object) throw new Error(`artifact ${contractFile}/${contractName} has no deployedBytecode`);
-  const masks: LinkReference[] = [];
-  for (const refs of Object.values(db.immutableReferences ?? {})) masks.push(...refs);
-  for (const byFile of Object.values(db.linkReferences ?? {})) for (const refs of Object.values(byFile)) masks.push(...refs);
-  return { code: db.object, masks };
+export async function runtimeCodeOf(
+  provider: ethers.Provider,
+  contractFile: string,
+  contractName: string,
+  constructorArgs: unknown[] = [],
+): Promise<string> {
+  const { abi, bytecode } = loadArtifact(contractFile, contractName);
+  if (Object.keys(bytecode.linkReferences ?? {}).length > 0) {
+    throw new Error(`runtimeCodeOf: ${contractName} links libraries; link it before simulating the deploy`);
+  }
+  const tx = await new ethers.ContractFactory(abi, bytecode.object).getDeployTransaction(...constructorArgs);
+  return provider.call({ data: tx.data });
 }
 
 export function getAbi(contractFile: string, contractName: string): any[] {

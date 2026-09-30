@@ -16,6 +16,7 @@ import {
   type DescribedCall,
   deployContract,
   deploySAC,
+  assertStellarNetworkForEnv,
   getAddress,
   invokeContract,
   latestLedger,
@@ -68,6 +69,8 @@ export async function deployCore(
 ): Promise<DeployStellarCoreResult> {
   const env = requireDeployEnv(opts.env);
   const chainId = requireStellarChainId(opts.chainId, env);
+  // A-4: the network the CLI talks to must be the env's, before anything else touches it.
+  assertStellarNetworkForEnv(env);
   const commit = opts.commit ?? envOrDefault("GIT_COMMIT", "unknown");
   const chainName =
     opts.chainName ?? envOrDefault("CHAIN_NAME", `stellar-${chainId}`);
@@ -84,6 +87,30 @@ export async function deployCore(
   if (existing) {
     console.log(`[stellar-deploy] reusing addresses from ${outPath}`);
   }
+
+  // ── everything that can be refused before sending, is ─────────────
+  // T2 notary: the publisher key(s) in ANCHOR_PUBLISHER (comma-separated G-addresses, default admin)
+  // at ANCHOR_THRESHOLD (default 1). Outside local the notary is named: after handover the deploy key
+  // must not stay the sole anchor signer.
+  const anchorSigners = namedOutsideLocal("ANCHOR_PUBLISHER", env, adminStrkey)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  // A-8: naming the deployer as notary outside local is the local default in disguise.
+  if (env !== "local" && anchorSigners.includes(adminStrkey)) {
+    throw new Error("stellar-deploy: ANCHOR_PUBLISHER names the deployer — outside local the notary must be a separate key (it stays the anchor signer after handover)");
+  }
+  const anchorThreshold = Number(envOrDefault("ANCHOR_THRESHOLD", "1"));
+  // The arbiter must not be the admin (2.3g D6): its containment is that it holds no escrow powers.
+  const arbiterAddr = namedOutsideLocal("DISPUTE_ARBITER", env, adminStrkey);
+  const feePoolAddr = namedOutsideLocal("DISPUTE_FEE_POOL", env, adminStrkey);
+  if (env !== "local" && arbiterAddr === adminStrkey) {
+    throw new Error(
+      "deploy-core: DISPUTE_ARBITER must not be the admin — the arbiter's containment is that it holds no escrow powers",
+    );
+  }
+  // The bundle's VK; outside local a missing file refuses, so the manifest (and link's A-6 compare) has its hash.
+  const vkRec = vkRecord(vk, env);
 
   function reused(existingAddr: string | undefined): string | undefined {
     return existingAddr;
@@ -108,7 +135,6 @@ export async function deployCore(
     fs.appendFileSync(sidecar, `${label} ${id}\n`);
     return id;
   };
-  const vkRec = vkRecord(vk);
 
   // ── Verifier ────────────────────────────────────────────────────
   let verifier = reused(existing?.contracts.verifier.address);
@@ -264,18 +290,8 @@ export async function deployCore(
   }
 
   // ── RootAnchor (2.3f) + Registrar (2.1b) ───────────────────────────
-  // T2 notary: the publisher key(s) in ANCHOR_PUBLISHER (comma-separated G-addresses,
-  // default admin) at ANCHOR_THRESHOLD (default 1). Per-route delays are set at link time.
-  // Outside local the notary is named: after handover the deploy key must not stay the sole anchor signer.
-  const anchorSigners = namedOutsideLocal("ANCHOR_PUBLISHER", env, adminStrkey)
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  // A-8: naming the deployer as notary outside local is the local default in disguise.
-  if (env !== "local" && anchorSigners.includes(adminStrkey)) {
-    throw new Error("stellar-deploy: ANCHOR_PUBLISHER names the deployer — outside local the notary must be a separate key (it stays the anchor signer after handover)");
-  }
-  const anchorThreshold = Number(envOrDefault("ANCHOR_THRESHOLD", "1"));
+  // T2 notary: the publisher key(s) in ANCHOR_PUBLISHER at ANCHOR_THRESHOLD, settled up front.
+  // Per-route delays are set at link time.
   let rootAnchor = reused(existing?.contracts.rootAnchor?.address);
   if (!rootAnchor) {
     rootAnchor = tracked("RootAnchor", deployContract(path.join(wasmBase, "root_anchor.wasm")));
@@ -328,13 +344,6 @@ export async function deployCore(
   //
   // The arbiter must not be the admin (2.3g D6): its containment is that it holds no escrow powers.
   {
-    const arbiterAddr = namedOutsideLocal("DISPUTE_ARBITER", env, adminStrkey);
-    const feePoolAddr = namedOutsideLocal("DISPUTE_FEE_POOL", env, adminStrkey);
-    if (env !== "local" && arbiterAddr === adminStrkey) {
-      throw new Error(
-        "deploy-core: DISPUTE_ARBITER must not be the admin — the arbiter's containment is that it holds no escrow powers",
-      );
-    }
     if (readView(disputeManager, "get_arbiter") === arbiterAddr) {
       console.log(`  [skip] DisputeManager.set_arbiter already ${arbiterAddr}`);
     } else {

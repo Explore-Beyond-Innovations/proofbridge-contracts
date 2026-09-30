@@ -8,6 +8,8 @@
 export const PUBLISHER_MARGIN_S = 3600n;
 
 export interface RouteSide {
+  /** Whether this chain has a DisputeManager: without one it runs no disputes, and has no params to check. */
+  disputeModule: boolean;
   /** This chain's clocks for the route to the other chain. */
   timing?: { buffer: string; longBackstop: string };
   /** This chain's dispute params for the route (present where a DisputeManager is wired). */
@@ -24,12 +26,24 @@ export function requiredBackstop(challengePeriod: bigint, primaryBuffer: bigint,
 /**
  * Checks both directions across one route: `local` as follower of `peer`'s primary, and `local` as
  * primary for `peer`'s follower. A direction whose data is not recorded yet is skipped; the other
- * chain's link checks it. Returns the directions checked.
+ * chain's link checks it. A primary with no DisputeManager has no dispute to outlast, so its
+ * direction counts once both clocks are known. Returns the directions checked.
  */
 export function assertDisputeFitsBackstop(local: RouteSide, peer: RouteSide, where: string): string[] {
+  // A-5: a dispute filed on one side could never be ruled on, or anchored, on a side without a module.
+  if (local.disputeModule !== peer.disputeModule) {
+    throw new Error(
+      `${where}: only ${local.disputeModule ? "this chain" : "the peer"} has a DisputeManager; a mixed route cannot settle disputes. Deploy one on the other chain (or neither).`,
+    );
+  }
   const checked: string[] = [];
   const check = (label: string, primary: RouteSide, follower: RouteSide) => {
-    if (!primary.dispute || !primary.timing || !follower.timing) return;
+    if (!primary.timing || !follower.timing) return;
+    if (!primary.disputeModule) {
+      checked.push(`${label} (clocks only: no dispute module)`);
+      return;
+    }
+    if (!primary.dispute) return;
     const need = requiredBackstop(
       BigInt(primary.dispute.challengePeriod),
       BigInt(primary.timing.buffer),

@@ -416,6 +416,21 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         dm.bondFor(60 ether, orderChainId + 7);
     }
 
+    /// 49E-2: above the floor the bond is BOND_BPS of the amount; the literals are 1% of each amount.
+    function test_49e2_bondForScalesAboveTheFloor() public view {
+        assertEq(dm.bondFor(500 ether, orderChainId), 5 ether, "1% of 500 is above the 1-ether floor");
+        assertEq(dm.bondFor(1000 ether, orderChainId), 10 ether, "and follows the amount");
+        assertEq(dm.bondFor(1000 ether + 12_300, orderChainId), 10 ether + 123, "to the wei");
+    }
+
+    /// 49E-2: at the boundary 1% of the amount equals the floor; one step past it the percentage wins.
+    function test_49e2_bondForAtTheFloorBoundary() public view {
+        assertEq(dm.bondFor(100 ether, orderChainId), 1 ether, "1% of 100 is exactly the floor");
+        assertEq(dm.bondFor(100 ether + 99, orderChainId), 1 ether, "rounds down onto the floor");
+        assertEq(dm.bondFor(100 ether + 100, orderChainId), 1 ether + 1, "one wei of bond past the floor");
+        assertEq(dm.bondFor(100 ether - 100, orderChainId), 1 ether, "just below: the floor");
+    }
+
     function test_c17_bondMustBeExact() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(26);
         uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));

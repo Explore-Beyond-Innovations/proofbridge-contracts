@@ -91,6 +91,7 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     const peerKey = String(peerChainId);
     const checked = assertDisputeFitsBackstop(
       {
+        disputeModule: !!local.contracts.disputeManager,
         timing: routeTimingFromEnv(local.meta.env),
         dispute: local.contracts.disputeManager ? disputeParamsFromEnv(local.meta.env) : undefined,
         anchorDelay: process.env.ANCHOR_DELAY_S ?? "0",
@@ -429,6 +430,7 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
  */
 export function peerSide(peer: ChainDeploymentManifest, localKey: string, peerEnvFile: string | undefined) {
   const recorded = {
+    disputeModule: !!peer.contracts.disputeManager,
     timing: peer.routeTiming?.[localKey],
     dispute: peer.disputeParams?.[localKey],
     anchorDelay: peer.rootAnchorConfig?.anchorDelays?.[localKey],
@@ -444,6 +446,7 @@ export function peerSide(peer: ChainDeploymentManifest, localKey: string, peerEn
   // Only what the peer has not recorded is derived (a redeployed dispute module, for instance,
   // has clocks on record but no params until the peer links again).
   return {
+    disputeModule: recorded.disputeModule,
     timing: recorded.timing ?? routeTimingFromEnv(env, vars),
     dispute: recorded.dispute ?? (peer.contracts.disputeManager ? disputeParamsFromEnv(env, vars) : undefined),
     anchorDelay: recorded.anchorDelay ?? vars.ANCHOR_DELAY_S ?? "0",

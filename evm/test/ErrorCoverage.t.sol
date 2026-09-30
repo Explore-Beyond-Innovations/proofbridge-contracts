@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {IEscrow} from "src/interfaces/IEscrow.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
 import {IOrderPortal} from "src/interfaces/IOrderPortal.sol";
@@ -15,6 +15,9 @@ import {DecimalScaling} from "src/libraries/DecimalScaling.sol";
 import {AdManagerTest} from "./Admanager.t.sol";
 import {OrderPortalTest} from "./OrderPortal.t.sol";
 import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /*//////////////////////////////////////////////////////////////
        C-19 — errors no other test named, each triggered here
@@ -48,7 +51,74 @@ contract NoDecimalsToken {
     }
 }
 
+/// A token whose `transferFrom` reports failure by returning false, which SafeERC20 must refuse.
+contract FalseReturnToken {
+    function decimals() external pure returns (uint8) {
+        return 18;
+    }
+
+    function transferFrom(address, address, uint256) external pure returns (bool) {
+        return false;
+    }
+}
+
+/// A token whose `transferFrom` calls back into a target, to show the reentrancy guard holds.
+contract ReentrantToken {
+    address internal target;
+    bytes internal data;
+
+    function arm(address target_, bytes calldata data_) external {
+        target = target_;
+        data = data_;
+    }
+
+    function decimals() external pure returns (uint8) {
+        return 18;
+    }
+
+    function transferFrom(address, address, uint256) external returns (bool) {
+        (bool ok, bytes memory ret) = target.call(data);
+        if (!ok) {
+            assembly {
+                revert(add(ret, 32), mload(ret))
+            }
+        }
+        return true;
+    }
+}
+
 contract AdManagerErrorCoverageTest is AdManagerTest {
+    function _route(address token) internal {
+        vm.startPrank(admin);
+        adManager.setPeerEscrow(orderChainId, _b32(orderPortal));
+        adManager.setTokenRoute(token, orderChainId, _b32(orderToken));
+        vm.stopPrank();
+    }
+
+    /// 49E-3: the inherited errors are escrow errors too; the ABI gate asks for each.
+    function test_c19_unpauseWhenNotPausedIsExpectedPause() public {
+        vm.prank(admin);
+        vm.expectRevert(Pausable.ExpectedPause.selector);
+        adManager.unpause();
+    }
+
+    function test_c19_aTokenReturningFalseIsSafeERC20FailedOperation() public {
+        FalseReturnToken t = new FalseReturnToken();
+        _route(address(t));
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(SafeERC20.SafeERC20FailedOperation.selector, address(t)));
+        adManager.createAd("false-token", address(t), 1 ether, orderChainId, _b32(adRecipient), _b32(maker));
+    }
+
+    function test_c19_aTokenCallingBackIsReentrancyGuardReentrantCall() public {
+        ReentrantToken t = new ReentrantToken();
+        _route(address(t));
+        t.arm(address(adManager), abi.encodeCall(adManager.fundAd, ("reentrant", 1)));
+        vm.prank(maker);
+        vm.expectRevert(ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector);
+        adManager.createAd("reentrant", address(t), 1 ether, orderChainId, _b32(adRecipient), _b32(maker));
+    }
+
     function test_c19_lockOnAnUnknownAdIsAdNotFound() public {
         test_fundAd_makerOnly();
         IAdManager.OrderParams memory p = _defaultParams("no-such-ad");
@@ -133,6 +203,12 @@ contract AdManagerErrorCoverageTest is AdManagerTest {
 }
 
 contract OrderPortalErrorCoverageTest is OrderPortalTest {
+    function test_c19_unpauseWhenNotPausedIsExpectedPause() public {
+        vm.prank(admin);
+        vm.expectRevert(Pausable.ExpectedPause.selector);
+        portal.unpause();
+    }
+
     function _wire() internal {
         vm.startPrank(admin);
         portal.setPeerEscrow(adChainId, _b32(adManager));
@@ -187,6 +263,16 @@ contract BLSHarness {
 }
 
 contract StandaloneErrorCoverageTest is Test {
+    /// 49E-3: every custom error in the escrow ABIs (read from out/, not listed here) is named by a
+    /// test. test/error-coverage.mjs does the reading; a new error fails this until a test names it.
+    function test_49e3_everyEscrowErrorIsNamedByATest() public {
+        string[] memory cmd = new string[](2);
+        cmd[0] = "node";
+        cmd[1] = "test/error-coverage.mjs";
+        Vm.FfiResult memory r = vm.tryFfi(cmd);
+        assertEq(r.exitCode, 0, string(r.stderr));
+    }
+
     function test_c19_merkleManagerRefusesZeroAddresses() public {
         address hasher = address(new Poseidon2Yul());
         vm.expectRevert(MerkleManager.MerkleManager__ZeroAddress.selector);

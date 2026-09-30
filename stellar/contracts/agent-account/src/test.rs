@@ -2789,6 +2789,108 @@ fn s1_arming_a_longer_guard_restamps_a_pending_change() {
     f.client.upgrade(&hash);
 }
 
+/// Arm another ad on the same account (threshold 0, a wide bucket).
+fn guard_other(f: &Fixture, id: &str, delay: u64, window: u64) {
+    f.client.set_guard_rail(
+        &String::from_str(&f.env, id),
+        &Some(GuardRail {
+            threshold: 0,
+            delay,
+            window,
+            rate: Limit {
+                capacity: u128::MAX / 2,
+                refill_per_second: 1,
+            },
+            bucket: Bucket {
+                level: 0,
+                last_ts: 0,
+            },
+        }),
+    );
+}
+
+/// Pending rows of every kind: the ad's withdraw, its lock, and the account-wide upgrade.
+fn schedule_one_of_each(f: &Fixture) -> (Symbol, BytesN<32>) {
+    let hash = f.env.deployer().upload_contract_wasm(ACCOUNT_WASM);
+    let up = sym_of(&f.env, "upgrade");
+    f.client.schedule_account_extractive(&up, &hash);
+    f.client.schedule_extractive(
+        &ad(&f.env),
+        &sym_of(&f.env, "withdraw_from_ad"),
+        &1,
+        &Address::generate(&f.env),
+    );
+    let args = vec![&f.env, Val::from_u32(1).to_val()];
+    f.client
+        .schedule_lock(&ad(&f.env), &500_000, &commit(&f.env, args));
+    (up, hash)
+}
+
+/// (ready_at, expires_at) of the three rows `schedule_one_of_each` made.
+fn clocks(f: &Fixture, up: &Symbol) -> [(u64, u64); 3] {
+    let a = f.client.account_schedule(up).unwrap();
+    let w = f
+        .client
+        .schedule(&ad(&f.env), &sym_of(&f.env, "withdraw_from_ad"))
+        .unwrap();
+    let l = f.client.lock_schedule(&ad(&f.env)).unwrap();
+    [
+        (a.ready_at, a.expires_at),
+        (w.ready_at, w.expires_at),
+        (l.ready_at, l.expires_at),
+    ]
+}
+
+/// 49S-1 dead rows: a re-stamp moves `expires_at` with `ready_at`, so a 1 h / 1-day row tightened to
+/// a 7-day delay opens at day 7 and is still usable inside its window.
+#[test]
+fn s1_a_restamped_row_keeps_its_window() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let (up, hash) = schedule_one_of_each(&f);
+    guard(&f, 0, 7 * 86_400, 86_400);
+    let want = (T0 + 7 * 86_400, T0 + 7 * 86_400 + 86_400);
+    assert_eq!(clocks(&f, &up), [want; 3], "every row shifted whole");
+    f.env.ledger().set_timestamp(T0 + 7 * 86_400 + 86_400 - 1);
+    f.client.upgrade(&hash);
+}
+
+/// A threshold-only tightening raises no delay, so pending clocks stay where they were.
+#[test]
+fn s1_a_threshold_only_tightening_leaves_pending_clocks() {
+    let f = fixture();
+    guard(&f, 100, 3_600, 86_400);
+    let (up, _) = schedule_one_of_each(&f);
+    let before = clocks(&f, &up);
+    f.env.ledger().set_timestamp(T0 + 1_800);
+    guard(&f, 50, 3_600, 86_400);
+    assert_eq!(clocks(&f, &up), before);
+}
+
+/// Account-wide rows follow the account's longest delay: arming a second ad with a shorter delay
+/// leaves them alone, arming one with a longer delay re-stamps them (and not the first ad's rows).
+#[test]
+fn s1_account_rows_restamp_only_when_the_longest_delay_rises() {
+    let f = fixture();
+    guard(&f, 0, 7 * 86_400, 7 * 86_400);
+    let (up, _) = schedule_one_of_each(&f);
+    let before = clocks(&f, &up);
+    let now = T0 + 7 * 86_400 - 10;
+    f.env.ledger().set_timestamp(now);
+    guard_other(&f, "ad-2", 3_600, 7 * 86_400);
+    assert_eq!(clocks(&f, &up), before, "a shorter delay moves nothing");
+
+    guard_other(&f, "ad-3", 14 * 86_400, 7 * 86_400);
+    let after = clocks(&f, &up);
+    let shift = now + 14 * 86_400 - before[0].0;
+    assert_eq!(after[0], (before[0].0 + shift, before[0].1 + shift));
+    assert_eq!(
+        &after[1..],
+        &before[1..],
+        "the first ad's own rows keep its delay"
+    );
+}
+
 /// 49S-4: disarming clears the pending lock schedule along with the others.
 #[test]
 fn s4_disarming_clears_the_lock_schedule() {

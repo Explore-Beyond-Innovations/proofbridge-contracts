@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { assertReusedVk, sha256Hex, vkRecord, assertVerifierCode, maskRanges } from "../src/vk.js";
+import { assertReusedVk, sha256Hex, vkRecord, assertVerifierCode } from "../src/vk.js";
 
 // C-20: a reused verifier checking proofs against another VK makes one chain refuse every proof.
 test("a reused verifier with another VK is refused; the same VK, or nothing to compare, passes", () => {
@@ -21,31 +21,30 @@ test("the record hashes the VK file and takes a well-formed CIRCUITS_COMMIT", ()
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vk-"));
   const f = path.join(dir, "vk");
   fs.writeFileSync(f, "vk-bytes");
-  assert.deepEqual(vkRecord(f, { CIRCUITS_COMMIT: "2d9791e6" }), {
+  assert.deepEqual(vkRecord(f, "testnet", { CIRCUITS_COMMIT: "2d9791e6" }), {
     vkSha256: sha256Hex(Buffer.from("vk-bytes")),
     circuitsCommit: "2d9791e6",
   });
   // A-3: a missing file refuses (it used to record nothing and erase the manifest's hash).
-  assert.throws(() => vkRecord(path.join(dir, "missing"), { DEPLOY_ENV: "testnet", CIRCUITS_COMMIT: "not a sha" }), /VK file is missing/);
-  assert.deepEqual(vkRecord(path.join(dir, "missing"), { DEPLOY_ENV: "local" }), {}, "a local stack may run without built circuits");
-  assert.equal(vkRecord(f, { CIRCUITS_COMMIT: "not a sha" }).circuitsCommit, undefined, "a malformed commit is dropped");
+  assert.throws(() => vkRecord(path.join(dir, "missing"), "testnet", { CIRCUITS_COMMIT: "not a sha" }), /VK file is missing/);
+  assert.deepEqual(vkRecord(path.join(dir, "missing"), "local", {}), {}, "a local stack may run without built circuits");
+  // The resolved env decides, not a stray DEPLOY_ENV in the process environment.
+  assert.throws(() => vkRecord(path.join(dir, "missing"), "mainnet", { DEPLOY_ENV: "local" }), /VK file is missing/);
+  assert.equal(vkRecord(f, "local", { CIRCUITS_COMMIT: "not a sha" }).circuitsCommit, undefined, "a malformed commit is dropped");
   fs.rmSync(dir, { recursive: true });
 });
 
-// A-3: the chain's code is the fact; the manifest's hash is only a claim.
-test("a reused Verifier must carry this bundle's runtime code, immutable slots excepted", () => {
-  const art = { code: "aabb", masks: [] };
-  assertVerifierCode("t", "0xAABB", art);
-  assert.throws(() => assertVerifierCode("t", "0xaabb", { code: "0xaabc", masks: [] }), /not this bundle's Verifier/);
-  assert.throws(() => assertVerifierCode("t", "0x", art), /no code at the reused verifier address/);
-  // An immutable is zero in the artifact and a value on chain: masked, the rest must still match.
-  const withImm = { code: "0x11" + "00".repeat(32) + "22", masks: [{ start: 1, length: 32 }] };
-  assertVerifierCode("t", "0x11" + "ab".repeat(32) + "22", withImm);
-  assert.throws(() => assertVerifierCode("t", "0x11" + "ab".repeat(32) + "23", withImm), /not this bundle's Verifier/);
-  assert.equal(maskRanges("aabbccdd", [{ start: 1, length: 2 }]), "aa0000dd");
+// A-3: the chain's code is the fact; the manifest's hash is only a claim. Nothing is masked.
+test("a reused Verifier must carry exactly the bundle's runtime code", () => {
+  assertVerifierCode("t", "0xAABB", "aabb");
+  assert.throws(() => assertVerifierCode("t", "0xaabb", "0xaabc"), /not this bundle's Verifier/);
+  assert.throws(() => assertVerifierCode("t", "0x", "0xaabb"), /no code at the reused verifier address/);
+  assert.throws(() => assertVerifierCode("t", "0xaabb", "0x"), /produced no runtime code/);
+  // An immutable is part of the code: a different value is a different verifier.
+  assert.throws(() => assertVerifierCode("t", "0x11" + "ab".repeat(32) + "22", "0x11" + "ac".repeat(32) + "22"), /not this bundle's Verifier/);
 });
 
 test("a missing VK file refuses instead of recording nothing", () => {
-  assert.throws(() => vkRecord("/nonexistent/vk", {}), /VK file is missing/);
+  assert.throws(() => vkRecord("/nonexistent/vk", "testnet", {}), /VK file is missing/);
 });
 

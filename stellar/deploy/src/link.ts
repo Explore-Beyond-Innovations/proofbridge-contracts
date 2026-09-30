@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import { assertDisputeFitsBackstop } from "./dispute-fit.js";
-import { stellarChainIdOrLocal } from "./deploy-env.js";
+import { requireDeployEnv, stellarChainIdOrLocal } from "./deploy-env.js";
 import {
   readManifest,
   type ChainDeploymentManifest,
@@ -8,7 +8,7 @@ import {
   type DisputeParams,
   duplicatePairKeys,
 } from "@proofbridge/deployment-manifest";
-import { Acting, getAddress, invokeContract, readView, type DescribedCall } from "./stellar-cli.js";
+import { Acting, assertStellarNetworkForEnv, getAddress, invokeContract, readView, type DescribedCall } from "./stellar-cli.js";
 import { assertOneRegistry, linkCheckStep, verifierRegistry } from "./one-registry.js";
 import { stellarEscrowChain } from "./escrow-chain.js";
 import { adminsOf, foreignAdmins } from "./handover.js";
@@ -66,6 +66,9 @@ export async function link(
     );
   }
 
+  // A-4: the CLI's network must be the one this chain was deployed for, before any call reaches it.
+  assertStellarNetworkForEnv(requireDeployEnv(local.meta.env));
+
   console.log(
     `[stellar-link] local=${local.chain.name}(${local.chain.chainId}) ↔ peer=${peer.chain.name}(${peer.chain.chainId}, kind=${peer.chain.kind})`,
   );
@@ -79,6 +82,7 @@ export async function link(
     const peerKey = String(peerChainId);
     const checked = assertDisputeFitsBackstop(
       {
+        disputeModule: !!local.contracts.disputeManager,
         timing: routeTimingFromEnv(local.meta.env),
         dispute: local.contracts.disputeManager ? disputeParamsFromEnv(local.meta.env) : undefined,
         anchorDelay: process.env.ANCHOR_DELAY_S ?? "0",
@@ -466,6 +470,7 @@ function disputeParamsFromEnv(env: string, vars: Record<string, string | undefin
  */
 export function peerSide(peer: ChainDeploymentManifest, localKey: string, peerEnvFile: string | undefined) {
   const recorded = {
+    disputeModule: !!peer.contracts.disputeManager,
     timing: peer.routeTiming?.[localKey],
     dispute: peer.disputeParams?.[localKey],
     anchorDelay: peer.rootAnchorConfig?.anchorDelays?.[localKey],
@@ -481,6 +486,7 @@ export function peerSide(peer: ChainDeploymentManifest, localKey: string, peerEn
   // Only what the peer has not recorded is derived (a redeployed dispute module, for instance,
   // has clocks on record but no params until the peer links again).
   return {
+    disputeModule: recorded.disputeModule,
     timing: recorded.timing ?? routeTimingFromEnv(env, vars),
     dispute: recorded.dispute ?? (peer.contracts.disputeManager ? disputeParamsFromEnv(env, vars) : undefined),
     anchorDelay: recorded.anchorDelay ?? vars.ANCHOR_DELAY_S ?? "0",

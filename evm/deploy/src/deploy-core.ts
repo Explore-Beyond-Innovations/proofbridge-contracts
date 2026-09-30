@@ -22,7 +22,7 @@ import {
   contractFactoryLinked,
   linkedLibraryIn,
   attachContract,
-  deployedBytecodeOf,
+  runtimeCodeOf,
 } from "./artifacts.js";
 import {
   buildManifest,
@@ -315,13 +315,15 @@ async function deployCoreRun(
   // deployed from the same one: the chain cannot say, so the manifest's record is compared (C-20).
   const vkRec = vkRecord(
     process.env.EVENT_VK ?? process.env.STELLAR_EVENT_VK ?? path.join(evmRoot(), "..", "..", "proof_circuits", "events", "target", "vk"),
+    env,
   );
   if (existing?.contracts.verifier.address) {
     // The manifest's claim first, then the chain's fact (A-3): the reused Verifier's runtime code
     // must be this bundle's, whatever the manifest recorded — or failed to record.
     assertReusedVk("evm-deploy Verifier", vkRec.vkSha256, existing.meta.vkSha256);
     const onChain = await signer.provider!.getCode(existing.contracts.verifier.address);
-    assertVerifierCode("evm-deploy Verifier", onChain, deployedBytecodeOf("Verifier", "HonkVerifier"));
+    // No constructor args: the deploy below passes none.
+    assertVerifierCode("evm-deploy Verifier", onChain, await runtimeCodeOf(signer.provider!, "Verifier", "HonkVerifier"));
     console.log(`  [reuse] Verifier code matches the bundle${existing.meta.vkSha256 ? "" : " (VK hash recorded now)"}`);
   }
   const verifierAddr = await deployIfMissing(
