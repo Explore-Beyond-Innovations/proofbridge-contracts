@@ -282,15 +282,24 @@ impl AgentAccount {
                     },
                     ..g
                 };
+                // The delays pending rows were timed under, read before this write changes them.
+                let ad_delay_before = current.as_ref().map(|c| c.delay).unwrap_or(0);
+                let account_delay_before =
+                    policy::account_timelock(&env).map(|(d, _)| d).unwrap_or(0);
                 policy::put_guard_rail(&env, &ad_id, &armed)?;
                 // Settings the schedules were made under are gone, so the schedules go with them.
                 if loosening {
                     policy::clear_all_schedules(&env, &ad_id);
                 } else {
-                    // 49S-1: a pending change keeps waiting until the NEW delay has passed. Without
-                    // this, an upgrade a stolen key scheduled under a 1-day delay would still land
-                    // after the owner armed a 7-day guard — the guard would defend nothing pending.
-                    policy::restamp_schedules(&env, &ad_id, now + armed.delay);
+                    // 49S-1: a pending change waits the NEW delay, or a stolen key's 1-day upgrade
+                    // lands after the owner arms a 7-day guard. Only a delay that rises re-stamps:
+                    // a threshold-only tightening leaves pending clocks alone.
+                    if armed.delay > ad_delay_before {
+                        policy::restamp_ad_schedules(&env, &ad_id, now + armed.delay);
+                    }
+                    if armed.delay > account_delay_before {
+                        policy::restamp_account_schedules(&env, now + armed.delay);
+                    }
                 }
                 events::GuardRailSet {
                     ad_id,
