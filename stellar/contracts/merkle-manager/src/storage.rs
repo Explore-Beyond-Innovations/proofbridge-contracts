@@ -113,7 +113,8 @@ pub fn set_node_hash(env: &Env, index: u128, hash: &BytesN<32>) {
 pub fn get_root_at_width(env: &Env, width: u128) -> Option<BytesN<32>> {
     let key = (KEY_HISTORY, width);
     let v = env.storage().persistent().get(&key);
-    // 49S-2: a root an unlock still resolves against stays alive while it is read.
+    // 49S-2: reached only via the `get_root_at_index` view (the escrows' `get_historical_root`), not
+    // by appends or unlocks, so this extends only when a transaction calls that view.
     if v.is_some() {
         extend_persistent(env, &key);
     }

@@ -737,6 +737,57 @@ fn test_append_extends_node_and_root_history_ttl() {
     );
 }
 
+/// 49S-2: an append re-extends the rows it only reads — the manager row and the peaks it merges —
+/// so an escrow that keeps appending never meets an archived one. Aged below the bump threshold
+/// first, where only a read-time extend can lift them again.
+#[test]
+fn test_append_reads_extend_the_manager_and_peak_rows() {
+    use proofbridge_core::ttl::{PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD};
+    use soroban_sdk::testutils::storage::Persistent as _;
+    use soroban_sdk::testutils::Ledger as _;
+    use soroban_sdk::{symbol_short, IntoVal, Val};
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, manager) = setup_contract(&env);
+    client.initialize(&admin);
+    client.set_manager(&manager, &true);
+    client.append_order_hash(&manager, &BytesN::from_array(&env, &[1u8; 32]), &0);
+    client.append_order_hash(&manager, &BytesN::from_array(&env, &[2u8; 32]), &0);
+
+    let ttl_of =
+        |key: Val| env.as_contract(&client.address, || env.storage().persistent().get_ttl(&key));
+    let mgr = || (symbol_short!("mgrs"), manager.clone()).into_val(&env);
+    // Node 3 is the two-leaf peak; the next append reads it to bag the root and writes nothing to it.
+    let peak = || (symbol_short!("hashes"), 3u128).into_val(&env);
+    let age = PERSISTENT_BUMP_AMOUNT - PERSISTENT_LIFETIME_THRESHOLD / 2;
+    env.as_contract(&client.address, || {
+        env.storage().instance().extend_ttl(age + 10, age + 10)
+    });
+    env.ledger().with_mut(|l| l.sequence_number += age);
+    assert!(ttl_of(mgr()) < PERSISTENT_LIFETIME_THRESHOLD, "aged");
+    assert!(ttl_of(peak()) < PERSISTENT_LIFETIME_THRESHOLD, "aged");
+
+    client.append_order_hash(&manager, &BytesN::from_array(&env, &[3u8; 32]), &0);
+    assert!(
+        ttl_of(mgr()) >= PERSISTENT_BUMP_AMOUNT,
+        "manager row not extended on read"
+    );
+    assert!(
+        ttl_of(peak()) >= PERSISTENT_BUMP_AMOUNT,
+        "peak not extended on read"
+    );
+
+    // A historical root is read only through the view; calling it extends the row.
+    let root1 = || (symbol_short!("history"), 1u128).into_val(&env);
+    assert!(ttl_of(root1()) < PERSISTENT_LIFETIME_THRESHOLD, "aged");
+    client.get_root_at_index(&1);
+    assert!(
+        ttl_of(root1()) >= PERSISTENT_BUMP_AMOUNT,
+        "root not extended on read"
+    );
+}
+
 // =============================================================================
 // Soak batch D (C-19): every reachable error, named
 // =============================================================================
