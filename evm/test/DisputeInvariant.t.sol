@@ -154,7 +154,11 @@ contract DisputeInvariantTest is Test {
     }
 
     function _lockOrder(uint256 seed) internal returns (uint256 i) {
-        require(orders.length < MAX_ORDERS, "full");
+        i = _lockOrderWithin(seed, MAX_ORDERS);
+    }
+
+    function _lockOrderWithin(uint256 seed, uint256 cap) internal returns (uint256 i) {
+        require(orders.length < cap, "full");
         IAdManager.OrderParams memory p = _params(nonce++, block.timestamp + 1 hours + seed % 6 days);
         // The maker locks its own ad's liquidity; the suite pranks for the same reason.
         vm.prank(maker);
@@ -255,10 +259,8 @@ contract DisputeInvariantTest is Test {
         require(modules.length < MAX_MODULES, "enough modules");
         // With a dispute open on the old module, filed here if there is none, so one is left behind.
         if (!_hasAny(_mask(IEscrow.Status.Disputed))) {
-            uint256 j = orders.length < MAX_ORDERS
-                ? _lockOrder(pick)
-                : _pick(pick, _mask(IEscrow.Status.Open) | _mask(IEscrow.Status.Claimed));
-            _file(j, false);
+            // One slot past the cap is the swap's own: it happens once, and must not depend on room.
+            _file(_lockOrderWithin(pick, MAX_ORDERS + 1), false);
         }
         DisputeManager next = new DisputeManager(admin, IwNativeToken(address(wNative)));
         vm.startPrank(admin);
