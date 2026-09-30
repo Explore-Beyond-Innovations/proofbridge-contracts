@@ -360,32 +360,43 @@ pub fn clear_all_schedules(env: &Env, ad_id: &String) {
     }
 }
 
-/// 49S-1: every pending schedule this ad's settings time — its own three actions, its lock, and the
-/// account-wide rows — matures no earlier than `not_before`. Arming or tightening a guard rail
-/// calls this, so the delay just set applies to what was already announced.
-pub fn restamp_schedules(env: &Env, ad_id: &String, not_before: u64) {
+/// 49S-1: this ad's pending schedules (its three actions and its lock) mature no earlier than
+/// `not_before`. Called when the ad's own delay rises, so the new delay applies to what was pending.
+pub fn restamp_ad_schedules(env: &Env, ad_id: &String, not_before: u64) {
     for a in [withdraw_from_ad(env), close_ad(env), set_guard_rail(env)] {
         if let Some(mut s) = get_schedule(env, ad_id, &a) {
-            if s.ready_at < not_before {
-                s.ready_at = not_before;
+            if restamp(&mut s.ready_at, &mut s.expires_at, not_before) {
                 set_schedule(env, ad_id, &a, &s);
             }
         }
     }
     if let Some(mut s) = get_lock_schedule(env, ad_id) {
-        if s.ready_at < not_before {
-            s.ready_at = not_before;
+        if restamp(&mut s.ready_at, &mut s.expires_at, not_before) {
             set_lock_schedule(env, ad_id, &s);
         }
     }
+}
+
+/// 49S-1: the account-wide rows, when the account-wide (longest) delay rises.
+pub fn restamp_account_schedules(env: &Env, not_before: u64) {
     for a in account_actions(env) {
         if let Some(mut s) = get_account_schedule(env, &a) {
-            if s.ready_at < not_before {
-                s.ready_at = not_before;
+            if restamp(&mut s.ready_at, &mut s.expires_at, not_before) {
                 set_account_schedule(env, &a, &s);
             }
         }
     }
+}
+
+/// Push a row's window later so it opens at `not_before`; the window keeps its length, or a
+/// re-stamped row would expire before it opens.
+fn restamp(ready_at: &mut u64, expires_at: &mut u64, not_before: u64) -> bool {
+    if *ready_at >= not_before {
+        return false;
+    }
+    *expires_at = expires_at.saturating_add(not_before - *ready_at);
+    *ready_at = not_before;
+    true
 }
 
 pub fn get_lock_schedule(env: &Env, ad_id: &String) -> Option<BoundSchedule> {

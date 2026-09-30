@@ -151,11 +151,11 @@ impl DisputeManagerContract {
         // keeps "the escrow's balance is its order escrow" a single-contract invariant for 2.3h.
         filer.require_auth();
         let w = storage::get_w_native(&env).ok_or(Error::NotInitialized)?;
-        token::Client::new(&env, &w).transfer(
-            &filer,
-            &env.current_contract_address(),
-            &(bond as i128),
-        );
+        // 49S-3: a token refusal is ours to name; raw, its number would read as a dispute error.
+        token::Client::new(&env, &w)
+            .try_transfer(&filer, &env.current_contract_address(), &(bond as i128))
+            .map_err(|_| Error::BondTransferFailed)?
+            .map_err(|_| Error::BondTransferFailed)?;
 
         // The challenge period is a floor on how long the arbiter has, never a licence to finish
         // early: no dispute path may complete before the order's own `deadline + buffer` (D3,
@@ -429,12 +429,16 @@ impl DisputeManagerContract {
         }
         storage::set_claimable(&env, &recipient, 0);
         let w = storage::get_w_native(&env).ok_or(Error::NotInitialized)?;
-        token::Client::new(&env, &w).transfer(
-            &env.current_contract_address(),
-            &recipient,
-            &(amount as i128),
-        );
-        events::PayoutClaimed { recipient, amount }.publish(&env);
+        // The error reverts the zeroing above, so the credit stays claimable.
+        token::Client::new(&env, &w)
+            .try_transfer(
+                &env.current_contract_address(),
+                &recipient,
+                &(amount as i128),
+            )
+            .map_err(|_| Error::BondTransferFailed)?
+            .map_err(|_| Error::BondTransferFailed)?;
+        events::BondClaimed { recipient, amount }.publish(&env);
         Ok(())
     }
 
@@ -483,7 +487,7 @@ impl DisputeManagerContract {
         }
         let owed = storage::get_claimable(env, to);
         storage::set_claimable(env, to, owed + amount);
-        events::PayoutCredited {
+        events::BondCredited {
             recipient: to.clone(),
             amount,
         }

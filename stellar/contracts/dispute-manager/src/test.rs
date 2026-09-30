@@ -675,9 +675,9 @@ fn the_filing_event_carries_the_evidence_hash() {
     );
 }
 
-/// C-34: withdrawing a credited bond payout is observable.
+/// C-34: withdrawing a credited bond payout is observable (as `BondClaimed`).
 #[test]
-fn claim_publishes_payout_claimed() {
+fn claim_publishes_bond_claimed() {
     use soroban_sdk::{events::Event as _, testutils::Events as _};
     let f = fixture();
     let who = Address::generate(&f.env);
@@ -689,13 +689,13 @@ fn claim_publishes_payout_claimed() {
 
     f.client.claim(&who);
 
-    let want = events::PayoutClaimed {
+    let want = events::BondClaimed {
         recipient: who.clone(),
         amount: 500,
     }
     .to_xdr(&f.env, &f.client.address);
     let got = f.env.events().all().filter_by_contract(&f.client.address);
-    assert!(got.events().contains(&want), "no PayoutClaimed: {got:?}");
+    assert!(got.events().contains(&want), "no BondClaimed: {got:?}");
     assert_eq!(token::Client::new(&f.env, &f.token).balance(&who), 500);
     assert_eq!(f.client.claimable(&who), 0);
 }
@@ -803,4 +803,118 @@ fn claim_with_no_credit_is_nothing_to_claim() {
         f.client.try_claim(&Address::generate(&f.env)),
         Err(Ok(Error::NothingToClaim))
     );
+}
+
+// ── 49S-3: token refusals are the module's own error; relayed codes pinned ──
+
+/// A filer who cannot fund the bond is `BondTransferFailed`, and no record is left behind.
+#[test]
+fn an_unfunded_bond_is_bond_transfer_failed() {
+    let f = fixture();
+    let broke = Address::generate(&f.env);
+    let h = hash(&f.env, 51);
+    assert_eq!(
+        f.client.try_open_dispute(
+            &f.escrow,
+            &h,
+            &1_000,
+            &CHAIN,
+            &broke,
+            &hash(&f.env, 0xEE),
+            &DEADLINE,
+            &BUFFER,
+            &0u64,
+        ),
+        Err(Ok(Error::BondTransferFailed))
+    );
+    assert!(!f.client.is_disputed(&h));
+}
+
+/// A claim the token refuses is `BondTransferFailed`, and the credit stays claimable.
+#[test]
+fn a_refused_claim_is_bond_transfer_failed_and_keeps_the_credit() {
+    let f = fixture();
+    let who = Address::generate(&f.env);
+    // Credited, but the module holds no tokens to pay it with.
+    f.env.as_contract(&f.client.address, || {
+        storage::set_claimable(&f.env, &who, 500)
+    });
+    assert_eq!(f.client.try_claim(&who), Err(Ok(Error::BondTransferFailed)));
+    assert_eq!(f.client.claimable(&who), 500);
+}
+
+/// 49E-1 twin: the bond claim's topic is `bond_clm`, never the escrow's `pay_clm`.
+#[test]
+fn the_bond_claim_event_has_its_own_topic() {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
+    let f = fixture();
+    let who = Address::generate(&f.env);
+    f.env.as_contract(&f.client.address, || {
+        storage::set_claimable(&f.env, &who, 500)
+    });
+    TokenContractClient::new(&f.env, &f.token).mint(&f.client.address, &500);
+    f.client.claim(&who);
+    let got = f.env.events().all().filter_by_contract(&f.client.address);
+    let firsts: std::vec::Vec<ScVal> = got
+        .events()
+        .iter()
+        .map(|e| match &e.body {
+            ContractEventBody::V0(b) => b.topics[0].clone(),
+        })
+        .collect();
+    let sym = |s: &str| ScVal::Symbol(ScSymbol(s.try_into().unwrap()));
+    assert!(firsts.contains(&sym("bond_clm")), "{firsts:?}");
+    assert!(!firsts.contains(&sym("pay_clm")), "{firsts:?}");
+}
+
+/// 49E-1 twin: a credited bond payout's topic is `bond_cred`, never the escrow's `pay_cred`.
+#[test]
+fn the_bond_credit_event_has_its_own_topic() {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
+    let f = fixture();
+    let h = hash(&f.env, 61);
+    let bond = file(&f, &h, 1_000);
+    // Drain the module so the payout is refused and credited instead.
+    TokenContractClient::new(&f.env, &f.token).transfer(
+        &f.client.address,
+        &Address::generate(&f.env),
+        &(bond as i128),
+    );
+    f.client
+        .settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false);
+    // `events().all()` holds the last invocation only, so read them before any other call.
+    let got = f.env.events().all().filter_by_contract(&f.client.address);
+    let firsts: std::vec::Vec<ScVal> = got
+        .events()
+        .iter()
+        .map(|e| match &e.body {
+            ContractEventBody::V0(b) => b.topics[0].clone(),
+        })
+        .collect();
+    let sym = |s: &str| ScVal::Symbol(ScSymbol(s.try_into().unwrap()));
+    assert!(firsts.contains(&sym("bond_cred")), "{firsts:?}");
+    assert!(!firsts.contains(&sym("pay_cred")), "{firsts:?}");
+    assert_eq!(f.client.claimable(&f.filer), bond, "credited");
+}
+
+/// Error drift: every code the escrows relay is the same number here and in `proofbridge-core`.
+#[test]
+fn relayed_error_codes_match_the_shared_definitions() {
+    use proofbridge_core::dispute::error_code as c;
+    let pairs = [
+        (Error::NotEscrow, c::NOT_ESCROW),
+        (Error::DisputeExists, c::DISPUTE_EXISTS),
+        (Error::BondTooSmall, c::BOND_TOO_SMALL),
+        (Error::ChallengeOpen, c::CHALLENGE_OPEN),
+        (Error::ChallengeClosed, c::CHALLENGE_CLOSED),
+        (Error::NotResponder, c::NOT_RESPONDER),
+        (Error::NoDisputeParams, c::NO_DISPUTE_PARAMS),
+        (Error::WrongEscrow, c::WRONG_ESCROW),
+        (Error::BondTransferFailed, c::BOND_TRANSFER_FAILED),
+    ];
+    for (e, code) in pairs {
+        assert_eq!(e as u32, code, "{e:?}");
+    }
 }

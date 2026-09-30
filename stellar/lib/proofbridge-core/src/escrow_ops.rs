@@ -55,6 +55,8 @@ pub enum Fault {
     DisputeNotResponder,
     DisputeChallengeOpen,
     DisputeChallengeClosed,
+    /// 49S-3: the module could not move the bond (a token refusal, e.g. no trustline or a shortfall).
+    DisputeBondTransferFailed,
     /// A public input at or above the field prime (2.3h, residual 9). Defence in depth: both shipped
     /// verifiers already reject one, but the escrow's nullifier ledger keys on raw bytes, so a
     /// verifier that reduced instead would turn one proof into many nullifiers.
@@ -397,18 +399,20 @@ pub fn open_dispute(
 /// 49S-3: a `try_*` call into the dispute module fails either with the module's own contract error
 /// (relayed by its discriminant — the DisputeManager's `#[contracterror]` codes) or with a host
 /// failure (a trap, a missing contract), which stays `DisputeModuleRejected`.
-fn dispute_module_fault(e: Result<soroban_sdk::Error, soroban_sdk::InvokeError>) -> Fault {
+pub fn dispute_module_fault(e: Result<soroban_sdk::Error, soroban_sdk::InvokeError>) -> Fault {
+    use crate::dispute::error_code as code;
     use soroban_sdk::xdr::ScErrorType;
     match e {
         Ok(err) if err.is_type(ScErrorType::Contract) => match err.get_code() {
-            3 => Fault::DisputeNotEscrow,
-            10 => Fault::DisputeExists,
-            13 => Fault::DisputeBondTooSmall,
-            14 => Fault::DisputeChallengeOpen,
-            15 => Fault::DisputeChallengeClosed,
-            16 => Fault::DisputeNotResponder,
-            17 => Fault::DisputeNoParams,
-            21 => Fault::DisputeWrongEscrow,
+            code::NOT_ESCROW => Fault::DisputeNotEscrow,
+            code::DISPUTE_EXISTS => Fault::DisputeExists,
+            code::BOND_TOO_SMALL => Fault::DisputeBondTooSmall,
+            code::CHALLENGE_OPEN => Fault::DisputeChallengeOpen,
+            code::CHALLENGE_CLOSED => Fault::DisputeChallengeClosed,
+            code::NOT_RESPONDER => Fault::DisputeNotResponder,
+            code::NO_DISPUTE_PARAMS => Fault::DisputeNoParams,
+            code::WRONG_ESCROW => Fault::DisputeWrongEscrow,
+            code::BOND_TRANSFER_FAILED => Fault::DisputeBondTransferFailed,
             _ => Fault::DisputeModuleRejected,
         },
         _ => Fault::DisputeModuleRejected,
