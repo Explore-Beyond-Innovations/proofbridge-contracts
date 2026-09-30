@@ -6,6 +6,7 @@
 //   stellar-deploy deploy-test-tokens [--out <manifest-path>] [--chain-id <n>]
 //   stellar-deploy link --peer <peer-manifest> [--in <local-manifest>] [--peer-env <peer-env-file>]
 //   stellar-deploy handover --to <G...> | --verify   [--in <manifest-path>] [--chain-id <n>]
+//   stellar-deploy retirements-audit --file <vault-export.json> [--in <manifest-path>] [--chain-id <n>]
 //
 // Reads the `stellar` CLI environment:
 //   STELLAR_NETWORK (required; `local` by default for DEPLOY_ENV=local only), STELLAR_SOURCE_ACCOUNT (default: admin)
@@ -16,6 +17,9 @@ import { deployCore } from "../src/deploy-core.js";
 import { deployTestTokens } from "../src/deploy-test-tokens.js";
 import { link } from "../src/link.js";
 import { handover } from "../src/handover.js";
+import { formatAudit, retirementsAudit } from "../src/keys-env.js";
+import { manifestPath, readManifest } from "../src/manifest.js";
+import { requireDeployEnv, requireStellarChainId } from "../src/deploy-env.js";
 
 function parseFlag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
@@ -73,10 +77,28 @@ async function main(): Promise<void> {
       await handover({ to, verify, manifest: parseFlag(rest, "--in"), chainId: parseChainId(rest) });
       return;
     }
+    case "retirements-audit": {
+      // 50-4: pre-signed retirements the registry would refuse (an older message format) are listed.
+      const file = parseFlag(rest, "--file");
+      if (!file) {
+        console.error("retirements-audit: --file <vault-export.json> is required");
+        process.exit(2);
+      }
+      const inPath = parseFlag(rest, "--in") ?? manifestPath(requireStellarChainId(parseChainId(rest), requireDeployEnv()));
+      const registry = (await readManifest(inPath)).contracts.blsKeyRegistry?.address;
+      if (!registry) {
+        console.error(`retirements-audit: ${inPath} names no BLSKeyRegistry`);
+        process.exit(2);
+      }
+      const rows = retirementsAudit(registry, file);
+      console.log(formatAudit(rows));
+      if (rows.some((r) => r.status === "stale-format" || r.status === "error")) process.exit(1);
+      return;
+    }
     default:
       console.error(
         `Unknown command '${cmd ?? ""}'.\n` +
-          "Usage: stellar-deploy {deploy|deploy-test-tokens|link|handover} [flags]",
+          "Usage: stellar-deploy {deploy|deploy-test-tokens|link|handover|retirements-audit} [flags]",
       );
       process.exit(2);
   }

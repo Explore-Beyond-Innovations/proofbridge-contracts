@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { assertRegistryEnv, registryInitArgs } from "./keys-env.js";
 import { assertOneRegistry, deployRegistryStep, verifierRegistry } from "./one-registry.js";
 import { stellarEscrowChain } from "./escrow-chain.js";
 import { adminBlockFromChain, adminsOf, foreignAdmins, type HeldAdmin } from "./handover.js";
@@ -111,6 +112,11 @@ export async function deployCore(
   }
   // The bundle's VK; outside local a missing file refuses, so the manifest (and link's A-6 compare) has its hash.
   const vkRec = vkRecord(vk, env);
+  // D3: a reused key registry must have been initialized for this environment.
+  const reusedRegistry = existing?.contracts.blsKeyRegistry?.address;
+  if (reuse && reusedRegistry) {
+    assertRegistryEnv("stellar-deploy", env, readView(reusedRegistry, "keys_env"));
+  }
 
   function reused(existingAddr: string | undefined): string | undefined {
     return existingAddr;
@@ -225,12 +231,7 @@ export async function deployCore(
   let blsKeyRegistry = reused(existing?.contracts.blsKeyRegistry?.address);
   if (!blsKeyRegistry) {
     blsKeyRegistry = tracked("BLSKeyRegistry", deployContract(path.join(wasmBase, "bls_key_registry.wasm")));
-    invokeContract(blsKeyRegistry, "initialize", [
-      "--admin",
-      adminStrkey,
-      "--chain_id",
-      chainId.toString(),
-    ]);
+    invokeContract(blsKeyRegistry, "initialize", registryInitArgs(adminStrkey, chainId, env));
     deployedNow.push("BLSKeyRegistry");
     console.log(`  [deploy] BLSKeyRegistry: ${blsKeyRegistry}`);
   } else {
