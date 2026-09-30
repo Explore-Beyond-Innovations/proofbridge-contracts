@@ -77,7 +77,7 @@ jobs:
           # gate whose halves run on different runtimes will eventually pass on one and fail on
           # the other.
           node-version: "20"
-          cache: "pnpm"
+          # No pnpm cache here: setup-node would save one from a job that runs circuit code.
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
