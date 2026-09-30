@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import { assertDisputeFitsBackstop } from "./dispute-fit.js";
-import { stellarChainIdOrLocal } from "./deploy-env.js";
+import { requireDeployEnv, stellarChainIdOrLocal } from "./deploy-env.js";
 import {
   readManifest,
   type ChainDeploymentManifest,
@@ -8,7 +8,7 @@ import {
   type DisputeParams,
   duplicatePairKeys,
 } from "@proofbridge/deployment-manifest";
-import { Acting, getAddress, invokeContract, readView, type DescribedCall } from "./stellar-cli.js";
+import { Acting, assertStellarNetworkForEnv, getAddress, invokeContract, readView, type DescribedCall } from "./stellar-cli.js";
 import { assertOneRegistry, linkCheckStep, verifierRegistry } from "./one-registry.js";
 import { stellarEscrowChain } from "./escrow-chain.js";
 import { adminsOf, foreignAdmins } from "./handover.js";
@@ -65,6 +65,9 @@ export async function link(
       `link: chainId=${chainId} does not match local manifest chainId=${local.chain.chainId}`,
     );
   }
+
+  // A-4: the CLI's network must be the one this chain was deployed for, before any call reaches it.
+  assertStellarNetworkForEnv(requireDeployEnv(local.meta.env));
 
   console.log(
     `[stellar-link] local=${local.chain.name}(${local.chain.chainId}) ↔ peer=${peer.chain.name}(${peer.chain.chainId}, kind=${peer.chain.kind})`,
