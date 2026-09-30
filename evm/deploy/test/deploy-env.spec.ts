@@ -26,10 +26,27 @@ test("DEPLOY_ENV is tied to the connected chain id", () => {
   assert.throws(() => assertChainIdForEnv(31337n, "testnet", {}), /is a local chain/);
   assert.throws(() => assertChainIdForEnv(1n, "testnet", {}), /is a mainnet chain/);
   assertChainIdForEnv(1n, "mainnet", {});
-  assert.throws(() => assertChainIdForEnv(11155111n, "mainnet", {}), /not a known mainnet/);
+  assert.throws(() => assertChainIdForEnv(11155111n, "mainnet", {}), /which is a testnet chain/);
   // A private devnet or a new L1 is declared, never guessed.
   assertChainIdForEnv(9999n, "local", { LOCAL_EVM_CHAIN_IDS: "9999" });
   assertChainIdForEnv(5000n, "mainnet", { MAINNET_EVM_CHAIN_IDS: "5000, 5001" });
   assert.throws(() => assertChainIdForEnv(1n, "mainnet", { MAINNET_EVM_CHAIN_IDS: "abc" }), /decimal chain ids/);
 });
 
+
+// An allowlist per env: an unlisted id (an unknown mainnet, a fork) is never guessed to be a testnet.
+test("every env is an allowlist: the known testnets pass, an unlisted id refuses everywhere", () => {
+  for (const id of [11155111n, 84532n, 421614n, 11155420n, 17000n, 80002n]) {
+    assertChainIdForEnv(id, "testnet", {});
+    assert.throws(() => assertChainIdForEnv(id, "local", {}), /which is a testnet chain/);
+    assert.throws(() => assertChainIdForEnv(id, "mainnet", {}), /which is a testnet chain/);
+  }
+  for (const e of ["local", "testnet", "mainnet"] as const) {
+    assert.throws(() => assertChainIdForEnv(5000n, e, {}), /chain 5000, which no environment lists/);
+  }
+  assert.throws(() => assertChainIdForEnv(5000n, "testnet", {}), /TESTNET_EVM_CHAIN_IDS/, "names the list to extend");
+  assertChainIdForEnv(5003n, "testnet", { TESTNET_EVM_CHAIN_IDS: "5003" });
+  assert.throws(() => assertChainIdForEnv(5003n, "mainnet", { TESTNET_EVM_CHAIN_IDS: "5003" }), /which is a testnet chain/);
+  // An id declared for two envs is ambiguous, not whichever list is read first.
+  assert.throws(() => assertChainIdForEnv(31337n, "testnet", { TESTNET_EVM_CHAIN_IDS: "31337" }), /listed for local and testnet/);
+});
