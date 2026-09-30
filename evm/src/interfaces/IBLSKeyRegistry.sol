@@ -75,8 +75,14 @@ interface IBLSKeyRegistry is IKeyRegistry {
     error KeyPreviouslyUsed();
     error BadValidUntil();
     error UnknownScheme();
-    /// The signed legs do not hold this registry's own leg exactly once, or a retirement names legs.
+    /// The signed legs do not name this registry exactly once at its current nonce, or a retirement names legs.
     error LegMismatch();
+    /// Review D2: chain time is past the registration's deadline.
+    error DeadlineExpired();
+    /// Review D2: the deadline is more than MAX_REGISTER_TTL past chain time, whoever signed it.
+    error DeadlineTooFar();
+    /// Review D3: the environment is not local, testnet or mainnet.
+    error BadEnv();
     error ProofRegistrationDisabled();
     error ProofRegistrationRefsUnset();
     error SourceNotAllowed(uint256 chainId);
@@ -98,7 +104,8 @@ interface IBLSKeyRegistry is IKeyRegistry {
         OwnerAuth calldata owner,
         bytes calldata blsPubKey,
         bytes calldata pop,
-        uint256 nonce
+        uint256 nonce,
+        uint64 deadline
     ) external returns (uint32 slotId);
     function registerByProof(
         bytes32 account,
@@ -128,4 +135,5 @@ interface IBLSKeyRegistry is IKeyRegistry {
     function nextSlotId(bytes32 account) external view returns (uint32);
     function slotOfKey(bytes32 account, bytes32 keyCommitment) external view returns (uint32);
     function domainSeparator() external view returns (bytes32);
+    function keysEnv() external view returns (string memory);
 }

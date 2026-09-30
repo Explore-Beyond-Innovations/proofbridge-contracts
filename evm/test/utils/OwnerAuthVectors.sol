@@ -37,6 +37,29 @@ library OwnerAuthVectors {
         }
     }
 
+    /// `.ownerAuth.<who>.register[i]`, or `registerLate[i]` once the clock reaches `slots.graceTs`:
+    /// each family is signed for its own clock (review D2).
+    function registerPath(string memory json, string memory who, uint256 i) internal view returns (string memory) {
+        bool late = block.timestamp >= vm.parseUint(json.readString(".slots.graceTs"));
+        return string.concat(".ownerAuth.", who, late ? ".registerLate[" : ".register[", vm.toString(i), "]");
+    }
+
+    /// Moves the clock to the one `register[...]` entries are signed for; returns the clock to
+    /// restore, for suites whose registrations are setup, not the subject (review D2).
+    function enterRegisterClock(string memory json) internal returns (uint256 prev) {
+        prev = block.timestamp;
+        vm.warp(vm.parseUint(json.readString(".ownerAuth._meta.deadline.registerChainTime")));
+    }
+
+    function restoreClock(uint256 t) internal {
+        vm.warp(t);
+    }
+
+    /// A RegisterKey entry's deadline (review D2).
+    function deadline(string memory json, string memory path) internal pure returns (uint64) {
+        return uint64(vm.parseUint(json.readString(string.concat(path, ".deadline"))));
+    }
+
     /// The key fingerprint an entry names (`keyCommitment`).
     function key(string memory json, string memory path) internal pure returns (bytes32) {
         return json.readBytes32(string.concat(path, ".keyCommitment"));

@@ -281,6 +281,6 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
         IBLSKeyRegistry.OwnerAuth memory owner;
         owner.sig = hex"00";
         vm.expectRevert(IBLSKeyRegistry.BadLength.selector);
-        registry.register(account, owner, bytes.concat(pk, hex"00"), pop, 0);
+        registry.register(account, owner, bytes.concat(pk, hex"00"), pop, 0, uint64(block.timestamp));
     }
 }

@@ -37,7 +37,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         vjson = vm.readFile("../test-vectors/bls-encodings.json");
         vOrderRoot = vjson.readBytes32(".settlement.auth.orderChainRoot");
 
-        BLSKeyRegistry impl = new BLSKeyRegistry(address(this));
+        BLSKeyRegistry impl = new BLSKeyRegistry(address(this), "testnet");
         vm.etch(REGISTRY, address(impl).code);
         _registerVectorParties(vjson);
         cVerifier = new CounterpartyVerifier(REGISTRY);
@@ -226,7 +226,7 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
         bridgerAcct = vjson.readBytes32(".registration.bridgerOnSepolia.account");
         vBridger = address(uint160(uint256(bridgerAcct)));
 
-        BLSKeyRegistry impl = new BLSKeyRegistry(address(this));
+        BLSKeyRegistry impl = new BLSKeyRegistry(address(this), "testnet");
         vm.etch(REGISTRY, address(impl).code);
         _registerVectorParties(vjson);
         cVerifier = new CounterpartyVerifier(REGISTRY);
@@ -379,14 +379,18 @@ function _registerVectorParties(string memory vjson) {
 
 function _registerOne(string memory vjson, string memory who, bool maker) {
     string memory base = string.concat(".registration.", who);
+    string memory entry = maker ? ".ownerAuth.maker.register[0]" : ".ownerAuth.bridger.register[0]";
+    uint256 clock = OwnerAuthVectors.enterRegisterClock(vjson);
     BLSKeyRegistry(0x1111111111111111111111111111111111111111)
         .register(
             stdJson.readBytes32(vjson, string.concat(base, ".account")),
-            OwnerAuthVectors.auth(vjson, maker ? ".ownerAuth.maker.register[0]" : ".ownerAuth.bridger.register[0]"),
+            OwnerAuthVectors.auth(vjson, entry),
             stdJson.readBytes(vjson, string.concat(base, ".pkNative")),
             stdJson.readBytes(vjson, string.concat(base, ".pop")),
-            0
+            0,
+            OwnerAuthVectors.deadline(vjson, entry)
         );
+    OwnerAuthVectors.restoreClock(clock);
 }
 
 function _vectorCosig(string memory vjson) view returns (bytes memory) {

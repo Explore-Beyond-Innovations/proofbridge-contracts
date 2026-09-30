@@ -15,6 +15,7 @@ import {stdJson} from "forge-std/StdJson.sol";
 import {IKeyRegistry} from "src/interfaces/IKeyRegistry.sol";
 import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
 import {BLSKeyRegistry} from "src/BLSKeyRegistry.sol";
+import {KeyMessages} from "src/libraries/KeyMessages.sol";
 import {CounterpartyVerifier} from "src/CounterpartyVerifier.sol";
 import {RouteTiming} from "src/libraries/RouteTiming.sol";
 import {AdManagerTest} from "./Admanager.t.sol";
@@ -405,17 +406,19 @@ abstract contract RealRegistryFixture is AdManagerTest {
     string internal v;
     BLSKeyRegistry internal registry;
     bytes32 internal account;
+    bytes32 internal keysDomain;
 
     /// Per test, not in `setUp`: the inherited suites keep running against the mock.
     function _realRegistry() internal {
         // Foundry's clock starts at second 1 — the very date a kill names. Start in 2023 instead.
         vm.warp(1_700_000_000);
         v = vm.readFile("../test-vectors/bls-encodings.json");
-        BLSKeyRegistry impl = new BLSKeyRegistry(address(this));
+        BLSKeyRegistry impl = new BLSKeyRegistry(address(this), "testnet");
         vm.etch(REGISTRY, address(impl).code);
         vm.store(REGISTRY, bytes32(0), bytes32(uint256(uint160(address(this)))));
         registry = BLSKeyRegistry(REGISTRY);
-        account = v.readBytes32(".slots.makerOnSepolia.account");
+        keysDomain = registry.domainSeparator();
+        account = v.readBytes32(".slots.bridgerOnSepolia.account");
         // Two slots, so a kill of one leaves `hasUsableSlot` true: the state the attack needs.
         _registerSlot(0);
         _registerSlot(1);
@@ -433,21 +436,45 @@ abstract contract RealRegistryFixture is AdManagerTest {
         vm.chainId(cid);
     }
 
+    /// The vector account is the EVM-home bridger, so each registration is signed here at the current
+    /// clock (a RegisterKey expires, review D2); key i and its PoP are the vector's slot i at nonce i.
     function _registerSlot(uint256 i) internal onVectorChain {
-        string memory path = string.concat(".slots.makerOnSepolia.registrations[", vm.toString(i), "]");
+        string memory path = string.concat(".slots.bridgerOnSepolia.registrations[", vm.toString(i), "]");
+        bytes memory pk = v.readBytes(string.concat(path, ".pkNative"));
+        uint64 deadline = uint64(block.timestamp + 1 hours);
         registry.register(
             account,
-            OwnerAuthVectors.auth(v, string.concat(".ownerAuth.maker.register[", vm.toString(i), "]")),
-            v.readBytes(string.concat(path, ".pkNative")),
+            _signedRegister(keccak256(pk), i, deadline),
+            pk,
             v.readBytes(string.concat(path, ".pop")),
-            i
+            i,
+            deadline
         );
     }
 
-    /// `ownerAuth.maker.retire` vectors: index = key*2 + (retire ? 0 : 1); a retire names `1`.
+    function _signedRegister(bytes32 key, uint256 nonce, uint64 deadline)
+        internal
+        view
+        returns (IBLSKeyRegistry.OwnerAuth memory auth)
+    {
+        auth.legs = new IBLSKeyRegistry.KeyLeg[](1);
+        auth.legs[0] = IBLSKeyRegistry.KeyLeg(VECTOR_CHAIN_ID, bytes32(uint256(uint160(REGISTRY))), nonce);
+        bytes32 legs =
+            keccak256(abi.encode(KeyMessages.KEY_LEG_TYPEHASH, VECTOR_CHAIN_ID, auth.legs[0].registry, nonce));
+        bytes32 structHash = keccak256(
+            abi.encode(KeyMessages.REGISTER_KEY_TYPEHASH, account, key, keccak256(abi.encodePacked(legs)), deadline)
+        );
+        (uint8 sv, bytes32 r, bytes32 ss) = vm.sign(
+            uint256(v.readBytes32(".keys.bridgerWallet.sk")),
+            keccak256(abi.encodePacked(hex"1901", keysDomain, structHash))
+        );
+        auth.sig = abi.encodePacked(r, ss, sv);
+    }
+
+    /// `ownerAuth.bridger.retire` vectors: index = key*2 + (retire ? 0 : 1); a retire names `1`.
     function _setValidUntil(uint32 key, bool retire) internal onVectorChain {
         string memory path =
-            string.concat(".ownerAuth.maker.retire[", vm.toString(uint256(key) * 2 + (retire ? 0 : 1)), "]");
+            string.concat(".ownerAuth.bridger.retire[", vm.toString(uint256(key) * 2 + (retire ? 0 : 1)), "]");
         registry.setValidUntil(
             account, OwnerAuthVectors.auth(v, path), OwnerAuthVectors.key(v, path), retire ? 1 : _graceTs()
         );

@@ -144,7 +144,7 @@ contract RegistryPauseTest is Test {
     BLSKeyRegistry registry;
 
     function setUp() public {
-        registry = new BLSKeyRegistry(address(this));
+        registry = new BLSKeyRegistry(address(this), "local");
     }
 
     function test_pause_blocksRegisterAndRevoke() public {
@@ -153,14 +153,14 @@ contract RegistryPauseTest is Test {
         IBLSKeyRegistry.OwnerAuth memory auth;
         auth.sig = new bytes(65);
         vm.expectRevert(IBLSKeyRegistry.EnforcedPause.selector);
-        registry.register(bytes32(uint256(1)), auth, new bytes(128), new bytes(256), 0);
+        registry.register(bytes32(uint256(1)), auth, new bytes(128), new bytes(256), 0, uint64(block.timestamp));
 
         vm.expectRevert(IBLSKeyRegistry.EnforcedPause.selector);
         registry.revoke(bytes32(uint256(1)), auth, 0);
 
         registry.unpause();
         vm.expectRevert(IBLSKeyRegistry.IdentityKey.selector);
-        registry.register(bytes32(uint256(1)), auth, new bytes(128), new bytes(256), 0);
+        registry.register(bytes32(uint256(1)), auth, new bytes(128), new bytes(256), 0, uint64(block.timestamp));
     }
 
     function test_twoStepAdmin_transferAndAccept() public {
@@ -248,7 +248,7 @@ contract MerkleManagerAdminRoleTest is Test {
     /// C-37: the BLS key registry refuses a zero admin at construction.
     function test_c37_blsRegistryRefusesZeroAdmin() public {
         vm.expectRevert(IBLSKeyRegistry.ZeroAdmin.selector);
-        new BLSKeyRegistry(address(0));
+        new BLSKeyRegistry(address(0), "local");
     }
 
     function test_pauseIsAdminOnly() public {

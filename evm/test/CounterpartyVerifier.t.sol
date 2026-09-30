@@ -33,7 +33,7 @@ contract CounterpartyVerifierTest is Test {
         vm.chainId(CHAIN_ID);
         vm.warp(T0);
 
-        BLSKeyRegistry impl = new BLSKeyRegistry(address(this));
+        BLSKeyRegistry impl = new BLSKeyRegistry(address(this), "testnet");
         vm.etch(REGISTRY, address(impl).code);
         registry = BLSKeyRegistry(REGISTRY);
         verifier = new CounterpartyVerifier(REGISTRY);
@@ -54,14 +54,16 @@ contract CounterpartyVerifierTest is Test {
             OwnerAuthVectors.auth(v, ".ownerAuth.maker.register[0]"),
             v.readBytes(".registration.makerOnSepolia.pkNative"),
             v.readBytes(".registration.makerOnSepolia.pop"),
-            0
+            0,
+            OwnerAuthVectors.deadline(v, ".ownerAuth.maker.register[0]")
         );
         registry.register(
             bridger,
             OwnerAuthVectors.auth(v, ".ownerAuth.bridger.register[0]"),
             v.readBytes(".registration.bridgerOnSepolia.pkNative"),
             v.readBytes(".registration.bridgerOnSepolia.pop"),
-            0
+            0,
+            OwnerAuthVectors.deadline(v, ".ownerAuth.bridger.register[0]")
         );
     }
 
@@ -105,12 +107,14 @@ contract CounterpartyVerifierTest is Test {
     }
 
     function registerMakerSlot(uint256 i) internal returns (uint32) {
+        string memory path = OwnerAuthVectors.registerPath(v, "maker", i);
         return registry.register(
             maker,
-            OwnerAuthVectors.auth(v, string.concat(".ownerAuth.maker.register[", vm.toString(i), "]")),
+            OwnerAuthVectors.auth(v, path),
             v.readBytes(string.concat(makerSlotPath(i), ".pkNative")),
             v.readBytes(string.concat(makerSlotPath(i), ".pop")),
-            i
+            i,
+            OwnerAuthVectors.deadline(v, path)
         );
     }
 
@@ -230,7 +234,7 @@ contract CounterpartyVerifierTest is Test {
             registerMakerSlot(i);
         }
         // #422 D14: the kill expired the slot at the kill, not in 1970; it is prunable 30 days later.
-        vm.warp(T0 + 30 days + 1);
+        vm.warp(graceTs()); // well past the grace; the late register entries are signed for it (D2)
         registerMakerSlot(5); // at cap: prunes slot 0
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.lookup(maker, 0);

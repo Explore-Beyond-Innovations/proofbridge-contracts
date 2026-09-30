@@ -45,7 +45,7 @@ contract BLSKeyRegistryTest is Test {
 
         // Deploy normally (auto-links the SCL libraries), then move the
         // runtime code to the address the vector digests bind.
-        BLSKeyRegistry impl = new BLSKeyRegistry(address(this));
+        BLSKeyRegistry impl = new BLSKeyRegistry(address(this), "testnet");
         vm.etch(REGISTRY, address(impl).code);
         vm.store(REGISTRY, bytes32(0), bytes32(uint256(uint160(address(this))))); // admin
         registry = BLSKeyRegistry(REGISTRY);
@@ -83,7 +83,8 @@ contract BLSKeyRegistryTest is Test {
             oa("makerOnSepolia", "register[0]"),
             reg("makerOnSepolia", "pkNative"),
             reg("makerOnSepolia", "pop"),
-            0
+            0,
+            D()
         );
     }
 
@@ -94,7 +95,8 @@ contract BLSKeyRegistryTest is Test {
             oa("bridgerOnSepolia", "register[0]"),
             reg("bridgerOnSepolia", "pkNative"),
             reg("bridgerOnSepolia", "pop"),
-            0
+            0,
+            D()
         );
     }
 
@@ -105,7 +107,20 @@ contract BLSKeyRegistryTest is Test {
     }
 
     function slotAuth(string memory who, uint256 i) internal view returns (IBLSKeyRegistry.OwnerAuth memory) {
-        return oa(who, idx("register", i));
+        return oa(who, idx(fam(), i));
+    }
+
+    /// Review D2: register entries are signed for the suite's clock (deadline D); from graceTs on the
+    /// suite registers with `registerLate`, signed for that clock.
+    function fam() internal view returns (string memory) {
+        return block.timestamp >= graceTs() ? "registerLate" : "register";
+    }
+
+    /// The deadline every `register[i]` / negative RegisterKey entry carries.
+    function D() internal view returns (uint64) {
+        return block.timestamp >= graceTs()
+            ? uint64(vm.parseUint(v.readString(".ownerAuth._meta.deadline.registerLate")))
+            : uint64(vm.parseUint(v.readString(".ownerAuth._meta.deadline.register")));
     }
 
     function isMaker(string memory who) internal pure returns (bool) {
@@ -119,7 +134,8 @@ contract BLSKeyRegistryTest is Test {
             slotAuth(who, i),
             v.readBytes(string.concat(slotPath(who, i), ".pkNative")),
             v.readBytes(string.concat(slotPath(who, i), ".pop")),
-            i
+            i,
+            D()
         );
     }
 
@@ -141,7 +157,7 @@ contract BLSKeyRegistryTest is Test {
         return OwnerAuthVectors.key(v, oaPath(who, idx("register", i)));
     }
 
-    function graceTs() internal view returns (uint64) {
+    function graceTs() public view returns (uint64) {
         return uint64(vm.parseUint(v.readString(".slots.graceTs")));
     }
 
@@ -262,7 +278,7 @@ contract BLSKeyRegistryTest is Test {
         vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
         registerSlot("makerOnSepolia", 5);
 
-        vm.warp(T0 + 30 days + 1);
+        vm.warp(graceTs()); // well past the grace; register deadlines are signed for this clock (D2)
         assertEq(registerSlot("makerOnSepolia", 5), 5);
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.lookup(account, 2);
@@ -279,7 +295,7 @@ contract BLSKeyRegistryTest is Test {
         vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
         registerSlot("makerOnSepolia", 5);
 
-        vm.warp(T0 + 30 days + 1);
+        vm.warp(graceTs()); // well past the grace; register deadlines are signed for this clock (D2)
         assertEq(registerSlot("makerOnSepolia", 5), 5);
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.lookup(account, 2);
@@ -317,7 +333,8 @@ contract BLSKeyRegistryTest is Test {
             oa("makerOnSepolia", "reuseKey0AtNonce1"),
             reg("makerOnSepolia", "registerAtNonce1.pkNative"),
             reg("makerOnSepolia", "registerAtNonce1.pop"),
-            1
+            1,
+            D()
         );
     }
 
@@ -331,7 +348,8 @@ contract BLSKeyRegistryTest is Test {
             oa("makerOnSepolia", "reuseKey0AtNonce1"),
             reg("makerOnSepolia", "registerAtNonce1.pkNative"),
             reg("makerOnSepolia", "registerAtNonce1.pop"),
-            1
+            1,
+            D()
         );
     }
 
@@ -512,7 +530,8 @@ contract BLSKeyRegistryTest is Test {
             slotAuth("bridgerOnSepolia", 1),
             v.readBytes(string.concat(slotPath("bridgerOnSepolia", 1), ".pkNative")),
             v.readBytes(string.concat(slotPath("bridgerOnSepolia", 0), ".pop")), // slot-0 PoP
-            1
+            1,
+            D()
         );
     }
 
@@ -561,10 +580,10 @@ contract BLSKeyRegistryTest is Test {
         bytes memory pop = reg("makerOnSepolia", "pop");
 
         vm.expectRevert(IBLSKeyRegistry.BadNonce.selector);
-        registry.register(account, auth, pk, pop, 0);
+        registry.register(account, auth, pk, pop, 0, D());
 
         vm.expectRevert(IBLSKeyRegistry.InvalidPop.selector);
-        registry.register(account, auth, pk, pop, 1);
+        registry.register(account, auth, pk, pop, 1, D());
     }
 
     function test_identityPubkeyRejected() public {
@@ -574,7 +593,8 @@ contract BLSKeyRegistryTest is Test {
             oa("makerOnSepolia", "register[0]"),
             v.readBytes(".negative.identityPubkey.eip2537"),
             reg("makerOnSepolia", "pop"),
-            0
+            0,
+            D()
         );
     }
 
@@ -585,7 +605,8 @@ contract BLSKeyRegistryTest is Test {
             oa("makerOnSepolia", "register[0]"),
             reg("makerOnSepolia", "pkNative"),
             v.readBytes(".negative.popWrongDstSepolia.pop"),
-            0
+            0,
+            D()
         );
     }
 
@@ -599,7 +620,8 @@ contract BLSKeyRegistryTest is Test {
             auth,
             reg("bridgerOnSepolia", "pkNative"),
             reg("bridgerOnSepolia", "pop"),
-            0
+            0,
+            D()
         );
     }
 
@@ -610,13 +632,42 @@ contract BLSKeyRegistryTest is Test {
 
         vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
         registry.register(
-            reg32("makerOnSepolia", "account"), auth, reg("makerOnSepolia", "pkNative"), reg("makerOnSepolia", "pop"), 0
+            reg32("makerOnSepolia", "account"),
+            auth,
+            reg("makerOnSepolia", "pkNative"),
+            reg("makerOnSepolia", "pop"),
+            0,
+            D()
         );
     }
 
-    function test_revokeUnregisteredRejected() public {
-        vm.expectRevert(IBLSKeyRegistry.NotRegistered.selector);
-        registry.revoke(reg32("makerOnSepolia", "account"), oa("makerOnSepolia", "revoke[1]"), 0);
+    /// Review D2: with no slots, revoke still consumes the nonce (killing every outstanding signature
+    /// here) and emits; no guard is asked, so a busy account can cancel too.
+    function test_revokeWithNoSlotsBumpsTheNonce() public {
+        for (uint256 k = 0; k < 2; k++) {
+            string memory who = whoAt(k);
+            bytes32 account = v.readBytes32(string.concat(".slots.", who, ".account"));
+            busyGuard();
+            vm.expectEmit(true, false, false, true, REGISTRY);
+            emit IBLSKeyRegistry.KeyRevoked(account, 0);
+            registry.revoke(account, oa(who, "revoke[0]"), 0);
+            assertEq(registry.nonceOf(account), 1);
+            // the pending registration signed at nonce 0 is dead here
+            vm.expectRevert(IBLSKeyRegistry.BadNonce.selector);
+            registerWith(who, slotAuth(who, 0));
+        }
+    }
+
+    /// A zero-slot revoke still needs its own leg and the owner's signature.
+    function test_revokeWithNoSlotsStillChecksTheSignature() public {
+        bytes32 account = v.readBytes32(".slots.bridgerOnSepolia.account");
+        vm.expectRevert(IBLSKeyRegistry.LegMismatch.selector);
+        registry.revoke(account, oa("bridgerOnSepolia", "revoke[1]"), 0);
+        IBLSKeyRegistry.OwnerAuth memory auth = oa("bridgerOnSepolia", "revoke[0]");
+        auth.sig[64] = auth.sig[64] == bytes1(uint8(27)) ? bytes1(uint8(28)) : bytes1(uint8(27));
+        vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+        registry.revoke(account, auth, 0);
+        assertEq(registry.nonceOf(account), 0);
     }
 
     function test_revokeBlockedWhileInFlight() public {
@@ -665,7 +716,8 @@ contract BLSKeyRegistryTest is Test {
             auth,
             v.readBytes(string.concat(slotPath(who, 0), ".pkNative")),
             v.readBytes(string.concat(slotPath(who, 0), ".pop")),
-            0
+            0,
+            D()
         );
     }
 
@@ -750,7 +802,8 @@ contract BLSKeyRegistryTest is Test {
             OwnerAuthVectors.auth(v, n),
             v.readBytes(string.concat(n, ".sepolia.pkNative")),
             v.readBytes(string.concat(n, ".sepolia.pop")),
-            0
+            0,
+            D()
         );
     }
 
@@ -808,8 +861,8 @@ contract BLSKeyRegistryTest is Test {
     }
 
     /// Gas for `register` under a two-leg RegisterKey, each scheme, and for the pre-signed RetireKey.
-    /// Measured 2026-09-29: register 420,102 (secp256k1) / 1,000,533 (sep53); setValidUntil
-    /// 33,712 / 573,149. The BLS PoP pairing dominates register; ceilings sit ~10% above.
+    /// Measured 2026-09-30 (review D1–D3): register 420,202 (secp256k1) / 1,012,007 (sep53, the longer
+    /// text); setValidUntil 33,785 / 574,255. The BLS PoP pairing dominates register; ceilings sit ~10% above.
     function test_ownerSigGas() public {
         string[2] memory names = ["bridgerOnSepolia", "makerOnSepolia"];
         uint256[2] memory registerCeil = [REGISTER_SECP_GAS, REGISTER_SEP53_GAS];
@@ -820,8 +873,9 @@ contract BLSKeyRegistryTest is Test {
             bytes32 account = v.readBytes32(string.concat(".slots.", who, ".account"));
             bytes memory pk = v.readBytes(string.concat(slotPath(who, 0), ".pkNative"));
             bytes memory pop = v.readBytes(string.concat(slotPath(who, 0), ".pop"));
+            uint64 deadline = D();
             uint256 g = gasleft();
-            registry.register(account, auth, pk, pop, 0);
+            registry.register(account, auth, pk, pop, 0, deadline);
             g -= gasleft();
             emit log_named_uint(string.concat("register gas, 2 legs, ", who), g);
             assertLe(g, registerCeil[k]);
@@ -840,6 +894,133 @@ contract BLSKeyRegistryTest is Test {
 
     function test_domainSeparatorIsTheKeysDomain() public view {
         assertEq(registry.domainSeparator(), v.readBytes32(".ownerAuth._meta.domainSeparator"));
+        assertEq(registry.keysEnv(), "testnet");
+    }
+
+    // =========================================================================
+    // Review D1: one secp256k1 rule — v 0/1/27/28 normalized, high s refused
+    // =========================================================================
+
+    function test_secpFormsFollowTheOneRule() public {
+        bytes32 account = v.readBytes32(".slots.bridgerOnSepolia.account");
+        for (
+            uint256 i = 0; vm.keyExistsJson(v, string.concat(".ownerAuth.secpForms.forms[", vm.toString(i), "]")); i++) {
+            string memory f = string.concat(".ownerAuth.secpForms.forms[", vm.toString(i), "]");
+            IBLSKeyRegistry.OwnerAuth memory auth = oa("bridgerOnSepolia", "register[0]");
+            auth.sig = v.readBytes(string.concat(f, ".sig"));
+            uint256 snap = vm.snapshotState();
+            if (keccak256(bytes(v.readString(string.concat(f, ".expect")))) == keccak256("accept")) {
+                assertEq(registerWith("bridgerOnSepolia", auth), 0, v.readString(string.concat(f, ".name")));
+                assertEq(registry.nonceOf(account), 1);
+            } else {
+                vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+                registerWith("bridgerOnSepolia", auth);
+            }
+            vm.revertToState(snap);
+        }
+    }
+
+    // =========================================================================
+    // Review D2: the registration deadline
+    // =========================================================================
+
+    function test_deadlineBoundaries() public {
+        uint64 d = D();
+        uint64 cap = registry.MAX_REGISTER_TTL();
+        assertEq(cap, uint64(vm.parseUint(v.readString(".ownerAuth._meta.deadline.maxTtl"))));
+        for (uint256 k = 0; k < 2; k++) {
+            string memory who = whoAt(k);
+            uint256 snap = vm.snapshotState();
+            vm.warp(d);
+            assertEq(registerWith(who, slotAuth(who, 0)), 0, "at the deadline");
+            vm.revertToState(snap);
+            vm.warp(d - cap);
+            assertEq(registerWith(who, slotAuth(who, 0)), 0, "exactly the cap before it");
+            vm.revertToState(snap);
+            vm.warp(d + 1);
+            vm.expectRevert(IBLSKeyRegistry.DeadlineExpired.selector);
+            registry.register(
+                v.readBytes32(string.concat(".slots.", who, ".account")),
+                slotAuth(who, 0),
+                v.readBytes(string.concat(slotPath(who, 0), ".pkNative")),
+                v.readBytes(string.concat(slotPath(who, 0), ".pop")),
+                0,
+                d
+            );
+            vm.warp(d - cap - 1);
+            vm.expectRevert(IBLSKeyRegistry.DeadlineTooFar.selector);
+            registerWith(who, slotAuth(who, 0));
+            vm.revertToState(snap);
+        }
+    }
+
+    /// The deadline is signed: submitting another one breaks the signature.
+    function test_deadlineIsSigned() public {
+        for (uint256 k = 0; k < 2; k++) {
+            string memory who = whoAt(k);
+            vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+            registry.register(
+                v.readBytes32(string.concat(".slots.", who, ".account")),
+                slotAuth(who, 0),
+                v.readBytes(string.concat(slotPath(who, 0), ".pkNative")),
+                v.readBytes(string.concat(slotPath(who, 0), ".pop")),
+                0,
+                D() - 1
+            );
+        }
+    }
+
+    // =========================================================================
+    // Review D3: the environment is in every key message
+    // =========================================================================
+
+    function test_aRegistryForAnotherEnvRefusesTheSignature() public {
+        BLSKeyRegistry impl = new BLSKeyRegistry(address(this), "local");
+        vm.etch(REGISTRY, address(impl).code);
+        assertEq(registry.keysEnv(), "local");
+        assertEq(registry.domainSeparator(), v.readBytes32(".ownerAuth._meta.envs.local.domainSeparator"));
+        for (uint256 k = 0; k < 2; k++) {
+            vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+            registerWith(whoAt(k), slotAuth(whoAt(k), 0));
+        }
+    }
+
+    function test_aSignatureForAnotherEnvIsRefused() public {
+        for (uint256 k = 0; k < 2; k++) {
+            assertEq(v.readString(string.concat(oaPath(whoAt(k), "otherEnv"), ".env")), "mainnet");
+            vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+            registerWith(whoAt(k), oa(whoAt(k), "otherEnv"));
+        }
+    }
+
+    function test_constructorRefusesAnUnknownEnv() public {
+        vm.expectRevert(IBLSKeyRegistry.BadEnv.selector);
+        new BLSKeyRegistry(address(this), "staging");
+        vm.expectRevert(IBLSKeyRegistry.BadEnv.selector);
+        new BLSKeyRegistry(address(this), "");
+        assertEq(
+            new BLSKeyRegistry(address(this), "mainnet").domainSeparator(),
+            v.readBytes32(".ownerAuth._meta.envs.mainnet.domainSeparator")
+        );
+    }
+
+    // =========================================================================
+    // Review 50-3: a registry named twice is refused whatever the nonces
+    // =========================================================================
+
+    function test_aRegistryNamedTwiceAtDifferentNoncesIsRefused() public {
+        for (uint256 k = 0; k < 2; k++) {
+            string memory who = whoAt(k);
+            bytes32 account = v.readBytes32(string.concat(".slots.", who, ".account"));
+            vm.expectRevert(IBLSKeyRegistry.LegMismatch.selector);
+            registerWith(who, oa(who, "sameRegistryTwoNonces"));
+            IBLSKeyRegistry.OwnerAuth memory rv = oa(who, "revokeSameRegistryTwoNonces");
+            vm.expectRevert(IBLSKeyRegistry.LegMismatch.selector);
+            registry.revoke(account, rv, 0);
+            registerWith(who, slotAuth(who, 0)); // nonce 0 -> 1
+            vm.expectRevert(IBLSKeyRegistry.LegMismatch.selector);
+            registry.revoke(account, rv, 1);
+        }
     }
 }
 
@@ -850,29 +1031,35 @@ contract KeyMessagesHarness {
         bytes32 account,
         bytes32 key,
         IBLSKeyRegistry.KeyLeg[] calldata legs,
-        uint64 validUntil
+        uint64 time
     ) external pure returns (bytes32) {
-        return KeyMessages.structHash(kind, account, key, legs, validUntil);
+        return KeyMessages.structHash(kind, account, key, legs, time);
     }
 
     function digest(
+        string calldata env,
         KeyMessages.Kind kind,
         bytes32 account,
         bytes32 key,
         IBLSKeyRegistry.KeyLeg[] calldata legs,
-        uint64 validUntil
+        uint64 time
     ) external pure returns (bytes32) {
-        return KeyMessages.digest(kind, account, key, legs, validUntil);
+        return KeyMessages.digest(KeyMessages.domainSeparator(KeyMessages.salt(env)), kind, account, key, legs, time);
     }
 
     function text(
+        string calldata env,
         KeyMessages.Kind kind,
         bytes32 account,
         bytes32 key,
         IBLSKeyRegistry.KeyLeg[] calldata legs,
-        uint64 validUntil
+        uint64 time
     ) external pure returns (bytes memory) {
-        return KeyMessages.text(kind, account, key, legs, validUntil);
+        return KeyMessages.text(bytes(env), kind, account, key, legs, time);
+    }
+
+    function utc(uint256 t) external pure returns (string memory) {
+        return string(KeyMessages.utc(t));
     }
 }
 
@@ -892,7 +1079,24 @@ contract KeyMessagesVectorsTest is Test {
         assertEq(KeyMessages.REGISTER_KEY_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.registerKey"));
         assertEq(KeyMessages.REVOKE_KEYS_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.revokeKeys"));
         assertEq(KeyMessages.RETIRE_KEY_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.retireKey"));
-        assertEq(KeyMessages.DOMAIN_SEPARATOR, v.readBytes32(".ownerAuth._meta.domainSeparator"));
+        assertEq(KeyMessages.DOMAIN_TYPEHASH, keccak256(bytes(v.readString(".ownerAuth._meta.domainType"))));
+        string[3] memory envs = ["local", "testnet", "mainnet"];
+        for (uint256 i = 0; i < 3; i++) {
+            string memory e = string.concat(".ownerAuth._meta.envs.", envs[i]);
+            assertEq(KeyMessages.salt(envs[i]), v.readBytes32(string.concat(e, ".salt")));
+            assertEq(
+                KeyMessages.domainSeparator(KeyMessages.salt(envs[i])),
+                v.readBytes32(string.concat(e, ".domainSeparator"))
+            );
+        }
+    }
+
+    /// Review D2: the UTC line's calendar arithmetic, against the vectors' pinned values.
+    function test_utcMatchesTheVectors() public view {
+        string[4] memory ts = ["0", "951782400", "1700259200", "4102444799"];
+        for (uint256 i = 0; i < 4; i++) {
+            assertEq(h.utc(vm.parseUint(ts[i])), v.readString(string.concat(".ownerAuth._meta.deadline.utc.", ts[i])));
+        }
     }
 
     // Each cheatcode read re-encodes the whole 250 KB vector file into memory, so these readers
@@ -955,31 +1159,59 @@ contract KeyMessagesVectorsTest is Test {
             ? KeyMessages.Kind.Register
             : kindName == keccak256("revoke") ? KeyMessages.Kind.Revoke : KeyMessages.Kind.Retire;
         bytes32 key = kind == KeyMessages.Kind.Revoke ? bytes32(0) : r32(string.concat(path, ".keyCommitment"));
-        uint64 vu = kind == KeyMessages.Kind.Retire ? uint64(vm.parseUint(rstr(string.concat(path, ".validUntil")))) : 0;
+        uint64 time = kind == KeyMessages.Kind.Retire
+            ? uint64(vm.parseUint(rstr(string.concat(path, ".validUntil"))))
+            : kind == KeyMessages.Kind.Register ? uint64(vm.parseUint(rstr(string.concat(path, ".deadline")))) : 0;
         bytes32 account = r32(string.concat(path, ".account"));
+        string memory env = rstr(string.concat(path, ".env"));
         IBLSKeyRegistry.KeyLeg[] memory legs = legsAt(path);
-        assertEq(h.structHash(kind, account, key, legs, vu), r32(string.concat(path, ".structHash")), path);
-        assertEq(h.digest(kind, account, key, legs, vu), r32(string.concat(path, ".digest")), path);
-        assertEq(string(h.text(kind, account, key, legs, vu)), rstr(string.concat(path, ".text")), path);
+        assertEq(h.structHash(kind, account, key, legs, time), r32(string.concat(path, ".structHash")), path);
+        assertEq(h.digest(env, kind, account, key, legs, time), r32(string.concat(path, ".digest")), path);
+        assertEq(string(h.text(env, kind, account, key, legs, time)), rstr(string.concat(path, ".text")), path);
     }
 
-    function test_everyVectorEntryRebuildsByteForByte() public view {
+    // One test per family: each cheatcode read re-encodes the vector file, so one loop over all of
+    // them runs out of gas.
+    function checkFamily(string memory family, uint256 n) internal view {
         string[2] memory actors = ["maker", "bridger"];
         for (uint256 a = 0; a < 2; a++) {
-            string memory base = string.concat(".ownerAuth.", actors[a], ".");
-            for (uint256 i = 0; i < 6; i++) {
-                check(string.concat(base, "register[", vm.toString(i), "]"));
+            for (uint256 i = 0; i < n; i++) {
+                check(string.concat(".ownerAuth.", actors[a], ".", family, "[", vm.toString(i), "]"));
             }
-            for (uint256 i = 0; i < 7; i++) {
-                check(string.concat(base, "revoke[", vm.toString(i), "]"));
+        }
+    }
+
+    function test_everyRegisterEntryRebuildsByteForByte() public view {
+        checkFamily("register", 6);
+    }
+
+    function test_everyRegisterLateEntryRebuildsByteForByte() public view {
+        checkFamily("registerLate", 6);
+    }
+
+    function test_everyRevokeEntryRebuildsByteForByte() public view {
+        checkFamily("revoke", 7);
+    }
+
+    function test_everyRetireEntryRebuildsByteForByte() public view {
+        checkFamily("retire", 12);
+    }
+
+    function test_everyNamedEntryRebuildsByteForByte() public view {
+        string[2] memory actors = ["maker", "bridger"];
+        string[7] memory named = [
+            "reuseKey0AtNonce1",
+            "onlySepoliaLeg",
+            "onlyStellarLeg",
+            "duplicateLegs",
+            "sameRegistryTwoNonces",
+            "revokeSameRegistryTwoNonces",
+            "otherEnv"
+        ];
+        for (uint256 a = 0; a < 2; a++) {
+            for (uint256 i = 0; i < named.length; i++) {
+                check(string.concat(".ownerAuth.", actors[a], ".", named[i]));
             }
-            for (uint256 i = 0; i < 12; i++) {
-                check(string.concat(base, "retire[", vm.toString(i), "]"));
-            }
-            check(string.concat(base, "reuseKey0AtNonce1"));
-            check(string.concat(base, "onlySepoliaLeg"));
-            check(string.concat(base, "onlyStellarLeg"));
-            check(string.concat(base, "duplicateLegs"));
         }
         check(".ownerAuth.negative.secpOnNonEvmAccount");
         check(".ownerAuth.negative.sep53OnEvmAccount");
