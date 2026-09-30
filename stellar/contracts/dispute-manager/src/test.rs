@@ -804,3 +804,61 @@ fn claim_with_no_credit_is_nothing_to_claim() {
         Err(Ok(Error::NothingToClaim))
     );
 }
+
+// ── 49S-3: token refusals are the module's own error; relayed codes pinned ──
+
+/// A filer who cannot fund the bond is `BondTransferFailed`, and no record is left behind.
+#[test]
+fn an_unfunded_bond_is_bond_transfer_failed() {
+    let f = fixture();
+    let broke = Address::generate(&f.env);
+    let h = hash(&f.env, 51);
+    assert_eq!(
+        f.client.try_open_dispute(
+            &f.escrow,
+            &h,
+            &1_000,
+            &CHAIN,
+            &broke,
+            &hash(&f.env, 0xEE),
+            &DEADLINE,
+            &BUFFER,
+            &0u64,
+        ),
+        Err(Ok(Error::BondTransferFailed))
+    );
+    assert!(!f.client.is_disputed(&h));
+}
+
+/// A claim the token refuses is `BondTransferFailed`, and the credit stays claimable.
+#[test]
+fn a_refused_claim_is_bond_transfer_failed_and_keeps_the_credit() {
+    let f = fixture();
+    let who = Address::generate(&f.env);
+    // Credited, but the module holds no tokens to pay it with.
+    f.env.as_contract(&f.client.address, || {
+        storage::set_claimable(&f.env, &who, 500)
+    });
+    assert_eq!(f.client.try_claim(&who), Err(Ok(Error::BondTransferFailed)));
+    assert_eq!(f.client.claimable(&who), 500);
+}
+
+/// Error drift: every code the escrows relay is the same number here and in `proofbridge-core`.
+#[test]
+fn relayed_error_codes_match_the_shared_definitions() {
+    use proofbridge_core::dispute::error_code as c;
+    let pairs = [
+        (Error::NotEscrow, c::NOT_ESCROW),
+        (Error::DisputeExists, c::DISPUTE_EXISTS),
+        (Error::BondTooSmall, c::BOND_TOO_SMALL),
+        (Error::ChallengeOpen, c::CHALLENGE_OPEN),
+        (Error::ChallengeClosed, c::CHALLENGE_CLOSED),
+        (Error::NotResponder, c::NOT_RESPONDER),
+        (Error::NoDisputeParams, c::NO_DISPUTE_PARAMS),
+        (Error::WrongEscrow, c::WRONG_ESCROW),
+        (Error::BondTransferFailed, c::BOND_TRANSFER_FAILED),
+    ];
+    for (e, code) in pairs {
+        assert_eq!(e as u32, code, "{e:?}");
+    }
+}

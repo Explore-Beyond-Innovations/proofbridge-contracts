@@ -163,6 +163,8 @@ pub enum AdManagerError {
     DisputeNotResponder = 78,
     DisputeChallengeOpen = 79,
     DisputeChallengeClosed = 80,
+    /// 49S-3: the dispute module could not move the bond (a token refusal, not a dispute rule).
+    DisputeBondTransferFailed = 81,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for AdManagerError {
@@ -229,6 +231,7 @@ impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
             DisputeNotResponder => AdManagerError::DisputeNotResponder,
             DisputeChallengeOpen => AdManagerError::DisputeChallengeOpen,
             DisputeChallengeClosed => AdManagerError::DisputeChallengeClosed,
+            DisputeBondTransferFailed => AdManagerError::DisputeBondTransferFailed,
         }
     }
 }

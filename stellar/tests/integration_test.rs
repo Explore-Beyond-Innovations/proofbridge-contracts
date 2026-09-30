@@ -7405,6 +7405,253 @@ fn test_c31_a_module_refusal_to_record_a_response_is_the_escrows_error() {
     );
 }
 
+// --- 49S-3: the bond transfer, and every relayed code driven through the real module ---------
+
+/// A module wired to the ad-manager whose bonds are held in `bond_token`.
+fn wire_dispute_manager_bonded_in(
+    s: &TestSetup,
+    bond_token: &Address,
+) -> dispute_manager_contract::Client<'static> {
+    let (dm, _arbiter, _filer) = wire_dispute_manager(s);
+    let dm_addr = Address::generate(&s.env);
+    s.env.register_at(&dm_addr, DISPUTE_MANAGER_WASM, ());
+    let bonded = dispute_manager_contract::Client::new(&s.env, &dm_addr);
+    bonded.initialize(&s.admin_addr, bond_token);
+    bonded.set_escrow(&s.ad_manager.address, &true);
+    bonded.set_dispute_params(
+        &s.tp.order_chain_id,
+        &dm.dispute_params(&s.tp.order_chain_id).unwrap(),
+    );
+    s.ad_manager.set_dispute_manager(&dm_addr);
+    bonded
+}
+
+/// A SAC bond the filer holds no trustline for is the transfer fault, never `DisputeBondTooSmall`
+/// (the SAC's own #13, read as the module's number).
+#[test]
+fn test_49s3_a_sac_bond_without_a_trustline_is_the_transfer_fault() {
+    let s = setup();
+    let sac = s
+        .env
+        .register_stellar_asset_contract_v2(s.admin_addr.clone());
+    let dm = wire_dispute_manager_bonded_in(&s, &sac.address());
+    let p = locked_ad_order(&s);
+    assert_eq!(
+        s.ad_manager
+            .try_dispute(&p, &s.maker_addr, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::DisputeBondTransferFailed))
+    );
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Open);
+    assert!(!dm.is_disputed(&s.ad_manager.hash_order(&p)));
+}
+
+/// Mainnet bonds in native XLM: a filer short of the bond is the transfer fault, never
+/// `DisputeExists` (the XLM SAC's #10, read as the module's number).
+#[test]
+fn test_49s3_an_xlm_shortfall_is_the_transfer_fault() {
+    use soroban_sdk::xdr;
+    use soroban_sdk::TryIntoVal;
+    let s = setup();
+    let create = xdr::HostFunction::CreateContract(xdr::CreateContractArgs {
+        contract_id_preimage: xdr::ContractIdPreimage::Asset(xdr::Asset::Native),
+        executable: xdr::ContractExecutable::StellarAsset,
+    });
+    let xlm: Address = s
+        .env
+        .host()
+        .invoke_function(create)
+        .unwrap()
+        .try_into_val(&s.env)
+        .unwrap();
+    // The maker's classic account, holding less XLM than the bond floor.
+    let id = xdr::AccountId(xdr::PublicKey::PublicKeyTypeEd25519(xdr::Uint256(
+        s.tp.ad_creator,
+    )));
+    let key = std::rc::Rc::new(xdr::LedgerKey::Account(xdr::LedgerKeyAccount {
+        account_id: id.clone(),
+    }));
+    let entry = std::rc::Rc::new(xdr::LedgerEntry {
+        data: xdr::LedgerEntryData::Account(xdr::AccountEntry {
+            account_id: id,
+            balance: (DISPUTE_BOND_FLOOR / 2) as i64,
+            flags: 0,
+            home_domain: Default::default(),
+            inflation_dest: None,
+            num_sub_entries: 0,
+            seq_num: xdr::SequenceNumber(0),
+            thresholds: xdr::Thresholds([1; 4]),
+            signers: xdr::VecM::default(),
+            ext: xdr::AccountEntryExt::V0,
+        }),
+        last_modified_ledger_seq: 0,
+        ext: xdr::LedgerEntryExt::V0,
+    });
+    s.env.host().add_ledger_entry(&key, &entry, None).unwrap();
+    assert_eq!(
+        TokenContractClient::new(&s.env, &xlm).balance(&s.maker_addr),
+        (DISPUTE_BOND_FLOOR / 2) as i128,
+        "the maker's account is real and short"
+    );
+
+    let dm = wire_dispute_manager_bonded_in(&s, &xlm);
+    let p = locked_ad_order(&s);
+    assert_eq!(
+        s.ad_manager
+            .try_dispute(&p, &s.maker_addr, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::DisputeBondTransferFailed))
+    );
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Open);
+    assert!(!dm.is_disputed(&s.ad_manager.hash_order(&p)));
+}
+
+/// Module code 3: an escrow the module no longer serves is `DisputeNotEscrow`.
+#[test]
+fn test_49s3_a_module_that_does_not_serve_the_escrow_is_not_escrow() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    dm.set_escrow(&s.ad_manager.address, &false);
+    let p = locked_ad_order(&s);
+    assert_eq!(
+        s.ad_manager.try_dispute(&p, &filer, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::DisputeNotEscrow))
+    );
+}
+
+/// Module code 10: a record the module already holds for this order is `DisputeExists`.
+#[test]
+fn test_49s3_a_record_the_module_already_holds_is_dispute_exists() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    dm.open_dispute(
+        &s.ad_manager.address,
+        &h,
+        &1_000_000,
+        &s.tp.order_chain_id,
+        &filer,
+        &evidence(&s, 0xAA),
+        &p.deadline,
+        &0,
+        &0,
+    );
+    assert_eq!(
+        s.ad_manager.try_dispute(&p, &filer, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::DisputeExists))
+    );
+}
+
+/// Module code 21: a record another escrow opened is `DisputeWrongEscrow` to this one.
+#[test]
+fn test_49s3_a_record_another_escrow_opened_is_wrong_escrow() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    // Swap the module's record for one another served escrow opened on the same hash.
+    dm.settle_bond(
+        &s.ad_manager.address,
+        &h,
+        &dispute_manager_contract::DisputeOutcome::MutualRefund,
+        &false,
+    );
+    let other = Address::generate(&s.env);
+    dm.set_escrow(&other, &true);
+    dm.open_dispute(
+        &other,
+        &h,
+        &1_000_000,
+        &s.tp.order_chain_id,
+        &filer,
+        &evidence(&s, 0xAA),
+        &p.deadline,
+        &0,
+        &0,
+    );
+    let bridger = account_addr(&s, &s.tp.order_recipient);
+    assert_eq!(
+        s.ad_manager
+            .try_respond_to_dispute(&p, &bridger, &evidence(&s, 0x11)),
+        Err(Ok(AdErr::DisputeWrongEscrow))
+    );
+}
+
+/// Every code the escrows relay, produced by the real module and put through the escrows' relay.
+/// Codes 14 and 15 come from the module's permissionless / arbiter doors, which no escrow path
+/// calls; 13 is never raised by the Soroban module (the bond is pulled, not sent).
+#[test]
+fn test_49s3_every_relayed_code_from_the_real_module() {
+    use dispute_manager_contract::DisputeManagerError as DmErr;
+    use proofbridge_core::escrow_ops::{dispute_module_fault, Fault};
+    let relay = |e: soroban_sdk::Error| dispute_module_fault(Ok(e));
+
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    let ev = evidence(&s, 0xEE);
+    let esc = s.ad_manager.address.clone();
+    let chain = s.tp.order_chain_id;
+    let open = |escrow: &Address, h: &BytesN<32>, chain: u128, who: &Address| {
+        dm.try_open_dispute(escrow, h, &1_000_000, &chain, who, &ev, &p.deadline, &0, &0)
+            .unwrap_err()
+            .unwrap()
+    };
+    let stranger = Address::generate(&s.env);
+
+    assert_eq!(
+        relay(open(&stranger, &h, chain, &filer)),
+        Fault::DisputeNotEscrow
+    );
+    assert_eq!(
+        relay(open(&esc, &h, chain + 7, &filer)),
+        Fault::DisputeNoParams
+    );
+    assert_eq!(
+        relay(open(&esc, &h, chain, &Address::generate(&s.env))),
+        Fault::DisputeBondTransferFailed
+    );
+
+    s.ad_manager.dispute(&p, &filer, &ev);
+    assert_eq!(relay(open(&esc, &h, chain, &filer)), Fault::DisputeExists);
+    assert_eq!(
+        relay(dm.try_claim_dispute(&h).unwrap_err().unwrap()),
+        Fault::DisputeChallengeOpen
+    );
+    assert_eq!(
+        relay(
+            dm.try_record_response(&esc, &h, &filer, &ev)
+                .unwrap_err()
+                .unwrap()
+        ),
+        Fault::DisputeNotResponder
+    );
+    dm.set_escrow(&stranger, &true);
+    assert_eq!(
+        relay(
+            dm.try_record_response(&stranger, &h, &filer, &ev)
+                .unwrap_err()
+                .unwrap()
+        ),
+        Fault::DisputeWrongEscrow
+    );
+    warp_past_dispute_window(&s, &dm, &h);
+    assert_eq!(
+        relay(
+            dm.try_resolve_dispute(&h, &dispute_manager_contract::DisputeOutcome::MakerForfeit)
+                .unwrap_err()
+                .unwrap()
+        ),
+        Fault::DisputeChallengeClosed
+    );
+    // The one relayed code the Soroban module cannot raise still maps, for parity with EVM.
+    assert_eq!(
+        relay(soroban_sdk::Error::from(DmErr::BondTooSmall)),
+        Fault::DisputeBondTooSmall
+    );
+}
+
 // --- C-14: the events the dashboard needs ------------------------------------
 
 #[test]
