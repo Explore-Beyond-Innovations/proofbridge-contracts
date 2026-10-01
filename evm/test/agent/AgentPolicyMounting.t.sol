@@ -13,6 +13,22 @@ import {AgentPolicyBase} from "./AgentPolicyBase.t.sol";
 contract AgentPolicyMountingTest is AgentPolicyBase {
     using ModuleKitHelpers for *;
 
+    /// C-34: setting and clearing the forwarder are both logged.
+    function test_c34_forwarderChangesEmit() public {
+        address account = makeAddr("some-account");
+        address forwarder = makeAddr("forwarder");
+        vm.startPrank(account);
+        module.onInstall(bytes.concat(bytes32(TYPE_VALIDATOR)));
+        vm.expectEmit(true, true, false, true, address(module));
+        emit ProofBridgeAgentPolicy.TrustedForwarderSet(account, forwarder);
+        module.setTrustedForwarder(forwarder);
+        vm.expectEmit(true, true, false, true, address(module));
+        emit ProofBridgeAgentPolicy.TrustedForwarderSet(account, address(0));
+        module.clearTrustedForwarder();
+        vm.stopPrank();
+        assertEq(module.trustedForwarder(account), address(0));
+    }
+
     /// C1. Anyone could nominate the maker's account as *their* forwarder, and an agent could then
     /// pad its calldata so the hook resolved "the account" to that stranger — finding no marker
     /// there, and debiting nothing.

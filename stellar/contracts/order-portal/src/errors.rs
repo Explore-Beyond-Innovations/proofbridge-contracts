@@ -136,6 +136,21 @@ pub enum OrderPortalError {
     NonCanonicalInput = 89,
     /// #453: the deadline is past `now + MAX_ORDER_WINDOW`.
     DeadlineTooFar = 90,
+    /// C-10: the primary's window has closed, so a dispute can no longer be filed.
+    DisputeWindowClosed = 91,
+    /// C-31: the dispute module refused or trapped the call.
+    DisputeModuleRejected = 92,
+    /// 49S-3: the dispute module's own refusals, relayed (codes only ever appended).
+    DisputeBondTooSmall = 93,
+    DisputeNoParams = 94,
+    DisputeNotEscrow = 95,
+    DisputeExists = 96,
+    DisputeWrongEscrow = 97,
+    DisputeNotResponder = 98,
+    DisputeChallengeOpen = 99,
+    DisputeChallengeClosed = 100,
+    /// 49S-3: the dispute module could not move the bond (a token refusal, not a dispute rule).
+    DisputeBondTransferFailed = 101,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
@@ -192,6 +207,17 @@ impl From<proofbridge_core::escrow_ops::Fault> for OrderPortalError {
             NotDisputable => OrderPortalError::NotDisputable,
             NonCanonicalInput => OrderPortalError::NonCanonicalInput,
             DisputeNotResolved => OrderPortalError::DisputeNotResolved,
+            DisputeWindowClosed => OrderPortalError::DisputeWindowClosed,
+            DisputeModuleRejected => OrderPortalError::DisputeModuleRejected,
+            DisputeBondTooSmall => OrderPortalError::DisputeBondTooSmall,
+            DisputeNoParams => OrderPortalError::DisputeNoParams,
+            DisputeNotEscrow => OrderPortalError::DisputeNotEscrow,
+            DisputeExists => OrderPortalError::DisputeExists,
+            DisputeWrongEscrow => OrderPortalError::DisputeWrongEscrow,
+            DisputeNotResponder => OrderPortalError::DisputeNotResponder,
+            DisputeChallengeOpen => OrderPortalError::DisputeChallengeOpen,
+            DisputeChallengeClosed => OrderPortalError::DisputeChallengeClosed,
+            DisputeBondTransferFailed => OrderPortalError::DisputeBondTransferFailed,
         }
     }
 }

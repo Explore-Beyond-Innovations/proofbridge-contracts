@@ -153,50 +153,79 @@ fn bond_is_max_of_floor_and_percentage() {
 fn params_fail_closed() {
     let f = fixture();
     // Too short a challenge period leaves no room to gather evidence.
-    assert!(f
-        .client
-        .try_set_dispute_params(
+    assert_eq!(
+        f.client.try_set_dispute_params(
             &CHAIN,
             &DisputeParams {
                 challenge_period: 60,
                 bond_floor: BOND_FLOOR,
                 bond_bps: BOND_BPS,
             }
-        )
-        .is_err());
+        ),
+        Err(Ok(Error::InvalidChallengePeriod))
+    );
     // A zero floor would let a bond round down to nothing.
-    assert!(f
-        .client
-        .try_set_dispute_params(
+    assert_eq!(
+        f.client.try_set_dispute_params(
             &CHAIN,
             &DisputeParams {
                 challenge_period: CHALLENGE,
                 bond_floor: 0,
                 bond_bps: BOND_BPS,
             }
-        )
-        .is_err());
+        ),
+        Err(Ok(Error::InvalidBondFloor))
+    );
     // Above the ceiling a bond deters honest disputes as much as frivolous ones.
-    assert!(f
-        .client
-        .try_set_dispute_params(
+    assert_eq!(
+        f.client.try_set_dispute_params(
             &CHAIN,
             &DisputeParams {
                 challenge_period: CHALLENGE,
                 bond_floor: BOND_FLOOR,
                 bond_bps: 2_000,
             }
-        )
-        .is_err());
+        ),
+        Err(Ok(Error::InvalidBondBps))
+    );
+}
+
+/// Parameter validation from the shared vector both chains loop over: each row either writes or fails
+/// with the error for the field the vector names (C-36 put the challenge-period ceiling there).
+#[test]
+fn param_validation_matches_the_shared_vector() {
+    let v: serde_json::Value = serde_json::from_str(DISPUTE_VECTORS).unwrap();
+    let rows = v["paramValidation"].as_array().unwrap();
+    assert_eq!(
+        rows.len() as u64,
+        v["counts"]["paramValidation"].as_u64().unwrap()
+    );
+    assert!(!rows.is_empty(), "the vector holds no validation rows");
+    let f = fixture();
+    for row in rows {
+        let p = DisputeParams {
+            challenge_period: row["challengePeriod"].as_u64().unwrap(),
+            bond_floor: row["bondFloor"].as_str().unwrap().parse().unwrap(),
+            bond_bps: row["bondBps"].as_u64().unwrap() as _,
+        };
+        let got = f.client.try_set_dispute_params(&CHAIN, &p);
+        let label = row["label"].as_str().unwrap();
+        match row["validField"].as_u64().unwrap() {
+            0 => assert!(got.is_ok(), "{label}: should write"),
+            1 => assert_eq!(got, Err(Ok(Error::InvalidChallengePeriod)), "{label}"),
+            2 => assert_eq!(got, Err(Ok(Error::InvalidBondFloor)), "{label}"),
+            3 => assert_eq!(got, Err(Ok(Error::InvalidBondBps)), "{label}"),
+            other => panic!("{label}: unknown field {other}"),
+        }
+    }
 }
 
 #[test]
 fn an_unconfigured_route_cannot_be_disputed() {
     let f = fixture();
     let h = hash(&f.env, 1);
-    assert!(f
-        .client
-        .try_open_dispute(
+    assert_eq!(
+        f.client.try_open_dispute(
             &f.escrow,
             &h,
             &1_000,
@@ -206,8 +235,9 @@ fn an_unconfigured_route_cannot_be_disputed() {
             &DEADLINE,
             &BUFFER,
             &0u64
-        )
-        .is_err());
+        ),
+        Err(Ok(Error::NoDisputeParams))
+    );
 }
 
 // ── the escrow edge ──────────────────────────────────────────────────────
@@ -217,9 +247,8 @@ fn only_a_registered_escrow_may_open_a_dispute() {
     let f = fixture();
     let stranger = Address::generate(&f.env);
     let h = hash(&f.env, 2);
-    assert!(f
-        .client
-        .try_open_dispute(
+    assert_eq!(
+        f.client.try_open_dispute(
             &stranger,
             &h,
             &1_000,
@@ -229,8 +258,9 @@ fn only_a_registered_escrow_may_open_a_dispute() {
             &DEADLINE,
             &BUFFER,
             &0u64
-        )
-        .is_err());
+        ),
+        Err(Ok(Error::NotEscrow))
+    );
 }
 
 #[test]
@@ -249,9 +279,8 @@ fn one_dispute_per_order() {
     let f = fixture();
     let h = hash(&f.env, 4);
     file(&f, &h, 100_000);
-    assert!(f
-        .client
-        .try_open_dispute(
+    assert_eq!(
+        f.client.try_open_dispute(
             &f.escrow,
             &h,
             &100_000,
@@ -261,8 +290,9 @@ fn one_dispute_per_order() {
             &DEADLINE,
             &BUFFER,
             &0u64
-        )
-        .is_err());
+        ),
+        Err(Ok(Error::DisputeExists))
+    );
 }
 
 // ── the arbiter boundary ─────────────────────────────────────────────────
@@ -274,14 +304,15 @@ fn the_arbiter_can_never_rule_that_the_trade_went_through() {
     file(&f, &h, 100_000);
     // TradeProceeds is what evidence produces; an arbiter reaching it would be arbitration
     // overruling proof.
-    assert!(f
-        .client
-        .try_resolve_dispute(&h, &DisputeOutcome::TradeProceeds)
-        .is_err());
-    assert!(f
-        .client
-        .try_resolve_dispute(&h, &DisputeOutcome::None)
-        .is_err());
+    assert_eq!(
+        f.client
+            .try_resolve_dispute(&h, &DisputeOutcome::TradeProceeds),
+        Err(Ok(Error::ArbiterCannotSettle))
+    );
+    assert_eq!(
+        f.client.try_resolve_dispute(&h, &DisputeOutcome::None),
+        Err(Ok(Error::ArbiterCannotSettle))
+    );
 }
 
 #[test]
@@ -374,10 +405,11 @@ fn the_arbiter_cannot_rule_after_the_challenge_period() {
     let h = hash(&f.env, 8);
     file(&f, &h, 100_000);
     warp_past_window(&f, &h);
-    assert!(f
-        .client
-        .try_resolve_dispute(&h, &DisputeOutcome::MutualRefund)
-        .is_err());
+    assert_eq!(
+        f.client
+            .try_resolve_dispute(&h, &DisputeOutcome::MutualRefund),
+        Err(Ok(Error::ChallengeClosed))
+    );
 }
 
 // ── bond routing ─────────────────────────────────────────────────────────
@@ -540,10 +572,11 @@ fn only_the_escrow_that_opened_a_dispute_may_settle_it() {
     f.client.set_escrow(&other, &true);
     let h = hash(&f.env, 11);
     file(&f, &h, 100_000);
-    assert!(f
-        .client
-        .try_settle_bond(&other, &h, &DisputeOutcome::MutualRefund, &false)
-        .is_err());
+    assert_eq!(
+        f.client
+            .try_settle_bond(&other, &h, &DisputeOutcome::MutualRefund, &false),
+        Err(Ok(Error::WrongEscrow))
+    );
 }
 
 /// The handover reads who the admin is (#424): the deployer until the nominee accepts, the nominee
@@ -589,5 +622,299 @@ fn arbiter_and_fee_pool_views_follow_their_setters() {
         f.client.set_protocol_fee_pool(&pool);
         assert_eq!(f.client.get_arbiter(), Some(arbiter));
         assert_eq!(f.client.get_protocol_fee_pool(), Some(pool));
+    }
+}
+
+// ── soak batch B ─────────────────────────────────────────────────────────
+
+fn with_challenge(challenge_period: u64) -> DisputeParams {
+    DisputeParams {
+        challenge_period,
+        bond_floor: BOND_FLOOR,
+        bond_bps: BOND_BPS,
+    }
+}
+
+/// C-36: seven days is the longest challenge period a route may take; one second more is refused
+/// with the same error as one below the minimum.
+#[test]
+fn challenge_period_ceiling_is_seven_days() {
+    let f = fixture();
+    let max = proofbridge_core::dispute::MAX_CHALLENGE_PERIOD;
+    assert_eq!(max, 604_800);
+    f.client.set_dispute_params(&CHAIN, &with_challenge(max));
+    assert_eq!(f.client.dispute_params(&CHAIN), Some(with_challenge(max)));
+    assert_eq!(
+        f.client
+            .try_set_dispute_params(&CHAIN, &with_challenge(max + 1)),
+        Err(Ok(Error::InvalidChallengePeriod))
+    );
+}
+
+/// C-14: the filing event carries the evidence hash, so an indexer needs no second read.
+#[test]
+fn the_filing_event_carries_the_evidence_hash() {
+    use soroban_sdk::{events::Event as _, testutils::Events as _};
+    let f = fixture();
+    let h = hash(&f.env, 1);
+    let bond = file(&f, &h, 1_000);
+    // `events().all()` holds the last invocation only, so read them before any other call.
+    let got = f.env.events().all().filter_by_contract(&f.client.address);
+    let d = f.client.get_dispute(&h).unwrap();
+    let want = events::DisputeFiled {
+        order_hash: h.clone(),
+        initiator: f.filer.clone(),
+        bond,
+        challenge_deadline: d.challenge_deadline,
+        evidence: hash(&f.env, 0xEE),
+    }
+    .to_xdr(&f.env, &f.client.address);
+    assert!(
+        got.events().contains(&want),
+        "no DisputeFiled with the evidence: {got:?}"
+    );
+}
+
+/// C-34: withdrawing a credited bond payout is observable (as `BondClaimed`).
+#[test]
+fn claim_publishes_bond_claimed() {
+    use soroban_sdk::{events::Event as _, testutils::Events as _};
+    let f = fixture();
+    let who = Address::generate(&f.env);
+    // Seed a credit as `pay_or_credit` leaves one, with the tokens it would hold.
+    f.env.as_contract(&f.client.address, || {
+        storage::set_claimable(&f.env, &who, 500)
+    });
+    TokenContractClient::new(&f.env, &f.token).mint(&f.client.address, &500);
+
+    f.client.claim(&who);
+
+    let want = events::BondClaimed {
+        recipient: who.clone(),
+        amount: 500,
+    }
+    .to_xdr(&f.env, &f.client.address);
+    let got = f.env.events().all().filter_by_contract(&f.client.address);
+    assert!(got.events().contains(&want), "no BondClaimed: {got:?}");
+    assert_eq!(token::Client::new(&f.env, &f.token).balance(&who), 500);
+    assert_eq!(f.client.claimable(&who), 0);
+}
+
+// ── soak batch D (C-19): every reachable error, named ─────────────────────
+
+/// A second `initialize` is refused; the first admin stays.
+#[test]
+fn initialize_twice_is_already_initialized() {
+    let f = fixture();
+    assert_eq!(
+        f.client.try_initialize(&f.admin, &f.token),
+        Err(Ok(Error::AlreadyInitialized))
+    );
+    assert_eq!(f.client.get_admin(), Some(f.admin.clone()));
+}
+
+/// Before `initialize` there is no admin to authorize a setter, and no arbiter to rule.
+#[test]
+fn an_uninitialized_module_is_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(DisputeManagerContract, ());
+    let client = DisputeManagerContractClient::new(&env, &id);
+    assert_eq!(
+        client.try_set_escrow(&Address::generate(&env), &true),
+        Err(Ok(Error::NotInitialized))
+    );
+    assert_eq!(
+        client.try_resolve_dispute(&hash(&env, 1), &DisputeOutcome::MutualRefund),
+        Err(Ok(Error::NotInitialized))
+    );
+}
+
+/// Every path that reads a record refuses an order that was never disputed.
+#[test]
+fn an_undisputed_order_is_not_disputed() {
+    let f = fixture();
+    let h = hash(&f.env, 40);
+    assert_eq!(
+        f.client
+            .try_resolve_dispute(&h, &DisputeOutcome::MutualRefund),
+        Err(Ok(Error::NotDisputed))
+    );
+    assert_eq!(f.client.try_claim_dispute(&h), Err(Ok(Error::NotDisputed)));
+    assert_eq!(
+        f.client
+            .try_settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false),
+        Err(Ok(Error::NotDisputed))
+    );
+    assert_eq!(
+        f.client
+            .try_record_response(&f.escrow, &h, &Address::generate(&f.env), &hash(&f.env, 1)),
+        Err(Ok(Error::NotDisputed))
+    );
+}
+
+/// The filer cannot answer their own dispute: the responder slot is the other party's.
+#[test]
+fn the_filer_cannot_respond_to_their_own_dispute() {
+    let f = fixture();
+    let h = hash(&f.env, 41);
+    file(&f, &h, 100_000);
+    assert_eq!(
+        f.client
+            .try_record_response(&f.escrow, &h, &f.filer, &hash(&f.env, 0x11)),
+        Err(Ok(Error::NotResponder))
+    );
+    assert_eq!(
+        f.client.get_dispute(&h).unwrap().responder_evidence,
+        hash(&f.env, 0),
+        "the slot is still empty"
+    );
+
+    // The real counterparty still can.
+    let counterparty = Address::generate(&f.env);
+    f.client
+        .record_response(&f.escrow, &h, &counterparty, &hash(&f.env, 0x11));
+    assert_eq!(
+        f.client.get_dispute(&h).unwrap().responder_evidence,
+        hash(&f.env, 0x11)
+    );
+}
+
+/// A response has to come through the escrow the dispute was filed on.
+#[test]
+fn a_response_through_another_escrow_is_wrong_escrow() {
+    let f = fixture();
+    let other = f.env.register(MockEscrow, ());
+    f.client.set_escrow(&other, &true);
+    let h = hash(&f.env, 42);
+    file(&f, &h, 100_000);
+    assert_eq!(
+        f.client
+            .try_record_response(&other, &h, &Address::generate(&f.env), &hash(&f.env, 0x11)),
+        Err(Ok(Error::WrongEscrow))
+    );
+}
+
+/// `claim` with no credit pays nothing and says so.
+#[test]
+fn claim_with_no_credit_is_nothing_to_claim() {
+    let f = fixture();
+    assert_eq!(
+        f.client.try_claim(&Address::generate(&f.env)),
+        Err(Ok(Error::NothingToClaim))
+    );
+}
+
+// ── 49S-3: token refusals are the module's own error; relayed codes pinned ──
+
+/// A filer who cannot fund the bond is `BondTransferFailed`, and no record is left behind.
+#[test]
+fn an_unfunded_bond_is_bond_transfer_failed() {
+    let f = fixture();
+    let broke = Address::generate(&f.env);
+    let h = hash(&f.env, 51);
+    assert_eq!(
+        f.client.try_open_dispute(
+            &f.escrow,
+            &h,
+            &1_000,
+            &CHAIN,
+            &broke,
+            &hash(&f.env, 0xEE),
+            &DEADLINE,
+            &BUFFER,
+            &0u64,
+        ),
+        Err(Ok(Error::BondTransferFailed))
+    );
+    assert!(!f.client.is_disputed(&h));
+}
+
+/// A claim the token refuses is `BondTransferFailed`, and the credit stays claimable.
+#[test]
+fn a_refused_claim_is_bond_transfer_failed_and_keeps_the_credit() {
+    let f = fixture();
+    let who = Address::generate(&f.env);
+    // Credited, but the module holds no tokens to pay it with.
+    f.env.as_contract(&f.client.address, || {
+        storage::set_claimable(&f.env, &who, 500)
+    });
+    assert_eq!(f.client.try_claim(&who), Err(Ok(Error::BondTransferFailed)));
+    assert_eq!(f.client.claimable(&who), 500);
+}
+
+/// 49E-1 twin: the bond claim's topic is `bond_clm`, never the escrow's `pay_clm`.
+#[test]
+fn the_bond_claim_event_has_its_own_topic() {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
+    let f = fixture();
+    let who = Address::generate(&f.env);
+    f.env.as_contract(&f.client.address, || {
+        storage::set_claimable(&f.env, &who, 500)
+    });
+    TokenContractClient::new(&f.env, &f.token).mint(&f.client.address, &500);
+    f.client.claim(&who);
+    let got = f.env.events().all().filter_by_contract(&f.client.address);
+    let firsts: std::vec::Vec<ScVal> = got
+        .events()
+        .iter()
+        .map(|e| match &e.body {
+            ContractEventBody::V0(b) => b.topics[0].clone(),
+        })
+        .collect();
+    let sym = |s: &str| ScVal::Symbol(ScSymbol(s.try_into().unwrap()));
+    assert!(firsts.contains(&sym("bond_clm")), "{firsts:?}");
+    assert!(!firsts.contains(&sym("pay_clm")), "{firsts:?}");
+}
+
+/// 49E-1 twin: a credited bond payout's topic is `bond_cred`, never the escrow's `pay_cred`.
+#[test]
+fn the_bond_credit_event_has_its_own_topic() {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
+    let f = fixture();
+    let h = hash(&f.env, 61);
+    let bond = file(&f, &h, 1_000);
+    // Drain the module so the payout is refused and credited instead.
+    TokenContractClient::new(&f.env, &f.token).transfer(
+        &f.client.address,
+        &Address::generate(&f.env),
+        &(bond as i128),
+    );
+    f.client
+        .settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false);
+    // `events().all()` holds the last invocation only, so read them before any other call.
+    let got = f.env.events().all().filter_by_contract(&f.client.address);
+    let firsts: std::vec::Vec<ScVal> = got
+        .events()
+        .iter()
+        .map(|e| match &e.body {
+            ContractEventBody::V0(b) => b.topics[0].clone(),
+        })
+        .collect();
+    let sym = |s: &str| ScVal::Symbol(ScSymbol(s.try_into().unwrap()));
+    assert!(firsts.contains(&sym("bond_cred")), "{firsts:?}");
+    assert!(!firsts.contains(&sym("pay_cred")), "{firsts:?}");
+    assert_eq!(f.client.claimable(&f.filer), bond, "credited");
+}
+
+/// Error drift: every code the escrows relay is the same number here and in `proofbridge-core`.
+#[test]
+fn relayed_error_codes_match_the_shared_definitions() {
+    use proofbridge_core::dispute::error_code as c;
+    let pairs = [
+        (Error::NotEscrow, c::NOT_ESCROW),
+        (Error::DisputeExists, c::DISPUTE_EXISTS),
+        (Error::BondTooSmall, c::BOND_TOO_SMALL),
+        (Error::ChallengeOpen, c::CHALLENGE_OPEN),
+        (Error::ChallengeClosed, c::CHALLENGE_CLOSED),
+        (Error::NotResponder, c::NOT_RESPONDER),
+        (Error::NoDisputeParams, c::NO_DISPUTE_PARAMS),
+        (Error::WrongEscrow, c::WRONG_ESCROW),
+        (Error::BondTransferFailed, c::BOND_TRANSFER_FAILED),
+    ];
+    for (e, code) in pairs {
+        assert_eq!(e as u32, code, "{e:?}");
     }
 }

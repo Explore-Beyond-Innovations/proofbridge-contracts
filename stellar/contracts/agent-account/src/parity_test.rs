@@ -3,7 +3,8 @@
 //! Three implementations decide whether an agent's lock is allowed: this account, the EVM module,
 //! and a TypeScript copy the relayer asks first. `../../../test-vectors/agent-policy-parity.json`
 //! holds policy + lock → accept or reject, with every verdict written by hand, and all three read
-//! it. A case carries exactly one fault, because the implementations check in different orders.
+//! it. A case carries exactly one fault, except the precedence cases, which pin the one order all three
+//! share. A case this reader does not run names the reason in `skips`, and the reader asserts it.
 //!
 //! Driven through `__check_auth` with a real agent signature, as the escrow's `require_auth` would.
 //! A passing check debits the buckets, so a case's steps are naturally a sequence.
@@ -170,8 +171,8 @@ fn install(r: &Rig, policy: &Value) -> Result<(), AccountError> {
     }
 }
 
-/// One lock, judged by `__check_auth` with the agent's signature.
-fn judge(r: &Rig, lock: &Value) -> Result<(), AccountError> {
+/// One lock as the contract context the escrow's `require_auth` would hand the account.
+fn context(r: &Rig, lock: &Value) -> Context {
     let env = &r.env;
     let signer = match lock["signer"].as_str().unwrap() {
         "policy" => r.signer.clone(),
@@ -187,8 +188,12 @@ fn judge(r: &Rig, lock: &Value) -> Result<(), AccountError> {
         src_order_portal: BytesN::from_array(env, &[0xFF; 32]),
         order_recipient: BytesN::from_array(env, &[0xEE; 32]),
         ad_id: String::from_str(env, lock["adId"].as_str().unwrap()),
-        // Always this account: the maker is not what any case here is about.
-        ad_creator: r.signer.clone(),
+        // The ad's maker: this account, or a stranger (02-agent-account.md §6 step 4).
+        ad_creator: match lock["maker"].as_str().unwrap() {
+            "account" => r.signer.clone(),
+            "other" => hex32(env, vectors()["constants"]["otherSigner"].as_str().unwrap()),
+            other => panic!("maker: {other}"),
+        },
         ad_recipient: BytesN::from_array(env, &[0xCC; 32]),
         salt: soroban_sdk::U256::from_u128(env, 42),
         order_decimals: lock["orderDecimals"].as_u64().unwrap() as u32,
@@ -208,14 +213,21 @@ fn judge(r: &Rig, lock: &Value) -> Result<(), AccountError> {
         other => panic!("action: {other}"),
     };
     let args: Vec<Val> = vec![env, params.into_val(env)];
-    let contexts = vec![
-        env,
-        Context::Contract(ContractContext {
-            contract: target,
-            fn_name,
-            args,
-        }),
-    ];
+    Context::Contract(ContractContext {
+        contract: target,
+        fn_name,
+        args,
+    })
+}
+
+/// One request, judged by `__check_auth` with the agent's signature: every lock is a context of the
+/// same auth entry, which is what "one request" means on this chain.
+fn judge(r: &Rig, locks: &[&Value]) -> Result<(), AccountError> {
+    let env = &r.env;
+    let mut contexts: Vec<Context> = Vec::new(env);
+    for lock in locks {
+        contexts.push_back(context(r, lock));
+    }
 
     let payload = BytesN::from_array(env, &[0x01; 32]);
     let sig = AccountSig::Agent(Ed25519Sig {
@@ -257,15 +269,35 @@ fn reads(entry: &Value) -> bool {
         .any(|r| r == "soroban")
 }
 
+/// A case this reader does not run has to say why, or it is a silent skip (C-41).
+fn skip_reason(case: &Value) -> &str {
+    case["skips"]["soroban"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: not read here, and no reason says why",
+                case["name"].as_str().unwrap()
+            )
+        })
+}
+
 #[test]
 fn check_contract_call_matches_the_shared_policy_fixture() {
     let v = vectors();
-    let (mut ran_cases, mut ran_steps) = (0u64, 0u64);
+    let (mut ran_cases, mut ran_steps, mut skipped) = (0u64, 0u64, 0u64);
 
     for case in v["cases"].as_array().unwrap() {
         if !reads(case) {
+            skip_reason(case);
+            skipped += 1;
             continue;
         }
+        assert!(
+            case["skips"].get("soroban").is_none(),
+            "{}: read here and marked as not",
+            case["name"].as_str().unwrap()
+        );
         let name = case["name"].as_str().unwrap();
         let start = case["startTime"].as_u64().unwrap();
         let r = rig(start, &case["accountCeilings"]);
@@ -281,15 +313,55 @@ fn check_contract_call_matches_the_shared_policy_fixture() {
                 r.client.revoke_agent(&r.agent_id);
                 continue;
             }
+            let at = format!("{name} [step {i}]");
             if step["op"] == "reinstall" {
                 // The owner installs the same policy again: a fresh bucket for the agent, while the
-                // account's ceiling keeps what was spent.
-                install(&r, &case["policy"])
-                    .unwrap_or_else(|e| panic!("{name}: did not reinstall: {e:?}"));
+                // account's ceiling keeps what was spent. Or, for a revoked id, a refusal.
+                let got = install(&r, &case["policy"]);
+                match step["expect"].as_str() {
+                    None => assert_eq!(got, Ok(()), "{at}: did not reinstall"),
+                    Some(want) => {
+                        let word = v["installReasons"][want]["soroban"]
+                            .as_str()
+                            .unwrap_or_else(|| panic!("{at}: no Soroban word for {want}"));
+                        assert_eq!(got, Err(account_error(word)), "{at}: want {want}");
+                    }
+                }
                 continue;
             }
-            let at = format!("{name} [step {i}]");
-            let got = judge(&r, &step["lock"]);
+            if step["op"] == "setCeiling" {
+                r.client.set_account_limit(
+                    &hex32(&r.env, step["token"].as_str().unwrap()),
+                    &Limit {
+                        capacity: u128_of(&step["capacity"]),
+                        refill_per_second: u128_of(&step["refillPerSecond"]),
+                    },
+                );
+                continue;
+            }
+            if step["op"] == "dropCeiling" {
+                // What an idle account's persistent entry archiving looks like to the account: the
+                // row is simply not there (06-volume-buckets.md §5).
+                let key = crate::policy::DataKey::AccountVolume(hex32(
+                    &r.env,
+                    step["token"].as_str().unwrap(),
+                ));
+                r.env.as_contract(&r.account, || {
+                    assert!(
+                        r.env.storage().persistent().has(&key),
+                        "{at}: no row to drop"
+                    );
+                    r.env.storage().persistent().remove(&key);
+                });
+                continue;
+            }
+            let locks: std::vec::Vec<&Value> = match step["op"].as_str().unwrap() {
+                "lock" => std::vec![&step["lock"]],
+                // Soroban's error names no context, so `refusedAt` is the EVM reader's to check.
+                "request" => step["locks"].as_array().unwrap().iter().collect(),
+                other => panic!("{at}: an op this reader does not know: {other}"),
+            };
+            let got = judge(&r, &locks);
             let want = expected(step);
             if want == "accept" {
                 assert_eq!(got, Ok(()), "{at}");
@@ -314,6 +386,11 @@ fn check_contract_call_matches_the_shared_policy_fixture() {
         ran_steps,
         v["counts"]["soroban"]["steps"].as_u64().unwrap(),
         "steps ran"
+    );
+    assert_eq!(
+        ran_cases + skipped,
+        v["counts"]["total"]["cases"].as_u64().unwrap(),
+        "every case run or skipped with a reason"
     );
 }
 

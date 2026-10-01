@@ -195,11 +195,22 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
      *      `nonReentrant` stays, because this one does move funds.
      */
     function claim(address recipient, address token) external nonReentrant {
-        uint256 amount = claimable[recipient][token];
+        emit PayoutClaimed(recipient, token, _payCredit(recipient, token, recipient));
+    }
+
+    /// @inheritdoc IEscrow
+    /// @dev Not pause-gated, like `claim`. Only the credited account can redirect its own credit.
+    function claimTo(address token, address to) external nonReentrant {
+        if (to == address(0)) revert Escrow__ZeroAddress();
+        emit PayoutClaimedTo(msg.sender, to, token, _payCredit(msg.sender, token, to));
+    }
+
+    /// @dev Zero `recipient`'s credit in `token` and send it to `to`; returns the amount.
+    function _payCredit(address recipient, address token, address to) private returns (uint256 amount) {
+        amount = claimable[recipient][token];
         if (amount == 0) revert Escrow__NothingToClaim();
         claimable[recipient][token] = 0;
-        _pushFunds(token, recipient, amount);
-        emit PayoutClaimed(recipient, token, amount);
+        _pushFunds(token, to, amount);
     }
 
     /// @notice The payout transfer, self-callable only so `_payOrCredit` can catch it.
@@ -221,7 +232,8 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     /// @dev Take `amount` of `token` from the caller: native (exact `msg.value` wrapped) or ERC20.
     function _pullFunds(address token, uint256 amount) internal {
         if (token.isNative()) {
-            if (msg.value < amount) revert Escrow__InsufficientLiquidity();
+            // Exact: a surplus would be wrapped nowhere and stranded here (C-17).
+            if (msg.value != amount) revert Escrow__NativeAmountMismatch(msg.value, amount);
             i_wNativeToken.safeDeposit(amount);
         } else {
             if (msg.value != 0) revert Escrow__InsufficientLiquidity();
@@ -473,7 +485,9 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
         return i_merkleManager.getWidth();
     }
 
-    /// @dev Native unwraps land here. No `fallback`: an unknown selector reverts instead of
-    ///      silently accepting value (a mis-targeted call must fail loudly).
-    receive() external payable {}
+    /// @dev Native unwraps land here, and only those: a stray send would be stranded (C-17). No
+    ///      `fallback`: an unknown selector reverts instead of silently accepting value.
+    receive() external payable {
+        if (msg.sender != address(i_wNativeToken)) revert Escrow__NativeNotAccepted(msg.sender);
+    }
 }

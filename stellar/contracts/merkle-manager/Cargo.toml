@@ -10,6 +10,7 @@ doctest = false
 
 [dependencies]
 soroban-sdk = { workspace = true }
+proofbridge-core = { workspace = true }
 soroban-poseidon = { workspace = true }
 
 [dev-dependencies]

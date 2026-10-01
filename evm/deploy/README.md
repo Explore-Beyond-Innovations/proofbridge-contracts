@@ -78,7 +78,8 @@ in that run, and needs its own `handover`.
 | `EVM_ADMIN_PRIVATE_KEY` | *required* | Deployer, and the admin until `handover` |
 | `ADMIN` | — | **No longer read.** The deployer is always the admin at deploy time (deploy and link are admin-only); `deploy` refuses it if set to anyone else. Hand over afterwards with `handover` (#424). |
 | `CHAIN_NAME` | `evm-<chainId>` | Human-readable name in the manifest |
-| `DEPLOY_ENV` | `local` | Logical env tag (`local`/`testnet`/`mainnet`) |
+| `DEPLOY_ENV` | *required* | `local`/`testnet`/`mainnet`; must match the RPC's chain id |
+| `LOCAL_EVM_CHAIN_IDS` / `TESTNET_EVM_CHAIN_IDS` / `MAINNET_EVM_CHAIN_IDS` | — | Extra chain ids for that env (comma-separated). Built in: local 31337, 1337; testnet Sepolia, Base Sepolia, Arbitrum Sepolia, OP Sepolia, Holesky, Amoy; mainnet 1, 10, 56, 137, 8453, 42161, 43114. An unlisted id is refused in every env |
 | `GIT_COMMIT` | `unknown` | Commit sha stamped into `meta.commit` |
 | `WNATIVE_NAME` | `Wrapped Native` | wNativeToken `name()` |
 | `WNATIVE_SYMBOL` | `WNATIVE` | wNativeToken `symbol()` |

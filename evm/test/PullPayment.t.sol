@@ -142,6 +142,77 @@ contract PayoutFallbackTest is AdManagerTest {
         adManager.claim(makeAddr("nobody"), address(adToken));
     }
 
+    /// C-16: a recipient that refuses native is credited; it sends its own credit elsewhere.
+    function test_c16_claimToRedirectsARefusedCredit() public {
+        IAdManager.OrderParams memory p = _unlockNativeTo(address(receiver), TestField.fe("CT"));
+        assertEq(adManager.claimable(address(receiver), NATIVE_TOKEN_ADDRESS), p.amount, "credited");
+
+        vm.prank(address(receiver));
+        vm.expectRevert(IEscrow.Escrow__ZeroAddress.selector);
+        adManager.claimTo(NATIVE_TOKEN_ADDRESS, address(0));
+
+        address wallet = makeAddr("wallet");
+        vm.expectEmit(true, true, true, true, address(adManager));
+        emit IEscrow.PayoutClaimedTo(address(receiver), wallet, NATIVE_TOKEN_ADDRESS, p.amount);
+        vm.prank(address(receiver));
+        adManager.claimTo(NATIVE_TOKEN_ADDRESS, wallet);
+
+        assertEq(wallet.balance, p.amount, "paid where the recipient chose");
+        assertEq(adManager.claimable(address(receiver), NATIVE_TOKEN_ADDRESS), 0, "credit consumed");
+        vm.prank(address(receiver));
+        vm.expectRevert(IEscrow.Escrow__NothingToClaim.selector);
+        adManager.claimTo(NATIVE_TOKEN_ADDRESS, wallet);
+    }
+
+    /// C-16: `claimTo` moves only the caller's own credit.
+    function test_c16_claimToCannotTakeSomeoneElsesCredit() public {
+        _unlockNativeTo(address(receiver), TestField.fe("CS"));
+        vm.prank(makeAddr("thief"));
+        vm.expectRevert(IEscrow.Escrow__NothingToClaim.selector);
+        adManager.claimTo(NATIVE_TOKEN_ADDRESS, makeAddr("thief"));
+    }
+
+    /// C-17: native value must equal the amount. Over- and underpaying are both refused.
+    function test_c17_nativeAmountMustBeExact() public {
+        test_createAd_with_native_token_success();
+        vm.deal(maker, fundAmt * 2);
+
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NativeAmountMismatch.selector, fundAmt + 1, fundAmt));
+        adManager.fundAd{value: fundAmt + 1}("nativeAd", fundAmt);
+
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NativeAmountMismatch.selector, fundAmt - 1, fundAmt));
+        adManager.fundAd{value: fundAmt - 1}("nativeAd", fundAmt);
+
+        vm.prank(maker);
+        adManager.fundAd{value: fundAmt}("nativeAd", fundAmt);
+        assertEq(address(adManager).balance, 0, "nothing stranded as raw native");
+    }
+
+    /// C-17: a plain native send to the escrow is refused.
+    function test_c17_escrowRefusesStrayNative() public {
+        address sender = makeAddr("sender");
+        vm.deal(sender, 1 ether);
+        vm.prank(sender);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NativeNotAccepted.selector, sender));
+        (bool ok,) = address(adManager).call{value: 1 ether}("");
+        assertTrue(ok, "expectRevert consumed the revert");
+        assertEq(address(adManager).balance, 0);
+    }
+
+    /// C-17: unwraps still land, since they come from the wrapper: native withdraw and close pay out.
+    function test_c17_unwrapPathsStillPay() public {
+        test_createAd_with_native_token_success();
+        address to = makeAddr("to");
+        vm.prank(maker);
+        adManager.withdrawFromAd("nativeAd", 1 ether, to);
+        assertEq(to.balance, 1 ether, "withdraw unwrapped through receive");
+        vm.prank(maker);
+        adManager.closeAd("nativeAd", to);
+        assertEq(to.balance, initAmt, "close unwrapped the rest");
+    }
+
     function test_directPayout_selfCallOnly() public {
         vm.expectRevert(IEscrow.Escrow__SelfCallOnly.selector);
         adManager.directPayout(makeAddr("x"), address(adToken), 1);

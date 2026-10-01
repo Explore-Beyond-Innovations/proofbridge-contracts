@@ -152,7 +152,10 @@ fn test_double_initialize_fails() {
 
     // Second initialize should fail with AlreadyInitialized error
     let result = client.try_initialize(&admin);
-    assert!(result.is_err());
+    assert_eq!(
+        result,
+        Err(Ok(crate::errors::MerkleError::AlreadyInitialized))
+    );
 }
 
 #[test]
@@ -251,7 +254,7 @@ fn test_append_not_manager_fails() {
 
     let hash = BytesN::from_array(&env, &[1u8; 32]);
     let result = client.try_append_order_hash(&manager, &hash, &0);
-    assert!(result.is_err());
+    assert_eq!(result, Err(Ok(crate::errors::MerkleError::NotManager)));
 }
 
 // =============================================================================
@@ -681,4 +684,179 @@ fn test_append_metering() {
             );
         }
     }
+}
+
+/// C-13: node hashes and root history are written once and then only read, by later appends and by
+/// every unlock's root lookup, so each write extends the entry. Asserted on the TTL itself: the test
+/// environment does not evict, so a read after aging would pass either way.
+#[test]
+fn test_append_extends_node_and_root_history_ttl() {
+    use proofbridge_core::ttl::PERSISTENT_BUMP_AMOUNT;
+    use soroban_sdk::testutils::storage::Persistent as _;
+    use soroban_sdk::{symbol_short, IntoVal, Val};
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, manager) = setup_contract(&env);
+    client.initialize(&admin);
+    client.set_manager(&manager, &true);
+    client.append_order_hash(&manager, &BytesN::from_array(&env, &[1u8; 32]), &0);
+    client.append_order_hash(&manager, &BytesN::from_array(&env, &[2u8; 32]), &0);
+
+    let ttl_of = |key: Val| {
+        env.as_contract(&client.address, || {
+            if env.storage().persistent().has(&key) {
+                Some(env.storage().persistent().get_ttl(&key))
+            } else {
+                None
+            }
+        })
+    };
+    let mut nodes = 0;
+    for i in 0..=client.get_size() {
+        if let Some(ttl) = ttl_of((symbol_short!("hashes"), i).into_val(&env)) {
+            assert!(
+                ttl >= PERSISTENT_BUMP_AMOUNT,
+                "node {i} not extended: {ttl}"
+            );
+            nodes += 1;
+        }
+    }
+    assert_eq!(nodes, 3, "two leaves and their branch");
+    for w in 1..=2u128 {
+        let ttl = ttl_of((symbol_short!("history"), w).into_val(&env)).expect("root recorded");
+        assert!(
+            ttl >= PERSISTENT_BUMP_AMOUNT,
+            "root at width {w} not extended: {ttl}"
+        );
+    }
+    let ttl = ttl_of((symbol_short!("mgrs"), manager.clone()).into_val(&env)).unwrap();
+    assert!(
+        ttl >= PERSISTENT_BUMP_AMOUNT,
+        "manager row not extended: {ttl}"
+    );
+}
+
+/// 49S-2: an append re-extends the rows it only reads — the manager row and the peaks it merges —
+/// so an escrow that keeps appending never meets an archived one. Aged below the bump threshold
+/// first, where only a read-time extend can lift them again.
+#[test]
+fn test_append_reads_extend_the_manager_and_peak_rows() {
+    use proofbridge_core::ttl::{PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD};
+    use soroban_sdk::testutils::storage::Persistent as _;
+    use soroban_sdk::testutils::Ledger as _;
+    use soroban_sdk::{symbol_short, IntoVal, Val};
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, manager) = setup_contract(&env);
+    client.initialize(&admin);
+    client.set_manager(&manager, &true);
+    client.append_order_hash(&manager, &BytesN::from_array(&env, &[1u8; 32]), &0);
+    client.append_order_hash(&manager, &BytesN::from_array(&env, &[2u8; 32]), &0);
+
+    let ttl_of =
+        |key: Val| env.as_contract(&client.address, || env.storage().persistent().get_ttl(&key));
+    let mgr = || (symbol_short!("mgrs"), manager.clone()).into_val(&env);
+    // Node 3 is the two-leaf peak; the next append reads it to bag the root and writes nothing to it.
+    let peak = || (symbol_short!("hashes"), 3u128).into_val(&env);
+    let age = PERSISTENT_BUMP_AMOUNT - PERSISTENT_LIFETIME_THRESHOLD / 2;
+    env.as_contract(&client.address, || {
+        env.storage().instance().extend_ttl(age + 10, age + 10)
+    });
+    env.ledger().with_mut(|l| l.sequence_number += age);
+    assert!(ttl_of(mgr()) < PERSISTENT_LIFETIME_THRESHOLD, "aged");
+    assert!(ttl_of(peak()) < PERSISTENT_LIFETIME_THRESHOLD, "aged");
+
+    client.append_order_hash(&manager, &BytesN::from_array(&env, &[3u8; 32]), &0);
+    assert!(
+        ttl_of(mgr()) >= PERSISTENT_BUMP_AMOUNT,
+        "manager row not extended on read"
+    );
+    assert!(
+        ttl_of(peak()) >= PERSISTENT_BUMP_AMOUNT,
+        "peak not extended on read"
+    );
+
+    // A historical root is read only through the view; calling it extends the row.
+    let root1 = || (symbol_short!("history"), 1u128).into_val(&env);
+    assert!(ttl_of(root1()) < PERSISTENT_LIFETIME_THRESHOLD, "aged");
+    client.get_root_at_index(&1);
+    assert!(
+        ttl_of(root1()) >= PERSISTENT_BUMP_AMOUNT,
+        "root not extended on read"
+    );
+}
+
+// =============================================================================
+// Soak batch D (C-19): every reachable error, named
+// =============================================================================
+
+use crate::errors::MerkleError;
+
+/// The contract's own address cannot be its admin (nobody could sign for it).
+#[test]
+fn test_initialize_with_self_as_admin_is_zero_address() {
+    let env = Env::default();
+    let (client, _, _) = setup_contract(&env);
+    assert_eq!(
+        client.try_initialize(&client.address),
+        Err(Ok(MerkleError::ZeroAddress))
+    );
+}
+
+/// Before `initialize`, every admin lever and the append refuse.
+#[test]
+fn test_uninitialized_calls_are_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, manager) = setup_contract(&env);
+    assert_eq!(client.try_pause(), Err(Ok(MerkleError::NotInitialized)));
+    assert_eq!(client.try_unpause(), Err(Ok(MerkleError::NotInitialized)));
+    assert_eq!(
+        client.try_transfer_admin(&manager),
+        Err(Ok(MerkleError::NotInitialized))
+    );
+    assert_eq!(
+        client.try_set_manager(&manager, &true),
+        Err(Ok(MerkleError::NotInitialized))
+    );
+    assert_eq!(
+        client.try_append_order_hash(&manager, &BytesN::from_array(&env, &[1u8; 32]), &0),
+        Err(Ok(MerkleError::NotInitialized))
+    );
+}
+
+/// A pause stops appends, even from a registered manager; unpause lets them through again.
+#[test]
+fn test_append_while_paused_is_contract_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, manager) = setup_contract(&env);
+    client.initialize(&admin);
+    client.set_manager(&manager, &true);
+    client.pause();
+    let hash = BytesN::from_array(&env, &[1u8; 32]);
+    assert_eq!(
+        client.try_append_order_hash(&manager, &hash, &0),
+        Err(Ok(MerkleError::ContractPaused))
+    );
+    assert_eq!(client.get_width(), 0);
+    client.unpause();
+    client.append_order_hash(&manager, &hash, &0);
+    assert_eq!(client.get_width(), 1);
+}
+
+/// `accept_admin` with no transfer in progress has nobody to hand to.
+#[test]
+fn test_accept_admin_without_a_transfer_is_not_pending_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _) = setup_contract(&env);
+    client.initialize(&admin);
+    assert_eq!(
+        client.try_accept_admin(),
+        Err(Ok(MerkleError::NotPendingAdmin))
+    );
+    assert_eq!(client.get_admin(), Some(admin));
 }

@@ -74,6 +74,8 @@ interface IEscrow {
     /// @notice A payout could not be pushed and was credited for `claim`.
     event PayoutCredited(address indexed recipient, address indexed token, uint256 amount);
     event PayoutClaimed(address indexed recipient, address indexed token, uint256 amount);
+    /// @notice `claimTo`: `recipient` sent its own credit to `to`.
+    event PayoutClaimedTo(address indexed recipient, address indexed to, address indexed token, uint256 amount);
 
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -118,6 +120,12 @@ interface IEscrow {
     error Escrow__NoDisputeManager();
     /// @notice The dispute has not reached a terminal state yet.
     error Escrow__DisputeNotResolved(bytes32 orderHash);
+    /// @notice Filing after the primary's window closed (C-10): a dispute must not outlive the backstop.
+    error Escrow__DisputeWindowClosed(bytes32 orderHash, uint256 windowEnd);
+    /// @notice Native value must equal the amount exactly (C-17).
+    error Escrow__NativeAmountMismatch(uint256 sent, uint256 expected);
+    /// @notice Plain native sends are refused; only the wrapped-native contract's unwraps land (C-17).
+    error Escrow__NativeNotAccepted(address sender);
 
     /*//////////////////////////////////////////////////////////////
                                  ADMIN
@@ -142,6 +150,9 @@ interface IEscrow {
 
     /// @notice Pay out a credited payout. Permissionless: funds only ever go to the credited recipient.
     function claim(address recipient, address token) external;
+    /// @notice Pay the caller's own credit in `token` to `to` (C-16): a credit whose recipient
+    ///         cannot take native value is otherwise stuck. `to == 0` reverts `Escrow__ZeroAddress`.
+    function claimTo(address token, address to) external;
 
     /*//////////////////////////////////////////////////////////////
                                  VIEWS

@@ -1,11 +1,14 @@
 use soroban_sdk::{contractevent, Address, BytesN, String, Symbol, Vec};
 
+/// `fingerprint` is the canonical policy hash (`policy_fingerprint`), so a watcher can tell which
+/// policy was installed without a storage read.
 #[contractevent(topics = ["pol_set"], data_format = "vec")]
 pub struct PolicySet {
     #[topic]
     pub agent_id: BytesN<32>,
     pub settlement_signer: BytesN<32>,
     pub valid_until: u64,
+    pub fingerprint: BytesN<32>,
 }
 
 /// 2.1e wires the runtime to fire the owner's pre-signed registry
@@ -16,12 +19,14 @@ pub struct AgentRevoked {
     pub agent_id: BytesN<32>,
 }
 
-/// The account-wide volume ceiling for one token changed (2.1d). The numbers stay off the event:
-/// an indexer that wants them reads the row, and a limit is not a thing to reconstruct from logs.
-#[contractevent(topics = ["acct_lim"], data_format = "single-value")]
+/// The account-wide volume ceiling for one token changed (2.1d). The numbers ride on the event so
+/// a watcher sees a raised ceiling without reading storage.
+#[contractevent(topics = ["acct_lim"], data_format = "vec")]
 pub struct AccountLimitSet {
     #[topic]
     pub token: BytesN<32>,
+    pub capacity: u128,
+    pub refill_per_second: u128,
 }
 
 /// The owner armed, tightened, loosened or disarmed an ad's guardrail (2.1e).
@@ -61,6 +66,41 @@ pub struct ExtractiveCancelled {
     pub ad_id: String,
     #[topic]
     pub action: Symbol,
+}
+
+/// An above-threshold owner lock was scheduled on a guarded ad, bound to the exact order.
+#[contractevent(topics = ["lock_sched"], data_format = "vec")]
+pub struct LockScheduled {
+    #[topic]
+    pub ad_id: String,
+    pub amount: u128,
+    pub commitment: BytesN<32>,
+    pub ready_at: u64,
+    pub expires_at: u64,
+}
+
+/// An account-wide change (`upgrade`, a loosening `set_policy` / `set_account_limit` /
+/// `set_targets`) was scheduled. `commitment` is the wasm hash for `upgrade`.
+#[contractevent(topics = ["acct_sched"], data_format = "vec")]
+pub struct AccountExtractiveScheduled {
+    #[topic]
+    pub action: Symbol,
+    pub commitment: BytesN<32>,
+    pub ready_at: u64,
+    pub expires_at: u64,
+}
+
+#[contractevent(topics = ["acct_cancel"], data_format = "single-value")]
+pub struct AccountExtractiveCancelled {
+    #[topic]
+    pub action: Symbol,
+}
+
+/// The schema marker moved to what the running code expects.
+#[contractevent(topics = ["migrated"], data_format = "vec")]
+pub struct Migrated {
+    pub from: u32,
+    pub to: u32,
 }
 
 /// Emitted by the constructor and by `set_targets`, so an event-only indexer

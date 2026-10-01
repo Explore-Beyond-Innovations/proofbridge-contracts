@@ -1,5 +1,6 @@
+import { stellarChainIdOrLocal } from "./deploy-env.js";
 import * as path from "path";
-import { DEFAULT_STELLAR_CHAIN_ID, wasmDir } from "./common.js";
+import { wasmDir } from "./common.js";
 import {
   deployContract,
   getAddress,
@@ -66,7 +67,7 @@ export interface DeployTestTokensOptions {
 export async function deployTestTokens(
   opts: DeployTestTokensOptions = {},
 ): Promise<TokenEntry[]> {
-  const chainId = opts.chainId ?? DEFAULT_STELLAR_CHAIN_ID;
+  const chainId = stellarChainIdOrLocal(opts.chainId);
   const outPath = opts.manifestOut ?? manifestPath(chainId);
   const tokens = opts.tokens ?? DEFAULT_TEST_TOKENS;
   const adminStrkey = opts.adminStrkey ?? getAddress();

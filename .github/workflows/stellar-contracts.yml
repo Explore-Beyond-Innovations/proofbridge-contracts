@@ -12,6 +12,10 @@ on:
   workflow_call:
   workflow_dispatch:
 
+# Every job only reads the repo; the token is scoped down to that.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -30,6 +34,39 @@ jobs:
         run: cargo fmt --all -- --check
         working-directory: stellar
 
+  # The cargo registry cache's only writer: main pushes, this repo's lockfile, no circuit code.
+  cargo-cache:
+    name: Cargo registry cache
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore the cargo registry
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-stellar-${{ hashFiles('stellar/Cargo.lock') }}
+
+      - name: Fetch the locked dependencies
+        if: steps.restore.outputs.cache-hit != 'true'
+        run: cargo fetch --locked
+        working-directory: stellar
+
+      - name: Save the cargo registry
+        if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-stellar-${{ hashFiles('stellar/Cargo.lock') }}
+
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
@@ -39,10 +76,25 @@ jobs:
       - uses: actions/checkout@v4
 
       # The event circuit lives in proofbridge-circuits; the VK build below needs it.
+      # Pinned to CIRCUITS_COMMIT, the commit the monorepo's proof_circuits pointer names (a repo-check
+      # there keeps the two equal). Checking out main tested the VK against circuits nobody deployed.
+      # CodeQL's cache-poisoning alerts on the steps after this checkout are dismissed as false
+      # positives: the ref is this repo's reviewed CIRCUITS_COMMIT, and no job running circuit code
+      # writes a cache. Keep it that way: never add a cache to a job that checks out circuits.
+      - name: Read the pinned circuits commit
+        id: circuits
+        working-directory: .
+        # A-9: an empty or malformed pin must fail here, not silently check out circuits main.
+        run: |
+          sha="$(tr -d '[:space:]' < CIRCUITS_COMMIT)"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::CIRCUITS_COMMIT must be a full 40-hex commit, got '${sha}'"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       - name: Checkout proofbridge-circuits
         uses: actions/checkout@v4
         with:
           repository: Explore-Beyond-Innovations/proofbridge-circuits
+          ref: ${{ steps.circuits.outputs.sha }}
           path: proof_circuits
 
       # The monorepo layout puts proof_circuits one level above evm/ and stellar/
@@ -56,18 +108,23 @@ jobs:
       - name: Install wasm32v1-none target
         run: rustup target add wasm32v1-none
 
-      - name: Cache cargo directories
-        uses: actions/cache@v4
+      # Restore only: this job runs code from the circuits checkout, so it never writes a cache that
+      # a later run would trust. The `cargo-cache` job is the only writer, and it runs no circuit code.
+      - name: Restore the cargo registry
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            stellar/target
-          key: ${{ runner.os }}-cargo-stellar-${{ hashFiles('stellar/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-stellar-${{ hashFiles('stellar/Cargo.lock') }}
 
       - name: Install Stellar CLI
+        env:
+          # GitHub's published digest for this asset, checked against a fresh download.
+          STELLAR_CLI_SHA256: 207544486734fccb4df1afc4a7745478f9f1e21688b2f9506f0ef36f60ce3fdc
         run: |
-          curl -Ls https://github.com/stellar/stellar-cli/releases/download/v28.0.0/stellar-cli-28.0.0-x86_64-unknown-linux-gnu.tar.gz -o /tmp/stellar-cli.tar.gz
+          curl -fsSL https://github.com/stellar/stellar-cli/releases/download/v28.0.0/stellar-cli-28.0.0-x86_64-unknown-linux-gnu.tar.gz -o /tmp/stellar-cli.tar.gz
+          echo "${STELLAR_CLI_SHA256}  /tmp/stellar-cli.tar.gz" | sha256sum -c -
           mkdir -p "$HOME/.local/bin"
           tar -xzf /tmp/stellar-cli.tar.gz -C "$HOME/.local/bin" stellar
           chmod +x "$HOME/.local/bin/stellar"
@@ -78,9 +135,9 @@ jobs:
 
       - name: Install Node.js
         uses: actions/setup-node@v4
+        # No pnpm cache: setup-node would save one from a job that runs circuit code.
         with:
           node-version: "18"
-          cache: "pnpm"
 
       - name: Install Node dependencies
         run: pnpm install --frozen-lockfile

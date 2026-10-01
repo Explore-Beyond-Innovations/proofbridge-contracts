@@ -87,6 +87,7 @@ impl BlsKeyRegistry {
         storage::set_initialized(&env);
         storage::set_admin(&env, &admin);
         storage::set_chain_id(&env, chain_id);
+        proofbridge_core::ttl::extend_instance(&env);
         events::Initialized { admin, chain_id }.publish(&env);
         Ok(())
     }
@@ -227,6 +228,7 @@ impl BlsKeyRegistry {
             .to_bytes();
         let slot_id = add_slot(&env, &account, &commitment)?;
         storage::set_nonce(&env, &account, nonce + 1);
+        proofbridge_core::ttl::extend_instance(&env);
         events::KeyRegistered {
             account,
             slot_id,
@@ -304,6 +306,7 @@ impl BlsKeyRegistry {
         }
 
         let slot_id = add_slot(&env, &account, &commitment)?;
+        proofbridge_core::ttl::extend_instance(&env);
         events::KeyRegisteredByProof {
             account,
             slot_id,
@@ -344,6 +347,7 @@ impl BlsKeyRegistry {
         let prev = storage::get_expired_at(&env, &account, slot_id);
         let at = if prev == 0 { eff } else { prev.min(eff) };
         storage::set_expired_at(&env, &account, slot_id, at);
+        proofbridge_core::ttl::extend_instance(&env);
         events::SlotValidUntilSet {
             account,
             slot_id,
@@ -384,6 +388,7 @@ impl BlsKeyRegistry {
         entry.live = Vec::new(&env);
         storage::set_entry(&env, &account, &entry);
         storage::set_nonce(&env, &account, nonce + 1);
+        proofbridge_core::ttl::extend_instance(&env);
         events::KeyRevoked { account, nonce }.publish(&env);
         Ok(())
     }
@@ -401,6 +406,8 @@ impl BlsKeyRegistry {
             return Err(RegistryError::SlotExpired);
         }
         storage::touch(&env, &account, slot_id);
+        // C-13: the verifier reads this on every unlock; an idle registry must not archive.
+        proofbridge_core::ttl::extend_instance(&env);
         Ok(slot.commitment)
     }
 
@@ -413,6 +420,7 @@ impl BlsKeyRegistry {
     /// outlives the cutoff does not. A dead slot is forgotten once the account has no open positions,
     /// or 30 days on.
     pub fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool {
+        proofbridge_core::ttl::extend_instance(&env);
         storage::get_entry(&env, &account)
             .live
             .iter()
@@ -424,6 +432,7 @@ impl BlsKeyRegistry {
 
     /// True iff at least one live slot is usable now (the "is registered" check for 2.3c).
     pub fn has_usable_slot(env: Env, account: BytesN<32>) -> bool {
+        proofbridge_core::ttl::extend_instance(&env);
         let now = env.ledger().timestamp();
         storage::get_entry(&env, &account)
             .live
@@ -435,6 +444,7 @@ impl BlsKeyRegistry {
     }
 
     pub fn lookup(env: Env, account: BytesN<32>, slot_id: u32) -> Option<KeySlot> {
+        proofbridge_core::ttl::extend_instance(&env);
         storage::get_slot(&env, &account, slot_id)
     }
 

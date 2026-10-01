@@ -268,6 +268,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
     event AgentRevoked(address indexed account, bytes32 indexed agentId);
     event AgentGasBudgetSet(address indexed account, bytes32 indexed agentId, uint256 weiBudget);
     event AgentTallyReset(address indexed account, bytes32 indexed agentId, uint256 priorTally, uint256 epoch);
+    /// @notice The account's hook forwarder was set; zero means cleared.
+    event TrustedForwarderSet(address indexed account, address indexed forwarder);
 
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -600,12 +602,14 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
     function setTrustedForwarder(address forwarder) external {
         _requireInstalled();
         trustedForwarder[msg.sender] = forwarder;
+        emit TrustedForwarderSet(msg.sender, forwarder);
     }
 
     /// @dev No install check, unlike the setter: Kernel's uninstall flow calls this *after*
     ///      `onUninstall`, and clearing one's own entry can harm nobody.
     function clearTrustedForwarder() external {
         trustedForwarder[msg.sender] = address(0);
+        emit TrustedForwarderSet(msg.sender, address(0));
     }
 
     function isTrustedForwarder(address forwarder, address account) public view returns (bool) {

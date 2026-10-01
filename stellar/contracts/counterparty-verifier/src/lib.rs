@@ -54,6 +54,7 @@ impl CounterpartyVerifier {
         }
         env.storage().instance().set(&KEY_INIT, &true);
         env.storage().instance().set(&KEY_REGISTRY, &registry);
+        proofbridge_core::ttl::extend_instance(&env);
         Ok(())
     }
 
@@ -67,6 +68,8 @@ impl CounterpartyVerifier {
         root: BytesN<32>,
         metadata: Bytes,
     ) -> bool {
+        // C-13: the registry address lives in instance storage and every unlock reads it.
+        proofbridge_core::ttl::extend_instance(&env);
         if metadata.len() != METADATA_LEN || metadata.get(96) != Some(METADATA_VERSION) {
             return false;
         }

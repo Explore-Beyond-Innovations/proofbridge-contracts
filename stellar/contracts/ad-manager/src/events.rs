@@ -154,3 +154,11 @@ pub struct LockCancelled {
     pub ad_id: String,
     pub amount: u128,
 }
+
+/// C-14: a dispute reached `Resolved` through `finalize_dispute`, with the outcome applied.
+#[contractevent(topics = ["dsp_fin"], data_format = "single-value")]
+pub struct DisputeFinalized {
+    #[topic]
+    pub order_hash: BytesN<32>,
+    pub outcome: crate::types::DisputeOutcome,
+}

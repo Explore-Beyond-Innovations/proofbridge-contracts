@@ -9,6 +9,7 @@ import {RootAnchor} from "src/RootAnchor.sol";
 import {IRootAnchor} from "src/interfaces/IRootAnchor.sol";
 import {HonkVerifier, IVerifier} from "src/Verifier.sol";
 import {RegistrationSubject} from "src/libraries/RegistrationSubject.sol";
+import {MockVerifier} from "test/mocks/MockVerifier.sol";
 
 /// 2.1b (#324), T-67b/c: the registry's proof-accepting `register` path, tested against the real
 /// `RootAnchor` (threshold 1, delay 0). The happy-path proof is the committed fixture
@@ -255,5 +256,30 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
         // Unanchored root *and* a bad POP: the storage read rejects, not the pairing.
         vm.expectRevert(abi.encodeWithSelector(IBLSKeyRegistry.RootNotAnchored.selector, SOURCE_CHAIN, fxRoot));
         registry.registerByProof(account, pk, otherPop, EPOCH, SOURCE_CHAIN, fxRoot, fxProof);
+    }
+
+    /// C-19: a verifier that answers `false` (rather than reverting, as Honk does) is named.
+    function test_c19_aLeafProofTheVerifierRefusesIsInvalidLeafProof() public {
+        _wire(true);
+        registry.setProofRegistration(
+            IRootAnchor(address(anchor)), IVerifier(address(new MockVerifier(false))), _sources(SOURCE_CHAIN), true
+        );
+        anchor.anchor(SOURCE_CHAIN, fxRoot, 1);
+        vm.expectRevert(IBLSKeyRegistry.InvalidLeafProof.selector);
+        _register();
+        assertFalse(registry.hasUsableSlot(account));
+    }
+
+    /// C-19: a key or proof of possession of the wrong length is refused before anything else.
+    function test_c19_wrongLengthsAreBadLength() public {
+        _wire(true);
+        vm.expectRevert(IBLSKeyRegistry.BadLength.selector);
+        registry.registerByProof(account, bytes.concat(pk, hex"00"), pop, EPOCH, SOURCE_CHAIN, fxRoot, fxProof);
+        vm.expectRevert(IBLSKeyRegistry.BadLength.selector);
+        registry.registerByProof(account, pk, bytes.concat(pop, hex"00"), EPOCH, SOURCE_CHAIN, fxRoot, fxProof);
+        // The owner-signed path checks the same lengths, then the signature's own.
+        IBLSKeyRegistry.OwnerAuth memory owner = IBLSKeyRegistry.OwnerAuth(IBLSKeyRegistry.Scheme.Eip712, hex"00");
+        vm.expectRevert(IBLSKeyRegistry.BadLength.selector);
+        registry.register(account, owner, bytes.concat(pk, hex"00"), pop, 0);
     }
 }

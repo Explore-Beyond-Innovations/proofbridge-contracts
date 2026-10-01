@@ -493,3 +493,56 @@ fn t02_retired_then_pruned_slot_fails() {
         .is_root_valid(&s.order_chain_id, &s.order_chain_root, &s.metadata()));
     assert_eq!(s.registry().live_slots(&s.maker_account()).len(), 5);
 }
+
+/// C-13: every unlock reads the registry address from this module's instance and the key
+/// commitments through the registry's, so one `is_root_valid` keeps both instances alive.
+#[test]
+fn is_root_valid_extends_its_own_and_the_registrys_instance_ttl() {
+    use proofbridge_core::ttl::{INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD};
+    use soroban_sdk::testutils::storage::Instance as _;
+
+    let s = setup();
+    let registry = s.verifier.registry();
+    let ttl = |at: &Address| {
+        s.env
+            .as_contract(at, || s.env.storage().instance().get_ttl())
+    };
+    let age = ttl(&s.verifier.address).max(ttl(&registry)) - INSTANCE_LIFETIME_THRESHOLD + 1;
+    s.env.ledger().with_mut(|l| l.sequence_number += age);
+    assert!(
+        ttl(&s.verifier.address) < INSTANCE_LIFETIME_THRESHOLD,
+        "set-up: verifier due"
+    );
+    assert!(
+        ttl(&registry) < INSTANCE_LIFETIME_THRESHOLD,
+        "set-up: registry due"
+    );
+
+    assert!(s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &s.metadata()));
+    assert_eq!(
+        ttl(&s.verifier.address),
+        INSTANCE_BUMP_AMOUNT,
+        "verifier instance not extended"
+    );
+    assert_eq!(
+        ttl(&registry),
+        INSTANCE_BUMP_AMOUNT,
+        "registry instance not extended"
+    );
+}
+
+// ---- soak batch D (C-19): every reachable error, named ----
+
+/// A second `initialize` is refused, and the registry the module reads does not move.
+#[test]
+fn initialize_twice_is_already_initialized() {
+    let s = setup();
+    let before = s.verifier.registry();
+    assert_eq!(
+        s.verifier.try_initialize(&Address::generate(&s.env)),
+        Err(Ok(VerifierError::AlreadyInitialized))
+    );
+    assert_eq!(s.verifier.registry(), before);
+}

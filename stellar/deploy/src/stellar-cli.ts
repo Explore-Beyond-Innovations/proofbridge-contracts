@@ -2,33 +2,103 @@
 
 import { execFileSync } from "child_process";
 import { StrKey } from "@stellar/stellar-sdk";
+import type { DeployEnv } from "./deploy-env.js";
 
-const NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
+/** The passphrase each environment's network answers with (RPC `getNetwork`). */
+export const NETWORK_PASSPHRASES: Record<DeployEnv, string> = {
+  local: "Standalone Network ; February 2017",
+  testnet: "Test SDF Network ; September 2015",
+  mainnet: "Public Global Stellar Network ; September 2015",
+};
+
+// Set once `assertStellarNetworkForEnv` has checked it; before that, STELLAR_NETWORK as given.
+let checkedNetwork: string | undefined;
+
+/** The `stellar network` profile every call uses. There is no default: a wrong guess is a real network. */
+export function network(): string {
+  const n = checkedNetwork ?? process.env.STELLAR_NETWORK;
+  if (!n) throw new Error("STELLAR_NETWORK is unset; name the `stellar network` profile to use");
+  return n;
+}
+
+/**
+ * A-4: the stated environment must be the network the RPC is on. STELLAR_NETWORK is required outside
+ * local (it defaults to the `local` profile only there), and the RPC's own passphrase must be the
+ * env's: `DEPLOY_ENV=local` against testnet would bring every local default to a real network.
+ * Runs before any transaction.
+ */
+export function assertStellarNetworkForEnv(deployEnv: DeployEnv, env: NodeJS.ProcessEnv = process.env): string {
+  const name = env.STELLAR_NETWORK || (deployEnv === "local" ? "local" : undefined);
+  if (!name) {
+    throw new Error(`STELLAR_NETWORK is unset for DEPLOY_ENV=${deployEnv}; name the \`stellar network\` profile for ${deployEnv}`);
+  }
+  let out: string;
+  try {
+    out = exec(["network", "info", "--network", name, "--output", "json"]);
+  } catch (err) {
+    throw new Error(`could not ask the RPC of STELLAR_NETWORK=${name} for its network (stellar network info): ${err instanceof Error ? err.message : err}`);
+  }
+  let passphrase: unknown;
+  try {
+    passphrase = (JSON.parse(out.split("\n").filter(Boolean).pop() ?? "null") as { passphrase?: unknown } | null)?.passphrase;
+  } catch {
+    passphrase = undefined;
+  }
+  if (typeof passphrase !== "string") {
+    throw new Error(`the RPC of STELLAR_NETWORK=${name} gave no network passphrase: ${out}`);
+  }
+  const want = NETWORK_PASSPHRASES[deployEnv];
+  if (passphrase !== want) {
+    const is = (Object.entries(NETWORK_PASSPHRASES).find(([, p]) => p === passphrase)?.[0]) ?? "an unknown network";
+    throw new Error(
+      `DEPLOY_ENV=${deployEnv} but STELLAR_NETWORK=${name} is on ${is}, not the ${deployEnv} network. ` +
+        `Point STELLAR_NETWORK at the ${deployEnv} network, or set DEPLOY_ENV to the network's environment.`,
+    );
+  }
+  checkedNetwork = name;
+  return name;
+}
 
 /** Single-quote a shell argument; a bare flag or plain word is left as is. */
 export function shellQuote(arg: string): string {
   return /^[A-Za-z0-9_\-=.:/]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
 }
-const SOURCE = process.env.STELLAR_SOURCE_ACCOUNT ?? "admin";
+const source = (): string => process.env.STELLAR_SOURCE_ACCOUNT ?? "admin";
 
-function exec(args: string[]): string {
-  return execFileSync("stellar", args, {
-    encoding: "utf8",
-    stdio: ["pipe", "pipe", "pipe"],
-    timeout: 180_000,
-  }).trim();
+/** A secret seed in any argument (e.g. `--source S...` from STELLAR_SOURCE_ACCOUNT) never reaches a log. */
+export function redact(text: string): string {
+  return text.replace(/\bS[A-Z2-7]{55}\b/g, (m) => (StrKey.isValidEd25519SecretSeed(m) ? "S…[redacted]" : m));
 }
 
-/** Run `stellar <args>`, echoing the command for debug visibility. */
+function exec(args: string[]): string {
+  try {
+    return execFileSync("stellar", args, {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 180_000,
+    }).trim();
+  } catch (err) {
+    // execFileSync's message and stderr carry the full command line; rethrow them redacted.
+    const e = err as Error & { stderr?: unknown; stdout?: unknown };
+    const out = new Error(redact(e.message ?? String(err)));
+    Object.assign(out, {
+      status: (err as { status?: unknown }).status,
+      stderr: typeof e.stderr === "string" ? redact(e.stderr) : e.stderr,
+    });
+    throw out;
+  }
+}
+
+/** Run `stellar <args>`, echoing the command (secrets redacted) for debug visibility. */
 export function stellar(args: string[]): string {
-  console.log(`  [stellar] stellar ${args.join(" ")}`);
+  console.log(`  [stellar] stellar ${redact(args.join(" "))}`);
   return exec(args);
 }
 
 /** Latest ledger sequence (verified on the pinned v23.3.0), or undefined without `ledger latest`. */
 export function latestLedger(): string | undefined {
   try {
-    const out = exec(["ledger", "latest", "--network", NETWORK, "--output", "json"]);
+    const out = exec(["ledger", "latest", "--network", network(), "--output", "json"]);
     const seq = (JSON.parse(out) as { sequence?: number }).sequence;
     return seq != null ? String(seq) : undefined;
   } catch {
@@ -47,9 +117,9 @@ export function deployContract(
     "--wasm",
     wasmPath,
     "--source",
-    SOURCE,
+    source(),
     "--network",
-    NETWORK,
+    network(),
   ];
   if (constructorArgs.length > 0) args.push("--", ...constructorArgs);
   const out = stellar(args);
@@ -61,6 +131,17 @@ export function deployContract(
   return id;
 }
 
+/**
+ * Install a wasm on the network without instantiating it; returns its hash (hex, no 0x). For
+ * contracts operators instantiate themselves, like the agent account (C-4).
+ */
+export function uploadWasm(wasmPath: string): string {
+  const out = stellar(["contract", "upload", "--wasm", wasmPath, "--source", source(), "--network", network()]);
+  const hash = out.split("\n").filter((l) => l.trim()).pop()?.trim() ?? "";
+  if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error(`unexpected upload output:\n${out}`);
+  return hash;
+}
+
 /** Invoke a contract function. Returns stdout. */
 export function invokeContract(
   contractId: string,
@@ -68,16 +149,16 @@ export function invokeContract(
   args: string[] = [],
   options: { send?: boolean; source?: string } = {},
 ): string {
-  const source = options.source ?? SOURCE;
+  const src = options.source ?? source();
   const cli = [
     "contract",
     "invoke",
     "--id",
     contractId,
     "--source-account",
-    source,
+    src,
     "--network",
-    NETWORK,
+    network(),
     "--send",
     options.send === false ? "no" : "yes",
     "--",
@@ -87,11 +168,11 @@ export function invokeContract(
   return stellar(cli);
 }
 
-export function getAddress(name: string = SOURCE): string {
+export function getAddress(name: string = source()): string {
   return stellar(["keys", "address", name]);
 }
 
-export function getSecret(name: string = SOURCE): string {
+export function getSecret(name: string = source()): string {
   return stellar(["keys", "secret", name]);
 }
 
@@ -116,9 +197,9 @@ export function deploySAC(asset: string = "native"): string {
       "--asset",
       asset,
       "--source",
-      SOURCE,
+      source(),
       "--network",
-      NETWORK,
+      network(),
     ]);
   } catch (err) {
     if (!isAlreadyDeployedSacError(err)) throw err;
@@ -130,7 +211,7 @@ export function deploySAC(asset: string = "native"): string {
       "--asset",
       asset,
       "--network",
-      NETWORK,
+      network(),
     ]);
   }
 }
@@ -226,7 +307,7 @@ export class Acting {
       // Args are quoted for a shell: JSON values (`--guards '[...]'`, `--timing '{...}'`) carry
       // characters the shell would otherwise split or expand.
       console.log(
-        `  ${d.label}.${d.fn}\n    stellar contract invoke --id ${d.contractId} --source-account <admin> --network ${NETWORK} -- ${d.fn} ${d.args.map(shellQuote).join(" ")}`,
+        `  ${d.label}.${d.fn}\n    stellar contract invoke --id ${d.contractId} --source-account <admin> --network ${network()} -- ${d.fn} ${d.args.map(shellQuote).join(" ")}`,
       );
     }
   }

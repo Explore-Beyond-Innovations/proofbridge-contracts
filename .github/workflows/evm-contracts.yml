@@ -33,10 +33,25 @@ jobs:
           submodules: recursive
 
       # The event circuit lives in proofbridge-circuits; the VK build below needs it.
+      # Pinned to CIRCUITS_COMMIT, the commit the monorepo's proof_circuits pointer names (a repo-check
+      # there keeps the two equal). Checking out main tested the VK against circuits nobody deployed.
+      # CodeQL's cache-poisoning alerts on the steps after this checkout are dismissed as false
+      # positives: the ref is this repo's reviewed CIRCUITS_COMMIT, and no job running circuit code
+      # writes a cache. Keep it that way: never add a cache to a job that checks out circuits.
+      - name: Read the pinned circuits commit
+        id: circuits
+        working-directory: .
+        # A-9: an empty or malformed pin must fail here, not silently check out circuits main.
+        run: |
+          sha="$(tr -d '[:space:]' < CIRCUITS_COMMIT)"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::CIRCUITS_COMMIT must be a full 40-hex commit, got '${sha}'"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       - name: Checkout proofbridge-circuits
         uses: actions/checkout@v4
         with:
           repository: Explore-Beyond-Innovations/proofbridge-circuits
+          ref: ${{ steps.circuits.outputs.sha }}
           path: proof_circuits
 
       # The monorepo layout puts proof_circuits one level above evm/ and stellar/
@@ -65,7 +80,7 @@ jobs:
           # gate whose halves run on different runtimes will eventually pass on one and fail on
           # the other.
           node-version: "20"
-          cache: "pnpm"
+          # No pnpm cache here: setup-node would save one from a job that runs circuit code.
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -167,10 +182,10 @@ jobs:
           done
         id: agent-accounts
 
-      - name: Unlock gas baseline gate (1.6c)
+      - name: Unlock and door gas baseline gate (1.6c, #358)
         run: |
           set -o pipefail
-          forge test --match-contract UnlockGas -vv | tee /tmp/gas.log
+          forge test --match-contract 'UnlockGas|EscrowDoorGas' -vv | tee /tmp/gas.log
           grep -qE 'Suite result: ok\. [1-9][0-9]* passed' /tmp/gas.log
         id: gas-baseline
 

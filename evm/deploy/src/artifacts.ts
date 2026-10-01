@@ -15,6 +15,7 @@ interface Artifact {
     linkReferences?: Record<string, Record<string, LinkReference[]>>;
   };
   deployedBytecode?: {
+    object?: string;
     linkReferences?: Record<string, Record<string, LinkReference[]>>;
   };
 }
@@ -31,6 +32,25 @@ function loadArtifact(contractFile: string, contractName: string): Artifact {
     );
   }
   return JSON.parse(fs.readFileSync(p, "utf8")) as Artifact;
+}
+
+/**
+ * The runtime code a fresh deploy of this artifact leaves on chain, asked of the node itself: the
+ * creation code (with the deploy's constructor args) runs as an `eth_call`, so immutables are filled
+ * exactly as a deploy fills them and the answer compares byte for byte with `getCode`.
+ */
+export async function runtimeCodeOf(
+  provider: ethers.Provider,
+  contractFile: string,
+  contractName: string,
+  constructorArgs: unknown[] = [],
+): Promise<string> {
+  const { abi, bytecode } = loadArtifact(contractFile, contractName);
+  if (Object.keys(bytecode.linkReferences ?? {}).length > 0) {
+    throw new Error(`runtimeCodeOf: ${contractName} links libraries; link it before simulating the deploy`);
+  }
+  const tx = await new ethers.ContractFactory(abi, bytecode.object).getDeployTransaction(...constructorArgs);
+  return provider.call({ data: tx.data });
 }
 
 export function getAbi(contractFile: string, contractName: string): any[] {

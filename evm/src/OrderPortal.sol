@@ -157,6 +157,7 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         // No deadline read: like the cancel refund, this is the primary's decision arriving, and it
         // is valid whenever it arrives (D4's rule, T-41).
         _fill(orderHash, params.bridger, true);
+        emit OrderForfeited(orderHash);
         _payMaker(params);
     }
 

@@ -1,6 +1,6 @@
+import { stellarChainIdOrLocal } from "./deploy-env.js";
 import { StrKey } from "@stellar/stellar-sdk";
 import { readManifest, type ChainDeploymentManifest } from "@proofbridge/deployment-manifest";
-import { DEFAULT_STELLAR_CHAIN_ID } from "./common.js";
 import { getAddress, invokeContract, readView } from "./stellar-cli.js";
 import { manifestPath, writeManifest } from "./manifest.js";
 
@@ -119,7 +119,7 @@ export function adminBlockFromChain(
 }
 
 export async function handover(opts: StellarHandoverOptions): Promise<StellarHandoverResult> {
-  const chainId = opts.chainId ?? DEFAULT_STELLAR_CHAIN_ID;
+  const chainId = stellarChainIdOrLocal(opts.chainId);
   const path = opts.manifest ?? manifestPath(chainId);
   const manifest = await readManifest(path);
   if (manifest.chain.kind !== "STELLAR" || BigInt(manifest.chain.chainId) !== chainId) {

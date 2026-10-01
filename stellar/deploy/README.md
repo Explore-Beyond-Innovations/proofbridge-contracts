@@ -65,13 +65,13 @@ not silent. After the handover, `deploy` and `link` describe admin-only calls as
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `STELLAR_NETWORK` | `testnet` | Name of the `stellar network` profile to use |
+| `STELLAR_NETWORK` | `local` (`DEPLOY_ENV=local` only) | Name of the `stellar network` profile to use. Required outside local; `deploy` and `link` refuse unless its RPC's passphrase (`stellar network info`) is the env's network |
 | `STELLAR_SOURCE_ACCOUNT` | `admin` | `stellar keys` identity that signs deploys, and the admin until `handover` |
 | `STELLAR_WASM_DIR` | `contracts/stellar/target/wasm32v1-none/release` | Build artifacts |
-| `STELLAR_DEPOSIT_VK` | `proof_circuits/deposits/target/vk` | Verifier key for `Verifier.initialize` |
+| `STELLAR_EVENT_VK` | `proof_circuits/events/target/vk` | Verifier key for `Verifier.initialize`; its sha256 is recorded as `meta.vkSha256`. Missing refuses outside local |
 | `STELLAR_DEPLOYMENTS_DIR` | `contracts/stellar/deployments` | Manifest output dir |
 | `CHAIN_NAME` | `stellar-<chainId>` | Name stamped in the manifest |
-| `DEPLOY_ENV` | `local` | `meta.env` (`local`/`testnet`/`mainnet`) |
+| `DEPLOY_ENV` | *required* | `meta.env` (`local`/`testnet`/`mainnet`); must match the network's passphrase |
 | `GIT_COMMIT` | `unknown` | `meta.commit` |
 | `DISPUTE_ARBITER` | admin (`local` only) | The only account that may rule a dispute (2.3g). Must not be the admin outside `local`: its whole containment is that it holds no escrow powers |
 | `DISPUTE_FEE_POOL` | admin (`local` only) | Where forfeited bonds go. Unset, every forfeited bond returns to the filer |

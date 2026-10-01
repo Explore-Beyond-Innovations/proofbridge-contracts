@@ -370,7 +370,7 @@ contract AdManagerTest is Test {
         vm.deal(maker, initAmt);
 
         vm.prank(maker);
-        vm.expectRevert(IEscrow.Escrow__InsufficientLiquidity.selector);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NativeAmountMismatch.selector, 0, initAmt));
         adManager.createAd(adId, NATIVE_TOKEN_ADDRESS, initAmt, orderChainId, _b32(adRecipient), _b32(maker));
     }
 

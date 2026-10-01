@@ -443,6 +443,35 @@ contract OrderPortalTest is Test {
         assertEq(balPortalAfter - balPortalBefore, p.amount, "portal not credited");
     }
 
+    /// C-17: the bridger's native deposit must equal the amount; a surplus is refused, not stranded.
+    function test_c17_createOrder_nativeAmountMustBeExact() public {
+        test_setNativeTokenRoute_setsAndEmits_whenSupported();
+        IOrderPortal.OrderParams memory p = _defaultParams();
+        p.orderChainToken = _b32(NATIVE_TOKEN_ADDRESS);
+        vm.deal(bridger, p.amount * 2);
+
+        vm.prank(bridger);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NativeAmountMismatch.selector, p.amount + 1, p.amount));
+        portal.createOrder{value: p.amount + 1}(p);
+
+        vm.prank(bridger);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NativeAmountMismatch.selector, p.amount - 1, p.amount));
+        portal.createOrder{value: p.amount - 1}(p);
+
+        vm.prank(bridger);
+        portal.createOrder{value: p.amount}(p);
+        assertEq(_wNativeToken.balanceOf(address(portal)), p.amount, "exactly the deposit is held");
+    }
+
+    /// C-17: a plain native send to the portal is refused.
+    function test_c17_portalRefusesStrayNative() public {
+        vm.deal(bridger, 1 ether);
+        vm.prank(bridger);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NativeNotAccepted.selector, bridger));
+        (bool ok,) = address(portal).call{value: 1 ether}("");
+        assertTrue(ok, "expectRevert consumed the revert");
+    }
+
     /*//////////////////////////////////////////////////////////////
              createOrder: duplicate (same params) -> OrderExists
     //////////////////////////////////////////////////////////////*/

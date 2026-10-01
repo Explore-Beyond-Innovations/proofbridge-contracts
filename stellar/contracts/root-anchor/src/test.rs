@@ -578,3 +578,22 @@ fn consumer_gets_false_not_a_trap_from_a_wrong_anchor_address() {
     let not_an_anchor = Address::generate(&f.env);
     assert!(!cc.refund(&not_an_anchor, &CHAIN, &root(&f.env, 0xA1)));
 }
+
+// --- soak batch D (C-19): every reachable error, named -------------------------
+
+/// Before `initialize`, neither a notary nor an admin lever gets through.
+#[test]
+fn an_uninitialized_anchor_is_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = RootAnchorClient::new(&env, &env.register(RootAnchor, ()));
+    let signer = Address::generate(&env);
+    assert_eq!(
+        client.try_anchor(&signer, &CHAIN, &root(&env, 1), &1),
+        Err(Ok(RootAnchorError::NotInitialized))
+    );
+    assert_eq!(
+        client.try_set_anchor_delay(&CHAIN, &60),
+        Err(Ok(RootAnchorError::NotInitialized))
+    );
+}

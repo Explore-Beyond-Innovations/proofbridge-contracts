@@ -870,7 +870,11 @@ fn test_nullifier_prevents_double_unlock() {
         &Bytes::new(&s.env),
     );
 
-    assert!(result.is_err(), "Double unlock must fail");
+    assert_eq!(
+        result,
+        Err(Ok(ad_manager_contract::AdManagerError::OrderNotOpen)),
+        "Double unlock must fail"
+    );
 }
 
 // ============================================================================
@@ -5638,6 +5642,15 @@ const DISPUTE_BOND_BPS: u32 = 100;
 fn wire_dispute_manager(
     s: &TestSetup,
 ) -> (dispute_manager_contract::Client<'static>, Address, Address) {
+    let (dm, arbiter, filer) = deploy_dispute_manager(s);
+    s.ad_manager.set_dispute_manager(&dm.address);
+    (dm, arbiter, filer)
+}
+
+/// A configured module that serves the ad-manager but is not yet its current one (C-11 swaps).
+fn deploy_dispute_manager(
+    s: &TestSetup,
+) -> (dispute_manager_contract::Client<'static>, Address, Address) {
     let dm_addr = Address::generate(&s.env);
     s.env.register_at(&dm_addr, DISPUTE_MANAGER_WASM, ());
     let dm = dispute_manager_contract::Client::new(&s.env, &dm_addr);
@@ -5660,8 +5673,6 @@ fn wire_dispute_manager(
             bond_bps: DISPUTE_BOND_BPS,
         },
     );
-    s.ad_manager.set_dispute_manager(&dm_addr);
-
     TokenContractClient::new(&s.env, &s.ad_token_addr).mint(&filer, &1_000_000);
     (dm, arbiter, filer)
 }
@@ -5770,8 +5781,9 @@ fn test_2_3g_finalize_waits_for_the_modules_window() {
         &dispute_manager_contract::DisputeOutcome::MutualRefund,
     );
 
-    assert!(
-        s.ad_manager.try_finalize_dispute(&params).is_err(),
+    assert_eq!(
+        s.ad_manager.try_finalize_dispute(&params),
+        Err(Ok(ad_manager_contract::AdManagerError::DisputeNotResolved)),
         "the window has not closed"
     );
 }
@@ -5794,8 +5806,9 @@ fn test_2_3g_the_unresolved_fallback_refunds_and_returns_the_bond() {
     use soroban_sdk::testutils::Ledger;
     let now = s.env.ledger().timestamp();
     s.env.ledger().set_timestamp(now + DISPUTE_CHALLENGE + 1);
-    assert!(
-        s.ad_manager.try_finalize_dispute(&params).is_err(),
+    assert_eq!(
+        s.ad_manager.try_finalize_dispute(&params),
+        Err(Ok(ad_manager_contract::AdManagerError::DisputeNotResolved)),
         "no dispute path may complete before the order's own deadline + buffer"
     );
 
@@ -5820,10 +5833,10 @@ fn test_2_3g_only_a_party_may_file() {
     let stranger = Address::generate(&s.env);
     TokenContractClient::new(&s.env, &s.ad_token_addr).mint(&stranger, &1_000_000);
 
-    assert!(
+    assert_eq!(
         s.ad_manager
-            .try_dispute(&params, &stranger, &bytes32_to_bytesn(&s.env, &[0xEE; 32]))
-            .is_err(),
+            .try_dispute(&params, &stranger, &bytes32_to_bytesn(&s.env, &[0xEE; 32])),
+        Err(Ok(ad_manager_contract::AdManagerError::NotAParty)),
         "a bystander cannot dispute somebody else's order"
     );
 }
@@ -5872,10 +5885,13 @@ fn test_2_3g_only_the_other_party_may_respond() {
 
     s.ad_manager
         .dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
-    assert!(
-        s.ad_manager
-            .try_respond_to_dispute(&params, &stranger, &bytes32_to_bytesn(&s.env, &[0x11; 32]))
-            .is_err(),
+    assert_eq!(
+        s.ad_manager.try_respond_to_dispute(
+            &params,
+            &stranger,
+            &bytes32_to_bytesn(&s.env, &[0x11; 32])
+        ),
+        Err(Ok(ad_manager_contract::AdManagerError::NotAParty)),
         "only the order's other party may respond"
     );
 }
@@ -7146,4 +7162,1605 @@ fn test_466_wired_chains_list_each_chain_once() {
         soroban_sdk::vec![&s.env, s.tp.order_chain_id, 777u128],
         "re-wiring a chain does not list it again"
     );
+}
+
+// =============================================================================
+// Soak batch B (2.6): escrow and dispute gaps, Soroban half
+// =============================================================================
+
+fn evidence(s: &TestSetup, fill: u8) -> BytesN<32> {
+    bytes32_to_bytesn(&s.env, &[fill; 32])
+}
+
+/// The last invocation's events from `contract` whose first topic is `name`, as (topics, data).
+fn events_named(
+    s: &TestSetup,
+    contract: &Address,
+    name: &str,
+) -> std::vec::Vec<(
+    std::vec::Vec<soroban_sdk::xdr::ScVal>,
+    soroban_sdk::xdr::ScVal,
+)> {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::xdr::{ContractEventBody, ScVal};
+    let mut out = std::vec::Vec::new();
+    for ev in s.env.events().all().filter_by_contract(contract).events() {
+        let ContractEventBody::V0(body) = &ev.body;
+        if let Some(ScVal::Symbol(sym)) = body.topics.first() {
+            if sym.to_utf8_string_lossy() == name {
+                out.push((body.topics.to_vec(), body.data.clone()));
+            }
+        }
+    }
+    out
+}
+
+fn scval<T: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
+    env: &Env,
+    v: &T,
+) -> soroban_sdk::xdr::ScVal {
+    use soroban_sdk::TryFromVal;
+    soroban_sdk::xdr::ScVal::try_from_val(env, &v.into_val(env)).unwrap()
+}
+
+/// A second order on the fixture's ad, with its own liquidity, locked now.
+fn second_locked_order(s: &TestSetup) -> ad_manager_contract::OrderParams {
+    s.ad_manager.fund_ad(&ad_id(s), &s.tp.amount);
+    let mut q = ad_manager_order_params(&s.env, &s.tp);
+    q.salt = soroban_sdk::U256::from_u32(&s.env, 1011);
+    q.deadline = s.env.ledger().timestamp() + 86_400;
+    s.ad_manager.lock_for_order(&q);
+    q
+}
+
+// --- C-10: no filing after the primary's window has closed -------------------
+
+/// The last second of an `Open` leg's window still files.
+#[test]
+fn test_c10_filing_at_the_window_end_passes() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    assert!(dm.is_disputed(&s.ad_manager.hash_order(&p)));
+}
+
+/// One second past it is refused, and nothing reaches the module.
+#[test]
+fn test_c10_filing_one_second_after_the_window_end_is_refused() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    assert_eq!(
+        s.ad_manager.try_dispute(&p, &filer, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::DisputeWindowClosed))
+    );
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Open);
+    assert!(!dm.is_disputed(&s.ad_manager.hash_order(&p)));
+}
+
+/// A `Claimed` leg files against its claim's `finalize_at`, not `deadline + buffer`: a retime
+/// after the claim moves neither.
+#[test]
+fn test_c10_claimed_uses_its_own_window_end() {
+    let raised = ad_timing(0, 7_200, 0, SUITE_LONG_BACKSTOP, 0);
+
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    s.ad_manager.set_route_timing(&s.tp.order_chain_id, &raised);
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    assert_eq!(
+        s.ad_manager.try_dispute(&p, &filer, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::DisputeWindowClosed)),
+        "the claim's end holds against a raised buffer"
+    );
+
+    let t = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&t);
+    let q = locked_ad_order(&t);
+    warp(&t, q.deadline);
+    t.ad_manager.claim_cancel(&q);
+    t.ad_manager.set_route_timing(&t.tp.order_chain_id, &raised);
+    warp(&t, q.deadline + SUITE_BUFFER);
+    t.ad_manager.dispute(&q, &filer, &evidence(&t, 0xEE));
+    assert!(dm.is_disputed(&t.ad_manager.hash_order(&q)));
+}
+
+/// A pause between the lock and the filing moves the filing window by the pause, as it moves the
+/// unlock's.
+#[test]
+fn test_c10_a_pause_extends_the_filing_window() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let now = s.env.ledger().timestamp();
+    s.ad_manager.pause();
+    warp(&s, now + 600);
+    s.ad_manager.unpause();
+    warp(&s, p.deadline + SUITE_BUFFER + 601);
+    assert_eq!(
+        s.ad_manager.try_dispute(&p, &filer, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::DisputeWindowClosed))
+    );
+    warp(&s, p.deadline + SUITE_BUFFER + 600);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+}
+
+// --- C-11: the module is snapshotted per order at filing ---------------------
+
+/// Filed under A, the escrow swaps to B: the response and the finalize still go to A, and the bond
+/// leaves A. A new filing goes to B.
+#[test]
+fn test_c11_a_swap_leaves_an_open_dispute_on_its_own_module() {
+    let s = setup();
+    let (a, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    assert_eq!(s.ad_manager.dispute_module_of(&h), Some(a.address.clone()));
+
+    let (b, _arbiter_b, _) = deploy_dispute_manager(&s);
+    s.ad_manager.set_dispute_manager(&b.address);
+
+    let bridger = account_addr(&s, &s.tp.order_recipient);
+    s.ad_manager
+        .respond_to_dispute(&p, &bridger, &evidence(&s, 0x11));
+    assert_eq!(
+        a.get_dispute(&h).unwrap().responder_evidence,
+        evidence(&s, 0x11),
+        "the response reached the filing module"
+    );
+    assert!(!b.is_disputed(&h));
+
+    warp_past_dispute_window(&s, &a, &h);
+    s.ad_manager.finalize_dispute(&p);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Resolved);
+    assert!(!a.is_disputed(&h), "the filing module closed its record");
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    assert_eq!(
+        token.balance(&a.address),
+        0,
+        "the bond left the filing module"
+    );
+
+    let q = second_locked_order(&s);
+    let hq = s.ad_manager.hash_order(&q);
+    s.ad_manager.dispute(&q, &filer, &evidence(&s, 0xEE));
+    assert!(b.is_disputed(&hq), "a new filing uses the current module");
+    assert!(!a.is_disputed(&hq));
+    assert_eq!(s.ad_manager.dispute_module_of(&hq), Some(b.address.clone()));
+}
+
+/// Evidence after a swap closes the dispute on the module it was filed with.
+#[test]
+fn test_c11_evidence_closes_the_dispute_on_the_filing_module() {
+    let s = setup();
+    let (a, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    let (b, _, _) = deploy_dispute_manager(&s);
+    s.ad_manager.set_dispute_manager(&b.address);
+
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+    assert!(!a.is_disputed(&h), "evidence closed A's record");
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    assert_eq!(token.balance(&a.address), 0, "no bond stranded in A");
+}
+
+/// A never-disputed order has no module: its evidence path touches none.
+#[test]
+fn test_c11_a_never_disputed_order_has_no_module() {
+    let s = setup();
+    let (dm, _arbiter, _filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    assert_eq!(s.ad_manager.dispute_module_of(&h), None);
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    assert!(!dm.is_disputed(&h));
+}
+
+// --- C-31: a module failure is the escrow's own error -------------------------
+
+/// A module that refuses (here: no params for the route) surfaces as the escrow's OWN code for that
+/// refusal (49S-3: `DisputeNoParams`), never as the module's number read under the escrow's enum
+/// (17 would read as `OrderExists`); a host failure stays `DisputeModuleRejected`.
+#[test]
+fn test_c31_a_module_refusal_to_file_is_the_escrows_error() {
+    let s = setup();
+    let dm_addr = Address::generate(&s.env);
+    s.env.register_at(&dm_addr, DISPUTE_MANAGER_WASM, ());
+    let dm = dispute_manager_contract::Client::new(&s.env, &dm_addr);
+    dm.initialize(&s.admin_addr, &s.ad_token_addr);
+    dm.set_escrow(&s.ad_manager.address, &true);
+    s.ad_manager.set_dispute_manager(&dm_addr);
+    let p = locked_ad_order(&s);
+
+    assert_eq!(
+        s.ad_manager
+            .try_dispute(&p, &s.maker_addr, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::DisputeNoParams))
+    );
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Open);
+}
+
+/// The filer answering its own dispute is refused by the module (`NotResponder`); the escrow relays
+/// it as `DisputeNotResponder` (49S-3).
+#[test]
+fn test_c31_a_module_refusal_to_record_a_response_is_the_escrows_error() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    assert_eq!(
+        s.ad_manager
+            .try_respond_to_dispute(&p, &filer, &evidence(&s, 0x11)),
+        Err(Ok(AdErr::DisputeNotResponder))
+    );
+}
+
+// --- 49S-3: the bond transfer, and every relayed code driven through the real module ---------
+
+/// A module wired to the ad-manager whose bonds are held in `bond_token`.
+fn wire_dispute_manager_bonded_in(
+    s: &TestSetup,
+    bond_token: &Address,
+) -> dispute_manager_contract::Client<'static> {
+    let (dm, _arbiter, _filer) = wire_dispute_manager(s);
+    let dm_addr = Address::generate(&s.env);
+    s.env.register_at(&dm_addr, DISPUTE_MANAGER_WASM, ());
+    let bonded = dispute_manager_contract::Client::new(&s.env, &dm_addr);
+    bonded.initialize(&s.admin_addr, bond_token);
+    bonded.set_escrow(&s.ad_manager.address, &true);
+    bonded.set_dispute_params(
+        &s.tp.order_chain_id,
+        &dm.dispute_params(&s.tp.order_chain_id).unwrap(),
+    );
+    s.ad_manager.set_dispute_manager(&dm_addr);
+    bonded
+}
+
+/// A SAC bond the filer holds no trustline for is the transfer fault, never `DisputeBondTooSmall`
+/// (the SAC's own #13, read as the module's number).
+#[test]
+fn test_49s3_a_sac_bond_without_a_trustline_is_the_transfer_fault() {
+    let s = setup();
+    let sac = s
+        .env
+        .register_stellar_asset_contract_v2(s.admin_addr.clone());
+    let dm = wire_dispute_manager_bonded_in(&s, &sac.address());
+    let p = locked_ad_order(&s);
+    assert_eq!(
+        s.ad_manager
+            .try_dispute(&p, &s.maker_addr, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::DisputeBondTransferFailed))
+    );
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Open);
+    assert!(!dm.is_disputed(&s.ad_manager.hash_order(&p)));
+}
+
+/// Mainnet bonds in native XLM: a filer short of the bond is the transfer fault, never
+/// `DisputeExists` (the XLM SAC's #10, read as the module's number).
+#[test]
+fn test_49s3_an_xlm_shortfall_is_the_transfer_fault() {
+    use soroban_sdk::xdr;
+    use soroban_sdk::TryIntoVal;
+    let s = setup();
+    let create = xdr::HostFunction::CreateContract(xdr::CreateContractArgs {
+        contract_id_preimage: xdr::ContractIdPreimage::Asset(xdr::Asset::Native),
+        executable: xdr::ContractExecutable::StellarAsset,
+    });
+    let xlm: Address = s
+        .env
+        .host()
+        .invoke_function(create)
+        .unwrap()
+        .try_into_val(&s.env)
+        .unwrap();
+    // The maker's classic account, holding less XLM than the bond floor.
+    let id = xdr::AccountId(xdr::PublicKey::PublicKeyTypeEd25519(xdr::Uint256(
+        s.tp.ad_creator,
+    )));
+    let key = std::rc::Rc::new(xdr::LedgerKey::Account(xdr::LedgerKeyAccount {
+        account_id: id.clone(),
+    }));
+    let entry = std::rc::Rc::new(xdr::LedgerEntry {
+        data: xdr::LedgerEntryData::Account(xdr::AccountEntry {
+            account_id: id,
+            balance: (DISPUTE_BOND_FLOOR / 2) as i64,
+            flags: 0,
+            home_domain: Default::default(),
+            inflation_dest: None,
+            num_sub_entries: 0,
+            seq_num: xdr::SequenceNumber(0),
+            thresholds: xdr::Thresholds([1; 4]),
+            signers: xdr::VecM::default(),
+            ext: xdr::AccountEntryExt::V0,
+        }),
+        last_modified_ledger_seq: 0,
+        ext: xdr::LedgerEntryExt::V0,
+    });
+    s.env.host().add_ledger_entry(&key, &entry, None).unwrap();
+    assert_eq!(
+        TokenContractClient::new(&s.env, &xlm).balance(&s.maker_addr),
+        (DISPUTE_BOND_FLOOR / 2) as i128,
+        "the maker's account is real and short"
+    );
+
+    let dm = wire_dispute_manager_bonded_in(&s, &xlm);
+    let p = locked_ad_order(&s);
+    assert_eq!(
+        s.ad_manager
+            .try_dispute(&p, &s.maker_addr, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::DisputeBondTransferFailed))
+    );
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Open);
+    assert!(!dm.is_disputed(&s.ad_manager.hash_order(&p)));
+}
+
+/// Module code 3: an escrow the module no longer serves is `DisputeNotEscrow`.
+#[test]
+fn test_49s3_a_module_that_does_not_serve_the_escrow_is_not_escrow() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    dm.set_escrow(&s.ad_manager.address, &false);
+    let p = locked_ad_order(&s);
+    assert_eq!(
+        s.ad_manager.try_dispute(&p, &filer, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::DisputeNotEscrow))
+    );
+}
+
+/// Module code 10: a record the module already holds for this order is `DisputeExists`.
+#[test]
+fn test_49s3_a_record_the_module_already_holds_is_dispute_exists() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    dm.open_dispute(
+        &s.ad_manager.address,
+        &h,
+        &1_000_000,
+        &s.tp.order_chain_id,
+        &filer,
+        &evidence(&s, 0xAA),
+        &p.deadline,
+        &0,
+        &0,
+    );
+    assert_eq!(
+        s.ad_manager.try_dispute(&p, &filer, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::DisputeExists))
+    );
+}
+
+/// Module code 21: a record another escrow opened is `DisputeWrongEscrow` to this one.
+#[test]
+fn test_49s3_a_record_another_escrow_opened_is_wrong_escrow() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    // Swap the module's record for one another served escrow opened on the same hash.
+    dm.settle_bond(
+        &s.ad_manager.address,
+        &h,
+        &dispute_manager_contract::DisputeOutcome::MutualRefund,
+        &false,
+    );
+    let other = Address::generate(&s.env);
+    dm.set_escrow(&other, &true);
+    dm.open_dispute(
+        &other,
+        &h,
+        &1_000_000,
+        &s.tp.order_chain_id,
+        &filer,
+        &evidence(&s, 0xAA),
+        &p.deadline,
+        &0,
+        &0,
+    );
+    let bridger = account_addr(&s, &s.tp.order_recipient);
+    assert_eq!(
+        s.ad_manager
+            .try_respond_to_dispute(&p, &bridger, &evidence(&s, 0x11)),
+        Err(Ok(AdErr::DisputeWrongEscrow))
+    );
+}
+
+/// Every code the escrows relay, produced by the real module and put through the escrows' relay.
+/// Codes 14 and 15 come from the module's permissionless / arbiter doors, which no escrow path
+/// calls; 13 is never raised by the Soroban module (the bond is pulled, not sent).
+#[test]
+fn test_49s3_every_relayed_code_from_the_real_module() {
+    use dispute_manager_contract::DisputeManagerError as DmErr;
+    use proofbridge_core::escrow_ops::{dispute_module_fault, Fault};
+    let relay = |e: soroban_sdk::Error| dispute_module_fault(Ok(e));
+
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    let ev = evidence(&s, 0xEE);
+    let esc = s.ad_manager.address.clone();
+    let chain = s.tp.order_chain_id;
+    let open = |escrow: &Address, h: &BytesN<32>, chain: u128, who: &Address| {
+        dm.try_open_dispute(escrow, h, &1_000_000, &chain, who, &ev, &p.deadline, &0, &0)
+            .unwrap_err()
+            .unwrap()
+    };
+    let stranger = Address::generate(&s.env);
+
+    assert_eq!(
+        relay(open(&stranger, &h, chain, &filer)),
+        Fault::DisputeNotEscrow
+    );
+    assert_eq!(
+        relay(open(&esc, &h, chain + 7, &filer)),
+        Fault::DisputeNoParams
+    );
+    assert_eq!(
+        relay(open(&esc, &h, chain, &Address::generate(&s.env))),
+        Fault::DisputeBondTransferFailed
+    );
+
+    s.ad_manager.dispute(&p, &filer, &ev);
+    assert_eq!(relay(open(&esc, &h, chain, &filer)), Fault::DisputeExists);
+    assert_eq!(
+        relay(dm.try_claim_dispute(&h).unwrap_err().unwrap()),
+        Fault::DisputeChallengeOpen
+    );
+    assert_eq!(
+        relay(
+            dm.try_record_response(&esc, &h, &filer, &ev)
+                .unwrap_err()
+                .unwrap()
+        ),
+        Fault::DisputeNotResponder
+    );
+    dm.set_escrow(&stranger, &true);
+    assert_eq!(
+        relay(
+            dm.try_record_response(&stranger, &h, &filer, &ev)
+                .unwrap_err()
+                .unwrap()
+        ),
+        Fault::DisputeWrongEscrow
+    );
+    warp_past_dispute_window(&s, &dm, &h);
+    assert_eq!(
+        relay(
+            dm.try_resolve_dispute(&h, &dispute_manager_contract::DisputeOutcome::MakerForfeit)
+                .unwrap_err()
+                .unwrap()
+        ),
+        Fault::DisputeChallengeClosed
+    );
+    // The one relayed code the Soroban module cannot raise still maps, for parity with EVM.
+    assert_eq!(
+        relay(soroban_sdk::Error::from(DmErr::BondTooSmall)),
+        Fault::DisputeBondTooSmall
+    );
+}
+
+// --- C-14: the events the dashboard needs ------------------------------------
+
+#[test]
+fn test_c14_finalize_dispute_publishes_the_outcome() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    dm.resolve_dispute(&h, &dispute_manager_contract::DisputeOutcome::MakerForfeit);
+    warp_past_dispute_window(&s, &dm, &h);
+    s.ad_manager.finalize_dispute(&p);
+
+    let got = events_named(&s, &s.ad_manager.address, "dsp_fin");
+    assert_eq!(got.len(), 1, "one DisputeFinalized");
+    assert_eq!(got[0].0[1], scval(&s.env, &h), "topic: the order hash");
+    assert_eq!(
+        got[0].1,
+        scval(
+            &s.env,
+            &dispute_manager_contract::DisputeOutcome::MakerForfeit
+        ),
+        "data: the applied outcome"
+    );
+}
+
+#[test]
+fn test_c14_forfeit_payout_publishes_order_forfeited() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = created_portal_order(&s);
+    let (root, proof) = forfeit_proof(&s);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &root);
+    s.order_portal.pay_maker_by_forfeit(&p, &root, &proof);
+    // Read before any other call: the events are the last invocation's only.
+    let got = events_named(&s, &s.order_portal.address, "ord_forf");
+    let settled = events_named(&s, &s.order_portal.address, "ord_setl");
+
+    let h = s.order_portal.hash_order(&p);
+    assert_eq!(got.len(), 1, "one OrderForfeited");
+    assert_eq!(got[0].0[1], scval(&s.env, &h));
+    assert_eq!(settled.len(), 1, "the settle event is still there");
+}
+
+// --- C-15: the claimable views -------------------------------------------------
+
+#[test]
+fn test_c15_ad_manager_claimable_is_what_claim_pays() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let recipient = bytes32_to_bytesn(&s.env, &s.tp.order_recipient);
+    let token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+    assert_eq!(s.ad_manager.claimable(&recipient, &token), 0);
+
+    let tc = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    tc.set_fail_transfers(&true);
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    tc.set_fail_transfers(&false);
+    let owed = s.ad_manager.claimable(&recipient, &token);
+    assert!(owed > 0, "the payout was credited");
+
+    let who = account_addr(&s, &s.tp.order_recipient);
+    let before = tc.balance(&who);
+    s.ad_manager.claim(&recipient, &token);
+    assert_eq!(
+        tc.balance(&who) - before,
+        owed as i128,
+        "the view is the credit"
+    );
+    assert_eq!(s.ad_manager.claimable(&recipient, &token), 0);
+}
+
+#[test]
+fn test_c15_order_portal_claimable_is_what_claim_pays() {
+    let s = setup();
+    let p = created_portal_order(&s);
+    let recipient = bytes32_to_bytesn(&s.env, &s.tp.ad_recipient);
+    let token = bytes32_to_bytesn(&s.env, &s.tp.order_chain_token);
+    assert_eq!(s.order_portal.claimable(&recipient, &token), 0);
+
+    let tc = TokenContractClient::new(&s.env, &s.order_token_addr);
+    tc.set_fail_transfers(&true);
+    assert_eq!(portal_unlock(&s, &p), Ok(()));
+    tc.set_fail_transfers(&false);
+    assert_eq!(s.order_portal.claimable(&recipient, &token), s.tp.amount);
+
+    let who = account_addr(&s, &s.tp.ad_recipient);
+    let before = tc.balance(&who);
+    s.order_portal.claim(&recipient, &token);
+    assert_eq!(tc.balance(&who) - before, s.tp.amount as i128);
+    assert_eq!(s.order_portal.claimable(&recipient, &token), 0);
+}
+
+// --- C-35: read-only views the EVM side already has ----------------------------
+
+#[test]
+fn test_c35_views_read_the_stored_state() {
+    let s = setup();
+    let nullifier = bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier);
+    let signer = bytes32_to_bytesn(&s.env, &s.tp.ad_settlement_signer);
+    let ad_token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+    let order_token = bytes32_to_bytesn(&s.env, &s.tp.order_chain_token);
+
+    assert_eq!(
+        s.ad_manager.token_route(&ad_token, &s.tp.order_chain_id),
+        Some(order_token.clone())
+    );
+    assert_eq!(s.ad_manager.token_route(&ad_token, &777), None);
+    assert_eq!(
+        s.order_portal.token_route(&order_token, &s.tp.ad_chain_id),
+        Some(ad_token.clone())
+    );
+    assert_eq!(s.ad_manager.registry_epoch(), 1);
+    assert_eq!(s.ad_manager.registry_at(&1), Some(s.key_registry.clone()));
+    assert_eq!(s.ad_manager.registry_at(&2), None);
+
+    assert!(!s.ad_manager.nullifier_used(&nullifier));
+    assert_eq!(s.ad_manager.in_flight_of(&signer), 0);
+    let p = locked_ad_order(&s);
+    assert_eq!(s.ad_manager.in_flight_of(&signer), 1);
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    assert!(s.ad_manager.nullifier_used(&nullifier));
+    assert_eq!(s.ad_manager.in_flight_of(&signer), 0);
+
+    let bridger = bytes32_to_bytesn(&s.env, &s.tp.bridger);
+    let portal_nullifier = bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier);
+    let q = created_portal_order(&s);
+    assert_eq!(s.order_portal.in_flight_of(&bridger), 1);
+    assert!(!s.order_portal.nullifier_used(&portal_nullifier));
+    assert_eq!(portal_unlock(&s, &q), Ok(()));
+    assert!(s.order_portal.nullifier_used(&portal_nullifier));
+    assert_eq!(s.order_portal.in_flight_of(&bridger), 0);
+}
+
+// =============================================================================
+// Soak batch D (C-19): every reachable escrow error, named through an entry point
+// =============================================================================
+//
+// Unreachable variants are listed in the batch D report, not tested: nothing in the contract returns
+// them (a declared discriminant with no return site), or the order leg has no such path.
+
+/// BN254's scalar field modulus, big-endian: the smallest non-canonical input.
+const BN254_PRIME: [u8; 32] = [
+    0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
+    0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
+];
+
+fn zero32(s: &TestSetup) -> BytesN<32> {
+    BytesN::from_array(&s.env, &[0u8; 32])
+}
+
+/// A second fixture order on the ad-manager (next salt), funded and locked.
+fn second_fixture_lock(s: &TestSetup) -> ad_manager_contract::OrderParams {
+    TokenContractClient::new(&s.env, &s.ad_token_addr).mint(&s.maker_addr, &(s.tp.amount as i128));
+    s.ad_manager.fund_ad(&ad_id(s), &s.tp.amount);
+    let mut y = ad_manager_order_params(&s.env, &s.tp);
+    y.salt = soroban_sdk::U256::from_u128(&s.env, s.tp.salt + 1);
+    s.ad_manager.lock_for_order(&y);
+    y
+}
+
+// --- the cross-order nullifier (mirrors evm/test/Admanager.t.sol:945-967) -------------------------
+
+/// A nullifier spent on one order cannot unlock a different, still-open order.
+#[test]
+fn test_c19_ad_manager_nullifier_reuse_across_orders_is_nullifier_used() {
+    let s = setup();
+    let x = locked_ad_order(&s);
+    let y = second_fixture_lock(&s);
+    assert!(ad_unlock(&s, &x, &Bytes::new(&s.env)));
+    let hy = s.ad_manager.hash_order(&y);
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &y,
+            &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &Bytes::new(&s.env),
+        ),
+        Err(Ok(AdErr::NullifierUsed))
+    );
+    assert_eq!(
+        s.ad_manager.get_order_status(&hy),
+        ad_manager_contract::Status::Open,
+        "the second order is untouched"
+    );
+}
+
+#[test]
+fn test_c19_order_portal_nullifier_reuse_across_orders_is_nullifier_used() {
+    let s = setup();
+    let x = created_portal_order(&s);
+    let mut y = order_portal_order_params(&s.env, &s.tp);
+    y.salt = soroban_sdk::U256::from_u128(&s.env, s.tp.salt + 1);
+    let hy = s.order_portal.create_order(&y);
+    assert_eq!(portal_unlock(&s, &x), Ok(()));
+    assert_eq!(portal_unlock(&s, &y), Err(OpErr::NullifierUsed));
+    assert_eq!(
+        s.order_portal.get_order_status(&hy),
+        order_portal_contract::Status::Open,
+        "the second order is untouched"
+    );
+}
+
+/// A nullifier at or above the field prime is refused before any proof is read.
+#[test]
+fn test_c19_non_canonical_nullifier_is_refused_on_both_escrows() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let prime = BytesN::from_array(&s.env, &BN254_PRIME);
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &p,
+            &prime,
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &Bytes::new(&s.env),
+        ),
+        Err(Ok(AdErr::NonCanonicalInput))
+    );
+    let q = created_portal_order(&s);
+    assert_eq!(
+        s.order_portal.try_unlock(
+            &q,
+            &prime,
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
+            &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
+            &Bytes::new(&s.env),
+        ),
+        Err(Ok(OpErr::NonCanonicalInput))
+    );
+}
+
+/// A second unlock of a filled order is refused on its status, before the nullifier.
+#[test]
+fn test_c19_unlock_of_a_filled_order_is_order_not_open() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &p,
+            &bytes32_to_bytesn(&s.env, &[0x07; 32]),
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &Bytes::new(&s.env),
+        ),
+        Err(Ok(AdErr::OrderNotOpen))
+    );
+}
+
+// --- setup and admin -------------------------------------------------------------------------------
+
+/// Before `initialize`, both escrows refuse admin levers.
+#[test]
+fn test_c19_uninitialized_escrows_are_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let am = ad_manager_contract::Client::new(&env, &env.register(AD_MANAGER_WASM, ()));
+    let op = order_portal_contract::Client::new(&env, &env.register(ORDER_PORTAL_WASM, ()));
+    assert_eq!(am.try_pause(), Err(Ok(AdErr::NotInitialized)));
+    assert_eq!(op.try_pause(), Err(Ok(OpErr::NotInitialized)));
+}
+
+/// `accept_admin` with no transfer in progress has nobody to hand to.
+#[test]
+fn test_c19_accept_admin_without_a_transfer_is_not_pending_admin() {
+    let s = setup();
+    assert_eq!(
+        s.ad_manager.try_accept_admin(),
+        Err(Ok(AdErr::NotPendingAdmin))
+    );
+    assert_eq!(
+        s.order_portal.try_accept_admin(),
+        Err(Ok(OpErr::NotPendingAdmin))
+    );
+}
+
+/// A supported chain must name a peer escrow; the order portal also refuses itself as admin.
+#[test]
+fn test_c19_zero_peer_escrow_is_zero_address() {
+    let s = setup();
+    assert_eq!(
+        s.ad_manager.try_set_chain(&777, &zero32(&s), &true),
+        Err(Ok(AdErr::ZeroAddress))
+    );
+    assert_eq!(
+        s.order_portal.try_set_chain(&777, &zero32(&s), &true),
+        Err(Ok(OpErr::ZeroAddress))
+    );
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(ORDER_PORTAL_WASM, ());
+    let op = order_portal_contract::Client::new(&env, &id);
+    let any = Address::generate(&env);
+    assert_eq!(
+        op.try_initialize(&id, &any, &any, &any, &1),
+        Err(Ok(OpErr::ZeroAddress))
+    );
+}
+
+/// A token route must name both tokens.
+#[test]
+fn test_c19_zero_token_route_is_refused() {
+    let s = setup();
+    let order_token = bytes32_to_bytesn(&s.env, &s.tp.order_chain_token);
+    assert_eq!(
+        s.ad_manager
+            .try_set_token_route(&zero32(&s), &order_token, &s.tp.order_chain_id),
+        Err(Ok(AdErr::TokenZeroAddress))
+    );
+    assert_eq!(
+        s.order_portal
+            .try_set_token_route(&order_token, &s.tp.ad_chain_id, &zero32(&s)),
+        Err(Ok(OpErr::RoutesZeroAddress))
+    );
+}
+
+// --- ads -------------------------------------------------------------------------------------------
+
+#[test]
+fn test_c19_create_ad_with_a_zero_token_or_a_used_id_is_refused() {
+    let s = setup();
+    let create = |id: &str, token: &BytesN<32>| {
+        s.ad_manager.try_create_ad(
+            &s.maker_addr,
+            &SorobanString::from_str(&s.env, id),
+            token,
+            &s.tp.amount,
+            &s.tp.order_chain_id,
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_recipient),
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_settlement_signer),
+        )
+    };
+    let token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+    assert_eq!(
+        create("fresh", &zero32(&s)),
+        Err(Ok(AdErr::TokenZeroAddress))
+    );
+    assert_eq!(create(&s.tp.ad_id, &token), Err(Ok(AdErr::UsedAdId)));
+}
+
+#[test]
+fn test_c19_an_unknown_ad_is_ad_not_found() {
+    let s = setup();
+    let nope = SorobanString::from_str(&s.env, "no-such-ad");
+    assert_eq!(
+        s.ad_manager.try_fund_ad(&nope, &1),
+        Err(Ok(AdErr::AdNotFound))
+    );
+    let mut p = ad_manager_order_params(&s.env, &s.tp);
+    p.ad_id = nope;
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p),
+        Err(Ok(AdErr::AdNotFound))
+    );
+}
+
+/// Only unlocked liquidity leaves an ad, and a lock cannot reserve more than is free.
+#[test]
+fn test_c19_more_than_the_free_liquidity_is_insufficient_liquidity() {
+    let s = setup();
+    let to = Address::generate(&s.env);
+    assert_eq!(
+        s.ad_manager
+            .try_withdraw_from_ad(&ad_id(&s), &(s.tp.amount + 1), &to),
+        Err(Ok(AdErr::InsufficientLiquidity))
+    );
+    locked_ad_order(&s);
+    let mut y = ad_manager_order_params(&s.env, &s.tp);
+    y.salt = soroban_sdk::U256::from_u128(&s.env, s.tp.salt + 1);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&y),
+        Err(Ok(AdErr::InsufficientLiquidity))
+    );
+    assert_eq!(
+        s.ad_manager.try_withdraw_from_ad(&ad_id(&s), &1, &to),
+        Err(Ok(AdErr::InsufficientLiquidity))
+    );
+}
+
+#[test]
+fn test_c19_closing_an_ad_with_a_lock_is_active_locks() {
+    let s = setup();
+    locked_ad_order(&s);
+    assert_eq!(
+        s.ad_manager
+            .try_close_ad(&ad_id(&s), &Address::generate(&s.env)),
+        Err(Ok(AdErr::ActiveLocks))
+    );
+    assert!(s.ad_manager.get_ad(&ad_id(&s)).unwrap().open);
+}
+
+// --- locks and orders ------------------------------------------------------------------------------
+
+#[test]
+fn test_c19_create_order_twice_is_order_exists() {
+    let s = setup();
+    let p = created_portal_order(&s);
+    assert_eq!(
+        s.order_portal.try_create_order(&p),
+        Err(Ok(OpErr::OrderExists))
+    );
+}
+
+/// An escrow the merkle manager does not serve cannot append, so it cannot lock or create.
+#[test]
+fn test_c19_a_revoked_merkle_manager_is_merkle_append_failed() {
+    let s = setup();
+    merkle_contract::Client::new(&s.env, &s.ad_merkle_addr)
+        .set_manager(&s.ad_manager.address, &false);
+    let p = ad_manager_order_params(&s.env, &s.tp);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p),
+        Err(Ok(AdErr::MerkleAppendFailed))
+    );
+    assert_eq!(ad_locked(&s), 0, "nothing was reserved");
+
+    merkle_contract::Client::new(&s.env, &s.order_merkle_addr)
+        .set_manager(&s.order_portal.address, &false);
+    let bridger = account_addr(&s, &s.tp.bridger);
+    TokenContractClient::new(&s.env, &s.order_token_addr).mint(&bridger, &(s.tp.amount as i128));
+    let q = order_portal_order_params(&s.env, &s.tp);
+    assert_eq!(
+        s.order_portal.try_create_order(&q),
+        Err(Ok(OpErr::MerkleAppendFailed))
+    );
+}
+
+/// The decimal scaling errors, each through the lock that scales.
+#[test]
+fn test_c19_lock_decimal_errors_are_named() {
+    let s = setup();
+    let base = ad_manager_order_params(&s.env, &s.tp);
+
+    let mut p = base.clone();
+    p.order_decimals = 31;
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p),
+        Err(Ok(AdErr::DecimalsOutOfRange))
+    );
+
+    let mut p = base.clone();
+    p.ad_decimals = s.tp.ad_decimals + 1;
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p),
+        Err(Ok(AdErr::AdDecimalsMismatch))
+    );
+
+    // One more decimal on the order side and an amount not divisible by ten.
+    let mut p = base.clone();
+    p.order_decimals = s.tp.ad_decimals + 1;
+    p.amount = 12_345;
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p),
+        Err(Ok(AdErr::NonExactDownscale))
+    );
+
+    // Upscaling u128::MAX by 10^ad_decimals overflows.
+    let mut p = base;
+    p.order_decimals = 0;
+    p.amount = u128::MAX;
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p),
+        Err(Ok(AdErr::DecimalOverflow))
+    );
+}
+
+/// The order leg checks its own token's decimals and both ranges.
+#[test]
+fn test_c19_create_order_decimal_errors_are_named() {
+    let s = setup();
+    let bridger = account_addr(&s, &s.tp.bridger);
+    TokenContractClient::new(&s.env, &s.order_token_addr).mint(&bridger, &(s.tp.amount as i128));
+    let base = order_portal_order_params(&s.env, &s.tp);
+
+    let mut p = base.clone();
+    p.ad_decimals = 31;
+    assert_eq!(
+        s.order_portal.try_create_order(&p),
+        Err(Ok(OpErr::DecimalsOutOfRange))
+    );
+    let mut p = base;
+    p.order_decimals = s.tp.order_decimals + 1;
+    assert_eq!(
+        s.order_portal.try_create_order(&p),
+        Err(Ok(OpErr::OrderDecimalsMismatch))
+    );
+}
+
+/// The order leg's unlock needs a root verifier for the route, like the ad leg's.
+#[test]
+fn test_c19_order_portal_unlock_without_a_verifier_is_root_verifier_not_set() {
+    let s = setup_with_verifiers(false);
+    let q = created_portal_order(&s);
+    assert_eq!(portal_unlock(&s, &q), Err(OpErr::RootVerifierNotSet));
+}
+
+/// The order leg records SETTLED only for a filled order.
+#[test]
+fn test_c19_order_portal_record_settled_on_an_open_order_is_not_filled() {
+    let s = setup();
+    let q = created_portal_order(&s);
+    assert_eq!(
+        s.order_portal.try_record_settled(&q),
+        Err(Ok(OpErr::NotFilled))
+    );
+}
+
+/// `claim` with no credit pays nothing and says so, on both escrows.
+#[test]
+fn test_c19_claim_with_no_credit_is_nothing_to_claim() {
+    let s = setup();
+    let r = bytes32_to_bytesn(&s.env, &s.tp.order_recipient);
+    let t = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+    assert_eq!(
+        s.ad_manager.try_claim(&r, &t),
+        Err(Ok(AdErr::NothingToClaim))
+    );
+    let r = bytes32_to_bytesn(&s.env, &s.tp.ad_recipient);
+    let t = bytes32_to_bytesn(&s.env, &s.tp.order_chain_token);
+    assert_eq!(
+        s.order_portal.try_claim(&r, &t),
+        Err(Ok(OpErr::NothingToClaim))
+    );
+}
+
+/// Resuming with no halt in force, or twice, is refused.
+#[test]
+fn test_c19_resume_without_a_halt_is_not_halted() {
+    let s = setup();
+    let maker = maker_addr(&s);
+    assert_eq!(
+        s.ad_manager.try_resume_settlement(&maker),
+        Err(Ok(AdErr::NotHalted))
+    );
+    s.ad_manager.halt_settlement(&maker);
+    s.ad_manager.resume_settlement(&maker);
+    assert_eq!(
+        s.ad_manager.try_resume_settlement(&maker),
+        Err(Ok(AdErr::NotHalted))
+    );
+}
+
+// --- disputes --------------------------------------------------------------------------------------
+
+/// No module wired: disputes are unavailable, and the order stays open.
+#[test]
+fn test_c19_dispute_without_a_module_is_no_dispute_manager() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    assert_eq!(
+        s.ad_manager
+            .try_dispute(&p, &s.maker_addr, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::NoDisputeManager))
+    );
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Open);
+}
+
+/// Only an `Open` or `Claimed` leg can be disputed: not one never locked, not one already filled.
+#[test]
+fn test_c19_dispute_on_a_settled_or_absent_order_is_not_disputable() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = ad_manager_order_params(&s.env, &s.tp);
+    assert_eq!(
+        s.ad_manager.try_dispute(&p, &filer, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::NotDisputable)),
+        "never locked"
+    );
+    s.ad_manager.lock_for_order(&p);
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    assert_eq!(
+        s.ad_manager.try_dispute(&p, &filer, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::NotDisputable)),
+        "already filled"
+    );
+}
+
+/// A bystander can neither file nor respond.
+#[test]
+fn test_c19_a_bystander_is_not_a_party() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let stranger = Address::generate(&s.env);
+    TokenContractClient::new(&s.env, &s.ad_token_addr).mint(&stranger, &1_000_000);
+    assert_eq!(
+        s.ad_manager.try_dispute(&p, &stranger, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::NotAParty))
+    );
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    assert_eq!(
+        s.ad_manager
+            .try_respond_to_dispute(&p, &stranger, &evidence(&s, 0x11)),
+        Err(Ok(AdErr::NotAParty))
+    );
+}
+
+/// The filer answering their own dispute: the escrow passes it (the maker is a party), the module
+/// refuses it, and the responder slot stays empty for the real counterparty.
+#[test]
+fn test_c19_the_filer_cannot_respond_to_their_own_dispute() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    assert_eq!(
+        s.ad_manager
+            .try_respond_to_dispute(&p, &filer, &evidence(&s, 0x11)),
+        Err(Ok(AdErr::DisputeNotResponder))
+    );
+    assert_eq!(
+        dm.get_dispute(&h).unwrap().responder_evidence,
+        zero32(&s),
+        "the filer wrote nothing"
+    );
+    let bridger = account_addr(&s, &s.tp.order_recipient);
+    s.ad_manager
+        .respond_to_dispute(&p, &bridger, &evidence(&s, 0x22));
+    assert_eq!(
+        dm.get_dispute(&h).unwrap().responder_evidence,
+        evidence(&s, 0x22)
+    );
+}
+
+/// 49S-5: the per-order dispute-module row is what a later `finalize_dispute` resolves against; it
+/// must carry the persistent bump like every other fund-relevant write (C-13).
+#[test]
+fn test_49s5_the_per_order_dispute_module_row_gets_its_ttl_extended() {
+    use proofbridge_core::ttl::{PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD};
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+
+    let ttl = s.env.as_contract(&s.ad_manager.address, || {
+        let key = (soroban_sdk::symbol_short!("dspord"), h.clone());
+        s.env.storage().persistent().get_ttl(&key)
+    });
+    assert!(
+        ttl >= PERSISTENT_BUMP_AMOUNT,
+        "the dispute-module row was written without a TTL bump: {ttl} < {PERSISTENT_BUMP_AMOUNT}"
+    );
+    assert!(ttl > PERSISTENT_LIFETIME_THRESHOLD);
+}
+
+/// Finalize before the module's window closes is `DisputeNotResolved`, ruled or not.
+#[test]
+fn test_c19_finalize_before_the_window_is_dispute_not_resolved() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    assert_eq!(
+        s.ad_manager.try_finalize_dispute(&p),
+        Err(Ok(AdErr::DisputeNotResolved))
+    );
+    dm.resolve_dispute(&h, &dispute_manager_contract::DisputeOutcome::MutualRefund);
+    assert_eq!(
+        s.ad_manager.try_finalize_dispute(&p),
+        Err(Ok(AdErr::DisputeNotResolved))
+    );
+}
+
+// --- the registry's proof door ---------------------------------------------------------------------
+
+/// An anchored root with a proof that is not the registration leaf's: `InvalidLeafProof`.
+#[test]
+fn test_c19_register_by_proof_with_the_wrong_proof_is_invalid_leaf_proof() {
+    let s = setup();
+    let fx = registration_fixture();
+    let (client, account, pk, pop) = vector_registry(&s);
+    let w = wire_proof_registration(&s, &client, true);
+    let root = BytesN::from_array(&s.env, &fx.root);
+    root_anchor_contract::Client::new(&s.env, &w.anchor).anchor(
+        &w.signer,
+        &REGISTRATION_SOURCE_CHAIN,
+        &root,
+        &1,
+    );
+    // A real event claim, for another leaf: it verifies against nothing here.
+    assert_eq!(
+        client.try_register_by_proof(
+            &account,
+            &pk,
+            &pop,
+            &0,
+            &REGISTRATION_SOURCE_CHAIN,
+            &root,
+            &Bytes::from_slice(&s.env, EVENT_CLAIMS[0].1),
+        ),
+        Err(Ok(
+            bls_key_registry_contract::RegistryError::InvalidLeafProof
+        ))
+    );
+    assert!(!client.has_usable_slot(&account));
+}
+
+// =============================================================================
+// Soak batch D (C-28, C-7 / #358): every door metered on the real stack
+// =============================================================================
+//
+// Each door runs against real WASM throughout: the UltraHonk verifier with the fixture proofs, the
+// real CounterpartyVerifier checking a real BLS co-signature (hash_to_g2 + a two-pair pairing), the
+// real BLSKeyRegistry holding both parties' keys, the real merkle manager, root anchor and dispute
+// module. Only the token is a Rust test contract (on chain it is a SAC, which runs no VM either).
+// Auth is mocked, so the ed25519 checks a real transaction pays are not in these figures.
+//
+// Figures are `cost_estimate().resources()` for the one top-level call. "reads" counts every
+// ledger read (in-memory and disk), held to the 200 disk-read limit as if every entry were cold.
+//
+// Measured (SDK 28.0.0-rc.1, env-host 28.0.2, `stellar contract build --optimize`, 2026-09-28):
+//
+//   door                               cpu (insns)  mem (bytes)  reads  writes  write B  event B
+//   ad_manager.lock_for_order           12,689,003    3,128,819     23       7     1624      512
+//   ad_manager.unlock (ZK + BLS)       128,876,824    6,194,001     26       7     1244      492
+//   ad_manager.record_settled           13,094,342    2,936,870     11       5      868      304
+//   ad_manager.present_settled          96,256,426    5,626,083     15       6     1112      288
+//   ad_manager.finalize_cancel          14,542,432    3,225,507     22       8     1556      468
+//   ad_manager.dispute                   4,580,987    2,597,558     16       6     1380      408
+//   ad_manager.finalize_dispute         16,149,125    3,645,815     28      11     1848      668
+//   order_portal.create_order           11,771,978    2,868,358     17       8     1356      784
+//   order_portal.unlock (ZK + BLS)     128,589,809    6,178,710     23       6      684      492
+//   order_portal.record_settled         13,027,084    2,931,506     11       5      868      304
+//   order_portal.present_settled        95,882,109    5,610,782     13       5      552      288
+//   order_portal.refund_by_cancel       95,810,489    5,608,549     13       5      552      468
+//   order_portal.pay_maker_by_forfeit   95,828,999    5,609,158     13       5      552      400
+//
+// The heaviest door, the co-signed unlock, uses 32% of mainnet's CPU and 15% of its memory. The
+// BLS gate is ~32.5M of it: the same unlock behind the mock verifier meters ~96.4M
+// (`test_unlock_metering`). Disk-read bytes are 0 on every door: the test host keeps all state live.
+//
+// Ceilings sit at measured + ~10% so a regression fails here. The mainnet per-transaction limits
+// (SDK 28 `InvocationResourceLimits::mainnet()`, cost_estimate.rs; `Env::default()` also enforces
+// them on every call) are asserted alongside, so a door that could never submit fails too.
+
+const MAINNET_TX_INSTRUCTIONS: i64 = 400_000_000;
+const MAINNET_TX_MEM_BYTES: i64 = 41_943_040;
+const MAINNET_TX_DISK_READ_ENTRIES: u32 = 200;
+const MAINNET_TX_WRITE_ENTRIES: u32 = 200;
+const MAINNET_TX_LEDGER_ENTRIES: u32 = 400;
+const MAINNET_TX_DISK_READ_BYTES: u32 = 200_000;
+const MAINNET_TX_WRITE_BYTES: u32 = 132_096;
+const MAINNET_TX_EVENT_BYTES: u32 = 16_384;
+
+/// One door's asserted ceiling: measured + ~10% on each figure.
+struct Ceil {
+    cpu: i64,
+    mem: i64,
+    reads: u32,
+    writes: u32,
+    write_bytes: u32,
+    events: u32,
+}
+
+/// The last top-level call's resources, printed and held to its ceiling and to mainnet's limits.
+fn meter_door(s: &TestSetup, door: &str, c: Ceil) {
+    let r = s.env.cost_estimate().resources();
+    let reads = r.memory_read_entries + r.disk_read_entries;
+    std::println!(
+        "METER | {door} | cpu {} | mem {} | reads {} | writes {} | write_bytes {} | disk_read_bytes {} | events {}",
+        r.instructions,
+        r.mem_bytes,
+        reads,
+        r.write_entries,
+        r.write_bytes,
+        r.disk_read_bytes,
+        r.contract_events_size_bytes
+    );
+    // The network's limits.
+    assert!(
+        r.instructions <= MAINNET_TX_INSTRUCTIONS,
+        "{door}: over mainnet CPU"
+    );
+    assert!(
+        r.mem_bytes <= MAINNET_TX_MEM_BYTES,
+        "{door}: over mainnet memory"
+    );
+    assert!(
+        reads <= MAINNET_TX_DISK_READ_ENTRIES,
+        "{door}: over mainnet reads"
+    );
+    assert!(
+        r.write_entries <= MAINNET_TX_WRITE_ENTRIES,
+        "{door}: over mainnet writes"
+    );
+    assert!(
+        reads + r.write_entries <= MAINNET_TX_LEDGER_ENTRIES,
+        "{door}: over the mainnet footprint"
+    );
+    assert!(
+        r.disk_read_bytes <= MAINNET_TX_DISK_READ_BYTES,
+        "{door}: over mainnet read bytes"
+    );
+    assert!(
+        r.write_bytes <= MAINNET_TX_WRITE_BYTES,
+        "{door}: over mainnet write bytes"
+    );
+    assert!(
+        r.contract_events_size_bytes <= MAINNET_TX_EVENT_BYTES,
+        "{door}: over mainnet event bytes"
+    );
+    // This door's own regression ceilings.
+    assert!(
+        r.instructions <= c.cpu,
+        "{door}: CPU grew to {} over {}",
+        r.instructions,
+        c.cpu
+    );
+    assert!(
+        r.mem_bytes <= c.mem,
+        "{door}: memory grew to {} over {}",
+        r.mem_bytes,
+        c.mem
+    );
+    assert!(
+        reads <= c.reads,
+        "{door}: reads grew to {reads} over {}",
+        c.reads
+    );
+    assert!(
+        r.write_entries <= c.writes,
+        "{door}: writes grew to {} over {}",
+        r.write_entries,
+        c.writes
+    );
+    assert!(
+        r.write_bytes <= c.write_bytes,
+        "{door}: write bytes grew to {} over {}",
+        r.write_bytes,
+        c.write_bytes
+    );
+    assert!(
+        r.contract_events_size_bytes <= c.events,
+        "{door}: event bytes grew to {} over {}",
+        r.contract_events_size_bytes,
+        c.events
+    );
+}
+
+/// keccak256("ProofBridge.BLSKeyRegistry.PoP.v1"), as the registry's `POP_TAG`.
+fn pop_tag(env: &Env) -> [u8; 32] {
+    env.crypto()
+        .keccak256(&Bytes::from_slice(
+            env,
+            b"ProofBridge.BLSKeyRegistry.PoP.v1",
+        ))
+        .to_bytes()
+        .to_array()
+}
+
+/// A nonce-0 proof of possession for `account` under `who`'s vector key, as the registry checks it.
+fn vector_pop(
+    env: &Env,
+    registry_id: &[u8; 32],
+    chain_id: u128,
+    account: &[u8; 32],
+    who: &str,
+) -> BytesN<192> {
+    use soroban_sdk::crypto::bls12_381::Bls12381Fr as Fr;
+    let v = vector_json();
+    let pk = vhex(&v["keys"][who]["pk"]["uncompressed"]);
+    let mut msg = Bytes::from_slice(env, &pop_tag(env));
+    msg.extend_from_slice(&pad32(chain_id));
+    msg.extend_from_slice(registry_id);
+    msg.extend_from_slice(account);
+    msg.extend_from_slice(&pk);
+    msg.extend_from_slice(&[0u8; 32]);
+    let bls = env.crypto().bls12_381();
+    let h = bls.hash_to_g2(
+        &msg,
+        &Bytes::from_slice(env, b"BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_"),
+    );
+    let sk: [u8; 32] = vhex(&v["keys"][who]["sk"]).try_into().unwrap();
+    bls.g2_mul(&h, &Fr::from_bytes(BytesN::from_array(env, &sk)))
+        .to_bytes()
+}
+
+/// The production root gate end to end: the real BLSKeyRegistry with the fixture's two parties
+/// registered under the vector keys, the real CounterpartyVerifier over it on both escrows, and the
+/// ad-manager reading the same registry. Returns the fixture order's co-signature.
+fn wire_real_stack(s: &TestSetup) -> Bytes {
+    const REGISTRY_ID: [u8; 32] = [0x33; 32];
+    const REGISTRY_CHAIN: u128 = 1_000_002;
+    let v = vector_json();
+    let registry = contract_address(&s.env, &REGISTRY_ID);
+    s.env
+        .register_at(&registry, bls_key_registry_contract::WASM, ());
+    let reg = bls_key_registry_contract::Client::new(&s.env, &registry);
+    reg.initialize(&s.admin_addr, &REGISTRY_CHAIN);
+    for (account, who) in [
+        (s.tp.ad_settlement_signer, "makerBls"),
+        (s.tp.bridger, "bridgerBls"),
+    ] {
+        let pk: [u8; 96] = vhex(&v["keys"][who]["pk"]["uncompressed"])
+            .try_into()
+            .unwrap();
+        let slot = reg.register(
+            &BytesN::from_array(&s.env, &account),
+            &bls_key_registry_contract::OwnerAuth::Stellar(account_addr(s, &account)),
+            &BytesN::from_array(&s.env, &pk),
+            &vector_pop(&s.env, &REGISTRY_ID, REGISTRY_CHAIN, &account, who),
+            &0,
+        );
+        assert_eq!(slot, 0, "the co-signature names slot 0");
+    }
+
+    let module = s.env.register(counterparty_verifier_contract::WASM, ());
+    counterparty_verifier_contract::Client::new(&s.env, &module).initialize(&registry);
+    s.ad_manager
+        .set_root_verifier(&s.tp.order_chain_id, &module);
+    s.order_portal.set_root_verifier(&s.tp.ad_chain_id, &module);
+    s.ad_manager.set_key_registry(&registry);
+
+    cosign(
+        &s.env,
+        &CoSignAuth {
+            order_chain_id: s.tp.order_chain_id,
+            ad_chain_id: s.tp.ad_chain_id,
+            order_hash: s.tp.order_hash,
+            order_chain_root: s.tp.order_root,
+            ad_chain_root: s.tp.ad_root,
+        },
+    )
+}
+
+/// Measured + ~10%, from the table above.
+const fn ceil(cpu: i64, mem: i64, reads: u32, writes: u32, write_bytes: u32, events: u32) -> Ceil {
+    Ceil {
+        cpu,
+        mem,
+        reads,
+        writes,
+        write_bytes,
+        events,
+    }
+}
+
+const LOCK_FOR_ORDER: Ceil = ceil(14_000_000, 3_450_000, 26, 8, 1_787, 564);
+const AD_UNLOCK_REAL: Ceil = ceil(141_800_000, 6_820_000, 29, 8, 1_369, 542);
+const AD_RECORD_SETTLED: Ceil = ceil(14_500_000, 3_240_000, 13, 6, 955, 335);
+const AD_PRESENT_SETTLED: Ceil = ceil(105_900_000, 6_190_000, 17, 7, 1_224, 317);
+const FINALIZE_CANCEL: Ceil = ceil(16_000_000, 3_550_000, 25, 9, 1_712, 515);
+const DISPUTE: Ceil = ceil(5_040_000, 2_860_000, 18, 7, 1_519, 449);
+const FINALIZE_DISPUTE: Ceil = ceil(17_800_000, 4_020_000, 31, 13, 2_033, 735);
+const CREATE_ORDER: Ceil = ceil(13_000_000, 3_160_000, 19, 9, 1_492, 863);
+const OP_UNLOCK_REAL: Ceil = ceil(141_500_000, 6_800_000, 26, 7, 753, 542);
+const OP_RECORD_SETTLED: Ceil = ceil(14_400_000, 3_230_000, 13, 6, 955, 335);
+const OP_PRESENT_SETTLED: Ceil = ceil(105_500_000, 6_180_000, 15, 6, 608, 317);
+const REFUND_BY_CANCEL: Ceil = ceil(105_400_000, 6_170_000, 15, 6, 608, 515);
+const PAY_MAKER_BY_FORFEIT: Ceil = ceil(105_500_000, 6_180_000, 15, 6, 608, 441);
+
+/// The primary: lock, the co-signed unlock with the real BLS gate, then its SETTLED leaf.
+#[test]
+fn test_c28_meter_ad_manager_lock_unlock_record_settled() {
+    let s = setup();
+    let cosig = wire_real_stack(&s);
+    let p = ad_manager_order_params(&s.env, &s.tp);
+
+    s.ad_manager.lock_for_order(&p);
+    meter_door(&s, "ad_manager.lock_for_order", LOCK_FOR_ORDER);
+
+    // The real gate is live: no co-signature, no unlock.
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &p,
+            &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &Bytes::new(&s.env),
+        ),
+        Err(Ok(AdErr::RootNotValid))
+    );
+
+    s.ad_manager.unlock(
+        &p,
+        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+        &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &cosig,
+    );
+    meter_door(&s, "ad_manager.unlock (ZK + BLS)", AD_UNLOCK_REAL);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+
+    s.ad_manager.record_settled(&p);
+    meter_door(&s, "ad_manager.record_settled", AD_RECORD_SETTLED);
+}
+
+/// The follower: create, the co-signed unlock with the real BLS gate, then its SETTLED leaf.
+#[test]
+fn test_c28_meter_order_portal_create_unlock_record_settled() {
+    let s = setup();
+    let cosig = wire_real_stack(&s);
+    let bridger = account_addr(&s, &s.tp.bridger);
+    TokenContractClient::new(&s.env, &s.order_token_addr).mint(&bridger, &(s.tp.amount as i128));
+    let q = order_portal_order_params(&s.env, &s.tp);
+
+    s.order_portal.create_order(&q);
+    meter_door(&s, "order_portal.create_order", CREATE_ORDER);
+
+    // The real gate is live: no co-signature, no unlock.
+    assert_eq!(portal_unlock(&s, &q), Err(OpErr::RootNotValid));
+
+    s.order_portal.unlock(
+        &q,
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
+        &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
+        &cosig,
+    );
+    meter_door(&s, "order_portal.unlock (ZK + BLS)", OP_UNLOCK_REAL);
+    assert_eq!(portal_status(&s), order_portal_contract::Status::Filled);
+
+    s.order_portal.record_settled(&q);
+    meter_door(&s, "order_portal.record_settled", OP_RECORD_SETTLED);
+}
+
+/// The evidence doors, each with its real event proof under a notarized root.
+#[test]
+fn test_c28_meter_the_evidence_doors() {
+    // Primary: SETTLED evidence from the order chain.
+    let s = setup();
+    wire_real_stack(&s);
+    let anchor = wire_anchor(&s);
+    let p = locked_ad_order(&s);
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+    s.ad_manager.present_settled(&p, &root, &proof);
+    meter_door(&s, "ad_manager.present_settled", AD_PRESENT_SETTLED);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+
+    // Follower: SETTLED, CANCEL and FORFEIT evidence from the ad chain, one fresh order each.
+    let (settled_root, settled) = settled_proof(&s);
+    let (cancel_root, cancel) = cancel_proof(&s);
+    let (forfeit_root, forfeit) = forfeit_proof(&s);
+    type Door<'a> = fn(&TestSetup<'a>, &order_portal_contract::OrderParams, &BytesN<32>, &Bytes);
+    let doors: [(&str, BytesN<32>, Bytes, Door, Ceil); 3] = [
+        (
+            "order_portal.present_settled",
+            settled_root,
+            settled,
+            |s, q, r, pr| s.order_portal.present_settled(q, r, pr),
+            OP_PRESENT_SETTLED,
+        ),
+        (
+            "order_portal.refund_by_cancel",
+            cancel_root,
+            cancel,
+            |s, q, r, pr| s.order_portal.refund_by_cancel(q, r, pr),
+            REFUND_BY_CANCEL,
+        ),
+        (
+            "order_portal.pay_maker_by_forfeit",
+            forfeit_root,
+            forfeit,
+            |s, q, r, pr| s.order_portal.pay_maker_by_forfeit(q, r, pr),
+            PAY_MAKER_BY_FORFEIT,
+        ),
+    ];
+    for (door, root, proof, call, ceiling) in doors {
+        let t = setup();
+        wire_real_stack(&t);
+        let anchor = wire_anchor(&t);
+        let q = created_portal_order(&t);
+        let root = BytesN::from_array(&t.env, &root.to_array());
+        let proof = Bytes::from_slice(&t.env, &proof.to_alloc_vec());
+        notarize(&t, &anchor, t.tp.ad_chain_id, &root);
+        call(&t, &q, &root, &proof);
+        meter_door(&t, door, ceiling);
+        assert_ne!(portal_status(&t), order_portal_contract::Status::Open);
+    }
+}
+
+/// The primary's cancel: claim at the deadline, finalize at the window's end.
+#[test]
+fn test_c28_meter_finalize_cancel() {
+    let s = setup();
+    wire_real_stack(&s);
+    wire_anchor(&s);
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+    meter_door(&s, "ad_manager.finalize_cancel", FINALIZE_CANCEL);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Cancelled);
+}
+
+/// A dispute filed through the escrow into the real module, then finalized on the no-ruling fallback.
+#[test]
+fn test_c28_meter_dispute_and_finalize_dispute() {
+    let s = setup();
+    wire_real_stack(&s);
+    wire_anchor(&s);
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
+
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    meter_door(&s, "ad_manager.dispute", DISPUTE);
+
+    warp_past_dispute_window(&s, &dm, &h);
+    s.ad_manager.finalize_dispute(&p);
+    meter_door(&s, "ad_manager.finalize_dispute", FINALIZE_DISPUTE);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Resolved);
 }

@@ -57,6 +57,8 @@ interface IBLSKeyRegistry is IKeyRegistry {
     error BadLength();
     error NotAdmin();
     error NotPendingAdmin();
+    /// @notice The constructor was given no admin (C-37).
+    error ZeroAdmin();
     error EnforcedPause();
     error RegistryFull();
     error NoSuchSlot();

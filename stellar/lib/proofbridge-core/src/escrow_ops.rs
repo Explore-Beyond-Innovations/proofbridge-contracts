@@ -42,6 +42,21 @@ pub enum Fault {
     NotDisputable,
     /// The module's window has not closed, so there is nothing to apply yet.
     DisputeNotResolved,
+    /// C-10: the primary's window has closed, so a dispute can no longer be filed.
+    DisputeWindowClosed,
+    /// C-31: the dispute module trapped or failed in the host; no contract error to relay.
+    DisputeModuleRejected,
+    /// 49S-3: the module's own refusals, relayed so the frontend and relayer can tell them apart.
+    DisputeBondTooSmall,
+    DisputeNoParams,
+    DisputeNotEscrow,
+    DisputeExists,
+    DisputeWrongEscrow,
+    DisputeNotResponder,
+    DisputeChallengeOpen,
+    DisputeChallengeClosed,
+    /// 49S-3: the module could not move the bond (a token refusal, e.g. no trustline or a shortfall).
+    DisputeBondTransferFailed,
     /// A public input at or above the field prime (2.3h, residual 9). Defence in depth: both shipped
     /// verifiers already reject one, but the escrow's nullifier ledger keys on raw bytes, so a
     /// verifier that reduced instead would turn one proof into many nullifiers.
@@ -318,9 +333,15 @@ pub fn open_claim(env: &Env, order_hash: &BytesN<32>, entry: ClaimEntry, finaliz
 // Disputes (2.3g)
 // =============================================================================
 
-/// The module, or `NoDisputeManager`.
+/// The module new filings go to, or `NoDisputeManager`.
 pub fn dispute_manager(env: &Env) -> Result<Address, Fault> {
     storage::get_dispute_manager(env).ok_or(Fault::NoDisputeManager)
+}
+
+/// The module this order was filed with (C-11), or `NoDisputeManager` if it never was. Every call
+/// after filing reads this one, so swapping the escrow's module only affects new filings (D5).
+pub fn order_dispute_manager(env: &Env, order_hash: &BytesN<32>) -> Result<Address, Fault> {
+    storage::get_order_dispute_manager(env, order_hash).ok_or(Fault::NoDisputeManager)
 }
 
 /// `Open | Claimed → Disputed`, with the bond handed straight to the module.
@@ -347,23 +368,55 @@ pub fn open_dispute(
         Status::Open | Status::Claimed => {}
         _ => return Err(Fault::NotDisputable),
     }
+    // C-10 (D4): no filing once the primary's window has closed, so a dispute cannot outlive the
+    // follower's backstop. The last second of the window still files.
+    if env.ledger().timestamp() > window_end(env, order_hash, deadline, buffer) {
+        return Err(Fault::DisputeWindowClosed);
+    }
     let manager = dispute_manager(env)?;
-    let bond = cross_contract::DisputeManagerClient::new(env, &manager).open_dispute(
-        escrow,
-        order_hash,
-        &amount,
-        &peer_chain_id,
-        filer,
-        evidence,
-        &deadline,
-        &buffer,
-        // c41-J: the module adds every second paused past this snapshot, so the order's own (from
-        // the lock, not the filing) makes its floor the primary's window end to the second — a pause
-        // between lock and filing extends the unlock and the dispute alike.
-        &storage::get_order(env, order_hash).paused_at_open,
-    );
+    let bond = cross_contract::DisputeManagerClient::new(env, &manager)
+        .try_open_dispute(
+            escrow,
+            order_hash,
+            &amount,
+            &peer_chain_id,
+            filer,
+            evidence,
+            &deadline,
+            &buffer,
+            // c41-J: the module adds every second paused past this snapshot, so the order's own
+            // (from the lock, not the filing) makes its floor the primary's window end to the
+            // second — a pause between lock and filing extends the unlock and the dispute alike.
+            &storage::get_order(env, order_hash).paused_at_open,
+        )
+        .map_err(dispute_module_fault)?
+        .map_err(|_| Fault::DisputeModuleRejected)?;
+    storage::set_order_dispute_manager(env, order_hash, &manager);
     storage::set_order_status(env, order_hash, Status::Disputed);
     Ok(bond)
+}
+
+/// 49S-3: a `try_*` call into the dispute module fails either with the module's own contract error
+/// (relayed by its discriminant — the DisputeManager's `#[contracterror]` codes) or with a host
+/// failure (a trap, a missing contract), which stays `DisputeModuleRejected`.
+pub fn dispute_module_fault(e: Result<soroban_sdk::Error, soroban_sdk::InvokeError>) -> Fault {
+    use crate::dispute::error_code as code;
+    use soroban_sdk::xdr::ScErrorType;
+    match e {
+        Ok(err) if err.is_type(ScErrorType::Contract) => match err.get_code() {
+            code::NOT_ESCROW => Fault::DisputeNotEscrow,
+            code::DISPUTE_EXISTS => Fault::DisputeExists,
+            code::BOND_TOO_SMALL => Fault::DisputeBondTooSmall,
+            code::CHALLENGE_OPEN => Fault::DisputeChallengeOpen,
+            code::CHALLENGE_CLOSED => Fault::DisputeChallengeClosed,
+            code::NOT_RESPONDER => Fault::DisputeNotResponder,
+            code::NO_DISPUTE_PARAMS => Fault::DisputeNoParams,
+            code::WRONG_ESCROW => Fault::DisputeWrongEscrow,
+            code::BOND_TRANSFER_FAILED => Fault::DisputeBondTransferFailed,
+            _ => Fault::DisputeModuleRejected,
+        },
+        _ => Fault::DisputeModuleRejected,
+    }
 }
 
 /// The module's verdict, once its window has closed. `None` becomes the fallback's mutual refund.
@@ -371,10 +424,12 @@ pub fn dispute_outcome(
     env: &Env,
     order_hash: &BytesN<32>,
 ) -> Result<(DisputeOutcome, Option<Address>), Fault> {
-    let manager = dispute_manager(env)?;
+    let manager = order_dispute_manager(env, order_hash)?;
     let (outcome, window_over, initiator) =
         cross_contract::DisputeManagerClient::new(env, &manager)
-            .outcome_of(order_hash, &storage::get_paused_seconds(env));
+            .try_outcome_of(order_hash, &storage::get_paused_seconds(env))
+            .map_err(dispute_module_fault)?
+            .map_err(|_| Fault::DisputeModuleRejected)?;
     if !window_over {
         return Err(Fault::DisputeNotResolved);
     }
@@ -384,6 +439,15 @@ pub fn dispute_outcome(
         outcome
     };
     Ok((settled, initiator))
+}
+
+/// The dispute's challenge deadline in real time, from the order's own module (#422, C-11).
+pub fn dispute_challenge_deadline(env: &Env, order_hash: &BytesN<32>) -> Result<u64, Fault> {
+    let manager = order_dispute_manager(env, order_hash)?;
+    cross_contract::DisputeManagerClient::new(env, &manager)
+        .try_challenge_deadline_of(order_hash, &storage::get_paused_seconds(env))
+        .map_err(dispute_module_fault)?
+        .map_err(|_| Fault::DisputeModuleRejected)
 }
 
 /// Tell the module the dispute is over so it can route the bond and close its record.
@@ -398,14 +462,11 @@ pub fn settle_bond(
     outcome: DisputeOutcome,
     filer_is_bridger: bool,
 ) -> Result<(), Fault> {
-    let manager = dispute_manager(env)?;
-    cross_contract::DisputeManagerClient::new(env, &manager).settle_bond(
-        escrow,
-        order_hash,
-        &outcome,
-        &filer_is_bridger,
-    );
-    Ok(())
+    let manager = order_dispute_manager(env, order_hash)?;
+    cross_contract::DisputeManagerClient::new(env, &manager)
+        .try_settle_bond(escrow, order_hash, &outcome, &filer_is_bridger)
+        .map_err(dispute_module_fault)?
+        .map_err(|_| Fault::DisputeModuleRejected)
 }
 
 /// Record the counterparty's response. Escrow-only on the module's side, because only the escrow
@@ -417,17 +478,23 @@ pub fn record_response(
     responder: &Address,
     evidence: &BytesN<32>,
 ) -> Result<(), Fault> {
-    let manager = dispute_manager(env)?;
+    let manager = order_dispute_manager(env, order_hash)?;
     cross_contract::DisputeManagerClient::new(env, &manager)
-        .record_response(escrow, order_hash, responder, evidence);
-    Ok(())
+        .try_record_response(escrow, order_hash, responder, evidence)
+        .map_err(dispute_module_fault)?
+        .map_err(|_| Fault::DisputeModuleRejected)
 }
 
 /// Who filed, or `None` when nothing is disputed here. The escrows need it to answer
 /// `filer_is_bridger` on the evidence paths, where no ruling is involved.
-pub fn dispute_filer(env: &Env, order_hash: &BytesN<32>) -> Option<Address> {
-    let manager = storage::get_dispute_manager(env)?;
-    cross_contract::DisputeManagerClient::new(env, &manager).initiator_of(order_hash)
+pub fn dispute_filer(env: &Env, order_hash: &BytesN<32>) -> Result<Option<Address>, Fault> {
+    let Some(manager) = storage::get_order_dispute_manager(env, order_hash) else {
+        return Ok(None);
+    };
+    cross_contract::DisputeManagerClient::new(env, &manager)
+        .try_initiator_of(order_hash)
+        .map_err(dispute_module_fault)?
+        .map_err(|_| Fault::DisputeModuleRejected)
 }
 
 /// Evidence terminated a disputed order, so the dispute is over whatever the arbiter thought.
@@ -445,13 +512,22 @@ pub fn close_dispute_by_evidence(
     order_hash: &BytesN<32>,
     outcome: DisputeOutcome,
     filer_is_bridger: bool,
-) {
-    if let Some(manager) = storage::get_dispute_manager(env) {
-        let client = cross_contract::DisputeManagerClient::new(env, &manager);
-        if client.is_disputed(order_hash) {
-            client.settle_bond(escrow, order_hash, &outcome, &filer_is_bridger);
-        }
+) -> Result<(), Fault> {
+    let Some(manager) = storage::get_order_dispute_manager(env, order_hash) else {
+        return Ok(());
+    };
+    let client = cross_contract::DisputeManagerClient::new(env, &manager);
+    let disputed = client
+        .try_is_disputed(order_hash)
+        .map_err(dispute_module_fault)?
+        .map_err(|_| Fault::DisputeModuleRejected)?;
+    if disputed {
+        client
+            .try_settle_bond(escrow, order_hash, &outcome, &filer_is_bridger)
+            .map_err(dispute_module_fault)?
+            .map_err(|_| Fault::DisputeModuleRejected)?;
     }
+    Ok(())
 }
 
 /// `Open | Claimed → Filled`: close the window, count out. The SETTLED leaf (D8) is appended by
