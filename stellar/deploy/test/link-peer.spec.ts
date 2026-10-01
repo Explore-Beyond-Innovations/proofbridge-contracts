@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { assertPeerCompatible, readEnvFile } from "../src/link.js";
+import { assertPeerCompatible, peerSide, readEnvFile } from "../src/link.js";
 
 const manifest = (over: Record<string, unknown> = {}) =>
   ({ meta: { env: "testnet", vkSha256: "0x" + "ab".repeat(32), ...over } }) as never;
@@ -22,4 +22,11 @@ test("readEnvFile reads KEY=VALUE, skips comments, strips quotes and `export`", 
   const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "env-")), "peer.env");
   fs.writeFileSync(f, ["# clocks", "DEPLOY_ENV=testnet", "export ROUTE_BUFFER_S=1800", 'ROUTE_LONG_BACKSTOP_S="172800"', "", "BROKEN LINE"].join("\n"));
   assert.deepEqual(readEnvFile(f), { DEPLOY_ENV: "testnet", ROUTE_BUFFER_S: "1800", ROUTE_LONG_BACKSTOP_S: "172800" });
+});
+
+// A local route is linked with no env files: the peer side derives from the local defaults.
+test("a local peer with no recorded clocks and no env file derives from the local defaults; any other env stays unchecked", () => {
+  const peer = (env: string) => ({ meta: { env }, contracts: {}, routeTiming: {}, disputeParams: {} }) as never;
+  assert.ok(peerSide(peer("local"), "31337", undefined).timing, "local peer derived");
+  assert.equal(peerSide(peer("testnet"), "31337", undefined).timing, undefined);
 });

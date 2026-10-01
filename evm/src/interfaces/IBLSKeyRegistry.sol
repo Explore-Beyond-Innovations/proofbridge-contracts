@@ -15,17 +15,26 @@ interface IPositionGuard {
  * @notice State changes are authenticated by the owner's wallet signature plus a BLS proof of
  *         possession, never by the invoker (relayable). `register` / `revoke` consume the account
  *         nonce; `setValidUntil` is shorten-only and nonce-free; `registerByProof` (2.1b) enters
- *         on a home-chain leaf proof and ships switched off.
+ *         on a home-chain leaf proof and ships switched off. The owner signature is the one both
+ *         registries accept (2.6 plan 13): one message whose legs name every registry it is for.
  */
 interface IBLSKeyRegistry is IKeyRegistry {
     enum Scheme {
-        Eip712, // EVM-home: typed sig, recovered address must be `account`
-        Sep53 // Stellar-home: ed25519 over SHA256("Stellar Signed Message:\n" || hex(digest))
+        Secp256k1, // EIP-712 over the key message; the recovered address must be `account`'s low 20 bytes
+        Sep53 // ed25519 over SHA256("Stellar Signed Message:\n" || the fixed text); `account` is the key
+    }
+
+    /// One registry a signature is for: its chain, its 32-byte id and its nonce for the account.
+    struct KeyLeg {
+        uint256 chainId;
+        bytes32 registry; // EVM address left-padded, or the Soroban contract id
+        uint256 nonce;
     }
 
     struct OwnerAuth {
         Scheme scheme;
-        bytes data; // Eip712: r||s||v (65 B) · Sep53: abi.encode(r, s, edX, edY)
+        KeyLeg[] legs; // every registry the signature names; a RetireKey names none
+        bytes sig; // Secp256k1: r||s||v (65 B) · Sep53: abi.encode(r, s, edX, edY)
     }
 
     struct KeySlot {
@@ -46,6 +55,8 @@ interface IBLSKeyRegistry is IKeyRegistry {
     event AdminTransferStarted(address indexed from, address indexed to);
     event AdminTransferred(address indexed from, address indexed to);
     event KeyRevoked(bytes32 indexed account, uint256 nonce);
+    /// Review D2: the nonce moved and no slot changed; every signature naming `nonce` here is dead.
+    event RegistrationCancelled(bytes32 indexed account, uint256 nonce);
     event PositionGuardsSet(address[] guards);
 
     error BadNonce();
@@ -66,6 +77,14 @@ interface IBLSKeyRegistry is IKeyRegistry {
     error KeyPreviouslyUsed();
     error BadValidUntil();
     error UnknownScheme();
+    /// The signed legs do not name this registry exactly once at its current nonce, or a retirement names legs.
+    error LegMismatch();
+    /// Review D2: chain time is past the registration's deadline.
+    error DeadlineExpired();
+    /// Review D2: the deadline is more than MAX_REGISTER_TTL past chain time, whoever signed it.
+    error DeadlineTooFar();
+    /// Review D3: the environment is not local, testnet or mainnet.
+    error BadEnv();
     error ProofRegistrationDisabled();
     error ProofRegistrationRefsUnset();
     error SourceNotAllowed(uint256 chainId);
@@ -87,7 +106,8 @@ interface IBLSKeyRegistry is IKeyRegistry {
         OwnerAuth calldata owner,
         bytes calldata blsPubKey,
         bytes calldata pop,
-        uint256 nonce
+        uint256 nonce,
+        uint64 deadline
     ) external returns (uint32 slotId);
     function registerByProof(
         bytes32 account,
@@ -98,8 +118,9 @@ interface IBLSKeyRegistry is IKeyRegistry {
         bytes32 targetRoot,
         bytes calldata proof
     ) external returns (uint32 slotId);
-    function setValidUntil(bytes32 account, OwnerAuth calldata owner, uint32 slotId, uint64 validUntil) external;
+    function setValidUntil(bytes32 account, OwnerAuth calldata owner, bytes32 keyCommitment, uint64 validUntil) external;
     function revoke(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external;
+    function cancel(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external;
 
     // views
     function admin() external view returns (address);
@@ -115,5 +136,7 @@ interface IBLSKeyRegistry is IKeyRegistry {
     function lookup(bytes32 account, uint32 slotId) external view returns (KeySlot memory slot);
     function liveSlots(bytes32 account) external view returns (uint32[] memory);
     function nextSlotId(bytes32 account) external view returns (uint32);
+    function slotOfKey(bytes32 account, bytes32 keyCommitment) external view returns (uint32);
     function domainSeparator() external view returns (bytes32);
+    function keysEnv() external view returns (string memory);
 }

@@ -7,6 +7,7 @@ import {stdJson} from "forge-std/StdJson.sol";
 import {BLSKeyRegistry} from "../src/BLSKeyRegistry.sol";
 import {CounterpartyVerifier} from "../src/CounterpartyVerifier.sol";
 import {CoSign} from "test/utils/CoSign.sol";
+import {OwnerAuthVectors} from "test/utils/OwnerAuthVectors.sol";
 
 /// Vector-driven tests; the Soroban verifier suite consumes the same JSON.
 contract CounterpartyVerifierTest is Test {
@@ -32,7 +33,7 @@ contract CounterpartyVerifierTest is Test {
         vm.chainId(CHAIN_ID);
         vm.warp(T0);
 
-        BLSKeyRegistry impl = new BLSKeyRegistry(address(this));
+        BLSKeyRegistry impl = new BLSKeyRegistry(address(this), "testnet");
         vm.etch(REGISTRY, address(impl).code);
         registry = BLSKeyRegistry(REGISTRY);
         verifier = new CounterpartyVerifier(REGISTRY);
@@ -48,31 +49,21 @@ contract CounterpartyVerifierTest is Test {
     }
 
     function registerBoth() internal {
-        bytes memory sep53Data = abi.encode(
-            uint256(v.readBytes32(".registration.makerOnSepolia.ownerSig.scl.r")),
-            uint256(v.readBytes32(".registration.makerOnSepolia.ownerSig.scl.s")),
-            uint256(v.readBytes32(".registration.makerOnSepolia.ownerSig.scl.edX")),
-            uint256(v.readBytes32(".registration.makerOnSepolia.ownerSig.scl.edY"))
-        );
         registry.register(
             maker,
-            IBLSKeyRegistry.OwnerAuth(IBLSKeyRegistry.Scheme.Sep53, sep53Data),
+            OwnerAuthVectors.auth(v, ".ownerAuth.maker.register[0]"),
             v.readBytes(".registration.makerOnSepolia.pkNative"),
             v.readBytes(".registration.makerOnSepolia.pop"),
-            0
-        );
-
-        bytes memory eip712 = abi.encodePacked(
-            v.readBytes32(".registration.bridgerOnSepolia.ownerSig.sig.r"),
-            v.readBytes32(".registration.bridgerOnSepolia.ownerSig.sig.s"),
-            uint8(v.readUint(".registration.bridgerOnSepolia.ownerSig.sig.v"))
+            0,
+            OwnerAuthVectors.deadline(v, ".ownerAuth.maker.register[0]")
         );
         registry.register(
             bridger,
-            IBLSKeyRegistry.OwnerAuth(IBLSKeyRegistry.Scheme.Eip712, eip712),
+            OwnerAuthVectors.auth(v, ".ownerAuth.bridger.register[0]"),
             v.readBytes(".registration.bridgerOnSepolia.pkNative"),
             v.readBytes(".registration.bridgerOnSepolia.pop"),
-            0
+            0,
+            OwnerAuthVectors.deadline(v, ".ownerAuth.bridger.register[0]")
         );
     }
 
@@ -115,34 +106,25 @@ contract CounterpartyVerifierTest is Test {
         return string.concat(".slots.makerOnSepolia.registrations[", vm.toString(i), "]");
     }
 
-    function sep53(string memory path) internal view returns (IBLSKeyRegistry.OwnerAuth memory) {
-        return IBLSKeyRegistry.OwnerAuth(
-            IBLSKeyRegistry.Scheme.Sep53,
-            abi.encode(
-                uint256(v.readBytes32(string.concat(path, ".scl.r"))),
-                uint256(v.readBytes32(string.concat(path, ".scl.s"))),
-                uint256(v.readBytes32(string.concat(path, ".scl.edX"))),
-                uint256(v.readBytes32(string.concat(path, ".scl.edY")))
-            )
-        );
-    }
-
     function registerMakerSlot(uint256 i) internal returns (uint32) {
+        string memory path = OwnerAuthVectors.registerPath(v, "maker", i);
         return registry.register(
             maker,
-            sep53(string.concat(makerSlotPath(i), ".ownerSig")),
+            OwnerAuthVectors.auth(v, path),
             v.readBytes(string.concat(makerSlotPath(i), ".pkNative")),
             v.readBytes(string.concat(makerSlotPath(i), ".pop")),
-            i
+            i,
+            OwnerAuthVectors.deadline(v, path)
         );
     }
 
-    /// setValidUntil[slotId*2 + (retire ? 0 : 1)] -> value 1 or graceTs.
-    function setMakerValidUntil(uint32 slotId, bool retire) internal {
-        string memory path = string.concat(
-            ".slots.makerOnSepolia.setValidUntil[", vm.toString(uint256(slotId) * 2 + (retire ? 0 : 1)), "].ownerSig"
+    /// ownerAuth.maker.retire[key*2 + (retire ? 0 : 1)] -> value 1 or graceTs, naming key i.
+    function setMakerValidUntil(uint32 key, bool retire) internal {
+        string memory path =
+            string.concat(".ownerAuth.maker.retire[", vm.toString(uint256(key) * 2 + (retire ? 0 : 1)), "]");
+        registry.setValidUntil(
+            maker, OwnerAuthVectors.auth(v, path), OwnerAuthVectors.key(v, path), retire ? 1 : graceTs()
         );
-        registry.setValidUntil(maker, sep53(path), slotId, retire ? 1 : graceTs());
     }
 
     function graceTs() internal view returns (uint64) {
@@ -252,7 +234,7 @@ contract CounterpartyVerifierTest is Test {
             registerMakerSlot(i);
         }
         // #422 D14: the kill expired the slot at the kill, not in 1970; it is prunable 30 days later.
-        vm.warp(T0 + 30 days + 1);
+        vm.warp(graceTs()); // well past the grace; the late register entries are signed for it (D2)
         registerMakerSlot(5); // at cap: prunes slot 0
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.lookup(maker, 0);
@@ -270,19 +252,7 @@ contract CounterpartyVerifierTest is Test {
     }
 
     function test_unregisteredAccountFails() public {
-        registry.revoke(
-            maker,
-            IBLSKeyRegistry.OwnerAuth(
-                IBLSKeyRegistry.Scheme.Sep53,
-                abi.encode(
-                    uint256(v.readBytes32(".registration.makerOnSepolia.revokeAtNonce1.ownerSig.scl.r")),
-                    uint256(v.readBytes32(".registration.makerOnSepolia.revokeAtNonce1.ownerSig.scl.s")),
-                    uint256(v.readBytes32(".registration.makerOnSepolia.revokeAtNonce1.ownerSig.scl.edX")),
-                    uint256(v.readBytes32(".registration.makerOnSepolia.revokeAtNonce1.ownerSig.scl.edY"))
-                )
-            ),
-            1
-        );
+        registry.revoke(maker, OwnerAuthVectors.auth(v, ".ownerAuth.maker.revoke[1]"), 1);
         assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, metadata()));
     }
 

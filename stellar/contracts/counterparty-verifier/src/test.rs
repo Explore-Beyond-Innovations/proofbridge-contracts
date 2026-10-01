@@ -5,7 +5,9 @@
 extern crate std;
 
 use super::*;
-use bls_key_registry::{BlsKeyRegistry, BlsKeyRegistryClient, OwnerAuth};
+use bls_key_registry::{
+    BlsKeyRegistry, BlsKeyRegistryClient, KeyLeg, OwnerAuth, OwnerSig, SignedOwner,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     Env, String as SString,
@@ -53,7 +55,11 @@ fn setup() -> Setup {
     let at = Address::from_string(&SString::from_str(&env, &strkey));
     let registry_addr = env.register_at(&at, BlsKeyRegistry, ());
     let registry = BlsKeyRegistryClient::new(&env, &registry_addr);
-    registry.initialize(&Address::generate(&env), &CHAIN_ID);
+    registry.initialize(
+        &Address::generate(&env),
+        &CHAIN_ID,
+        &SString::from_str(&env, "testnet"),
+    );
 
     for who in ["makerOnStellarTestnet", "bridgerOnStellarTestnet"] {
         let r = &v["registration"][who];
@@ -62,12 +68,20 @@ fn setup() -> Setup {
             let g = stellar_strkey::ed25519::PublicKey(pk.try_into().unwrap()).to_string();
             OwnerAuth::Stellar(Address::from_string(&SString::from_str(&env, &g)))
         } else {
-            let sig = &r["ownerSig"]["sig"];
-            let mut out = [0u8; 65];
-            out[..32].copy_from_slice(&hexval(&sig["r"]));
-            out[32..64].copy_from_slice(&hexval(&sig["s"]));
-            out[64] = sig["v"].as_u64().unwrap() as u8;
-            OwnerAuth::Evm(BytesN::from_array(&env, &out))
+            // 2.6: the bridger's one signature, whose legs name this registry at nonce 0
+            let e = &v["ownerAuth"]["bridger"]["register"][0];
+            let mut legs = soroban_sdk::Vec::new(&env);
+            for l in e["legs"].as_array().unwrap() {
+                legs.push_back(KeyLeg {
+                    chain_id: l["chainId"].as_str().unwrap().parse().unwrap(),
+                    registry: bn::<32>(&env, &l["registry"]),
+                    nonce: l["nonce"].as_str().unwrap().parse().unwrap(),
+                });
+            }
+            OwnerAuth::Signed(SignedOwner {
+                legs,
+                sig: OwnerSig::Secp256k1(bn::<65>(&env, &e["sig"])),
+            })
         };
         registry.register(
             &bn::<32>(&env, &r["account"]),
@@ -75,6 +89,12 @@ fn setup() -> Setup {
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &0,
+            // the bridger's signed deadline (`_meta.deadline.register`); require_auth takes any in range
+            &v["ownerAuth"]["_meta"]["deadline"]["register"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap(),
         );
     }
 
@@ -189,14 +209,17 @@ impl Setup {
             &bn::<96>(&self.env, &r["pkNative"]),
             &bn::<192>(&self.env, &r["pop"]),
             &(i as u64),
+            &(self.env.ledger().timestamp() + 3_600), // require_auth: any deadline within 7 days
         )
     }
 
-    fn set_maker_valid_until(&self, slot_id: u32, valid_until: u64) {
+    /// Retires the key in slots registration `i` (named by its fingerprint, 2.6).
+    fn set_maker_valid_until(&self, i: u32, valid_until: u64) {
+        let fp = &self.v["ownerAuth"]["maker"]["register"][i as usize]["keyCommitment"];
         self.registry().set_valid_until(
             &self.maker_account(),
             &self.maker_owner(),
-            &slot_id,
+            &bn::<32>(&self.env, fp),
             &valid_until,
         );
     }

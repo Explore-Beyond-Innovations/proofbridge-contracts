@@ -40,7 +40,7 @@ use proofbridge_core::rate_limit::{self, Bucket, Limit};
 
 pub use auth::{AccountSig, Ed25519Sig, SecpSig};
 pub use errors::AccountError;
-pub use escrow::{required_settlement_signer, settlement_signer_of};
+pub use escrow::settlement_signer_of;
 pub use policy::{
     lock_for_order, AccountVolume, AgentId, AgentPolicy, MAX_AD_SCOPE, MAX_ALLOWED_ACTIONS,
     MAX_TARGETS, MAX_WHITELIST_TOKENS, SCHEMA_VERSION,

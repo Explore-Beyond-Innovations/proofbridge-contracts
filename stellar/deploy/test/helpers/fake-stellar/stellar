@@ -10,5 +10,7 @@ if [ "$1 $2" = "network info" ]; then
   printf '{"protocol_version":23,"passphrase":"%s"}\n' "$FAKE_STELLAR_PASSPHRASE"; exit 0
 fi
 if [ "$1 $2" = "keys address" ]; then echo "${FAKE_STELLAR_ADDRESS:-}"; exit 0; fi
+# the key registry's environment view, when a spec names one (2.6 D3)
+case "$*" in *" -- keys_env"*) if [ -n "${FAKE_STELLAR_KEYS_ENV:-}" ]; then printf '"%s"\n' "$FAKE_STELLAR_KEYS_ENV"; exit 0; fi;; esac
 echo "fake stellar: no answer for $*" >&2
 exit 1

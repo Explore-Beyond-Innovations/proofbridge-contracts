@@ -70,6 +70,14 @@ first transaction. A call to a contract whose admin is no longer the signer is *
 command exits 2. A contract deployed fresh after the handover has the deployer as admin, is wired
 in that run, and needs its own `handover`.
 
+### `retirements-audit --file <vault-export.json>`
+
+A one-off check (review 50-4): each pre-signed retirement in the relayer vault's export
+(`[{ account, keyCommitment, validUntil, scheme, sig, evmSig }]`) is replayed against this chain's
+registry as a simulated `setValidUntil` and listed as `current`, `stale-format` (signed under an
+older RetireKey message; collect it again), `no-slot` or `already-shorter`. Exits 1 when any row is
+stale or could not be checked.
+
 ## Environment
 
 | Variable | Default | Purpose |

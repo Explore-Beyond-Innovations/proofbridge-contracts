@@ -11,12 +11,15 @@ import {IVerifier} from "./Verifier.sol";
 import {RegistrationSubject} from "./libraries/RegistrationSubject.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {LeafDomain} from "./libraries/LeafDomain.sol";
+import {KeyMessages} from "./libraries/KeyMessages.sol";
+import {ShortString, ShortStrings} from "@openzeppelin/contracts/utils/ShortStrings.sol";
 
 /// @title BLSKeyRegistry v2 — maps a 32-byte account id to up to five BLS key slots.
 /// @notice State changes are authenticated by the owner's wallet sig + BLS
 ///         proof-of-possession, never by msg.sender. `register` / `revoke` consume
 ///         the per-account nonce; `setValidUntil` is shorten-only and nonce-free so
-///         a pre-signed retirement never expires (design 03 §3.4, 05 §5.6).
+///         a pre-signed retirement never expires (design 03 §3.4, 05 §5.6). One owner
+///         signature serves both registries (2.6 plan 13, `KeyMessages`).
 contract BLSKeyRegistry is IBLSKeyRegistry {
     struct RegistryEntry {
         uint32 nextSlotId; // monotonic, never reused
@@ -26,21 +29,16 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
 
     uint32 public constant MAX_ACTIVE_SLOTS = 5;
     uint64 public constant GRACE_PERIOD = 30 days;
+    /// Review D2: a registration deadline more than this past chain time is refused.
+    uint64 public constant MAX_REGISTER_TTL = 7 days;
+    /// secp256k1 n / 2: a larger s is the malleable twin, refused (review D1).
+    uint256 private constant SECP256K1_HALF_N = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
 
     string public constant DST_POP = "BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
-    bytes32 private constant REG_TAG = keccak256("ProofBridge.BLSKeyRegistry.Register.v1");
-    bytes32 private constant REVOKE_TAG = keccak256("ProofBridge.BLSKeyRegistry.Revoke.v1");
     bytes32 private constant POP_TAG = keccak256("ProofBridge.BLSKeyRegistry.PoP.v1");
-    bytes32 private constant SET_VALID_UNTIL_TAG = keccak256("ProofBridge.BLSKeyRegistry.SetValidUntil.v1");
     /// keccak256 of the 128-byte G1 identity encoding: never a key (it passes a naive PoP pairing).
     bytes32 private constant IDENTITY_COMMITMENT = 0x012893657d8eb2efad4de0a91bcd0e39ad9837745dec3ea923737ea803fc8e3d;
-
-    bytes32 private constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-    bytes32 private constant REGISTER_TYPEHASH = keccak256("Register(bytes blsPubKey,bytes pop,uint256 nonce)");
-    bytes32 private constant REVOKE_TYPEHASH = keccak256("Revoke(uint256 nonce)");
-    bytes32 private constant SET_VALID_UNTIL_TYPEHASH = keccak256("SetValidUntil(uint32 slotId,uint64 validUntil)");
 
     bytes private constant SEP53_PREFIX = "Stellar Signed Message:\n";
 
@@ -52,6 +50,11 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
     address public pendingAdmin;
     bool public paused;
 
+    /// Review D3: the environment the key messages are bound to, fixed at deploy (immutable, so it
+    /// survives a code move) and its EIP-712 domain separator.
+    ShortString private immutable _env;
+    bytes32 private immutable _domainSeparator;
+
     mapping(bytes32 => RegistryEntry) private entries;
 
     mapping(bytes32 => uint256) public nonceOf;
@@ -61,6 +64,8 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
     mapping(bytes32 => mapping(uint32 => uint64)) private expiries;
     /// Any commitment that ever held a slot for the account can never re-enter one.
     mapping(bytes32 => mapping(bytes32 => bool)) public usedCommitment;
+    /// 2.6 D2: the slot a key commitment occupies, plus one (0 = never); `setValidUntil` names the key.
+    mapping(bytes32 => mapping(bytes32 => uint32)) private _slotOfKey;
 
     /// 2.1b — proof-carried registration (design 03 §3.6). Ships flagged OFF: turning it on is a
     /// configuration call, gated in T3 on the anchor writer being the 3.5 quorum, a
@@ -71,9 +76,13 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
     uint256[] private _proofSources;
     bool public proofRegistrationEnabled;
 
-    constructor(address admin_) {
+    constructor(address admin_, string memory env_) {
         if (admin_ == address(0)) revert ZeroAdmin();
+        bytes32 h = keccak256(bytes(env_));
+        if (h != keccak256("local") && h != keccak256("testnet") && h != keccak256("mainnet")) revert BadEnv();
         admin = admin_;
+        _env = ShortStrings.toShortString(env_);
+        _domainSeparator = KeyMessages.domainSeparator(KeyMessages.salt(env_));
     }
 
     function pause() external {
@@ -140,21 +149,20 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         OwnerAuth calldata owner,
         bytes calldata blsPubKey,
         bytes calldata pop,
-        uint256 nonce
+        uint256 nonce,
+        uint64 deadline
     ) external returns (uint32 slotId) {
         if (paused) revert EnforcedPause();
+        if (block.timestamp > deadline) revert DeadlineExpired();
+        if (deadline > block.timestamp + MAX_REGISTER_TTL) revert DeadlineTooFar();
         if (blsPubKey.length != 128 || pop.length != 256) revert BadLength();
         if (nonce != nonceOf[account]) revert BadNonce();
         bytes32 commitment = keccak256(blsPubKey);
         if (commitment == IDENTITY_COMMITMENT) revert IdentityKey();
 
         _requirePop(account, blsPubKey, pop, nonce);
-        checkOwner(
-            account,
-            owner,
-            keccak256(abi.encode(REGISTER_TYPEHASH, commitment, keccak256(pop), nonce)),
-            regDigest(account, blsPubKey, nonce)
-        );
+        _requireOwnLeg(owner.legs, nonce);
+        _checkOwner(account, owner, KeyMessages.Kind.Register, commitment, deadline);
 
         slotId = _addSlot(account, commitment);
         nonceOf[account] = nonce + 1;
@@ -223,18 +231,17 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
     }
 
     /// Shorten-only, nonce-free, never guarded, and not pausable: the retirement lever
-    /// (D6/D9) only ever reduces authority, so a registry pause must not block it.
-    function setValidUntil(bytes32 account, OwnerAuth calldata owner, uint32 slotId, uint64 validUntil) external {
+    /// (D6/D9) only ever reduces authority, so a registry pause must not block it. Names the key,
+    /// not the slot, so one pre-signed `RetireKey` serves every registry (2.6 D1/D2).
+    function setValidUntil(bytes32 account, OwnerAuth calldata owner, bytes32 keyCommitment, uint64 validUntil)
+        external
+    {
+        uint32 slotId = slotOfKey(account, keyCommitment);
         KeySlot storage slot = entries[account].slots[slotId];
-        if (slot.commitment == bytes32(0)) revert NoSuchSlot();
         if (validUntil == 0 || (slot.validUntil != 0 && validUntil >= slot.validUntil)) revert BadValidUntil();
 
-        checkOwner(
-            account,
-            owner,
-            keccak256(abi.encode(SET_VALID_UNTIL_TYPEHASH, slotId, validUntil)),
-            setValidUntilDigest(account, slotId, validUntil)
-        );
+        if (owner.legs.length != 0) revert LegMismatch();
+        _checkOwner(account, owner, KeyMessages.Kind.Retire, keyCommitment, validUntil);
 
         slot.validUntil = validUntil;
         uint64 eff = uint64(block.timestamp) > validUntil ? uint64(block.timestamp) : validUntil;
@@ -243,15 +250,16 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         emit SlotValidUntilSet(account, slotId, validUntil);
     }
 
-    /// Leaves the protocol: drops every slot. Still guarded (t1-design §1.8).
+    /// Leaves the protocol: drops every slot, guarded while there are slots (t1-design §1.8). With
+    /// none it still consumes the nonce, so an owner can kill an unfiled registration (review D2).
     function revoke(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external {
         if (paused) revert EnforcedPause();
         RegistryEntry storage e = entries[account];
-        if (e.liveSlots.length == 0) revert NotRegistered();
         if (nonce != nonceOf[account]) revert BadNonce();
-        _requireNoOpenPositions(account);
+        if (e.liveSlots.length != 0) _requireNoOpenPositions(account);
 
-        checkOwner(account, owner, keccak256(abi.encode(REVOKE_TYPEHASH, nonce)), revokeDigest(account, nonce));
+        _requireOwnLeg(owner.legs, nonce);
+        _checkOwner(account, owner, KeyMessages.Kind.Revoke, bytes32(0), 0);
 
         for (uint256 i = 0; i < e.liveSlots.length; i++) {
             delete e.slots[e.liveSlots[i]];
@@ -260,6 +268,17 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         delete e.liveSlots;
         nonceOf[account] = nonce + 1;
         emit KeyRevoked(account, nonce);
+    }
+
+    /// Kills every outstanding signature naming `nonce` here (a pending registration) by consuming
+    /// the nonce; no slot changes, so live keys stay and no guard is asked (review D2).
+    function cancel(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external {
+        if (paused) revert EnforcedPause();
+        if (nonce != nonceOf[account]) revert BadNonce();
+        _requireOwnLeg(owner.legs, nonce);
+        _checkOwner(account, owner, KeyMessages.Kind.Cancel, bytes32(0), 0);
+        nonceOf[account] = nonce + 1;
+        emit RegistrationCancelled(account, nonce);
     }
 
     function _addSlot(bytes32 account, bytes32 commitment) private returns (uint32 slotId) {
@@ -273,6 +292,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         e.slots[slotId] = KeySlot(commitment, 0, uint64(block.timestamp));
         e.liveSlots.push(slotId);
         usedCommitment[account][commitment] = true;
+        _slotOfKey[account][commitment] = slotId + 1;
     }
 
     /// When the slot stopped being usable: `0` while unbounded, else the recorded expiry (#422 D14/D14b).
@@ -362,6 +382,14 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         return entries[account].nextSlotId;
     }
 
+    /// The slot a key occupies while it exists; on EVM the fingerprint is the stored commitment.
+    function slotOfKey(bytes32 account, bytes32 keyCommitment) public view returns (uint32 slotId) {
+        uint32 plusOne = _slotOfKey[account][keyCommitment];
+        if (plusOne == 0) revert NoSuchSlot();
+        slotId = plusOne - 1;
+        if (entries[account].slots[slotId].commitment != keyCommitment) revert NoSuchSlot();
+    }
+
     // =========================================================================
     // Message building
     // =========================================================================
@@ -375,74 +403,78 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         return bytes.concat(POP_TAG, bytes32(block.chainid), registryId(), account, blsPubKey, bytes32(nonce));
     }
 
-    /// keccak256(REG_TAG || chainId || registryId || account || keccak256(pk) || nonce)
-    function regDigest(bytes32 account, bytes calldata blsPubKey, uint256 nonce) private view returns (bytes32) {
-        return keccak256(
-            bytes.concat(REG_TAG, bytes32(block.chainid), registryId(), account, keccak256(blsPubKey), bytes32(nonce))
-        );
-    }
-
-    /// keccak256(REVOKE_TAG || chainId || registryId || account || nonce)
-    function revokeDigest(bytes32 account, uint256 nonce) private view returns (bytes32) {
-        return keccak256(bytes.concat(REVOKE_TAG, bytes32(block.chainid), registryId(), account, bytes32(nonce)));
-    }
-
-    /// keccak256(SET_VALID_UNTIL_TAG || chainId || registryId || account || slotId || validUntil)
-    function setValidUntilDigest(bytes32 account, uint32 slotId, uint64 validUntil) private view returns (bytes32) {
-        return keccak256(
-            bytes.concat(
-                SET_VALID_UNTIL_TAG,
-                bytes32(block.chainid),
-                registryId(),
-                account,
-                bytes32(uint256(slotId)),
-                bytes32(uint256(validUntil))
-            )
-        );
-    }
-
     // =========================================================================
     // Owner auth
     // =========================================================================
 
-    function domainSeparator() public view returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                DOMAIN_TYPEHASH, keccak256("ProofBridge.BLSKeyRegistry"), keccak256("1"), block.chainid, address(this)
-            )
-        );
+    /// The key messages' EIP-712 domain ("ProofBridge Keys", "2", salt): no chain or contract (2.6 D3);
+    /// the salt binds this registry's environment (review D3).
+    function domainSeparator() external view returns (bytes32) {
+        return _domainSeparator;
     }
 
-    /// Scheme dispatch; a new scheme is one more branch (design 03 §3.5).
-    function checkOwner(bytes32 account, OwnerAuth calldata owner, bytes32 structHash, bytes32 digest) private view {
-        if (owner.scheme == Scheme.Eip712) {
-            checkEip712Owner(account, structHash, owner.data);
+    function keysEnv() public view returns (string memory) {
+        return ShortStrings.toString(_env);
+    }
+
+    /// D5 check 1: exactly one leg names this registry (chain, id), whatever its nonce (review 50-3),
+    /// and that leg carries the current nonce.
+    function _requireOwnLeg(KeyLeg[] calldata legs, uint256 nonce) private view {
+        uint256 found;
+        uint256 at;
+        bytes32 self = registryId();
+        for (uint256 i = 0; i < legs.length; i++) {
+            if (legs[i].chainId == block.chainid && legs[i].registry == self) {
+                found++;
+                at = i;
+            }
+        }
+        if (found != 1 || legs[at].nonce != nonce) revert LegMismatch();
+    }
+
+    /// Scheme dispatch (D5 checks 2–3); the text is built only for the ed25519 path.
+    function _checkOwner(
+        bytes32 account,
+        OwnerAuth calldata owner,
+        KeyMessages.Kind kind,
+        bytes32 keyCommitment,
+        uint64 time
+    ) private view {
+        if (owner.scheme == Scheme.Secp256k1) {
+            checkSecp256k1Owner(
+                account, KeyMessages.digest(_domainSeparator, kind, account, keyCommitment, owner.legs, time), owner.sig
+            );
         } else if (owner.scheme == Scheme.Sep53) {
-            checkSep53Owner(account, digest, owner.data);
+            checkSep53Owner(
+                account, KeyMessages.text(bytes(keysEnv()), kind, account, keyCommitment, owner.legs, time), owner.sig
+            );
         } else {
             revert UnknownScheme(); // unreachable today: calldata decoding rejects out-of-range enums
         }
     }
 
-    /// `account` must be 12 zero bytes || the recovered signer address.
-    function checkEip712Owner(bytes32 account, bytes32 structHash, bytes calldata data) private view {
+    /// `account` must be 12 zero bytes || the recovered signer address. Review D1, the rule the TS
+    /// verifier and Soroban share: v in {0, 1, 27, 28} (normalized), s in the low half.
+    function checkSecp256k1Owner(bytes32 account, bytes32 digest, bytes calldata data) private pure {
         if (data.length != 65) revert BadLength();
         if (uint256(account) >> 160 != 0) revert OwnerMismatch();
+        uint8 v = uint8(bytes1(data[64:65]));
+        if (v < 27) v += 27;
+        if (v != 27 && v != 28) revert OwnerMismatch();
+        if (uint256(bytes32(data[32:64])) > SECP256K1_HALF_N) revert OwnerMismatch();
 
-        bytes32 digest = keccak256(abi.encodePacked(hex"1901", domainSeparator(), structHash));
-        address signer = ecrecover(digest, uint8(bytes1(data[64:65])), bytes32(data[0:32]), bytes32(data[32:64]));
+        address signer = ecrecover(digest, v, bytes32(data[0:32]), bytes32(data[32:64]));
         if (signer == address(0) || signer != address(uint160(uint256(account)))) {
             revert OwnerMismatch();
         }
     }
 
-    /// `account` is the raw 32-byte ed25519 pubkey. SEP-53 wallets sign text,
-    /// so the message is the digest's lowercase 0x-hex string:
-    /// SHA256(prefix || "0x…64hex"). Caller supplies the decompressed Edwards
-    /// point; it is checked against `account` and the curve equation, so a
-    /// wrong point cannot verify.
-    function checkSep53Owner(bytes32 account, bytes32 digest, bytes calldata data) private view {
+    /// `account` is the raw 32-byte ed25519 pubkey, never a padded EVM shape. SEP-53 wallets sign
+    /// text: SHA256(prefix || text). Caller supplies the decompressed Edwards point; it is checked
+    /// against `account` and the curve equation, so a wrong point cannot verify.
+    function checkSep53Owner(bytes32 account, bytes memory text, bytes calldata data) private view {
         if (data.length != 128) revert BadLength();
+        if (uint256(account) >> 160 == 0) revert OwnerMismatch();
         (uint256 r, uint256 s, uint256 edX, uint256 edY) = abi.decode(data, (uint256, uint256, uint256, uint256));
 
         if (SCL_sha512.Swap256(SCL_EIP6565.edCompress([edX, edY])) != uint256(account)) {
@@ -454,20 +486,8 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         (extKpub[0], extKpub[1]) = SCL_EIP6565.Edwards2WeierStrass(edX, edY);
         extKpub[4] = uint256(account);
 
-        string memory m = string(bytes.concat(sha256(bytes.concat(SEP53_PREFIX, toHexString(digest)))));
+        string memory m = string(bytes.concat(sha256(bytes.concat(SEP53_PREFIX, text))));
         if (!SCL_EIP6565.Verify_LE(m, r, s, extKpub)) revert OwnerMismatch();
-    }
-
-    /// Lowercase "0x" + 64-hex — the exact string a Stellar wallet signs.
-    function toHexString(bytes32 b) private pure returns (bytes memory out) {
-        bytes16 alphabet = "0123456789abcdef";
-        out = new bytes(66);
-        out[0] = "0";
-        out[1] = "x";
-        for (uint256 i = 0; i < 32; i++) {
-            out[2 + i * 2] = alphabet[uint8(b[i]) >> 4];
-            out[3 + i * 2] = alphabet[uint8(b[i]) & 0x0f];
-        }
     }
 
     /// -x^2 + y^2 == 1 + d*x^2*y^2 (mod p)

@@ -29,9 +29,9 @@ async function freePort(): Promise<number> {
   });
 }
 
-export async function startAnvil(chainId: number): Promise<Anvil> {
+export async function startAnvil(chainId: number, extraArgs: string[] = []): Promise<Anvil> {
   const port = await freePort();
-  const child: ChildProcess = spawn("anvil", ["--port", String(port), "--chain-id", String(chainId), "--silent"], {
+  const child: ChildProcess = spawn("anvil", ["--port", String(port), "--chain-id", String(chainId), "--silent", ...extraArgs], {
     stdio: "ignore",
   });
   let spawnError: Error | undefined;

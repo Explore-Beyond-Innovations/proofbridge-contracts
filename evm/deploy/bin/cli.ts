@@ -6,6 +6,7 @@
 //   evm-deploy deploy-test-tokens [--out <manifest-path>]
 //   evm-deploy link --peer <peer-manifest> [--in <local-manifest>] [--peer-env <peer-env-file>]
 //   evm-deploy handover --to <address> | --verify   [--in <manifest-path>]
+//   evm-deploy retirements-audit --file <vault-export.json> [--in <manifest-path>]
 //
 // Reads EVM_RPC_URL, EVM_ADMIN_PRIVATE_KEY from env. Other knobs:
 //   CHAIN_NAME, DEPLOY_ENV, GIT_COMMIT (ADMIN is refused: the deployer is the admin; see handover),
@@ -16,6 +17,7 @@ import { deployCore } from "../src/deploy-core.js";
 import { deployTestTokens } from "../src/deploy-test-tokens.js";
 import { link } from "../src/link.js";
 import { handover } from "../src/handover.js";
+import { retirementsAudit } from "../src/retirements-audit.js";
 
 function parseFlag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
@@ -61,10 +63,21 @@ async function main(): Promise<void> {
       await handover({ to, verify, manifest: parseFlag(rest, "--in") });
       return;
     }
+    case "retirements-audit": {
+      // Review 50-4: pre-signed retirements the registry no longer accepts must be collected again.
+      const file = parseFlag(rest, "--file");
+      if (!file) {
+        console.error("retirements-audit: --file <vault-export.json> is required");
+        process.exit(2);
+      }
+      const rows = await retirementsAudit({ file, manifest: parseFlag(rest, "--in") });
+      if (rows.some((r) => r.status === "stale-format" || r.status === "unchecked")) process.exit(1);
+      return;
+    }
     default:
       console.error(
         `Unknown command '${cmd ?? ""}'.\n` +
-          "Usage: evm-deploy {deploy|deploy-test-tokens|link|handover} [flags]",
+          "Usage: evm-deploy {deploy|deploy-test-tokens|link|handover|retirements-audit} [flags]",
       );
       process.exit(2);
   }

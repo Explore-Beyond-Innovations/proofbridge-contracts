@@ -3,71 +3,40 @@
 //! proof-of-possession, never by the invoker (relayable). `register` / `revoke`
 //! consume the per-account nonce; `set_valid_until` is shorten-only and
 //! nonce-free so a pre-signed retirement never expires (design 03 §3.4, 05 §5.6).
+//! The owner signature is the one both registries accept (2.6 plan 13, `owner`).
 
 #![no_std]
 
 mod errors;
 mod events;
+mod owner;
 mod storage;
 
 use soroban_sdk::{
-    bytesn, contract, contractclient, contractimpl, contracttype,
+    bytesn, contract, contractclient, contractimpl,
     crypto::bls12_381::{Bls12381G1Affine as G1Affine, Bls12381G2Affine as G2Affine},
-    vec, Address, Bytes, BytesN, ContractExecutable, Env, Vec,
+    vec, Address, Bytes, BytesN, ContractExecutable, Env, String, Vec,
 };
 
 use errors::RegistryError;
+use owner::{check_owner, key_fingerprint, keys_domain_separator, KeyMessage, MAX_REGISTER_TTL};
+pub use owner::{KeyLeg, OwnerAuth, OwnerSig, SignedOwner};
 use proofbridge_core::cross_contract::{self, VerifierClient, LEAF_DOMAIN_REGISTERED};
-use proofbridge_core::eip712::{address_to_bytes32, contract_address_to_bytes32};
+use proofbridge_core::eip712::contract_address_to_bytes32;
 pub use storage::KeySlot;
 
 /// RFC 9380 / IETF BLS proof-of-possession DST.
 pub const DST_POP: &str = "BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
-/// keccak256("ProofBridge.BLSKeyRegistry.Register.v1")
-const REG_TAG: [u8; 32] = [
-    0x6c, 0xd2, 0xef, 0x15, 0x5a, 0x7c, 0x76, 0x75, 0xfe, 0x1d, 0x69, 0xad, 0xb5, 0x3f, 0xf8, 0x6e,
-    0x72, 0x00, 0x54, 0xdf, 0xea, 0x3b, 0xb2, 0x28, 0x70, 0x8b, 0x27, 0x29, 0x60, 0x3a, 0x9b, 0xa8,
-];
-/// keccak256("ProofBridge.BLSKeyRegistry.Revoke.v1")
-const REVOKE_TAG: [u8; 32] = [
-    0xde, 0x96, 0x30, 0x9c, 0xde, 0xa1, 0x14, 0xde, 0xe7, 0x2c, 0x42, 0x59, 0x5e, 0x02, 0xd3, 0x0a,
-    0xe8, 0x19, 0x03, 0xef, 0x82, 0x7b, 0xc2, 0x05, 0x3a, 0x40, 0xcb, 0x90, 0x3f, 0xbc, 0xe2, 0xd3,
-];
 /// keccak256("ProofBridge.BLSKeyRegistry.PoP.v1")
 const POP_TAG: [u8; 32] = [
     0x28, 0xcc, 0x1b, 0x6c, 0x54, 0xf4, 0x22, 0xc0, 0x34, 0x57, 0x07, 0x7b, 0xa8, 0x81, 0x47, 0x10,
     0xc3, 0xdd, 0xb0, 0x7e, 0xe5, 0xb4, 0xa0, 0x68, 0xe9, 0x90, 0xbb, 0x90, 0xc5, 0x62, 0x20, 0x07,
 ];
 
-/// keccak256("ProofBridge.BLSKeyRegistry.SetValidUntil.v1")
-const SET_VALID_UNTIL_TAG: [u8; 32] = [
-    0xd0, 0xc0, 0x00, 0x29, 0xb6, 0x14, 0x56, 0xf2, 0x61, 0xfd, 0xd3, 0xfc, 0x50, 0x14, 0xb3, 0x12,
-    0x5f, 0x02, 0x02, 0x5a, 0xee, 0x7f, 0x21, 0xf0, 0x82, 0x2b, 0x50, 0x38, 0x29, 0x22, 0x83, 0x5a,
-];
-
 pub const MAX_ACTIVE_SLOTS: u32 = 5;
 /// Seconds past valid_until before a slot may be pruned.
 pub const GRACE_PERIOD: u64 = 30 * 24 * 60 * 60;
-
-const ETH_SIGN_PREFIX: &[u8; 28] = b"\x19Ethereum Signed Message:\n32";
-
-const SEP53_PREFIX: &[u8; 24] = b"Stellar Signed Message:\n";
-
-/// How the account owner authorized this state change.
-#[contracttype]
-#[derive(Clone)]
-pub enum OwnerAuth {
-    /// `require_auth`; the address must resolve to `account`.
-    Stellar(Address),
-    /// `r || s || v` secp256k1 personal_sign; recovered address must match `account`.
-    Evm(BytesN<65>),
-    /// `r || s` detached ed25519 over the SEP-53 message of the digest
-    /// (`sha256("Stellar Signed Message:\n" ‖ lowercase 0x-hex)`), the same bytes the EVM
-    /// registry checks; `account` is the signing key. Durable, so a Stellar-home identity can
-    /// pre-sign its retirement (#404, #400 option c).
-    Sep53(BytesN<64>),
-}
 
 /// Escrow-side seam so revoke can refuse while the account has open positions.
 #[contractclient(name = "PositionGuardClient")]
@@ -80,15 +49,29 @@ pub struct BlsKeyRegistry;
 
 #[contractimpl]
 impl BlsKeyRegistry {
-    pub fn initialize(env: Env, admin: Address, chain_id: u128) -> Result<(), RegistryError> {
+    /// `deploy_env` (local / testnet / mainnet) salts the key messages' domain and names the
+    /// Network line (2.6 review D3): a signature for one environment never applies in another.
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        chain_id: u128,
+        deploy_env: String,
+    ) -> Result<(), RegistryError> {
         if storage::is_initialized(&env) {
             return Err(RegistryError::AlreadyInitialized);
         }
+        let domain = keys_domain_separator(&env, &deploy_env)?;
         storage::set_initialized(&env);
         storage::set_admin(&env, &admin);
         storage::set_chain_id(&env, chain_id);
+        storage::set_keys_env(&env, &deploy_env, &domain);
         proofbridge_core::ttl::extend_instance(&env);
-        events::Initialized { admin, chain_id }.publish(&env);
+        events::Initialized {
+            admin,
+            chain_id,
+            deploy_env,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -202,12 +185,21 @@ impl BlsKeyRegistry {
         bls_pub_key: BytesN<96>,
         pop: BytesN<192>,
         nonce: u64,
+        deadline: u64,
     ) -> Result<u32, RegistryError> {
         if !storage::is_initialized(&env) {
             return Err(RegistryError::NotInitialized);
         }
         if storage::is_paused(&env) {
             return Err(RegistryError::ContractPaused);
+        }
+        // D2: refused past the deadline, and when the deadline sits more than 7 days out.
+        let now = env.ledger().timestamp();
+        if now > deadline {
+            return Err(RegistryError::DeadlineExpired);
+        }
+        if deadline - now > MAX_REGISTER_TTL {
+            return Err(RegistryError::DeadlineTooFar);
         }
         if nonce != storage::get_nonce(&env, &account) {
             return Err(RegistryError::BadNonce);
@@ -218,15 +210,23 @@ impl BlsKeyRegistry {
         if !verify_pop(&env, &account, &bls_pub_key, &pop, nonce) {
             return Err(RegistryError::InvalidPop);
         }
-        check_owner(&env, &account, owner, || {
-            reg_digest(&env, &account, &bls_pub_key, nonce)
-        })?;
+        let fingerprint = key_fingerprint(&env, &bls_pub_key);
+        check_owner(
+            &env,
+            &account,
+            owner,
+            KeyMessage::Register {
+                fingerprint: fingerprint.clone(),
+                nonce,
+                deadline,
+            },
+        )?;
 
         let commitment: BytesN<32> = env
             .crypto()
             .keccak256(&Bytes::from_slice(&env, &bls_pub_key.to_array()))
             .to_bytes();
-        let slot_id = add_slot(&env, &account, &commitment)?;
+        let slot_id = add_slot(&env, &account, &commitment, &fingerprint)?;
         storage::set_nonce(&env, &account, nonce + 1);
         proofbridge_core::ttl::extend_instance(&env);
         events::KeyRegistered {
@@ -305,7 +305,12 @@ impl BlsKeyRegistry {
             _ => return Err(RegistryError::InvalidLeafProof),
         }
 
-        let slot_id = add_slot(&env, &account, &commitment)?;
+        let slot_id = add_slot(
+            &env,
+            &account,
+            &commitment,
+            &key_fingerprint(&env, &bls_pub_key),
+        )?;
         proofbridge_core::ttl::extend_instance(&env);
         events::KeyRegisteredByProof {
             account,
@@ -319,25 +324,35 @@ impl BlsKeyRegistry {
     }
 
     /// Shorten-only, nonce-free, never guarded, and not pausable: the retirement lever
-    /// (D6/D9) only ever reduces authority, so a registry pause must not block it.
+    /// (D6/D9) only ever reduces authority, so a registry pause must not block it. Names the key
+    /// by its fingerprint (keccak of the EIP-2537 form), so one pre-signed `RetireKey` serves
+    /// every registry; the slot is found through the map written at registration.
     pub fn set_valid_until(
         env: Env,
         account: BytesN<32>,
         owner: OwnerAuth,
-        slot_id: u32,
+        key_commitment: BytesN<32>,
         valid_until: u64,
     ) -> Result<(), RegistryError> {
         if !storage::is_initialized(&env) {
             return Err(RegistryError::NotInitialized);
         }
+        let slot_id = storage::get_key_slot(&env, &account, &key_commitment)
+            .ok_or(RegistryError::NoSuchSlot)?;
         let mut slot =
             storage::get_slot(&env, &account, slot_id).ok_or(RegistryError::NoSuchSlot)?;
         if valid_until == 0 || (slot.valid_until != 0 && valid_until >= slot.valid_until) {
             return Err(RegistryError::BadValidUntil);
         }
-        check_owner(&env, &account, owner, || {
-            set_valid_until_digest(&env, &account, slot_id, valid_until)
-        })?;
+        check_owner(
+            &env,
+            &account,
+            owner,
+            KeyMessage::Retire {
+                fingerprint: key_commitment,
+                valid_until,
+            },
+        )?;
 
         slot.valid_until = valid_until;
         storage::set_slot(&env, &account, slot_id, &slot);
@@ -357,7 +372,8 @@ impl BlsKeyRegistry {
         Ok(())
     }
 
-    /// Leaves the protocol: drops every slot. Still guarded (t1-design §1.8).
+    /// Leaves the protocol: drops every slot, guarded (t1-design §1.8). With no slots here it only
+    /// bumps the nonce, killing every outstanding signature at this registry (2.6 review D2).
     pub fn revoke(
         env: Env,
         account: BytesN<32>,
@@ -371,16 +387,13 @@ impl BlsKeyRegistry {
             return Err(RegistryError::ContractPaused);
         }
         let mut entry = storage::get_entry(&env, &account);
-        if entry.live.is_empty() {
-            return Err(RegistryError::NotRegistered);
-        }
         if nonce != storage::get_nonce(&env, &account) {
             return Err(RegistryError::BadNonce);
         }
-        require_no_open_positions(&env, &account)?;
-        check_owner(&env, &account, owner, || {
-            revoke_digest(&env, &account, nonce)
-        })?;
+        if !entry.live.is_empty() {
+            require_no_open_positions(&env, &account)?;
+        }
+        check_owner(&env, &account, owner, KeyMessage::Revoke { nonce })?;
 
         for slot_id in entry.live.iter() {
             storage::remove_slot(&env, &account, slot_id);
@@ -390,6 +403,30 @@ impl BlsKeyRegistry {
         storage::set_nonce(&env, &account, nonce + 1);
         proofbridge_core::ttl::extend_instance(&env);
         events::KeyRevoked { account, nonce }.publish(&env);
+        Ok(())
+    }
+
+    /// Kills every outstanding signature naming `nonce` here (a pending registration) by consuming
+    /// the nonce; no slot changes, so live keys stay and no guard is asked (review D2).
+    pub fn cancel_pending(
+        env: Env,
+        account: BytesN<32>,
+        owner: OwnerAuth,
+        nonce: u64,
+    ) -> Result<(), RegistryError> {
+        if !storage::is_initialized(&env) {
+            return Err(RegistryError::NotInitialized);
+        }
+        if storage::is_paused(&env) {
+            return Err(RegistryError::ContractPaused);
+        }
+        if nonce != storage::get_nonce(&env, &account) {
+            return Err(RegistryError::BadNonce);
+        }
+        check_owner(&env, &account, owner, KeyMessage::Cancel { nonce })?;
+        storage::set_nonce(&env, &account, nonce + 1);
+        proofbridge_core::ttl::extend_instance(&env);
+        events::RegistrationCancelled { account, nonce }.publish(&env);
         Ok(())
     }
 
@@ -405,7 +442,7 @@ impl BlsKeyRegistry {
         if slot.valid_until != 0 && env.ledger().timestamp() >= slot.valid_until {
             return Err(RegistryError::SlotExpired);
         }
-        storage::touch(&env, &account, slot_id);
+        storage::touch(&env, &account, slot_id, &slot.fingerprint);
         // C-13: the verifier reads this on every unlock; an idle registry must not archive.
         proofbridge_core::ttl::extend_instance(&env);
         Ok(slot.commitment)
@@ -456,6 +493,12 @@ impl BlsKeyRegistry {
         storage::get_entry(&env, &account).next_slot_id
     }
 
+    /// The slot a key fingerprint occupies (the one `set_valid_until` acts on), while it exists.
+    pub fn slot_of_key(env: Env, account: BytesN<32>, key_commitment: BytesN<32>) -> Option<u32> {
+        storage::get_key_slot(&env, &account, &key_commitment)
+            .filter(|id| storage::get_slot(&env, &account, *id).is_some())
+    }
+
     pub fn is_used(env: Env, account: BytesN<32>, commitment: BytesN<32>) -> bool {
         storage::is_used(&env, &account, &commitment)
     }
@@ -466,6 +509,16 @@ impl BlsKeyRegistry {
 
     pub fn chain_id(env: Env) -> u128 {
         storage::get_chain_id(&env)
+    }
+
+    /// The environment the registry was initialized for (D3).
+    pub fn keys_env(env: Env) -> String {
+        storage::get_keys_env(&env)
+    }
+
+    /// The key messages' EIP-712 domain separator, salted with the environment (D3).
+    pub fn domain_separator(env: Env) -> BytesN<32> {
+        storage::get_domain(&env)
     }
 
     pub fn admin(env: Env) -> Address {
@@ -506,46 +559,6 @@ fn pop_msg(env: &Env, account: &BytesN<32>, bls_pub_key: &BytesN<96>, nonce: u64
     msg
 }
 
-/// reg_digest = keccak256(REG_TAG || chainId || registryId || account || keccak256(pk) || nonce)
-fn reg_digest(env: &Env, account: &BytesN<32>, bls_pub_key: &BytesN<96>, nonce: u64) -> BytesN<32> {
-    let pk_hash = env
-        .crypto()
-        .keccak256(&Bytes::from_slice(env, &bls_pub_key.to_array()));
-    let mut msg = Bytes::from_slice(env, &REG_TAG);
-    msg.extend_from_slice(&chain_id_be32(storage::get_chain_id(env)));
-    msg.extend_from_slice(&contract_address_to_bytes32(env).to_array());
-    msg.extend_from_slice(&account.to_array());
-    msg.extend_from_slice(&pk_hash.to_array());
-    msg.extend_from_slice(&nonce_be32(nonce));
-    env.crypto().keccak256(&msg).to_bytes()
-}
-
-/// revoke_digest = keccak256(REVOKE_TAG || chainId || registryId || account || nonce)
-fn revoke_digest(env: &Env, account: &BytesN<32>, nonce: u64) -> BytesN<32> {
-    let mut msg = Bytes::from_slice(env, &REVOKE_TAG);
-    msg.extend_from_slice(&chain_id_be32(storage::get_chain_id(env)));
-    msg.extend_from_slice(&contract_address_to_bytes32(env).to_array());
-    msg.extend_from_slice(&account.to_array());
-    msg.extend_from_slice(&nonce_be32(nonce));
-    env.crypto().keccak256(&msg).to_bytes()
-}
-
-/// set_valid_until_digest = keccak256(SET_VALID_UNTIL_TAG || chainId || registryId || account || slotId(32) || validUntil(32))
-fn set_valid_until_digest(
-    env: &Env,
-    account: &BytesN<32>,
-    slot_id: u32,
-    valid_until: u64,
-) -> BytesN<32> {
-    let mut msg = Bytes::from_slice(env, &SET_VALID_UNTIL_TAG);
-    msg.extend_from_slice(&chain_id_be32(storage::get_chain_id(env)));
-    msg.extend_from_slice(&contract_address_to_bytes32(env).to_array());
-    msg.extend_from_slice(&account.to_array());
-    msg.extend_from_slice(&nonce_be32(slot_id as u64));
-    msg.extend_from_slice(&nonce_be32(valid_until));
-    env.crypto().keccak256(&msg).to_bytes()
-}
-
 // =============================================================================
 // Verification
 // =============================================================================
@@ -564,6 +577,7 @@ fn add_slot(
     env: &Env,
     account: &BytesN<32>,
     commitment: &BytesN<32>,
+    fingerprint: &BytesN<32>,
 ) -> Result<u32, RegistryError> {
     if storage::is_used(env, account, commitment) {
         return Err(RegistryError::KeyPreviouslyUsed);
@@ -586,10 +600,12 @@ fn add_slot(
             commitment: commitment.clone(),
             valid_until: 0,
             registered_at: env.ledger().timestamp(),
+            fingerprint: fingerprint.clone(),
         },
     );
     storage::set_entry(env, account, &entry);
     storage::set_used(env, account, commitment);
+    storage::set_key_slot(env, account, fingerprint, slot_id);
     Ok(slot_id)
 }
 
@@ -636,63 +652,6 @@ fn prune(env: &Env, account: &BytesN<32>, entry: &mut storage::RegistryEntry) {
     entry.live = kept;
 }
 
-/// Scheme dispatch; a new scheme is one more arm (design 03 §3.5). The digest is
-/// only built for the signature schemes (`require_auth` needs none).
-fn check_owner(
-    env: &Env,
-    account: &BytesN<32>,
-    owner: OwnerAuth,
-    digest: impl FnOnce() -> BytesN<32>,
-) -> Result<(), RegistryError> {
-    match owner {
-        OwnerAuth::Stellar(addr) => {
-            addr.require_auth();
-            if address_to_bytes32(env, &addr) != *account {
-                return Err(RegistryError::OwnerMismatch);
-            }
-            Ok(())
-        }
-        OwnerAuth::Evm(sig) => check_evm_owner(env, account, &digest(), &sig),
-        OwnerAuth::Sep53(sig) => check_sep53_owner(env, account, &digest(), &sig),
-    }
-}
-
-/// `account` is the raw 32-byte ed25519 key; a padded-EVM shape is never one (the mirror of
-/// `check_evm_owner`'s rule). The message is the EVM registry's byte for byte. The host's
-/// ed25519 verify traps on a bad signature — there is no boolean form — so a wrong key
-/// surfaces as a host error, not `OwnerMismatch`; the relayer files nothing it has not verified
-/// off-chain first, and treats the trap as a permanent revert (plan D3).
-fn check_sep53_owner(
-    env: &Env,
-    account: &BytesN<32>,
-    digest: &BytesN<32>,
-    sig: &BytesN<64>,
-) -> Result<(), RegistryError> {
-    let acct = account.to_array();
-    if acct[..12].iter().all(|b| *b == 0) {
-        return Err(RegistryError::OwnerMismatch);
-    }
-    let mut message = Bytes::from_slice(env, SEP53_PREFIX);
-    message.extend_from_slice(&hex_0x_lower(&digest.to_array()));
-    let payload = env.crypto().sha256(&message).to_bytes();
-    env.crypto()
-        .ed25519_verify(account, &Bytes::from(payload), sig);
-    Ok(())
-}
-
-/// Lowercase "0x" + 64 hex — the exact string a Stellar wallet signs.
-fn hex_0x_lower(b: &[u8; 32]) -> [u8; 66] {
-    const ALPHABET: &[u8; 16] = b"0123456789abcdef";
-    let mut out = [0u8; 66];
-    out[0] = b'0';
-    out[1] = b'x';
-    for (i, byte) in b.iter().enumerate() {
-        out[2 + i * 2] = ALPHABET[(byte >> 4) as usize];
-        out[3 + i * 2] = ALPHABET[(byte & 0x0f) as usize];
-    }
-    out
-}
-
 fn require_no_open_positions(env: &Env, account: &BytesN<32>) -> Result<(), RegistryError> {
     if has_open_positions(env, account) {
         return Err(RegistryError::AccountInFlight);
@@ -730,39 +689,6 @@ fn verify_pop(
     let msg_g2 = bls.hash_to_g2(&pop_msg(env, account, bls_pub_key, nonce), &dst);
 
     bls.pairing_check(vec![env, pk, neg_g1], vec![env, msg_g2, sig])
-}
-
-/// `account` must be 12 zero bytes || the recovered personal_sign eth address.
-fn check_evm_owner(
-    env: &Env,
-    account: &BytesN<32>,
-    digest: &BytesN<32>,
-    sig: &BytesN<65>,
-) -> Result<(), RegistryError> {
-    let acct = account.to_array();
-    if acct[..12].iter().any(|b| *b != 0) {
-        return Err(RegistryError::OwnerMismatch);
-    }
-
-    let mut prefixed = Bytes::from_slice(env, ETH_SIGN_PREFIX);
-    prefixed.extend_from_slice(&digest.to_array());
-    let eth_digest = env.crypto().keccak256(&prefixed);
-
-    let sig_arr = sig.to_array();
-    let mut rs = [0u8; 64];
-    rs.copy_from_slice(&sig_arr[..64]);
-    let addr = proofbridge_core::secp::recover_evm_address(
-        env,
-        &eth_digest,
-        &BytesN::from_array(env, &rs),
-        sig_arr[64] as u32,
-    )
-    .ok_or(RegistryError::OwnerMismatch)?;
-
-    if addr[..] != acct[12..] {
-        return Err(RegistryError::OwnerMismatch);
-    }
-    Ok(())
 }
 
 #[cfg(test)]

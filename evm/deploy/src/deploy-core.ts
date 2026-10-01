@@ -16,6 +16,7 @@ import {
   evmRoot,
 } from "./common.js";
 import { namedOutsideLocal, requireDeployEnv, assertChainIdForEnv } from "./deploy-env.js";
+import { assertRegistryEnv, registryEnvOf } from "./keys-env.js";
 import { assertReusedVk, vkRecord, assertVerifierCode } from "./vk.js";
 import {
   contractFactory,
@@ -233,6 +234,10 @@ async function deployCoreRun(
       return address ? [{ label: artifact, artifact, address }] : [];
     });
     heldAdmins = await adminsOf(reusedAdminBearing, (a, f, n) => attachContract(a, f, n, signer));
+
+    // Review D3: a reused key registry must be bound to this environment.
+    const reusedRegistry = existing.contracts.blsKeyRegistry?.address;
+    if (reusedRegistry) assertRegistryEnv(reusedRegistry, await registryEnvOf(reusedRegistry, signer), env);
     foreign = foreignAdmins(deployer, heldAdmins, "evm-deploy");
 
     // A reused pre-2.3c AdManager has no `keyRegistry()`, and the wiring below cannot do without it.
@@ -431,7 +436,7 @@ async function deployCoreRun(
       const f = contractFactoryLinked("BLSKeyRegistry", "BLSKeyRegistry", signer, {
         SCL_EIP6565: sclAddr,
       });
-      const c = await f.deploy(admin, { nonce: nonces.next() });
+      const c = await f.deploy(admin, env, { nonce: nonces.next() });
       await c.deploymentTransaction()?.wait();
       return c as ethers.Contract;
     },

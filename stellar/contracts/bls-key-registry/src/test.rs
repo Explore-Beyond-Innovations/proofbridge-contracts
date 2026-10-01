@@ -17,6 +17,11 @@ const VECTORS: &str = include_str!("../../../../test-vectors/bls-encodings.json"
 const REGISTRY_ID: [u8; 32] = [0x22; 32];
 const CHAIN_ID: u128 = 1_000_002;
 const T0: u64 = 1_700_000_000;
+/// `ownerAuth.*.register[i]` deadline (`_meta.deadline.register`): 72 h after T0.
+const DEADLINE: u64 = 1_700_259_200;
+/// `ownerAuth.*.registerLate[i]` deadline: 72 h after graceTs.
+const LATE_DEADLINE: u64 = 2_000_259_200;
+const MAX_TTL: u64 = 604_800;
 
 fn vectors() -> serde_json::Value {
     serde_json::from_str(VECTORS).unwrap()
@@ -30,14 +35,6 @@ fn bn<const N: usize>(env: &Env, v: &serde_json::Value) -> BytesN<N> {
     let bytes = hexval(v);
     let arr: [u8; N] = bytes.as_slice().try_into().unwrap();
     BytesN::from_array(env, &arr)
-}
-
-fn sig65(env: &Env, owner_sig: &serde_json::Value) -> BytesN<65> {
-    let mut out = [0u8; 65];
-    out[..32].copy_from_slice(&hexval(&owner_sig["sig"]["r"]));
-    out[32..64].copy_from_slice(&hexval(&owner_sig["sig"]["s"]));
-    out[64] = owner_sig["sig"]["v"].as_u64().unwrap() as u8;
-    BytesN::from_array(env, &out)
 }
 
 /// The maker's Stellar wallet address (G-strkey of the vector ed25519 pubkey).
@@ -59,7 +56,28 @@ fn setup() -> (Env, BlsKeyRegistryClient<'static>, serde_json::Value) {
     let contract_id = env.register_at(&at, BlsKeyRegistry, ());
     let client = BlsKeyRegistryClient::new(&env, &contract_id);
 
-    client.initialize(&Address::generate(&env), &CHAIN_ID);
+    client.initialize(
+        &Address::generate(&env),
+        &CHAIN_ID,
+        &SString::from_str(&env, "testnet"),
+    );
+    (env, client, vectors())
+}
+
+/// The same registry initialized for another environment (D3).
+fn setup_env(name: &str) -> (Env, BlsKeyRegistryClient<'static>, serde_json::Value) {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
+    let strkey = stellar_strkey::Contract(REGISTRY_ID).to_string();
+    let at = Address::from_string(&SString::from_str(&env, &strkey));
+    let contract_id = env.register_at(&at, BlsKeyRegistry, ());
+    let client = BlsKeyRegistryClient::new(&env, &contract_id);
+    client.initialize(
+        &Address::generate(&env),
+        &CHAIN_ID,
+        &SString::from_str(&env, name),
+    );
     (env, client, vectors())
 }
 
@@ -80,26 +98,43 @@ fn slot_account(env: &Env, v: &serde_json::Value, who: &str) -> BytesN<32> {
     bn::<32>(env, &v["slots"][who]["account"])
 }
 
-/// The vector says how the owner signed: the maker registers by `require_auth` and retires by a
-/// detached SEP-53 signature (#404); the bridger always signs with its EVM key.
-fn owner_for(
-    env: &Env,
-    v: &serde_json::Value,
-    who: &str,
-    owner_sig: &serde_json::Value,
-) -> OwnerAuth {
-    if who == MAKER {
-        if owner_sig["scheme"] == "sep53-ed25519" {
-            OwnerAuth::Sep53(bn::<64>(env, &owner_sig["sig"]))
-        } else {
-            OwnerAuth::Stellar(maker_owner(env, v))
-        }
+// ---- 2.6 owner auth: `ownerAuth.<maker|bridger>` (one signature, both registries) ----
+
+/// The `ownerAuth` actor for a slots name: the maker signs ed25519 (SEP-53), the bridger secp256k1.
+fn oa<'a>(v: &'a serde_json::Value, who: &str) -> &'a serde_json::Value {
+    &v["ownerAuth"][if who == MAKER { "maker" } else { "bridger" }]
+}
+
+fn legs_of(env: &Env, e: &serde_json::Value) -> Vec<KeyLeg> {
+    let mut legs = Vec::new(env);
+    for l in e["legs"].as_array().into_iter().flatten() {
+        legs.push_back(KeyLeg {
+            chain_id: l["chainId"].as_str().unwrap().parse().unwrap(),
+            registry: bn::<32>(env, &l["registry"]),
+            nonce: l["nonce"].as_str().unwrap().parse().unwrap(),
+        });
+    }
+    legs
+}
+
+fn sig_of(env: &Env, e: &serde_json::Value) -> OwnerSig {
+    if e["scheme"] == "sep53" {
+        OwnerSig::Sep53(bn::<64>(env, &e["sig"]))
     } else {
-        OwnerAuth::Evm(sig65(env, owner_sig))
+        OwnerSig::Secp256k1(bn::<65>(env, &e["sig"]))
     }
 }
 
-/// Registers slot vector i for `who` at nonce i; returns the slot id.
+/// A vector entry as the signed owner auth it is.
+fn signed(env: &Env, e: &serde_json::Value) -> OwnerAuth {
+    signed_with(env, legs_of(env, e), sig_of(env, e))
+}
+
+fn signed_with(_env: &Env, legs: Vec<KeyLeg>, sig: OwnerSig) -> OwnerAuth {
+    OwnerAuth::Signed(SignedOwner { legs, sig })
+}
+
+/// Registers slot vector i for `who` at nonce i under its `ownerAuth.register[i]` signature.
 fn register_slot(
     env: &Env,
     client: &BlsKeyRegistryClient,
@@ -108,12 +143,19 @@ fn register_slot(
     i: usize,
 ) -> u32 {
     let r = slot_reg(v, who, i);
+    // D2: at or after graceTs the clock is past `register[i]`'s deadline; `registerLate[i]` fits it.
+    let (entry, deadline) = if env.ledger().timestamp() >= grace_ts(v) {
+        ("registerLate", LATE_DEADLINE)
+    } else {
+        ("register", DEADLINE)
+    };
     client.register(
         &slot_account(env, v, who),
-        &owner_for(env, v, who, &r["ownerSig"]),
+        &signed(env, &oa(v, who)[entry][i]),
         &bn::<96>(env, &r["pkNative"]),
         &bn::<192>(env, &r["pop"]),
         &(i as u64),
+        &deadline,
     )
 }
 
@@ -121,28 +163,36 @@ fn slot_commitment(env: &Env, v: &serde_json::Value, who: &str, i: usize) -> Byt
     bn::<32>(env, &slot_reg(v, who, i)["commitment"])
 }
 
+/// The fingerprint key i is named by in the owner's messages (keccak of its EIP-2537 form).
+fn fingerprint(env: &Env, v: &serde_json::Value, who: &str, i: usize) -> BytesN<32> {
+    bn::<32>(env, &oa(v, who)["register"][i]["keyCommitment"])
+}
+
 fn grace_ts(v: &serde_json::Value) -> u64 {
     v["slots"]["graceTs"].as_str().unwrap().parse().unwrap()
 }
 
-/// `slots.<who>.setValidUntil[]` is (slotId, validUntil) x {1, graceTs}: index = slotId*2 + (retire ? 0 : 1).
-fn svu_owner(env: &Env, v: &serde_json::Value, who: &str, slot_id: u32, retire: bool) -> OwnerAuth {
-    let e = &v["slots"][who]["setValidUntil"][(slot_id as usize) * 2 + if retire { 0 } else { 1 }];
-    owner_for(env, v, who, &e["ownerSig"])
+/// `ownerAuth.<who>.retire[]` is (key, validUntil) x {1, graceTs}: index = key*2 + (retire ? 0 : 1).
+fn svu_owner(env: &Env, v: &serde_json::Value, who: &str, key: u32, retire: bool) -> OwnerAuth {
+    signed(
+        env,
+        &oa(v, who)["retire"][(key as usize) * 2 + if retire { 0 } else { 1 }],
+    )
 }
 
+/// Retires key i (whatever slot it occupies) under its pre-signed `RetireKey`.
 fn set_valid_until(
     env: &Env,
     client: &BlsKeyRegistryClient,
     v: &serde_json::Value,
     who: &str,
-    slot_id: u32,
+    key: u32,
     retire: bool,
 ) {
     client.set_valid_until(
         &slot_account(env, v, who),
-        &svu_owner(env, v, who, slot_id, retire),
-        &slot_id,
+        &svu_owner(env, v, who, key, retire),
+        &fingerprint(env, v, who, key as usize),
         &if retire { 1 } else { grace_ts(v) },
     );
 }
@@ -172,6 +222,7 @@ fn register_stellar_home_account_via_require_auth() {
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &0,
+        &DEADLINE,
     );
 
     assert_eq!(
@@ -182,16 +233,17 @@ fn register_stellar_home_account_via_require_auth() {
 }
 
 #[test]
-fn register_evm_home_account_via_personal_sign() {
+fn register_evm_home_account_via_secp256k1() {
     let (env, client, v) = setup();
     let r = reg(&v, "bridgerOnStellarTestnet");
 
     client.register(
         &bn::<32>(&env, &r["account"]),
-        &OwnerAuth::Evm(sig65(&env, &r["ownerSig"])),
+        &signed(&env, &oa(&v, BRIDGER)["register"][0]),
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &0,
+        &DEADLINE,
     );
 
     assert_eq!(
@@ -213,6 +265,7 @@ fn revoke_stellar_home_then_key_is_gone() {
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &0,
+        &DEADLINE,
     );
     client.revoke(&account, &OwnerAuth::Stellar(owner), &1);
 
@@ -226,21 +279,9 @@ fn revoke_stellar_home_then_key_is_gone() {
 #[test]
 fn revoke_evm_home_with_nonce1_signature() {
     let (env, client, v) = setup();
-    let r = reg(&v, "bridgerOnStellarTestnet");
-    let account = bn::<32>(&env, &r["account"]);
-
-    client.register(
-        &account,
-        &OwnerAuth::Evm(sig65(&env, &r["ownerSig"])),
-        &bn::<96>(&env, &r["pkNative"]),
-        &bn::<192>(&env, &r["pop"]),
-        &0,
-    );
-    client.revoke(
-        &account,
-        &OwnerAuth::Evm(sig65(&env, &r["revokeAtNonce1"]["ownerSig"])),
-        &1,
-    );
+    let account = slot_account(&env, &v, BRIDGER);
+    register_slot(&env, &client, &v, BRIDGER, 0);
+    client.revoke(&account, &signed(&env, &oa(&v, BRIDGER)["revoke"][1]), &1);
 
     assert_eq!(
         client.try_commitment_at(&account, &0),
@@ -262,14 +303,35 @@ fn reregister_without_fresh_pop_reverts() {
     let pk = bn::<96>(&env, &r["pkNative"]);
     let pop = bn::<192>(&env, &r["pop"]);
 
-    client.register(&account, &OwnerAuth::Stellar(owner.clone()), &pk, &pop, &0);
+    client.register(
+        &account,
+        &OwnerAuth::Stellar(owner.clone()),
+        &pk,
+        &pop,
+        &0,
+        &DEADLINE,
+    );
 
     assert_eq!(
-        client.try_register(&account, &OwnerAuth::Stellar(owner.clone()), &pk, &pop, &0),
+        client.try_register(
+            &account,
+            &OwnerAuth::Stellar(owner.clone()),
+            &pk,
+            &pop,
+            &0,
+            &DEADLINE
+        ),
         Err(Ok(RegistryError::BadNonce))
     );
     assert_eq!(
-        client.try_register(&account, &OwnerAuth::Stellar(owner), &pk, &pop, &1),
+        client.try_register(
+            &account,
+            &OwnerAuth::Stellar(owner),
+            &pk,
+            &pop,
+            &1,
+            &DEADLINE
+        ),
         Err(Ok(RegistryError::InvalidPop))
     );
 }
@@ -287,6 +349,7 @@ fn identity_pubkey_rejected() {
             &bn::<96>(&env, &neg["uncompressed"]),
             &bn::<192>(&env, &r["pop"]),
             &0,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::IdentityKey))
     );
@@ -305,6 +368,7 @@ fn pop_signed_with_wrong_dst_rejected() {
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &neg["pop"]),
             &0,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::InvalidPop))
     );
@@ -322,6 +386,7 @@ fn stellar_owner_that_is_not_the_account_rejected() {
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &0,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::OwnerMismatch))
     );
@@ -331,36 +396,138 @@ fn stellar_owner_that_is_not_the_account_rejected() {
 fn evm_owner_sig_by_wrong_signer_rejected() {
     let (env, client, v) = setup();
     let r = reg(&v, "bridgerOnStellarTestnet");
+    let e = &oa(&v, BRIDGER)["register"][0];
 
     // Flip the recovery parity: recovers a different key → different address.
-    let mut bad = sig65(&env, &r["ownerSig"]).to_array();
+    let mut bad = bn::<65>(&env, &e["sig"]).to_array();
     bad[64] = if bad[64] == 27 { 28 } else { 27 };
 
     assert_eq!(
         client.try_register(
             &bn::<32>(&env, &r["account"]),
-            &OwnerAuth::Evm(BytesN::from_array(&env, &bad)),
+            &signed_with(
+                &env,
+                legs_of(&env, e),
+                OwnerSig::Secp256k1(BytesN::from_array(&env, &bad))
+            ),
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &0,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::OwnerMismatch))
     );
 }
 
+/// D2: with no slots here, revoke skips the guard, bumps the nonce and emits, so a pending
+/// registration signed at the old nonce is dead at this registry.
 #[test]
-fn revoke_unregistered_account_rejected() {
+fn revoke_with_no_slots_bumps_the_nonce_and_kills_a_pending_registration() {
     let (env, client, v) = setup();
-    let r = reg(&v, "makerOnStellarTestnet");
-
+    busy_guard(&env, &client);
+    let account = slot_account(&env, &v, BRIDGER);
+    client.revoke(&account, &signed(&env, &oa(&v, BRIDGER)["revoke"][0]), &0);
+    {
+        use soroban_sdk::{events::Event as _, testutils::Events as _};
+        // `events().all()` holds the last invocation only, so read them before any other call
+        let want = events::KeyRevoked {
+            account: account.clone(),
+            nonce: 0,
+        }
+        .to_xdr(&env, &client.address);
+        let got = env.events().all().filter_by_contract(&client.address);
+        assert!(got.events().contains(&want), "no KeyRevoked: {got:?}");
+    }
+    assert_eq!(client.nonce_of(&account), 1);
+    let r = slot_reg(&v, BRIDGER, 0);
     assert_eq!(
-        client.try_revoke(
-            &bn::<32>(&env, &r["account"]),
-            &OwnerAuth::Stellar(maker_owner(&env, &v)),
+        client.try_register(
+            &account,
+            &signed(&env, &oa(&v, BRIDGER)["register"][0]),
+            &bn::<96>(&env, &r["pkNative"]),
+            &bn::<192>(&env, &r["pop"]),
+            &0,
+            &DEADLINE,
+        ),
+        Err(Ok(RegistryError::BadNonce))
+    );
+    // the maker's Stellar path too
+    let maker = bn::<32>(&env, &reg(&v, "makerOnStellarTestnet")["account"]);
+    client.revoke(&maker, &OwnerAuth::Stellar(maker_owner(&env, &v)), &0);
+    assert_eq!(client.nonce_of(&maker), 1);
+}
+
+/// Review D2 follow-up: cancel at a registry holding an older live key moves the nonce, emits, asks
+/// no guard, and leaves the key live; the pending registration at the old nonce is dead.
+#[test]
+fn cancel_at_a_registry_holding_an_older_live_key_leaves_that_key_live() {
+    let (env, client, v) = setup();
+    busy_guard(&env, &client);
+    for who in [MAKER, BRIDGER] {
+        let account = slot_account(&env, &v, who);
+        let slot = register_slot(&env, &client, &v, who, 0); // nonce 0 -> 1
+        client.cancel_pending(&account, &signed(&env, &oa(&v, who)["cancel"][1]), &1);
+        {
+            use soroban_sdk::{events::Event as _, testutils::Events as _};
+            let want = events::RegistrationCancelled {
+                account: account.clone(),
+                nonce: 1,
+            }
+            .to_xdr(&env, &client.address);
+            let got = env.events().all().filter_by_contract(&client.address);
+            assert!(
+                got.events().contains(&want),
+                "no RegistrationCancelled: {got:?}"
+            );
+        }
+        assert_eq!(client.nonce_of(&account), 2);
+        assert_eq!(
+            client.commitment_at(&account, &slot),
+            slot_commitment(&env, &v, who, 0)
+        );
+        assert_eq!(client.live_slots(&account).len(), 1);
+        let r = slot_reg(&v, who, 1);
+        assert_eq!(
+            client.try_register(
+                &account,
+                &signed(&env, &oa(&v, who)["register"][1]),
+                &bn::<96>(&env, &r["pkNative"]),
+                &bn::<192>(&env, &r["pop"]),
+                &1,
+                &DEADLINE,
+            ),
+            Err(Ok(RegistryError::BadNonce))
+        );
+    }
+}
+
+#[test]
+fn cancel_checks_nonce_legs_and_signature() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, BRIDGER);
+    let a = oa(&v, BRIDGER);
+    assert_eq!(
+        client.try_cancel_pending(&account, &signed(&env, &a["cancel"][1]), &1),
+        Err(Ok(RegistryError::BadNonce))
+    );
+    assert_eq!(
+        client.try_cancel_pending(&account, &signed(&env, &a["cancel"][1]), &0),
+        Err(Ok(RegistryError::LegMismatch))
+    );
+    assert_eq!(
+        client.try_cancel_pending(
+            &account,
+            &signed(&env, &a["cancelSameRegistryTwoNonces"]),
             &0
         ),
-        Err(Ok(RegistryError::NotRegistered))
+        Err(Ok(RegistryError::LegMismatch))
     );
+    // a RevokeKeys signature over the same legs is not a cancel
+    assert_eq!(
+        client.try_cancel_pending(&account, &signed(&env, &a["revoke"][0]), &0),
+        Err(Ok(RegistryError::OwnerMismatch))
+    );
+    assert_eq!(client.nonce_of(&account), 0);
 }
 
 // =============================================================================
@@ -401,6 +568,7 @@ fn revoke_blocked_while_in_flight() {
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &0,
+        &DEADLINE,
     );
 
     let guard = env.register(MockGuard, ());
@@ -428,6 +596,7 @@ fn first_registration_ignores_busy_guards() {
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &0,
+        &DEADLINE,
     );
     assert_eq!(
         client.commitment_at(&account, &0),
@@ -453,7 +622,8 @@ fn pause_blocks_register_and_revoke_but_not_retirement() {
             &OwnerAuth::Stellar(owner.clone()),
             &bn::<96>(&env, &r1["pkNative"]),
             &bn::<192>(&env, &r1["pop"]),
-            &1
+            &1,
+            &DEADLINE
         ),
         Err(Ok(RegistryError::ContractPaused))
     );
@@ -541,6 +711,7 @@ fn sixth_slot_reverts_registry_full() {
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &5,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::RegistryFull))
     );
@@ -620,14 +791,15 @@ fn register_at_cap_keeps_a_dead_slot_while_in_flight_until_the_grace() {
     assert_eq!(
         client.try_register(
             &account,
-            &owner_for(&env, &v, MAKER, &r["ownerSig"]),
+            &signed(&env, &oa(&v, MAKER)["register"][5]),
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &5,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::RegistryFull))
     );
-    env.ledger().set_timestamp(T0 + 30 * 86_400 + 1);
+    env.ledger().set_timestamp(grace_ts(&v)); // past the 30-day grace, in registerLate's window
     assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
     assert_eq!(client.lookup(&account, &2), None);
 }
@@ -646,14 +818,15 @@ fn register_at_cap_no_guard_wired_keeps_a_dead_slot_until_the_grace() {
     assert_eq!(
         client.try_register(
             &account,
-            &owner_for(&env, &v, MAKER, &r["ownerSig"]),
+            &signed(&env, &oa(&v, MAKER)["register"][5]),
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &5,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::RegistryFull))
     );
-    env.ledger().set_timestamp(T0 + 30 * 86_400 + 1);
+    env.ledger().set_timestamp(grace_ts(&v)); // past the 30-day grace, in registerLate's window
     assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
     assert_eq!(client.lookup(&account, &2), None);
 }
@@ -695,6 +868,7 @@ fn in_grace_slot_is_not_pruned() {
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &5,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::RegistryFull))
     );
@@ -714,6 +888,7 @@ fn reused_key_rejected() {
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &0,
+        &DEADLINE,
     );
     assert_eq!(
         client.try_register(
@@ -722,6 +897,7 @@ fn reused_key_rejected() {
             &bn::<96>(&env, &rot["pkNative"]),
             &bn::<192>(&env, &rot["pop"]),
             &1,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::KeyPreviouslyUsed))
     );
@@ -742,6 +918,7 @@ fn reused_key_rejected_after_retirement() {
         &bn::<96>(&env, &r["pkNative"]),
         &bn::<192>(&env, &r["pop"]),
         &0,
+        &DEADLINE,
     );
     set_valid_until(&env, &client, &v, MAKER, 0, true);
     assert_eq!(
@@ -751,6 +928,7 @@ fn reused_key_rejected_after_retirement() {
             &bn::<96>(&env, &rot["pkNative"]),
             &bn::<192>(&env, &rot["pop"]),
             &1,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::KeyPreviouslyUsed))
     );
@@ -818,7 +996,12 @@ fn set_valid_until_shorten_only_and_never_zero() {
     let account = slot_account(&env, &v, BRIDGER);
     register_slot(&env, &client, &v, BRIDGER, 0);
     assert_eq!(
-        client.try_set_valid_until(&account, &svu_owner(&env, &v, BRIDGER, 0, true), &0, &0),
+        client.try_set_valid_until(
+            &account,
+            &svu_owner(&env, &v, BRIDGER, 0, true),
+            &fingerprint(&env, &v, BRIDGER, 0),
+            &0
+        ),
         Err(Ok(RegistryError::BadValidUntil))
     );
     set_valid_until(&env, &client, &v, BRIDGER, 0, true); // -> 1
@@ -826,7 +1009,7 @@ fn set_valid_until_shorten_only_and_never_zero() {
         client.try_set_valid_until(
             &account,
             &svu_owner(&env, &v, BRIDGER, 0, false),
-            &0,
+            &fingerprint(&env, &v, BRIDGER, 0),
             &grace_ts(&v)
         ),
         Err(Ok(RegistryError::BadValidUntil))
@@ -839,38 +1022,51 @@ fn set_valid_until_unknown_slot_rejected() {
     let account = slot_account(&env, &v, BRIDGER);
     register_slot(&env, &client, &v, BRIDGER, 0);
     assert_eq!(
-        client.try_set_valid_until(&account, &svu_owner(&env, &v, BRIDGER, 1, true), &1, &1),
+        client.try_set_valid_until(
+            &account,
+            &svu_owner(&env, &v, BRIDGER, 1, true),
+            &fingerprint(&env, &v, BRIDGER, 1),
+            &1
+        ),
         Err(Ok(RegistryError::NoSuchSlot))
     );
 }
 
 #[test]
-fn set_valid_until_sig_bound_to_slot_value_and_signer() {
+fn set_valid_until_sig_bound_to_key_value_and_signer() {
     let (env, client, v) = setup();
     let account = slot_account(&env, &v, BRIDGER);
     register_slot(&env, &client, &v, BRIDGER, 0);
     register_slot(&env, &client, &v, BRIDGER, 1);
-    // slot-0 signature replayed against slot 1
+    let fp0 = fingerprint(&env, &v, BRIDGER, 0);
+    // key-0 signature replayed against key 1
     assert_eq!(
-        client.try_set_valid_until(&account, &svu_owner(&env, &v, BRIDGER, 0, true), &1, &1),
+        client.try_set_valid_until(
+            &account,
+            &svu_owner(&env, &v, BRIDGER, 0, true),
+            &fingerprint(&env, &v, BRIDGER, 1),
+            &1
+        ),
         Err(Ok(RegistryError::OwnerMismatch))
     );
     // value-1 signature used for a different value
     assert_eq!(
-        client.try_set_valid_until(&account, &svu_owner(&env, &v, BRIDGER, 0, true), &0, &2),
+        client.try_set_valid_until(&account, &svu_owner(&env, &v, BRIDGER, 0, true), &fp0, &2),
         Err(Ok(RegistryError::OwnerMismatch))
     );
     // parity flipped -> different recovered signer
-    let mut bad = match svu_owner(&env, &v, BRIDGER, 0, true) {
-        OwnerAuth::Evm(sig) => sig.to_array(),
-        _ => unreachable!(),
-    };
+    let e = &oa(&v, BRIDGER)["retire"][0];
+    let mut bad = bn::<65>(&env, &e["sig"]).to_array();
     bad[64] = if bad[64] == 27 { 28 } else { 27 };
     assert_eq!(
         client.try_set_valid_until(
             &account,
-            &OwnerAuth::Evm(BytesN::from_array(&env, &bad)),
-            &0,
+            &signed_with(
+                &env,
+                Vec::new(&env),
+                OwnerSig::Secp256k1(BytesN::from_array(&env, &bad))
+            ),
+            &fp0,
             &1
         ),
         Err(Ok(RegistryError::OwnerMismatch))
@@ -889,14 +1085,15 @@ fn pre_signed_retirement_survives_later_writes_and_replay_is_noop() {
     set_valid_until(&env, &client, &v, BRIDGER, 1, false); // another retirement, other slot
     let nonce = client.nonce_of(&account);
 
-    client.set_valid_until(&account, &pre_signed, &0, &1);
+    let fp0 = fingerprint(&env, &v, BRIDGER, 0);
+    client.set_valid_until(&account, &pre_signed, &fp0, &1);
     assert_eq!(
         client.try_commitment_at(&account, &0),
         Err(Ok(RegistryError::SlotExpired))
     );
 
     assert_eq!(
-        client.try_set_valid_until(&account, &pre_signed, &0, &1), // replay
+        client.try_set_valid_until(&account, &pre_signed, &fp0, &1), // replay
         Err(Ok(RegistryError::BadValidUntil))
     );
     assert_eq!(client.nonce_of(&account), nonce);
@@ -950,94 +1147,47 @@ fn t04_second_slot_needs_fresh_pop() {
     assert_eq!(
         client.try_register(
             &slot_account(&env, &v, BRIDGER),
-            &owner_for(&env, &v, BRIDGER, &r1["ownerSig"]),
+            &signed(&env, &oa(&v, BRIDGER)["register"][1]),
             &bn::<96>(&env, &r1["pkNative"]),
             &bn::<192>(&env, &r0["pop"]), // slot-0 PoP
             &1,
+            &DEADLINE,
         ),
         Err(Ok(RegistryError::InvalidPop))
     );
 }
 
 // =============================================================================
-// #404: the detached ed25519 owner-auth (`Sep53`) — the maker's pre-signed kill switch
+// 2.6: the ed25519 owner signs the fixed text (SEP-53) — also the maker's pre-signed kill switch
 // =============================================================================
 
-/// Sign `digest` the way a Stellar wallet does (SEP-53: sha256(prefix ‖ lowercase 0x-hex)),
-/// with the vector maker's ed25519 key or a stranger's.
-fn sep53_sign(env: &Env, digest: &[u8; 32], sk: &[u8; 32]) -> BytesN<64> {
+/// Sign `text` the way a Stellar wallet does (SEP-53: sha256(prefix ‖ text)), with any ed25519 key.
+fn sep53_sign_text(env: &Env, text: &str, sk: &[u8; 32]) -> BytesN<64> {
     use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};
     let mut msg = b"Stellar Signed Message:\n".to_vec();
-    msg.extend_from_slice(std::format!("0x{}", hex::encode(digest)).as_bytes());
+    msg.extend_from_slice(text.as_bytes());
     let payload = Sha256::digest(&msg);
     let sig = SigningKey::from_bytes(sk).sign(&payload);
     BytesN::from_array(env, &sig.to_bytes())
+}
+
+/// Sign an EIP-712 digest the way an EVM wallet does: r ‖ s ‖ v, v = 27/28.
+fn secp_sign(env: &Env, digest: &[u8; 32], sk: &[u8]) -> BytesN<65> {
+    let key = k256::ecdsa::SigningKey::from_slice(sk).unwrap();
+    let (sig, rec) = key.sign_prehash_recoverable(digest).unwrap();
+    let mut out = [0u8; 65];
+    out[..64].copy_from_slice(&sig.to_bytes());
+    out[64] = rec.to_byte() + 27;
+    BytesN::from_array(env, &out)
 }
 
 fn maker_wallet_sk(v: &serde_json::Value) -> [u8; 32] {
     hexval(&v["keys"]["makerWallet"]["sk"]).try_into().unwrap()
 }
 
-fn digest32(v: &serde_json::Value) -> [u8; 32] {
-    hexval(v).try_into().unwrap()
-}
-
-/// The vectors' Soroban `setValidUntil` entries carry `sep53-ed25519` signatures for the maker,
-/// so every `set_valid_until` case above already runs under `Sep53`; this pins the bytes.
-#[test]
-fn sep53_vector_retires_the_makers_slot() {
-    let (env, client, v) = setup();
-    let account = slot_account(&env, &v, MAKER);
-    register_slot(&env, &client, &v, MAKER, 0);
-    let e = &v["slots"][MAKER]["setValidUntil"][0];
-    assert_eq!(e["ownerSig"]["scheme"], "sep53-ed25519");
-    client.set_valid_until(
-        &account,
-        &OwnerAuth::Sep53(bn::<64>(&env, &e["ownerSig"]["sig"])),
-        &0,
-        &1,
-    );
-    assert_eq!(
-        client.try_commitment_at(&account, &0),
-        Err(Ok(RegistryError::SlotExpired))
-    );
-}
-
-/// The message rule is the EVM registry's byte for byte: a fresh signature by the maker's key
-/// over the vector's digest verifies, so any SEP-53 wallet's output lands.
-#[test]
-fn sep53_fresh_signature_over_the_digest_verifies() {
-    let (env, client, v) = setup();
-    let account = slot_account(&env, &v, MAKER);
-    register_slot(&env, &client, &v, MAKER, 0);
-    let e = &v["slots"][MAKER]["setValidUntil"][1]; // (slot 0, graceTs)
-    let sig = sep53_sign(&env, &digest32(&e["digest"]), &maker_wallet_sk(&v));
-    client.set_valid_until(&account, &OwnerAuth::Sep53(sig), &0, &grace_ts(&v));
-    assert_eq!(
-        client.lookup(&account, &0).unwrap().valid_until,
-        grace_ts(&v)
-    );
-}
-
-/// A stranger's key over the same digest traps in the host's ed25519 verify (D3): nothing
-/// changes on-chain, and the relayer treats the trap as a permanent revert.
-#[test]
-fn sep53_wrong_key_traps_and_changes_nothing() {
-    let (env, client, v) = setup();
-    let account = slot_account(&env, &v, MAKER);
-    register_slot(&env, &client, &v, MAKER, 0);
-    let e = &v["slots"][MAKER]["setValidUntil"][0];
-    let stranger = [7u8; 32];
-    let sig = sep53_sign(&env, &digest32(&e["digest"]), &stranger);
-    let msg = panic_message(|| {
-        client.set_valid_until(&account, &OwnerAuth::Sep53(sig), &0, &1);
-    });
-    assert!(
-        msg.starts_with(CRYPTO_TRAP),
-        "a bad ed25519 signature is a host Crypto trap, got: {msg}"
-    );
-    assert_eq!(client.lookup(&account, &0).unwrap().valid_until, 0);
+fn text_of(e: &serde_json::Value) -> &str {
+    e["text"].as_str().unwrap()
 }
 
 /// The panic a failing call raises, as text. A bad ed25519 signature traps in the host; the
@@ -1059,42 +1209,111 @@ fn panic_message(f: impl FnOnce()) -> std::string::String {
 /// The exact host error the relayer's `isPermanentRevert` keys on (`Error(Crypto`).
 const CRYPTO_TRAP: &str = "HostError: Error(Crypto, InvalidInput)";
 
-/// A signature bound to slot 0 / value 1 does not retire slot 1 or set another value.
-/// The other legal path for a Stellar-home owner (#404): a detached SEP-53 signature rather than
-/// `require_auth`, which is what lets the relayer submit on the tenant's behalf. Same account and
-/// the same digests as `makerOnStellarTestnet` — only the authorisation differs. The signature is
-/// the generator's, not one this test builds, so it is the cross-implementation check.
-const MAKER_SEP53: &str = "makerSep53OnStellarTestnet";
-
-fn sep53_sig(env: &Env, node: &serde_json::Value) -> BytesN<64> {
-    bn::<64>(env, &node["ownerSig"]["sig"])
+fn assert_crypto_trap(f: impl FnOnce(), what: &str) {
+    let msg = panic_message(f);
+    assert!(
+        msg.starts_with(CRYPTO_TRAP),
+        "{what}: wanted a Crypto trap, got: {msg}"
+    );
 }
 
-fn register_via_sep53(
-    env: &Env,
-    client: &BlsKeyRegistryClient,
-    v: &serde_json::Value,
-) -> (BytesN<32>, serde_json::Value) {
-    let r = reg(v, MAKER_SEP53);
-    let account = bn::<32>(env, &r["account"]);
+/// The vector's SEP-53 retirement (the generator's signature, not this test's) retires the slot.
+#[test]
+fn sep53_vector_retires_the_makers_slot() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    let e = &oa(&v, MAKER)["retire"][0];
+    assert_eq!(e["scheme"], "sep53");
+    client.set_valid_until(
+        &account,
+        &signed(&env, e),
+        &fingerprint(&env, &v, MAKER, 0),
+        &1,
+    );
+    assert_eq!(
+        client.try_commitment_at(&account, &0),
+        Err(Ok(RegistryError::SlotExpired))
+    );
+}
+
+/// Any SEP-53 wallet's output lands: a fresh signature by the maker's key over the vector's text.
+#[test]
+fn sep53_fresh_signature_over_the_text_verifies() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    let sk = maker_wallet_sk(&v);
+    let r0 = slot_reg(&v, MAKER, 0);
+    let e0 = &oa(&v, MAKER)["register"][0];
     client.register(
         &account,
-        &OwnerAuth::Sep53(sep53_sig(env, &r)),
-        &bn::<96>(env, &r["pkNative"]),
-        &bn::<192>(env, &r["pop"]),
+        &signed_with(
+            &env,
+            legs_of(&env, e0),
+            OwnerSig::Sep53(sep53_sign_text(&env, text_of(e0), &sk)),
+        ),
+        &bn::<96>(&env, &r0["pkNative"]),
+        &bn::<192>(&env, &r0["pop"]),
         &0,
+        &DEADLINE,
     );
-    (account, r)
+    let e = &oa(&v, MAKER)["retire"][1]; // (key 0, graceTs)
+    client.set_valid_until(
+        &account,
+        &signed_with(
+            &env,
+            Vec::new(&env),
+            OwnerSig::Sep53(sep53_sign_text(&env, text_of(e), &sk)),
+        ),
+        &fingerprint(&env, &v, MAKER, 0),
+        &grace_ts(&v),
+    );
+    assert_eq!(
+        client.lookup(&account, &0).unwrap().valid_until,
+        grace_ts(&v)
+    );
+    let e1 = &oa(&v, MAKER)["revoke"][1];
+    client.revoke(
+        &account,
+        &signed_with(
+            &env,
+            legs_of(&env, e1),
+            OwnerSig::Sep53(sep53_sign_text(&env, text_of(e1), &sk)),
+        ),
+        &1,
+    );
+    assert_eq!(client.live_slots(&account).len(), 0);
+}
+
+/// A stranger's key over the same text traps in the host's ed25519 verify: nothing changes.
+#[test]
+fn sep53_wrong_key_traps_and_changes_nothing() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    let sig = sep53_sign_text(&env, text_of(&oa(&v, MAKER)["retire"][0]), &[7u8; 32]);
+    assert_crypto_trap(
+        || {
+            client.set_valid_until(
+                &account,
+                &signed_with(&env, Vec::new(&env), OwnerSig::Sep53(sig)),
+                &fingerprint(&env, &v, MAKER, 0),
+                &1,
+            );
+        },
+        "a stranger's retirement",
+    );
+    assert_eq!(client.lookup(&account, &0).unwrap().valid_until, 0);
 }
 
 #[test]
 fn register_stellar_home_account_via_sep53() {
     let (env, client, v) = setup();
-    let (account, r) = register_via_sep53(&env, &client, &v);
-
+    let account = slot_account(&env, &v, MAKER);
+    assert_eq!(register_slot(&env, &client, &v, MAKER, 0), 0);
     assert_eq!(
         client.commitment_at(&account, &0),
-        bn::<32>(&env, &r["commitment"])
+        slot_commitment(&env, &v, MAKER, 0)
     );
     assert_eq!(client.nonce_of(&account), 1);
 }
@@ -1102,15 +1321,9 @@ fn register_stellar_home_account_via_sep53() {
 #[test]
 fn revoke_stellar_home_account_via_sep53() {
     let (env, client, v) = setup();
-    let (account, r) = register_via_sep53(&env, &client, &v);
-
-    // The revoke digest binds the bumped nonce, so this is a second, distinct signature.
-    client.revoke(
-        &account,
-        &OwnerAuth::Sep53(sep53_sig(&env, &r["revokeAtNonce1"])),
-        &1,
-    );
-
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    client.revoke(&account, &signed(&env, &oa(&v, MAKER)["revoke"][1]), &1);
     assert_eq!(
         client.try_commitment_at(&account, &0),
         Err(Ok(RegistryError::NoSuchSlot))
@@ -1118,118 +1331,539 @@ fn revoke_stellar_home_account_via_sep53() {
     assert_eq!(client.nonce_of(&account), 2);
 }
 
-/// The replay a pre-signed kill switch has to survive: a revoke signature the owner really did
-/// produce, for the same account and the same tag, but bound to the previous nonce. Isolating the
-/// nonce is the point — replaying the *register* signature instead would differ in both the tag
-/// and the nonce and so could not tell the two bindings apart.
-#[test]
-fn sep53_revoke_signature_does_not_replay_across_nonces() {
-    let (env, client, v) = setup();
-    let (account, r) = register_via_sep53(&env, &client, &v);
-    let stale = sep53_sig(&env, &r["staleRevokeSigAtNonce0"]);
-
-    let msg = panic_message(|| {
-        client.revoke(&account, &OwnerAuth::Sep53(stale), &1);
-    });
-    assert!(
-        msg.starts_with(CRYPTO_TRAP),
-        "a revoke signature bound to nonce 0 must not authorise nonce 1, got: {msg}"
-    );
-
-    // And the refusal left nothing behind.
-    assert_eq!(
-        client.commitment_at(&account, &0),
-        bn::<32>(&env, &r["commitment"])
-    );
-    assert_eq!(client.nonce_of(&account), 1);
-}
-
-/// The tag half of the same binding: a register signature is not a revoke signature.
+/// The message kind is bound: a register signature (with its own legs at nonce 1) is not a revoke.
 #[test]
 fn sep53_register_signature_does_not_authorise_the_revoke() {
     let (env, client, v) = setup();
-    let (account, r) = register_via_sep53(&env, &client, &v);
-    let replayed = sep53_sig(&env, &r);
-
-    let msg = panic_message(|| {
-        client.revoke(&account, &OwnerAuth::Sep53(replayed), &1);
-    });
-    assert!(
-        msg.starts_with(CRYPTO_TRAP),
-        "the register signature must not authorise a revoke, got: {msg}"
-    );
-
-    assert_eq!(
-        client.commitment_at(&account, &0),
-        bn::<32>(&env, &r["commitment"])
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    let replayed = signed(&env, &oa(&v, MAKER)["register"][1]); // legs at nonce 1, a RegisterKey
+    assert_crypto_trap(
+        || {
+            client.revoke(&account, &replayed, &1);
+        },
+        "a register signature presented as a revoke",
     );
     assert_eq!(client.nonce_of(&account), 1);
+    assert_eq!(client.live_slots(&account).len(), 1);
 }
 
 #[test]
-fn sep53_signature_bound_to_slot_and_value() {
+fn sep53_signature_bound_to_key_and_value() {
     let (env, client, v) = setup();
     let account = slot_account(&env, &v, MAKER);
     register_slot(&env, &client, &v, MAKER, 0);
     register_slot(&env, &client, &v, MAKER, 1);
-    let e = &v["slots"][MAKER]["setValidUntil"][0];
-    let sig = bn::<64>(&env, &e["ownerSig"]["sig"]);
-    let other_slot = panic_message(|| {
-        client.set_valid_until(&account, &OwnerAuth::Sep53(sig.clone()), &1, &1);
-    });
-    assert!(
-        other_slot.starts_with(CRYPTO_TRAP),
-        "slot 1 under slot 0's signature: {other_slot}"
+    let key0_retire = svu_owner(&env, &v, MAKER, 0, true);
+    assert_crypto_trap(
+        || {
+            client.set_valid_until(&account, &key0_retire, &fingerprint(&env, &v, MAKER, 1), &1);
+        },
+        "key 1 under key 0's retirement",
     );
-    let other_value = panic_message(|| {
-        client.set_valid_until(&account, &OwnerAuth::Sep53(sig), &0, &grace_ts(&v));
-    });
-    assert!(
-        other_value.starts_with(CRYPTO_TRAP),
-        "another value under value 1's signature: {other_value}"
+    assert_crypto_trap(
+        || {
+            client.set_valid_until(
+                &account,
+                &key0_retire,
+                &fingerprint(&env, &v, MAKER, 0),
+                &grace_ts(&v),
+            );
+        },
+        "another value under value 1's signature",
     );
     assert_eq!(client.lookup(&account, &0).unwrap().valid_until, 0);
     assert_eq!(client.lookup(&account, &1).unwrap().valid_until, 0);
 }
 
-/// The shape rule mirrors the EVM path: a padded-EVM account is never an ed25519 key.
+// =============================================================================
+// 2.6 plan §4: every refusal, both signature schemes
+// =============================================================================
+
+/// One signature registers on both registries: the vector's legs name Sepolia and this chain.
 #[test]
-fn sep53_refuses_a_padded_evm_account() {
+fn one_signature_names_both_registries() {
+    let (_env, _client, v) = setup();
+    for who in [MAKER, BRIDGER] {
+        let legs = oa(&v, who)["register"][0]["legs"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(legs.len(), 2);
+        assert_eq!(legs[0]["chainId"], v["chains"]["sepolia"]["chainId"]);
+        assert_eq!(legs[1]["chainId"], v["chains"]["stellarTestnet"]["chainId"]);
+    }
+}
+
+/// A single-leg signature naming only this registry is enough here.
+#[test]
+fn a_signature_naming_only_this_registry_registers() {
     let (env, client, v) = setup();
-    let account = slot_account(&env, &v, BRIDGER);
-    register_slot(&env, &client, &v, BRIDGER, 0);
-    let e = &v["slots"][BRIDGER]["setValidUntil"][0];
-    let sig = sep53_sign(&env, &digest32(&e["digest"]), &maker_wallet_sk(&v));
+    for who in [MAKER, BRIDGER] {
+        let r = slot_reg(&v, who, 0);
+        assert_eq!(
+            client.register(
+                &slot_account(&env, &v, who),
+                &signed(&env, &oa(&v, who)["onlyStellarLeg"]),
+                &bn::<96>(&env, &r["pkNative"]),
+                &bn::<192>(&env, &r["pop"]),
+                &0,
+                &DEADLINE,
+            ),
+            0
+        );
+    }
+}
+
+/// Refusal: a signature over a different leg set (another registry's nonce moved, or a leg added).
+#[test]
+fn a_signature_over_a_different_leg_set_is_refused() {
+    let (env, client, v) = setup();
+    for who in [MAKER, BRIDGER] {
+        let e = &oa(&v, who)["register"][0];
+        let r = slot_reg(&v, who, 0);
+        let account = slot_account(&env, &v, who);
+        let mut moved = legs_of(&env, e);
+        let mut sepolia = moved.get(0).unwrap();
+        sepolia.nonce += 1;
+        moved.set(0, sepolia);
+        let mut added = legs_of(&env, e);
+        added.push_back(KeyLeg {
+            chain_id: 84532,
+            registry: BytesN::from_array(&env, &[0x33; 32]),
+            nonce: 0,
+        });
+        for legs in [moved, added] {
+            let auth = signed_with(&env, legs, sig_of(&env, e));
+            let (pk, pop) = (bn::<96>(&env, &r["pkNative"]), bn::<192>(&env, &r["pop"]));
+            if who == BRIDGER {
+                assert_eq!(
+                    client.try_register(&account, &auth, &pk, &pop, &0, &DEADLINE),
+                    Err(Ok(RegistryError::OwnerMismatch))
+                );
+            } else {
+                assert_crypto_trap(
+                    || {
+                        client.register(&account, &auth, &pk, &pop, &0, &DEADLINE);
+                    },
+                    "sep53 over another leg set",
+                );
+            }
+        }
+        assert_eq!(client.nonce_of(&account), 0);
+    }
+}
+
+/// Refusal: `legs` without this registry's own leg (a valid signature naming only the EVM leg).
+#[test]
+fn legs_without_the_own_leg_are_refused() {
+    let (env, client, v) = setup();
+    for who in [MAKER, BRIDGER] {
+        let r = slot_reg(&v, who, 0);
+        assert_eq!(
+            client.try_register(
+                &slot_account(&env, &v, who),
+                &signed(&env, &oa(&v, who)["onlySepoliaLeg"]),
+                &bn::<96>(&env, &r["pkNative"]),
+                &bn::<192>(&env, &r["pop"]),
+                &0,
+                &DEADLINE,
+            ),
+            Err(Ok(RegistryError::LegMismatch))
+        );
+    }
+}
+
+/// Refusal: this registry's own leg twice, under a valid signature over exactly those legs.
+#[test]
+fn the_own_leg_twice_is_refused() {
+    let (env, client, v) = setup();
+    for who in [MAKER, BRIDGER] {
+        let r = slot_reg(&v, who, 0);
+        assert_eq!(
+            client.try_register(
+                &slot_account(&env, &v, who),
+                &signed(&env, &oa(&v, who)["duplicateLegs"]),
+                &bn::<96>(&env, &r["pkNative"]),
+                &bn::<192>(&env, &r["pop"]),
+                &0,
+                &DEADLINE,
+            ),
+            Err(Ok(RegistryError::LegMismatch))
+        );
+    }
+}
+
+/// Refusal: a stale nonce. The owner really signed a revoke at nonce 0; once the nonce is 1 its leg
+/// is no longer this registry's, whatever `nonce` the caller passes.
+#[test]
+fn a_stale_nonce_is_refused() {
+    let (env, client, v) = setup();
+    for who in [MAKER, BRIDGER] {
+        let account = slot_account(&env, &v, who);
+        register_slot(&env, &client, &v, who, 0);
+        let stale = signed(&env, &oa(&v, who)["revoke"][0]);
+        assert_eq!(
+            client.try_revoke(&account, &stale, &1),
+            Err(Ok(RegistryError::LegMismatch))
+        );
+        assert_eq!(
+            client.try_revoke(&account, &stale, &0),
+            Err(Ok(RegistryError::BadNonce))
+        );
+        assert_eq!(client.live_slots(&account).len(), 1);
+    }
+}
+
+/// Refusal: a text with one byte changed. The maker signed a text one byte off the one the
+/// registry rebuilds from the call's arguments.
+#[test]
+fn a_text_with_one_byte_changed_is_refused() {
+    let (env, client, v) = setup();
+    let n = &v["ownerAuth"]["negative"]["tamperedText"];
+    let real = &oa(&v, MAKER)["register"][0];
+    assert_eq!(n["signedText"].as_str().unwrap().len(), text_of(real).len());
+    let r = slot_reg(&v, MAKER, 0);
+    let auth = signed_with(
+        &env,
+        legs_of(&env, real),
+        OwnerSig::Sep53(bn::<64>(&env, &n["sig"])),
+    );
+    assert_crypto_trap(
+        || {
+            client.register(
+                &slot_account(&env, &v, MAKER),
+                &auth,
+                &bn::<96>(&env, &r["pkNative"]),
+                &bn::<192>(&env, &r["pop"]),
+                &0,
+                &DEADLINE,
+            );
+        },
+        "a one-byte-off text",
+    );
+    assert_eq!(client.nonce_of(&slot_account(&env, &v, MAKER)), 0);
+}
+
+/// Refusal: a secp256k1 signature on an ed25519 (non-padded) account. The signature is valid and its
+/// signer is the account's low 20 bytes: only the padding rule refuses it.
+#[test]
+fn a_secp256k1_signature_on_an_ed25519_account_is_refused() {
+    let (env, client, v) = setup();
+    let n = &v["ownerAuth"]["negative"]["secpOnNonEvmAccount"];
     assert_eq!(
-        client.try_set_valid_until(&account, &OwnerAuth::Sep53(sig), &0, &1),
+        client.try_register(
+            &bn::<32>(&env, &n["account"]),
+            &signed(&env, n),
+            &bn::<96>(&env, &n["stellarTestnet"]["pkNative"]),
+            &bn::<192>(&env, &n["stellarTestnet"]["pop"]),
+            &0,
+            &DEADLINE,
+        ),
         Err(Ok(RegistryError::OwnerMismatch))
     );
 }
 
-/// `register` and `revoke` take the same dispatch, so a Stellar-home owner can be relayed there
-/// too: detached signatures over the vector's registration and revoke digests.
+/// Refusal: an ed25519 signature on an EVM-shaped (padded) account, register and retire.
 #[test]
-fn sep53_registers_and_revokes_by_detached_signature() {
+fn an_ed25519_signature_on_an_evm_account_is_refused() {
+    let (env, client, v) = setup();
+    let n = &v["ownerAuth"]["negative"]["sep53OnEvmAccount"];
+    let r = slot_reg(&v, BRIDGER, 0);
+    let account = slot_account(&env, &v, BRIDGER);
+    assert_eq!(bn::<32>(&env, &n["account"]), account);
+    assert_eq!(
+        client.try_register(
+            &account,
+            &signed(&env, n),
+            &bn::<96>(&env, &r["pkNative"]),
+            &bn::<192>(&env, &r["pop"]),
+            &0,
+            &DEADLINE
+        ),
+        Err(Ok(RegistryError::OwnerMismatch))
+    );
+    register_slot(&env, &client, &v, BRIDGER, 0);
+    let sig = sep53_sign_text(
+        &env,
+        text_of(&oa(&v, BRIDGER)["retire"][0]),
+        &maker_wallet_sk(&v),
+    );
+    assert_eq!(
+        client.try_set_valid_until(
+            &account,
+            &signed_with(&env, Vec::new(&env), OwnerSig::Sep53(sig)),
+            &fingerprint(&env, &v, BRIDGER, 0),
+            &1
+        ),
+        Err(Ok(RegistryError::OwnerMismatch))
+    );
+}
+
+/// A retirement names no legs: one that carries any is refused, even when the signature is sound.
+#[test]
+fn a_retirement_with_legs_is_refused() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, BRIDGER);
+    register_slot(&env, &client, &v, BRIDGER, 0);
+    let e = &oa(&v, BRIDGER)["retire"][0];
+    let auth = signed_with(
+        &env,
+        legs_of(&env, &oa(&v, BRIDGER)["register"][0]),
+        sig_of(&env, e),
+    );
+    assert_eq!(
+        client.try_set_valid_until(&account, &auth, &fingerprint(&env, &v, BRIDGER, 0), &1),
+        Err(Ok(RegistryError::LegMismatch))
+    );
+}
+
+/// A valid signature for a key the account already used still hits KeyPreviouslyUsed.
+#[test]
+fn reused_key_rejected_under_a_valid_signature() {
     let (env, client, v) = setup();
     let account = slot_account(&env, &v, MAKER);
-    let sk = maker_wallet_sk(&v);
-    let r0 = slot_reg(&v, MAKER, 0);
+    register_slot(&env, &client, &v, MAKER, 0);
+    let rot = &reg(&v, MAKER)["registerAtNonce1"]; // the same key's PoP at nonce 1
+    assert_eq!(
+        client.try_register(
+            &account,
+            &signed(&env, &oa(&v, MAKER)["reuseKey0AtNonce1"]),
+            &bn::<96>(&env, &rot["pkNative"]),
+            &bn::<192>(&env, &rot["pop"]),
+            &1,
+            &DEADLINE
+        ),
+        Err(Ok(RegistryError::KeyPreviouslyUsed))
+    );
+}
+
+// =============================================================================
+// 2.6: the builders equal the vectors byte for byte
+// =============================================================================
+
+fn message_of(env: &Env, e: &serde_json::Value) -> KeyMessage {
+    let fp = || bn::<32>(env, &e["keyCommitment"]);
+    match e["kind"].as_str().unwrap() {
+        "register" => KeyMessage::Register {
+            fingerprint: fp(),
+            nonce: 0,
+            deadline: e["deadline"].as_str().unwrap().parse().unwrap(),
+        },
+        "revoke" => KeyMessage::Revoke { nonce: 0 },
+        "cancel" => KeyMessage::Cancel { nonce: 0 },
+        _ => KeyMessage::Retire {
+            fingerprint: fp(),
+            valid_until: e["validUntil"].as_str().unwrap().parse().unwrap(),
+        },
+    }
+}
+
+#[test]
+fn text_and_struct_hash_match_every_vector() {
+    let v = vectors();
+    let mut entries = std::vec::Vec::new();
+    for who in ["maker", "bridger"] {
+        let a = &v["ownerAuth"][who];
+        for k in ["register", "registerLate", "revoke", "cancel", "retire"] {
+            entries.extend(a[k].as_array().unwrap().iter().cloned());
+        }
+        for k in [
+            "reuseKey0AtNonce1",
+            "onlySepoliaLeg",
+            "onlyStellarLeg",
+            "duplicateLegs",
+            "sameRegistryTwoNonces",
+            "revokeSameRegistryTwoNonces",
+            "cancelSameRegistryTwoNonces",
+            "otherEnv",
+        ] {
+            entries.push(a[k].clone());
+        }
+    }
+    for k in ["secpOnNonEvmAccount", "sep53OnEvmAccount"] {
+        entries.push(v["ownerAuth"]["negative"][k].clone());
+    }
+    assert!(entries.len() > 50);
+    for e in &entries {
+        // each entry's text is rebuilt by a registry initialized for the entry's env (D3)
+        let (env, client, _) = setup_env(e["env"].as_str().unwrap());
+        env.as_contract(&client.address, || {
+            let account = bn::<32>(&env, &e["account"]);
+            let legs = legs_of(&env, e);
+            let msg = message_of(&env, e);
+            let text = owner::text(&env, &account, &legs, &msg);
+            let mut buf = std::vec![0u8; text.len() as usize];
+            text.copy_into_slice(&mut buf);
+            assert_eq!(std::str::from_utf8(&buf).unwrap(), text_of(e));
+            assert_eq!(
+                owner::struct_hash(&env, &account, &legs, &msg).to_vec(),
+                hexval(&e["structHash"])
+            );
+        });
+    }
+}
+
+/// D2: the Valid-until line's calendar arithmetic equals bls-encodings' utcText.
+#[test]
+fn utc_text_matches_the_vectors() {
+    let env = Env::default();
+    let v = vectors();
+    for (unix, want) in v["ownerAuth"]["_meta"]["deadline"]["utc"]
+        .as_object()
+        .unwrap()
+    {
+        let mut t = Bytes::new(&env);
+        owner::push_utc(&mut t, unix.parse().unwrap());
+        let mut buf = std::vec![0u8; t.len() as usize];
+        t.copy_into_slice(&mut buf);
+        assert_eq!(
+            std::str::from_utf8(&buf).unwrap(),
+            want.as_str().unwrap(),
+            "{unix}"
+        );
+    }
+}
+
+#[test]
+fn constants_match_the_vectors() {
+    let (env, _client, v) = setup();
+    let m = &v["ownerAuth"]["_meta"];
+    let k = |s: &str| {
+        env.crypto()
+            .keccak256(&Bytes::from_slice(&env, s.as_bytes()))
+            .to_array()
+            .to_vec()
+    };
+    assert_eq!(
+        owner::KEY_LEG_TYPEHASH.to_vec(),
+        k(m["typeStrings"]["keyLeg"].as_str().unwrap())
+    );
+    assert_eq!(
+        owner::REGISTER_KEY_TYPEHASH.to_vec(),
+        k(m["typeStrings"]["registerKey"].as_str().unwrap())
+    );
+    assert_eq!(
+        owner::REVOKE_KEYS_TYPEHASH.to_vec(),
+        k(m["typeStrings"]["revokeKeys"].as_str().unwrap())
+    );
+    assert_eq!(
+        owner::CANCEL_PENDING_TYPEHASH.to_vec(),
+        k(m["typeStrings"]["cancelPending"].as_str().unwrap())
+    );
+    assert_eq!(
+        owner::RETIRE_KEY_TYPEHASH.to_vec(),
+        k(m["typeStrings"]["retireKey"].as_str().unwrap())
+    );
+    assert_eq!(client_domain(&env, &_client), hexval(&m["domainSeparator"]));
+    assert_eq!(_client.keys_env(), SString::from_str(&env, "testnet"));
+    // D3: each environment's separator, rebuilt here from the salt keccak256("proofbridge:" || env)
+    for name in ["local", "testnet", "mainnet"] {
+        let salt = k(&std::format!("proofbridge:{name}"));
+        assert_eq!(salt, hexval(&m["envs"][name]["salt"]));
+        let mut dom = std::vec::Vec::new();
+        dom.extend_from_slice(&k(m["domainType"].as_str().unwrap()));
+        dom.extend_from_slice(&k("ProofBridge Keys"));
+        dom.extend_from_slice(&k("2"));
+        dom.extend_from_slice(&salt);
+        let sep = env
+            .crypto()
+            .keccak256(&Bytes::from_slice(&env, &dom))
+            .to_array()
+            .to_vec();
+        assert_eq!(sep, hexval(&m["envs"][name]["domainSeparator"]));
+        let (e2, c2, _) = setup_env(name);
+        assert_eq!(client_domain(&e2, &c2), sep, "{name}");
+    }
+}
+
+fn client_domain(_env: &Env, client: &BlsKeyRegistryClient) -> std::vec::Vec<u8> {
+    client.domain_separator().to_array().to_vec()
+}
+
+/// D2: the padded 96-byte key hashes to the vector fingerprint, which is the EVM commitment.
+#[test]
+fn key_fingerprint_is_the_evm_commitment() {
+    let (env, _client, v) = setup();
+    for who in [MAKER, BRIDGER] {
+        let evm = if who == MAKER {
+            "makerOnSepolia"
+        } else {
+            "bridgerOnSepolia"
+        };
+        for i in 0..6 {
+            let pk = bn::<96>(&env, &slot_reg(&v, who, i)["pkNative"]);
+            let fp = owner::key_fingerprint(&env, &pk);
+            assert_eq!(fp, fingerprint(&env, &v, who, i));
+            assert_eq!(fp, bn::<32>(&env, &slot_reg(&v, evm, i)["commitment"]));
+            assert_ne!(
+                fp,
+                slot_commitment(&env, &v, who, i),
+                "storage keeps the native commitment"
+            );
+        }
+    }
+}
+
+/// A secp256k1 signature built here over the vector digest lands: the EIP-712 rule is the wallet's.
+#[test]
+fn a_fresh_secp256k1_signature_over_the_vector_digest_registers() {
+    let (env, client, v) = setup();
+    let e = &oa(&v, BRIDGER)["register"][2];
+    let digest: [u8; 32] = hexval(&e["digest"]).try_into().unwrap();
+    let sig = secp_sign(&env, &digest, &hexval(&v["keys"]["bridgerWallet"]["sk"]));
+    let r = slot_reg(&v, BRIDGER, 2);
+    let account = slot_account(&env, &v, BRIDGER);
+    register_slot(&env, &client, &v, BRIDGER, 0);
+    register_slot(&env, &client, &v, BRIDGER, 1);
     client.register(
         &account,
-        &OwnerAuth::Sep53(sep53_sign(&env, &digest32(&r0["regDigest"]), &sk)),
-        &bn::<96>(&env, &r0["pkNative"]),
-        &bn::<192>(&env, &r0["pop"]),
-        &0,
+        &signed_with(&env, legs_of(&env, e), OwnerSig::Secp256k1(sig)),
+        &bn::<96>(&env, &r["pkNative"]),
+        &bn::<192>(&env, &r["pop"]),
+        &2,
+        &DEADLINE,
     );
-    assert_eq!(client.nonce_of(&account), 1);
-    // revoke at nonce 1: the digest the vectors record on registration 1
-    let r1 = slot_reg(&v, MAKER, 1);
-    client.revoke(
-        &account,
-        &OwnerAuth::Sep53(sep53_sign(&env, &digest32(&r1["revokeDigest"]), &sk)),
-        &1,
+    assert_eq!(
+        client.slot_of_key(&account, &fingerprint(&env, &v, BRIDGER, 2)),
+        Some(2)
     );
-    assert!(client.try_commitment_at(&account, &0).is_err());
+}
+
+/// The fingerprint map follows the slots: a key maps to its slot, a pruned or revoked key to none.
+#[test]
+fn slot_of_key_follows_registration_and_revoke() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    assert_eq!(
+        client.slot_of_key(&account, &fingerprint(&env, &v, MAKER, 0)),
+        None
+    );
+    register_slot(&env, &client, &v, MAKER, 0);
+    assert_eq!(
+        client.slot_of_key(&account, &fingerprint(&env, &v, MAKER, 0)),
+        Some(0)
+    );
+    client.revoke(&account, &OwnerAuth::Stellar(maker_owner(&env, &v)), &1);
+    assert_eq!(
+        client.slot_of_key(&account, &fingerprint(&env, &v, MAKER, 0)),
+        None
+    );
+    assert_eq!(register_slot(&env, &client, &v, MAKER, 2), 1);
+    assert_eq!(
+        client.slot_of_key(&account, &fingerprint(&env, &v, MAKER, 2)),
+        Some(1)
+    );
+    // the retired-then-revoked key's retirement now finds no slot
+    assert_eq!(
+        client.try_set_valid_until(
+            &account,
+            &svu_owner(&env, &v, MAKER, 0, true),
+            &fingerprint(&env, &v, MAKER, 0),
+            &1
+        ),
+        Err(Ok(RegistryError::NoSuchSlot))
+    );
 }
 
 #[test]
@@ -1322,7 +1956,11 @@ fn read_and_write_entry_points_extend_the_instance_ttl() {
 fn initialize_twice_is_already_initialized() {
     let (env, client, _) = setup();
     assert_eq!(
-        client.try_initialize(&Address::generate(&env), &7),
+        client.try_initialize(
+            &Address::generate(&env),
+            &7,
+            &SString::from_str(&env, "testnet")
+        ),
         Err(Ok(RegistryError::AlreadyInitialized))
     );
     assert_eq!(client.chain_id(), CHAIN_ID);
@@ -1346,13 +1984,16 @@ fn an_uninitialized_registry_is_not_initialized() {
                 &owner,
                 &bn::<96>(&env, &r["pkNative"]),
                 &bn::<192>(&env, &r["pop"]),
-                &0
+                &0,
+                &DEADLINE
             )
             .err(),
         e
     );
     assert_eq!(
-        client.try_set_valid_until(&account, &owner, &0, &1).err(),
+        client
+            .try_set_valid_until(&account, &owner, &BytesN::from_array(&env, &[0; 32]), &1)
+            .err(),
         e
     );
     assert_eq!(client.try_revoke(&account, &owner, &0).err(), e);
@@ -1362,4 +2003,229 @@ fn an_uninitialized_registry_is_not_initialized() {
             .err(),
         e
     );
+}
+
+// =============================================================================
+// 2.6 review: D1 (one secp256k1 rule), D2 (deadline), D3 (env), 50-2, 50-3
+// =============================================================================
+
+/// D1: every v / s form of the bridger's register[0] gets the verifiers' shared answer; a refusal
+/// is OwnerMismatch, never a host trap.
+#[test]
+fn secp_forms_accept_v_0_1_27_28_and_refuse_high_s() {
+    let v = vectors();
+    let forms = v["ownerAuth"]["secpForms"]["forms"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(forms.len() >= 8);
+    for f in forms {
+        let (env, client, _) = setup();
+        let e = &oa(&v, BRIDGER)["register"][0];
+        let r = slot_reg(&v, BRIDGER, 0);
+        let got = client.try_register(
+            &slot_account(&env, &v, BRIDGER),
+            &signed_with(
+                &env,
+                legs_of(&env, e),
+                OwnerSig::Secp256k1(bn::<65>(&env, &f["sig"])),
+            ),
+            &bn::<96>(&env, &r["pkNative"]),
+            &bn::<192>(&env, &r["pop"]),
+            &0,
+            &DEADLINE,
+        );
+        let name = f["name"].as_str().unwrap();
+        if f["expect"] == "accept" {
+            assert_eq!(got, Ok(Ok(0)), "{name}");
+        } else {
+            assert_eq!(got, Err(Ok(RegistryError::OwnerMismatch)), "{name}");
+        }
+    }
+}
+
+fn try_register0(
+    env: &Env,
+    client: &BlsKeyRegistryClient,
+    v: &serde_json::Value,
+    who: &str,
+    entry: &str,
+    deadline: u64,
+) -> Result<
+    Result<u32, soroban_sdk::ConversionError>,
+    Result<RegistryError, soroban_sdk::InvokeError>,
+> {
+    let r = slot_reg(v, who, 0);
+    let e = if entry == "register" {
+        oa(v, who)["register"][0].clone()
+    } else {
+        oa(v, who)[entry].clone()
+    };
+    client.try_register(
+        &slot_account(env, v, who),
+        &signed(env, &e),
+        &bn::<96>(env, &r["pkNative"]),
+        &bn::<192>(env, &r["pop"]),
+        &0,
+        &deadline,
+    )
+}
+
+/// D2: accepted from deadline − 7 days through the deadline, refused either side, for both schemes
+/// and for the require_auth path.
+#[test]
+fn register_deadline_window() {
+    let v = vectors();
+    assert_eq!(
+        v["ownerAuth"]["_meta"]["deadline"]["register"],
+        std::string::ToString::to_string(&DEADLINE)
+    );
+    assert_eq!(
+        v["ownerAuth"]["_meta"]["deadline"]["maxTtl"],
+        std::string::ToString::to_string(&MAX_TTL)
+    );
+    for who in [MAKER, BRIDGER] {
+        for (at, want) in [
+            (DEADLINE, Ok(Ok(0))),
+            (DEADLINE - MAX_TTL, Ok(Ok(0))),
+            (DEADLINE + 1, Err(Ok(RegistryError::DeadlineExpired))),
+            (
+                DEADLINE - MAX_TTL - 1,
+                Err(Ok(RegistryError::DeadlineTooFar)),
+            ),
+        ] {
+            let (env, client, _) = setup();
+            env.ledger().set_timestamp(at);
+            assert_eq!(
+                try_register0(&env, &client, &v, who, "register", DEADLINE),
+                want,
+                "{who} at {at}"
+            );
+        }
+    }
+    let (env, client, _) = setup();
+    let r = reg(&v, "makerOnStellarTestnet");
+    let (pk, pop) = (bn::<96>(&env, &r["pkNative"]), bn::<192>(&env, &r["pop"]));
+    let account = bn::<32>(&env, &r["account"]);
+    let owner = OwnerAuth::Stellar(maker_owner(&env, &v));
+    assert_eq!(
+        client.try_register(&account, &owner, &pk, &pop, &0, &(T0 - 1)),
+        Err(Ok(RegistryError::DeadlineExpired))
+    );
+    assert_eq!(
+        client.try_register(&account, &owner, &pk, &pop, &0, &(T0 + MAX_TTL + 1)),
+        Err(Ok(RegistryError::DeadlineTooFar))
+    );
+    // the deadline is inside the signature: a later one under the same signature is refused
+    let (env, client, _) = setup();
+    assert_eq!(
+        try_register0(&env, &client, &v, BRIDGER, "register", DEADLINE + 1),
+        Err(Ok(RegistryError::OwnerMismatch))
+    );
+}
+
+/// D3: a signature for another environment never applies; init refuses an unknown env.
+#[test]
+fn the_environment_is_bound() {
+    let v = vectors();
+    for who in [MAKER, BRIDGER] {
+        // secp256k1 refuses with OwnerMismatch; the host's ed25519 verify traps (no boolean form)
+        let refused = |got: &Result<
+            Result<u32, soroban_sdk::ConversionError>,
+            Result<RegistryError, soroban_sdk::InvokeError>,
+        >| {
+            if who == BRIDGER {
+                *got == Err(Ok(RegistryError::OwnerMismatch))
+            } else {
+                matches!(got, Err(Err(_)))
+            }
+        };
+        let (env, client, _) = setup_env("local");
+        let got = try_register0(&env, &client, &v, who, "register", DEADLINE);
+        assert!(
+            refused(&got),
+            "{who}: a testnet signature on a local registry: {got:?}"
+        );
+        let (env, client, _) = setup();
+        let got = try_register0(&env, &client, &v, who, "otherEnv", DEADLINE);
+        assert!(
+            refused(&got),
+            "{who}: a mainnet signature on a testnet registry: {got:?}"
+        );
+        let (env, client, _) = setup_env("mainnet");
+        assert_eq!(
+            try_register0(&env, &client, &v, who, "otherEnv", DEADLINE),
+            Ok(Ok(0)),
+            "{who}: mainnet on mainnet"
+        );
+    }
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = BlsKeyRegistryClient::new(&env, &env.register(BlsKeyRegistry, ()));
+    for bad in ["staging", "", "Testnet", "testnet2"] {
+        assert_eq!(
+            client.try_initialize(
+                &Address::generate(&env),
+                &CHAIN_ID,
+                &SString::from_str(&env, bad)
+            ),
+            Err(Ok(RegistryError::BadEnv)),
+            "{bad:?}"
+        );
+    }
+}
+
+/// 50-3: a leg list naming this registry twice is refused whatever the nonces, so a malformed
+/// RevokeKeys cannot be replayed after the nonce moves.
+#[test]
+fn a_registry_named_twice_is_refused_at_either_nonce() {
+    let v = vectors();
+    for who in [MAKER, BRIDGER] {
+        let (env, client, _) = setup();
+        assert_eq!(
+            try_register0(&env, &client, &v, who, "sameRegistryTwoNonces", DEADLINE),
+            Err(Ok(RegistryError::LegMismatch)),
+            "{who}"
+        );
+        let account = slot_account(&env, &v, who);
+        let revoke = signed(&env, &oa(&v, who)["revokeSameRegistryTwoNonces"]);
+        assert_eq!(
+            client.try_revoke(&account, &revoke, &0),
+            Err(Ok(RegistryError::LegMismatch))
+        );
+        register_slot(&env, &client, &v, who, 0); // nonce 0 -> 1
+        assert_eq!(
+            client.try_revoke(&account, &revoke, &1),
+            Err(Ok(RegistryError::LegMismatch))
+        );
+    }
+}
+
+/// 50-2: the unlock read keeps the fingerprint row alive with the slot, so a retirement long after
+/// registration needs no restore.
+#[test]
+fn commitment_at_extends_the_keyslot_row() {
+    use proofbridge_core::ttl::{PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD};
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    let fp = fingerprint(&env, &v, MAKER, 0);
+    let ttl = || {
+        env.as_contract(&client.address, || {
+            storage::key_slot_ttl(&env, &account, &fp)
+        })
+    };
+    // age the row below the bump threshold, keeping the instance alive on the way
+    while ttl() >= PERSISTENT_LIFETIME_THRESHOLD {
+        let by = (ttl() - PERSISTENT_LIFETIME_THRESHOLD + 1).min(400_000);
+        env.ledger().with_mut(|l| l.sequence_number += by);
+        client.has_usable_slot(&account);
+    }
+    client.commitment_at(&account, &0);
+    assert_eq!(
+        ttl(),
+        PERSISTENT_BUMP_AMOUNT,
+        "commitment_at did not extend the keyslot row"
+    );
+    set_valid_until(&env, &client, &v, MAKER, 0, true);
 }

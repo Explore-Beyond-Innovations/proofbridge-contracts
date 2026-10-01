@@ -2,6 +2,7 @@
 pragma solidity ^0.8.34;
 
 import {TestField} from "test/utils/TestField.sol";
+import {OwnerAuthVectors} from "test/utils/OwnerAuthVectors.sol";
 
 import {stdJson} from "forge-std/StdJson.sol";
 import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
@@ -36,7 +37,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         vjson = vm.readFile("../test-vectors/bls-encodings.json");
         vOrderRoot = vjson.readBytes32(".settlement.auth.orderChainRoot");
 
-        BLSKeyRegistry impl = new BLSKeyRegistry(address(this));
+        BLSKeyRegistry impl = new BLSKeyRegistry(address(this), "testnet");
         vm.etch(REGISTRY, address(impl).code);
         _registerVectorParties(vjson);
         cVerifier = new CounterpartyVerifier(REGISTRY);
@@ -139,7 +140,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         assertFalse(adManager.hasOpenPositions(_b32(maker)), "custody is not counted");
 
         // The guard runs before the owner check, so the auth payload is irrelevant here.
-        IBLSKeyRegistry.OwnerAuth memory anyAuth = IBLSKeyRegistry.OwnerAuth(IBLSKeyRegistry.Scheme.Eip712, hex"");
+        IBLSKeyRegistry.OwnerAuth memory anyAuth;
         vm.expectRevert(IBLSKeyRegistry.AccountInFlight.selector);
         reg.revoke(signer, anyAuth, 1);
 
@@ -225,7 +226,7 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
         bridgerAcct = vjson.readBytes32(".registration.bridgerOnSepolia.account");
         vBridger = address(uint160(uint256(bridgerAcct)));
 
-        BLSKeyRegistry impl = new BLSKeyRegistry(address(this));
+        BLSKeyRegistry impl = new BLSKeyRegistry(address(this), "testnet");
         vm.etch(REGISTRY, address(impl).code);
         _registerVectorParties(vjson);
         cVerifier = new CounterpartyVerifier(REGISTRY);
@@ -359,14 +360,7 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
         vm.stopPrank();
 
         assertTrue(portal.hasOpenPositions(bridgerAcct));
-        IBLSKeyRegistry.OwnerAuth memory revokeAuth = IBLSKeyRegistry.OwnerAuth(
-            IBLSKeyRegistry.Scheme.Eip712,
-            abi.encodePacked(
-                vjson.readBytes32(".registration.bridgerOnSepolia.revokeAtNonce1.ownerSig.sig.r"),
-                vjson.readBytes32(".registration.bridgerOnSepolia.revokeAtNonce1.ownerSig.sig.s"),
-                uint8(vjson.readUint(".registration.bridgerOnSepolia.revokeAtNonce1.ownerSig.sig.v"))
-            )
-        );
+        IBLSKeyRegistry.OwnerAuth memory revokeAuth = OwnerAuthVectors.auth(vjson, ".ownerAuth.bridger.revoke[1]");
         vm.expectRevert(IBLSKeyRegistry.AccountInFlight.selector);
         reg.revoke(bridgerAcct, revokeAuth, 1);
 
@@ -383,37 +377,20 @@ function _registerVectorParties(string memory vjson) {
     _registerOne(vjson, "bridgerOnSepolia", false);
 }
 
-function _registerOne(string memory vjson, string memory who, bool sep53) {
+function _registerOne(string memory vjson, string memory who, bool maker) {
     string memory base = string.concat(".registration.", who);
-    IBLSKeyRegistry.OwnerAuth memory auth;
-    if (sep53) {
-        auth = IBLSKeyRegistry.OwnerAuth(
-            IBLSKeyRegistry.Scheme.Sep53,
-            abi.encode(
-                uint256(stdJson.readBytes32(vjson, string.concat(base, ".ownerSig.scl.r"))),
-                uint256(stdJson.readBytes32(vjson, string.concat(base, ".ownerSig.scl.s"))),
-                uint256(stdJson.readBytes32(vjson, string.concat(base, ".ownerSig.scl.edX"))),
-                uint256(stdJson.readBytes32(vjson, string.concat(base, ".ownerSig.scl.edY")))
-            )
-        );
-    } else {
-        auth = IBLSKeyRegistry.OwnerAuth(
-            IBLSKeyRegistry.Scheme.Eip712,
-            abi.encodePacked(
-                stdJson.readBytes32(vjson, string.concat(base, ".ownerSig.sig.r")),
-                stdJson.readBytes32(vjson, string.concat(base, ".ownerSig.sig.s")),
-                uint8(stdJson.readUint(vjson, string.concat(base, ".ownerSig.sig.v")))
-            )
-        );
-    }
+    string memory entry = maker ? ".ownerAuth.maker.register[0]" : ".ownerAuth.bridger.register[0]";
+    uint256 clock = OwnerAuthVectors.enterRegisterClock(vjson);
     BLSKeyRegistry(0x1111111111111111111111111111111111111111)
         .register(
             stdJson.readBytes32(vjson, string.concat(base, ".account")),
-            auth,
+            OwnerAuthVectors.auth(vjson, entry),
             stdJson.readBytes(vjson, string.concat(base, ".pkNative")),
             stdJson.readBytes(vjson, string.concat(base, ".pop")),
-            0
+            0,
+            OwnerAuthVectors.deadline(vjson, entry)
         );
+    OwnerAuthVectors.restoreClock(clock);
 }
 
 function _vectorCosig(string memory vjson) view returns (bytes memory) {

@@ -61,6 +61,14 @@ The contracts expose no pending admin, so a second `handover` re-nominates the s
 not silent. After the handover, `deploy` and `link` describe admin-only calls as the
 `stellar contract invoke` lines the admin has to run, send nothing, and exit 2.
 
+### `retirements-audit --file <vault-export.json>`
+
+A one-off check (review 50-4): each pre-signed retirement in the relayer vault's export
+(`[{ account, keyCommitment, validUntil, scheme, sig }]`) is replayed against this chain's
+registry as a simulated `set_valid_until` and listed as `current`, `stale-format` (signed under an
+older RetireKey message; collect it again), `no-slot` or `already-shorter`. Exits 1 when any row is
+stale or could not be checked.
+
 ## Environment
 
 | Variable | Default | Purpose |

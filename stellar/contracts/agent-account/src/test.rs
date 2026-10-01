@@ -484,17 +484,8 @@ fn set_policy_validates_lengths_and_zero_values() {
         &wide(&f.env, &ok_tokens),
     );
     assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
-    // foreign settlement signer (F5: until 2.3b only this account may be named)
-    let r = f.client.try_set_policy(
-        &id,
-        &ok_actions,
-        &ok_tokens,
-        &0,
-        &b32(&f.env, 0x77),
-        &None,
-        &wide(&f.env, &ok_tokens),
-    );
-    assert_eq!(r, Err(Ok(AccountError::BadPolicy)));
+    // (2.6 D9: a settlement signer other than this account is the owner's to name; see
+    // `d9_an_owner_named_settlement_signer_installs_and_settles`.)
     // duplicate selector
     let dup = vec![&f.env, lock_for_order(&f.env), lock_for_order(&f.env)];
     let r = f.client.try_set_policy(
@@ -708,6 +699,84 @@ fn revoke_stops_new_locks_but_not_settlement_of_co_signed_orders() {
         Err(Ok(AccountError::NoPolicyForAgent))
     );
     assert!(!f.client.is_revoked(&b32(&f.env, 0x55)));
+}
+
+/// 2.6 D9: the owner names the settlement signer — the agent's derived secp256k1 identity M, an
+/// EVM-shaped id — and a lock naming it passes; `ad_creator` must still be this account.
+#[test]
+fn d9_an_owner_named_settlement_signer_installs_and_settles() {
+    let f = fixture();
+    let mut m = [0u8; 32];
+    m[12..].copy_from_slice(&[0x8f; 20]);
+    let m = BytesN::from_array(&f.env, &m);
+    let tokens = vec![&f.env, f.ad_token.clone(), f.order_token.clone()];
+    f.client.set_policy(
+        &f.agent.id(&f.env),
+        &vec![&f.env, lock_for_order(&f.env)],
+        &tokens,
+        &0,
+        &m,
+        &None,
+        &wide(&f.env, &tokens),
+    );
+    assert_eq!(
+        f.client
+            .policy(&f.agent.id(&f.env))
+            .unwrap()
+            .settlement_signer,
+        m
+    );
+
+    let mut p = params(&f);
+    p.ad_settlement_signer = m.clone();
+    let lock = |p: &OrderParams| lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]);
+    assert_eq!(agent_check(&f, &lock(&p)), Ok(()));
+    // the lock still names this account as the ad's maker
+    p.ad_creator = m.clone();
+    expect_err(
+        agent_check(&f, &lock(&p)),
+        AccountError::SettlementSignerMismatch,
+    );
+    // and a lock naming the account itself no longer matches the policy
+    let mut q = params(&f);
+    q.ad_settlement_signer = f.signer.clone();
+    expect_err(
+        agent_check(&f, &lock(&q)),
+        AccountError::SettlementSignerMismatch,
+    );
+}
+
+/// 2.6 D9: on a guarded account, changing the settlement signer is a loosening write: refused
+/// unannounced, accepted once the exact write is scheduled and matured.
+#[test]
+fn d9_changing_the_settlement_signer_waits_the_delay_on_a_guarded_account() {
+    let f = fixture();
+    let id = f.agent.id(&f.env);
+    guard(&f, 0, 3_600, 86_400);
+    let tokens = vec![&f.env, f.ad_token.clone(), f.order_token.clone()];
+    let mut limits = Vec::new(&f.env);
+    for t in tokens.iter() {
+        limits.push_back(tl(&t, 1_000_000, u128::MAX / 2, 1));
+    }
+    let m = b32(&f.env, 0x8f);
+    let set = || {
+        f.client.try_set_policy(
+            &id,
+            &vec![&f.env, lock_for_order(&f.env)],
+            &tokens,
+            &0,
+            &m,
+            &None,
+            &limits,
+        )
+    };
+    assert_eq!(set(), Err(Ok(AccountError::NotScheduled)));
+    let args = policy_args(&f.env, &id, &tokens, 0, &m, &None, &limits);
+    f.client
+        .schedule_account_extractive(&sym_of(&f.env, "set_policy"), &commit(&f.env, args));
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    assert_eq!(set(), Ok(Ok(())));
+    assert_eq!(f.client.policy(&id).unwrap().settlement_signer, m);
 }
 
 /// D5 via the transitional `ad_creator` field (2.3b swaps it for

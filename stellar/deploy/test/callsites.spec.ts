@@ -44,6 +44,7 @@ const CLEAN: Record<string, string | undefined> = {
   DISPUTE_ARBITER: undefined,
   DISPUTE_FEE_POOL: undefined,
   FAKE_STELLAR_PASSPHRASE: undefined,
+  FAKE_STELLAR_KEYS_ENV: undefined,
   ...Object.fromEntries(Object.keys(CLOCKS).map((k) => [k, undefined])),
 };
 
@@ -125,6 +126,22 @@ test("vkRecord: outside local a missing VK is refused before anything is sent", 
   const calls = await withFake(
     { ...NAMED, STELLAR_EVENT_VK: path.join(tmp, "no-vk"), STELLAR_NETWORK: "testnet", STELLAR_CHAIN_ID: "1000002", FAKE_STELLAR_PASSPHRASE: NETWORK_PASSPHRASES.testnet },
     () => assert.rejects(deploy("testnet", "vk.json"), /VK file is missing/),
+  );
+  assert.deepEqual(sent(calls), []);
+});
+
+test("D3: a reused key registry initialized for another env is refused before anything is sent", async () => {
+  const out = "reuse-env.json";
+  manifest(out, 1000003n, "local");
+  const LOCAL = { FAKE_STELLAR_PASSPHRASE: NETWORK_PASSPHRASES.local, STELLAR_EVENT_VK: vkFile };
+  let calls = await withFake({ ...LOCAL, FAKE_STELLAR_KEYS_ENV: "testnet" }, () =>
+    assert.rejects(deploy("local", out), /reused BLSKeyRegistry was initialized for "testnet", not DEPLOY_ENV=local/),
+  );
+  assert.deepEqual(sent(calls), []);
+  assert.ok(calls.some((c) => / -- keys_env$/.test(c)), "the registry was asked");
+  // the same registry, initialized for local: the deploy goes past the check (to the next read)
+  calls = await withFake({ ...LOCAL, FAKE_STELLAR_KEYS_ENV: "local" }, () =>
+    assert.rejects(deploy("local", out), /fake stellar: no answer for contract invoke .* -- (?!keys_env)/),
   );
   assert.deepEqual(sent(calls), []);
 });
