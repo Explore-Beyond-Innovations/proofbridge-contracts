@@ -65,17 +65,33 @@ export function shellQuote(arg: string): string {
 }
 const source = (): string => process.env.STELLAR_SOURCE_ACCOUNT ?? "admin";
 
-function exec(args: string[]): string {
-  return execFileSync("stellar", args, {
-    encoding: "utf8",
-    stdio: ["pipe", "pipe", "pipe"],
-    timeout: 180_000,
-  }).trim();
+/** A secret seed in any argument (e.g. `--source S...` from STELLAR_SOURCE_ACCOUNT) never reaches a log. */
+export function redact(text: string): string {
+  return text.replace(/\bS[A-Z2-7]{55}\b/g, (m) => (StrKey.isValidEd25519SecretSeed(m) ? "S…[redacted]" : m));
 }
 
-/** Run `stellar <args>`, echoing the command for debug visibility. */
+function exec(args: string[]): string {
+  try {
+    return execFileSync("stellar", args, {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 180_000,
+    }).trim();
+  } catch (err) {
+    // execFileSync's message and stderr carry the full command line; rethrow them redacted.
+    const e = err as Error & { stderr?: unknown; stdout?: unknown };
+    const out = new Error(redact(e.message ?? String(err)));
+    Object.assign(out, {
+      status: (err as { status?: unknown }).status,
+      stderr: typeof e.stderr === "string" ? redact(e.stderr) : e.stderr,
+    });
+    throw out;
+  }
+}
+
+/** Run `stellar <args>`, echoing the command (secrets redacted) for debug visibility. */
 export function stellar(args: string[]): string {
-  console.log(`  [stellar] stellar ${args.join(" ")}`);
+  console.log(`  [stellar] stellar ${redact(args.join(" "))}`);
   return exec(args);
 }
 
