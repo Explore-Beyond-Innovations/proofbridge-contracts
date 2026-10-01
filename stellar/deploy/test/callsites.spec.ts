@@ -92,7 +92,7 @@ test("A-4: STELLAR_NETWORK is required outside local (no testnet default)", asyn
 
 test("A-4: DEPLOY_ENV=local against a testnet RPC is refused before anything is sent", async () => {
   const calls = await withFake({ STELLAR_NETWORK: "testnet", FAKE_STELLAR_PASSPHRASE: NETWORK_PASSPHRASES.testnet, STELLAR_EVENT_VK: vkFile }, () =>
-    assert.rejects(deploy("local", "l2.json"), /DEPLOY_ENV=local but STELLAR_NETWORK=testnet is on "Test SDF Network ; September 2015" \(testnet\)/),
+    assert.rejects(deploy("local", "l2.json"), /DEPLOY_ENV=local but STELLAR_NETWORK=testnet is on testnet, not the local network/),
   );
   assert.deepEqual(calls, ["network info --network testnet --output json"]);
 });
@@ -100,7 +100,7 @@ test("A-4: DEPLOY_ENV=local against a testnet RPC is refused before anything is 
 test("A-4: DEPLOY_ENV=testnet against a mainnet RPC, or one that does not answer, is refused", async () => {
   const env = { ...NAMED, STELLAR_NETWORK: "pubnet", STELLAR_CHAIN_ID: "1000002" };
   let calls = await withFake({ ...env, FAKE_STELLAR_PASSPHRASE: NETWORK_PASSPHRASES.mainnet }, () =>
-    assert.rejects(deploy("testnet", "t2.json"), /is on "Public Global Stellar Network ; September 2015" \(mainnet\)/),
+    assert.rejects(deploy("testnet", "t2.json"), /is on mainnet, not the testnet network/),
   );
   assert.deepEqual(sent(calls), []);
   calls = await withFake(env, () => assert.rejects(deploy("testnet", "t3.json"), /could not ask the RPC of STELLAR_NETWORK=pubnet/));
@@ -171,7 +171,7 @@ const PAST_CHECKS = /fake stellar: no answer for contract invoke/;
 test("A-4: link checks the network against the manifest's env before any call", async () => {
   const local = manifest("lnk-l.json", 1000002n, "testnet");
   const calls = await withFake({ ...CLOCKS, STELLAR_NETWORK: "testnet", FAKE_STELLAR_PASSPHRASE: NETWORK_PASSPHRASES.local }, () =>
-    assert.rejects(linkT(local, manifest("lnk-p.json", 11155111n, "testnet")), /DEPLOY_ENV=testnet but STELLAR_NETWORK=testnet is on "Standalone Network/),
+    assert.rejects(linkT(local, manifest("lnk-p.json", 11155111n, "testnet")), /DEPLOY_ENV=testnet but STELLAR_NETWORK=testnet is on local, not the testnet network/),
   );
   assert.deepEqual(calls, ["network info --network testnet --output json"]);
 });

@@ -51,7 +51,7 @@ export function assertStellarNetworkForEnv(deployEnv: DeployEnv, env: NodeJS.Pro
   if (passphrase !== want) {
     const is = (Object.entries(NETWORK_PASSPHRASES).find(([, p]) => p === passphrase)?.[0]) ?? "an unknown network";
     throw new Error(
-      `DEPLOY_ENV=${deployEnv} but STELLAR_NETWORK=${name} is on "${passphrase}" (${is}), not "${want}". ` +
+      `DEPLOY_ENV=${deployEnv} but STELLAR_NETWORK=${name} is on ${is}, not the ${deployEnv} network. ` +
         `Point STELLAR_NETWORK at the ${deployEnv} network, or set DEPLOY_ENV to the network's environment.`,
     );
   }
