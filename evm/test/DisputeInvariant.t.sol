@@ -72,6 +72,13 @@ contract DisputeInvariantTest is Test {
     /// cancel) may use, so the general locks never crowd them out.
     uint256 internal constant MAX_ORDERS = 64;
     uint256 internal constant RESERVED = 16;
+    /// Past the cap, one slot each for the steps `afterInvariant` needs that must not depend on room:
+    /// each is taken at most once (`targetedUsed`), so none can crowd out another.
+    uint256 internal constant SLOT_SWAP = 1;
+    uint256 internal constant SLOT_CREDIT = 2;
+    uint256 internal constant SLOT_UNLOCK = 4;
+    uint256 internal constant SLOT_CANCEL = 8;
+    uint256 internal constant TARGETED = 4;
     /// One swap is what C-11 needs (a dispute left on the old module); every invariant walks each
     /// module, so more would only slow the campaign.
     uint256 internal constant MAX_MODULES = 2;
@@ -87,6 +94,8 @@ contract DisputeInvariantTest is Test {
     DisputeManager[] internal modules;
     /// Ghost: the total `claimTo` moved to `recipientWallet`.
     uint256 internal claimedTo;
+    /// Which of the slots past the cap have been taken (`SLOT_*` bits).
+    uint256 internal targetedUsed;
 
     function setUp() public {
         recipient = address(new NativeRefuser());
@@ -155,6 +164,13 @@ contract DisputeInvariantTest is Test {
 
     function _lockOrder(uint256 seed) internal returns (uint256 i) {
         i = _lockOrderWithin(seed, MAX_ORDERS);
+    }
+
+    /// One of the slots past the cap, once.
+    function _lockTargeted(uint256 seed, uint256 slot) internal returns (uint256 i) {
+        require(targetedUsed & slot == 0, "slot used");
+        targetedUsed |= slot;
+        i = _lockOrderWithin(seed, MAX_ORDERS + TARGETED);
     }
 
     function _lockOrderWithin(uint256 seed, uint256 cap) internal returns (uint256 i) {
@@ -259,8 +275,8 @@ contract DisputeInvariantTest is Test {
         require(modules.length < MAX_MODULES, "enough modules");
         // With a dispute open on the old module, filed here if there is none, so one is left behind.
         if (!_hasAny(_mask(IEscrow.Status.Disputed))) {
-            // One slot past the cap is the swap's own: it happens once, and must not depend on room.
-            _file(_lockOrderWithin(pick, MAX_ORDERS + 1), false);
+            // Its own slot past the cap: the swap happens once, and must not depend on room.
+            _file(_lockTargeted(pick, SLOT_SWAP), false);
         }
         DisputeManager next = new DisputeManager(admin, IwNativeToken(address(wNative)));
         vm.startPrank(admin);
@@ -285,6 +301,35 @@ contract DisputeInvariantTest is Test {
         claimedTo += amount;
     }
 
+    /// 49E-4: a credit redirected with `claimTo`, in one step, since the random sequence does not
+    /// always claim after a credit. Claims an existing credit; with none, mints one in its own slot
+    /// (the bridger side files, is vindicated, and its refused bond refund is credited).
+    function handlerCreditThenClaimTo(uint256 seed) external returns (bool minted, bool onOldModule) {
+        uint256 k = _moduleWithCredit();
+        if (k == type(uint256).max) {
+            minted = true;
+            uint256 i = _lockTargeted(seed, SLOT_CREDIT);
+            require(_file(i, true), "not filed by the bridger side");
+            DisputeManager m = _moduleOf(i); // read before the prank, which the next call consumes
+            vm.prank(arbiter);
+            m.resolveDispute(hashes[i], Dispute.Outcome.MakerForfeit);
+            uint8 outcome;
+            (outcome, onOldModule) = _finalize(i);
+            require(outcome == uint8(Dispute.Outcome.MakerForfeit), "ruling lost");
+            k = _moduleWithCredit();
+            require(k != type(uint256).max, "the refused refund was not credited");
+        }
+        this.handlerClaimTo(k);
+        require(modules[k].claimable(recipient) == 0, "claimTo left credit behind");
+    }
+
+    function _moduleWithCredit() internal view returns (uint256) {
+        for (uint256 k = 0; k < modules.length; k++) {
+            if (modules[k].claimable(recipient) > 0) return k;
+        }
+        return type(uint256).max;
+    }
+
     /// Evidence: the order chain's SETTLED leaf. Beats any dispute, at any time.
     function handlerPresent(uint256 pick) external returns (bool wasDisputed) {
         uint256 i = _pick(pick, _live());
@@ -295,8 +340,11 @@ contract DisputeInvariantTest is Test {
     /// The co-signed unlock, which is evidence too.
     function handlerUnlock(uint256 pick) external returns (bool wasDisputed) {
         uint256 i = _pickInTime(pick);
-        // The reserve too: with the general slots full, the exit paths must stay reachable.
-        if (i == type(uint256).max) i = _lockOrder(pick);
+        // The reserve too: with the general slots full, the exit paths must stay reachable. Past
+        // the reserve, its own slot once: after a long warp nothing older is in time.
+        if (i == type(uint256).max) {
+            i = orders.length < MAX_ORDERS ? _lockOrder(pick) : _lockTargeted(pick, SLOT_UNLOCK);
+        }
         wasDisputed = adManager.orders(hashes[i]) == IEscrow.Status.Disputed;
         vm.prank(bridger);
         adManager.unlock(orders[i], _nullifier(hashes[i]), bytes32(uint256(1)), hex"", hex"");
@@ -306,7 +354,10 @@ contract DisputeInvariantTest is Test {
     function handlerCancel(uint256 pick) external {
         // Open orders are what every other action consumes, so lock one when none is left.
         // The reserve too: with the general slots full, the exit paths must stay reachable.
-        uint256 i = _hasAny(_mask(IEscrow.Status.Open)) ? _pick(pick, _mask(IEscrow.Status.Open)) : _lockOrder(pick);
+        // Past the reserve, its own slot once.
+        uint256 i = _hasAny(_mask(IEscrow.Status.Open))
+            ? _pick(pick, _mask(IEscrow.Status.Open))
+            : orders.length < MAX_ORDERS ? _lockOrder(pick) : _lockTargeted(pick, SLOT_CANCEL);
         _warpTo(orders[i].deadline);
         adManager.claimCancel(orders[i]);
         _warpTo(adManager.cancelFinalizesAt(orders[i]));
@@ -569,6 +620,30 @@ contract DisputeInvariantTest is Test {
         invariant_moduleIsSolventForItsBonds();
         invariant_disputedIffModuleHasARecord();
     }
+
+    /// The credit step mints and claims from a fresh campaign; with every general and reserved slot
+    /// full, the swap, unlock and cancel each still get their own slot.
+    function test_creditThenClaimToIsReachable() public {
+        handler.creditThenClaimTo(7);
+        assertEq(handler.claimsTo(), 1, "the step did not land on a fresh campaign");
+        assertEq(dm.claimable(recipient), 0);
+        while (hashes.length < MAX_ORDERS) _lockOrder(hashes.length);
+        handler.everyOutcome(0); // no room left: lands nothing
+        handler.creditThenClaimTo(8); // no credit and no slot: lands nothing
+        assertEq(handler.claimsTo(), 1);
+        handler.swapModule(0); // its own slot is still there
+        assertEq(handler.swaps(), 1, "the swap lost its slot to the credit step");
+        // Unlock and cancel each still have theirs, with nothing in time or Open left.
+        handler.warp(type(uint32).max);
+        while (_hasAny(_mask(IEscrow.Status.Open))) handler.cancel(0);
+        uint256 cancelled = handler.cancelled();
+        handler.unlock(0);
+        handler.cancel(0);
+        assertEq(handler.filledByUnlock(), 1, "unlock lost its slot");
+        assertEq(handler.cancelled(), cancelled + 1, "cancel lost its slot");
+        invariant_claimToPaysOnlyTheCallersCredit();
+        invariant_moduleIsSolventForItsBonds();
+    }
 }
 
 /// A payout address that refuses native, so its bond refunds become credits on the module.
@@ -700,6 +775,18 @@ contract DisputeHandler {
     function claimTo(uint256 pick) external {
         try t.handlerClaimTo(pick) {
             claimsTo++;
+        } catch {}
+    }
+
+    function creditThenClaimTo(uint256 seed) external {
+        try t.handlerCreditThenClaimTo(seed) returns (bool minted, bool onOldModule) {
+            claimsTo++;
+            if (minted) {
+                _countFiling(true);
+                resolved++;
+                resolvedAs[uint8(Dispute.Outcome.MakerForfeit)]++;
+                if (onOldModule) finalizedOnOldModule++;
+            }
         } catch {}
     }
 
