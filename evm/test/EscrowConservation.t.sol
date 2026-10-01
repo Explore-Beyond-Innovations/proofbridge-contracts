@@ -41,7 +41,9 @@ import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Posei
 ///
 /// 49E-4: the solvency check is an equality (a stranded surplus fails it as surely as a shortfall),
 /// the credited recipients redirect their credit with `claimTo` (C-16), and `afterInvariant`
-/// requires BridgerForfeit as well as the other outcomes.
+/// requires BridgerForfeit as well as the other outcomes. Two targeted steps on reserved salts
+/// (every outcome; a credit then `claimTo`) land once per run, so those requirements no longer
+/// depend on the seed.
 contract EscrowConservationInvariantTest is Test {
     AdManager internal adManager;
     DisputeManager internal dm;
@@ -70,8 +72,12 @@ contract EscrowConservationInvariantTest is Test {
     address internal constant NATIVE = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
     string internal constant ERC20_AD = "inv";
     string internal constant NATIVE_AD = "inv-native";
-    /// Salts at or above this are orders on the native ad.
+    /// Salts whose low five bits are at or above this are orders on the native ad.
     uint256 internal constant NATIVE_FROM = 16;
+    /// Reserved salts for the targeted steps (credit then `claimTo`, every outcome), one block per
+    /// token: random steps only reach salts below 32, so they can never exhaust these.
+    uint256 internal constant RESERVED_ERC20 = 32;
+    uint256 internal constant RESERVED_NATIVE = 48;
     bytes32 internal constant EVIDENCE_ROOT = bytes32(uint256(0xe71d));
 
     uint256 internal orderChainId = 11155111;
@@ -182,11 +188,15 @@ contract EscrowConservationInvariantTest is Test {
         live[salt] = false;
     }
 
-    /// Or let its clock run out and cancel it back to the pool.
+    /// Or let its clock run out and cancel it back to the pool. Warps forward only, to the escrow's
+    /// own finalize time: a fixed `deadline + 31 minutes` fell short once a pause had extended the
+    /// window (and warped back when already past it), so some runs never cancelled.
     function handlerCancel(uint256 salt) external {
         IAdManager.OrderParams memory p = _params(salt);
-        vm.warp(p.deadline + 31 minutes);
+        if (block.timestamp < p.deadline) vm.warp(p.deadline);
         adManager.claimCancel(p);
+        uint256 at = adManager.cancelFinalizesAt(p);
+        if (block.timestamp < at) vm.warp(at);
         adManager.finalizeCancel(p);
         live[salt] = false;
     }
@@ -243,6 +253,38 @@ contract EscrowConservationInvariantTest is Test {
         }
     }
 
+    /// 49E-4: a refused push credited and then redirected with `claimTo`, in one step, on a reserved
+    /// salt so random steps never exhaust it: the random sequence does not reach this every run.
+    /// Leaves the refusing flag as it found it.
+    function handlerCreditThenClaimTo(bool native) external {
+        uint256 salt = native ? RESERVED_NATIVE : RESERVED_ERC20; // offset 0 of the block
+        bool wasRefusing = adToken.refusing();
+        this.handlerSetRefusing(true);
+        this.handlerLock(salt);
+        address who = _recipientOf(salt);
+        address token = native ? NATIVE : address(adToken);
+        uint256 before = adManager.claimable(who, token);
+        this.handlerUnlock(salt);
+        require(adManager.claimable(who, token) == before + LOCK, "the refused push was not credited");
+        // The mock ERC20 refuses every transfer, so only the native side redirects while refusing.
+        if (!native) this.handlerSetRefusing(false);
+        this.handlerClaimTo(native);
+        require(adManager.claimable(who, token) == 0, "claimTo left credit behind");
+        this.handlerSetRefusing(wasRefusing);
+    }
+
+    /// 49E-4: every finalized outcome in one step (unruled MutualRefund, BridgerForfeit,
+    /// MakerForfeit), on reserved salts (offsets 1..3): each is a 1-in-4 ruling on a random dispute,
+    /// which some runs never draw.
+    function handlerEveryOutcome(bool native) external returns (uint8[3] memory applied) {
+        uint256 base = native ? RESERVED_NATIVE : RESERVED_ERC20;
+        for (uint256 k = 1; k <= 3; k++) {
+            this.handlerLock(base + k);
+            // Outcome table indices 0, 2, 3: unruled, BridgerForfeit, MakerForfeit.
+            applied[k - 1] = this.handlerDispute(base + k, k % 2 == 1, uint8([0, 2, 3][k - 1]));
+        }
+    }
+
     /// Flip the recipients' ability to receive. With them refusing, a payout credits instead of
     /// paying, which is the branch the solvency invariant exists to police.
     function handlerSetRefusing(bool v) external {
@@ -260,7 +302,7 @@ contract EscrowConservationInvariantTest is Test {
     }
 
     function _isNative(uint256 salt) internal pure returns (bool) {
-        return salt >= NATIVE_FROM;
+        return salt % 32 >= NATIVE_FROM;
     }
 
     function _recipientOf(uint256 salt) internal view returns (address) {
@@ -440,6 +482,39 @@ contract EscrowConservationInvariantTest is Test {
         invariant_escrowHoldsWhatItOwes();
     }
 
+    /// The targeted step lands on both tokens, from either refusing state, and leaves no credit.
+    function test_creditThenClaimToIsReachable() public {
+        handler.setRefusing(true);
+        handler.creditThenClaimTo(false);
+        assertTrue(adToken.refusing(), "the step restores the refusing flag");
+        handler.creditThenClaimTo(true); // once per run: a no-op now
+        assertEq(handler.claimsTo(), 1, "the step did not land");
+        assertEq(handler.credits(), 1);
+        assertEq(claimedToErc20, LOCK);
+        // The step's own logic, on the native token, from not refusing.
+        handler.setRefusing(false);
+        this.handlerCreditThenClaimTo(true);
+        assertFalse(adToken.refusing(), "the step restores the refusing flag");
+        assertEq(claimedToNative, LOCK);
+        invariant_claimToPaysOnlyTheCallersCredit();
+        invariant_escrowHoldsWhatItOwes();
+        invariant_lockedMatchesLiveOrders();
+    }
+
+    /// The outcome step lands every outcome on both tokens.
+    function test_everyOutcomeIsReachable() public {
+        handler.everyOutcome(true);
+        handler.everyOutcome(false); // once per run: a no-op now
+        assertEq(handler.outcomes(uint8(Dispute.Outcome.MutualRefund)), 1);
+        assertEq(handler.outcomes(uint8(Dispute.Outcome.BridgerForfeit)), 1);
+        assertEq(handler.outcomes(uint8(Dispute.Outcome.MakerForfeit)), 1);
+        assertEq(handler.nativeLocks(), 3);
+        // The step's own logic, on the other token too.
+        this.handlerEveryOutcome(false);
+        invariant_escrowHoldsWhatItOwes();
+        invariant_lockedMatchesLiveOrders();
+    }
+
     /// 49E-4: BridgerForfeit is reachable through the handler (index 2 of its outcome table).
     function test_bridgerForfeitIsReachable() public {
         handler.dispute(3, false, 2);
@@ -510,6 +585,10 @@ contract OrderPortalConservationInvariantTest is Test {
     address internal constant NATIVE = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
     uint256 internal constant NATIVE_FROM = 16;
     uint256 internal constant SALTS = 32;
+    /// Reserved for `handlerEveryDoor`, past the random salts. The step ends with its orders closed,
+    /// so the invariants' walk over the random salts still sees every live order.
+    uint256 internal constant RESERVED_ERC20 = 32;
+    uint256 internal constant RESERVED_NATIVE = 48;
     uint256 internal constant AMOUNT = 1 ether;
     bytes32 internal constant EVIDENCE_ROOT = bytes32(uint256(0xe71d));
     uint256 internal adChainId = 11155111;
@@ -557,7 +636,10 @@ contract OrderPortalConservationInvariantTest is Test {
 
     /// The bridger deposits. One order per salt, its deadline fixed at creation.
     function handlerCreate(uint256 salt) external returns (bool native) {
-        salt %= SALTS;
+        native = _create(salt % SALTS);
+    }
+
+    function _create(uint256 salt) internal returns (bool native) {
         // A salt whose last order ended starts a new one: a new generation, so a new hash.
         if (!live[salt]) {
             if (deadlineOf[salt] != 0) generation[salt]++;
@@ -620,6 +702,34 @@ contract OrderPortalConservationInvariantTest is Test {
         adRecipient.setRefusing(v);
     }
 
+    /// Every door once, on reserved salts, starting with a refused unlock that is credited: the
+    /// random doors only land on a live order, and some runs never line the two up (or never
+    /// refuse before a payout). Leaves the refusing flag as it found it.
+    function handlerEveryDoor(bool native) external {
+        uint256 base = native ? RESERVED_NATIVE : RESERVED_ERC20;
+        for (uint256 k = 0; k < 5; k++) {
+            _create(base + k);
+        }
+        bool wasRefusing = orderToken.refusing();
+        this.handlerSetRefusing(true);
+        address token = native ? NATIVE : address(orderToken);
+        uint256 before = portal.claimable(address(adRecipient), token);
+        portal.unlock(_params(base), _nullifier(base), bytes32(uint256(1)), hex"", hex"");
+        require(portal.claimable(address(adRecipient), token) == before + AMOUNT, "the refused payout was not credited");
+        this.handlerSetRefusing(wasRefusing);
+        portal.refundByCancel(_params(base + 1), EVIDENCE_ROOT, hex"");
+        portal.payMakerByForfeit(_params(base + 2), EVIDENCE_ROOT, hex"");
+        portal.presentSettled(_params(base + 3), EVIDENCE_ROOT, hex"");
+        IOrderPortal.OrderParams memory p = _params(base + 4);
+        if (block.timestamp < p.deadline + 1 days) vm.warp(p.deadline + 1 days);
+        portal.claimBackstop(p);
+        vm.warp(block.timestamp + 30 minutes);
+        portal.finalizeBackstop(p);
+        for (uint256 k = 0; k < 5; k++) {
+            live[base + k] = false;
+        }
+    }
+
     function handlerPauseFor(uint32 secs) external {
         vm.prank(admin);
         portal.pause();
@@ -638,7 +748,7 @@ contract OrderPortalConservationInvariantTest is Test {
     }
 
     function _isNative(uint256 salt) internal pure returns (bool) {
-        return salt >= NATIVE_FROM;
+        return salt % SALTS >= NATIVE_FROM;
     }
 
     function _params(uint256 salt) internal view returns (IOrderPortal.OrderParams memory p) {
@@ -742,6 +852,24 @@ contract OrderPortalConservationInvariantTest is Test {
         invariant_inFlightMatchesLiveOrders();
     }
 
+    /// The targeted step lands every door and a credit, on both tokens, and leaves the portal balanced.
+    function test_everyDoorStepIsReachable() public {
+        handler.everyDoor(false);
+        handler.everyDoor(true); // once per run: a no-op now
+        assertEq(handler.unlocks(), 1, "the step did not land");
+        assertEq(handler.refunds(), 1);
+        assertEq(handler.forfeits(), 1);
+        assertEq(handler.presents(), 1);
+        assertEq(handler.backstops(), 1);
+        assertEq(handler.credits(), 1);
+        assertEq(portal.claimable(address(adRecipient), address(orderToken)), AMOUNT, "the ERC20 payout was credited");
+        this.handlerEveryDoor(true); // the step's own logic, on the native token
+        assertEq(portal.claimable(address(adRecipient), NATIVE), AMOUNT, "the native payout was credited");
+        assertFalse(orderToken.refusing(), "the step restores the refusing flag");
+        invariant_portalHoldsExactlyWhatItOwes();
+        invariant_inFlightMatchesLiveOrders();
+    }
+
     function creditOutstanding() external view returns (uint256) {
         return
             portal.claimable(address(adRecipient), address(orderToken)) + portal.claimable(address(adRecipient), NATIVE);
@@ -810,14 +938,14 @@ contract EscrowHandler {
     }
 
     function cancel(uint256 salt) external {
-        try t.handlerCancel(t.liveFrom(salt)) {
+        try t.handlerCancel(_live(salt)) {
             cancels++;
         } catch {}
     }
 
     function present(uint256 salt) external {
         uint256 before = t.creditOutstanding();
-        try t.handlerPresent(t.liveFrom(salt)) {
+        try t.handlerPresent(_live(salt)) {
             presents++;
             _countCredit(before);
         } catch {}
@@ -845,6 +973,35 @@ contract EscrowHandler {
         } catch {}
     }
 
+    /// The targeted steps land once per run, then return at once: `afterInvariant` needs one
+    /// landing each, and repeating them only slows the campaign.
+    bool internal everyOutcomeLanded;
+    bool internal creditThenClaimToLanded;
+
+    function everyOutcome(bool native) external {
+        if (everyOutcomeLanded) return;
+        uint256 before = t.creditOutstanding();
+        try t.handlerEveryOutcome(native) returns (uint8[3] memory applied) {
+            for (uint256 k = 0; k < 3; k++) {
+                outcomes[applied[k]]++;
+            }
+            if (native) nativeLocks += 3;
+            _countCredit(before);
+            everyOutcomeLanded = true;
+        } catch {}
+    }
+
+    function creditThenClaimTo(bool native) external {
+        if (creditThenClaimToLanded) return;
+        try t.handlerCreditThenClaimTo(native) {
+            creditThenClaimToLanded = true;
+            unlocks++;
+            credits++;
+            claimsTo++;
+            if (native) nativeLocks++;
+        } catch {}
+    }
+
     function setRefusing(bool v) external {
         try t.handlerSetRefusing(v) {} catch {}
     }
@@ -863,6 +1020,12 @@ contract EscrowHandler {
     /// action consumes them.
     function _liveInTime(uint256 pick) internal returns (uint256 salt) {
         salt = t.liveInTimeFrom(pick);
+        if (!t.isLive(salt)) _lock(salt);
+    }
+
+    /// A live order; locks a fresh one when none is live.
+    function _live(uint256 pick) internal returns (uint256 salt) {
+        salt = t.liveFrom(pick);
         if (!t.isLive(salt)) _lock(salt);
     }
 
@@ -926,6 +1089,23 @@ contract PortalHandler {
     function backstop(uint256 pick) external {
         try t.handlerBackstop(pick) {
             backstops++;
+        } catch {}
+    }
+
+    /// Lands once per run, then returns at once, as the escrow handler's targeted steps do.
+    bool internal everyDoorLanded;
+
+    function everyDoor(bool native) external {
+        if (everyDoorLanded) return;
+        try t.handlerEveryDoor(native) {
+            everyDoorLanded = true;
+            unlocks++;
+            refunds++;
+            forfeits++;
+            presents++;
+            backstops++;
+            credits++;
+            if (native) nativeCreates += 5;
         } catch {}
     }
 
