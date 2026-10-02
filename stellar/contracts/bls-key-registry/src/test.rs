@@ -2229,3 +2229,365 @@ fn commitment_at_extends_the_keyslot_row() {
     );
     set_valid_until(&env, &client, &v, MAKER, 0, true);
 }
+
+// =============================================================================
+// Real wallet signatures (wallet-signatures.json): MetaMask v13.49.0 + Freighter 5.48.0
+// =============================================================================
+
+/// Replays the signatures the wallet-check page took from real wallets, at the contract id and
+/// chain id (1000001) its Stellar localnet registries had. The BLS side (test key + PoP) comes
+/// from wallet-signatures-pop.json; the EVM registry suite replays the same two files.
+mod wallet_signatures {
+    use super::*;
+
+    const WALLET: &str = include_str!("../../../../test-vectors/wallet-signatures.json");
+    const POP: &str = include_str!("../../../../test-vectors/wallet-signatures-pop.json");
+    const CHAIN: u128 = 1_000_001;
+    /// Inside every positive deadline (<= 7 days out) and past both registerExpired deadlines.
+    const NOW: u64 = 1_790_926_000;
+
+    struct W {
+        env: Env,
+        client: BlsKeyRegistryClient<'static>,
+        v: serde_json::Value,
+        p: serde_json::Value,
+        w: &'static str,
+    }
+
+    impl W {
+        /// The registry `reg_env`'s strkey names, initialized for `reg_env` as the deploy CLI does.
+        fn new(w: &'static str, reg_env: &str) -> W {
+            let v: serde_json::Value = serde_json::from_str(WALLET).unwrap();
+            let p: serde_json::Value = serde_json::from_str(POP).unwrap();
+            let env = Env::default();
+            env.mock_all_auths();
+            env.ledger().set_timestamp(NOW);
+            let strkey = v["_meta"]["registries"][reg_env]["soroban"]
+                .as_str()
+                .unwrap();
+            let at = Address::from_string(&SString::from_str(&env, strkey));
+            let id = env.register_at(&at, BlsKeyRegistry, ());
+            let client = BlsKeyRegistryClient::new(&env, &id);
+            client.initialize(
+                &Address::generate(&env),
+                &CHAIN,
+                &SString::from_str(&env, reg_env),
+            );
+            assert_eq!(
+                bn::<32>(&env, &p[w]["pop"][reg_env]["sorobanRegistry"]),
+                contract_address_bytes(&env, &id)
+            );
+            W {
+                env,
+                client,
+                v,
+                p,
+                w,
+            }
+        }
+
+        fn e(&self, group: &str) -> &serde_json::Value {
+            &self.v["ownerAuth"][self.w][group][0]
+        }
+
+        fn account(&self) -> BytesN<32> {
+            bn::<32>(&self.env, &self.v["ownerAuth"][self.w]["account"])
+        }
+
+        fn auth(&self, group: &str) -> OwnerAuth {
+            signed(&self.env, self.e(group))
+        }
+
+        fn nonce(&self, group: &str) -> u64 {
+            self.e(group)["legs"][1]["nonce"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+
+        fn num(&self, group: &str, field: &str) -> u64 {
+            self.e(group)[field].as_str().unwrap().parse().unwrap()
+        }
+
+        fn try_register(
+            &self,
+            group: &str,
+            reg_env: &str,
+            owner: &OwnerAuth,
+        ) -> Result<
+            Result<u32, soroban_sdk::ConversionError>,
+            Result<RegistryError, soroban_sdk::InvokeError>,
+        > {
+            self.client.try_register(
+                &self.account(),
+                owner,
+                &bn::<96>(&self.env, &self.p[self.w]["sorobanPk"]),
+                &bn::<192>(&self.env, &self.p[self.w]["pop"][reg_env]["soroban"]),
+                &self.nonce(group),
+                &self.num(group, "deadline"),
+            )
+        }
+
+        /// The plain client call: a refusal traps with its host error, as on chain.
+        fn file(&self, group: &str, reg_env: &str, owner: &OwnerAuth) -> u32 {
+            self.client.register(
+                &self.account(),
+                owner,
+                &bn::<96>(&self.env, &self.p[self.w]["sorobanPk"]),
+                &bn::<192>(&self.env, &self.p[self.w]["pop"][reg_env]["soroban"]),
+                &self.nonce(group),
+                &self.num(group, "deadline"),
+            )
+        }
+
+        fn register(&self) -> u32 {
+            self.try_register("register", "testnet", &self.auth("register"))
+                .unwrap()
+                .unwrap()
+        }
+
+        fn retire(&self, owner: &OwnerAuth) {
+            self.client.set_valid_until(
+                &self.account(),
+                owner,
+                &bn::<32>(&self.env, &self.e("retire")["keyCommitment"]),
+                &self.num("retire", "validUntil"),
+            );
+        }
+
+        fn sep53(&self) -> bool {
+            self.v["ownerAuth"][self.w]["scheme"] == "sep53"
+        }
+
+        /// The refusal the page saw for a bad owner signature: OwnerMismatch (secp) or the ed25519 trap.
+        fn assert_refused(&self, f: impl FnOnce(), what: &str) {
+            if self.sep53() {
+                assert_crypto_trap(f, what);
+            } else {
+                let msg = panic_message(f);
+                assert!(
+                    msg.contains("Error(Contract, #6)"),
+                    "{what}: wanted OwnerMismatch, got: {msg}"
+                );
+            }
+        }
+    }
+
+    fn contract_address_bytes(env: &Env, id: &Address) -> BytesN<32> {
+        env.as_contract(id, || {
+            proofbridge_core::eip712::contract_address_to_bytes32(env)
+        })
+    }
+
+    fn flip(o: OwnerAuth) -> OwnerAuth {
+        let OwnerAuth::Signed(mut s) = o else {
+            panic!("signed")
+        };
+        s.sig = match s.sig {
+            OwnerSig::Secp256k1(b) => {
+                let mut a = b.to_array();
+                a[63] ^= 1; // the low byte of s: r stays a curve point, so recovery yields another signer
+                OwnerSig::Secp256k1(BytesN::from_array(b.env(), &a))
+            }
+            OwnerSig::Sep53(b) => {
+                let mut a = b.to_array();
+                a[0] ^= 1;
+                OwnerSig::Sep53(BytesN::from_array(b.env(), &a))
+            }
+        };
+        OwnerAuth::Signed(s)
+    }
+
+    fn check_register(w: &'static str) {
+        let t = W::new(w, "testnet");
+        let slot = t.register();
+        let account = t.account();
+        assert_eq!(t.client.nonce_of(&account), 1);
+        assert_eq!(
+            t.client.commitment_at(&account, &slot),
+            t.env
+                .crypto()
+                .keccak256(&Bytes::from_slice(&t.env, &hexval(&t.p[w]["sorobanPk"])))
+                .to_bytes()
+        );
+    }
+
+    fn check_retire(w: &'static str) {
+        let t = W::new(w, "testnet");
+        let slot = t.register();
+        t.retire(&t.auth("retire"));
+        assert_eq!(
+            t.client.lookup(&t.account(), &slot).unwrap().valid_until,
+            t.num("retire", "validUntil")
+        );
+    }
+
+    // CancelPending and RevokeKeys both sign nonce 1 (the page simulated each from the post-register
+    // state), so they are alternatives: each test files the register (and the retire) first, then one.
+    fn check_cancel(w: &'static str) {
+        let t = W::new(w, "testnet");
+        let slot = t.register();
+        t.retire(&t.auth("retire"));
+        assert_eq!(t.nonce("cancel"), 1);
+        t.client.cancel_pending(&t.account(), &t.auth("cancel"), &1);
+        assert_eq!(t.client.nonce_of(&t.account()), 2);
+        assert_eq!(t.client.live_slots(&t.account()).len(), 1); // a cancel leaves live keys
+        assert!(t.client.lookup(&t.account(), &slot).is_some());
+    }
+
+    fn check_revoke(w: &'static str) {
+        let t = W::new(w, "testnet");
+        let slot = t.register();
+        t.retire(&t.auth("retire"));
+        assert_eq!(t.nonce("revoke"), 1);
+        t.client.revoke(&t.account(), &t.auth("revoke"), &1);
+        assert_eq!(t.client.nonce_of(&t.account()), 2);
+        assert_eq!(t.client.live_slots(&t.account()).len(), 0);
+        assert!(t.client.lookup(&t.account(), &slot).is_none());
+    }
+
+    fn check_expired(w: &'static str) {
+        let t = W::new(w, "testnet");
+        let dl = t.num("registerExpired", "deadline");
+        assert!(dl < NOW);
+        assert_eq!(
+            t.try_register("registerExpired", "testnet", &t.auth("registerExpired")),
+            Err(Ok(RegistryError::DeadlineExpired))
+        );
+        // the same entry at its deadline: the time check is the only refusal
+        t.env.ledger().set_timestamp(dl);
+        t.try_register("registerExpired", "testnet", &t.auth("registerExpired"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(t.client.nonce_of(&t.account()), 1);
+    }
+
+    /// Signed for testnet, filed at the local-env registry its legs name: the Network line / salt differ.
+    fn check_other_env(w: &'static str) {
+        let t = W::new(w, "local");
+        let o = t.auth("otherEnv");
+        t.assert_refused(
+            || {
+                t.file("otherEnv", "local", &o);
+            },
+            "otherEnv",
+        );
+        assert_eq!(t.client.nonce_of(&t.account()), 0);
+    }
+
+    fn check_mutated(w: &'static str) {
+        let t = W::new(w, "testnet");
+        let account = t.account();
+        let bad = flip(t.auth("register"));
+        t.assert_refused(
+            || {
+                t.file("register", "testnet", &bad);
+            },
+            "register",
+        );
+        t.register();
+        let bad = flip(t.auth("retire"));
+        t.assert_refused(|| t.retire(&bad), "retire");
+        let bad = flip(t.auth("cancel"));
+        t.assert_refused(|| t.client.cancel_pending(&account, &bad, &1), "cancel");
+        let bad = flip(t.auth("revoke"));
+        t.assert_refused(|| t.client.revoke(&account, &bad, &1), "revoke");
+    }
+
+    /// The SEP-53 text the contract rebuilds is the text Freighter displayed and signed, byte for byte.
+    #[test]
+    fn freighter_text_is_rebuilt_byte_for_byte() {
+        let t = W::new("freighter", "testnet");
+        let account = t.account();
+        let fp = bn::<32>(&t.env, &t.e("register")["keyCommitment"]);
+        let cases = [
+            (
+                "register",
+                KeyMessage::Register {
+                    fingerprint: fp.clone(),
+                    nonce: 0,
+                    deadline: t.num("register", "deadline"),
+                },
+            ),
+            (
+                "retire",
+                KeyMessage::Retire {
+                    fingerprint: fp,
+                    valid_until: t.num("retire", "validUntil"),
+                },
+            ),
+            ("cancel", KeyMessage::Cancel { nonce: 1 }),
+            ("revoke", KeyMessage::Revoke { nonce: 1 }),
+        ];
+        for (group, msg) in cases {
+            let legs = legs_of(&t.env, t.e(group));
+            let built = t.env.as_contract(&t.client.address, || {
+                crate::owner::text(&t.env, &account, &legs, &msg)
+            });
+            assert_eq!(
+                built,
+                Bytes::from_slice(&t.env, text_of(t.e(group)).as_bytes()),
+                "{group}"
+            );
+        }
+    }
+
+    #[test]
+    fn metamask_register() {
+        check_register("metamask");
+    }
+    #[test]
+    fn metamask_retire() {
+        check_retire("metamask");
+    }
+    #[test]
+    fn metamask_cancel_pending() {
+        check_cancel("metamask");
+    }
+    #[test]
+    fn metamask_revoke() {
+        check_revoke("metamask");
+    }
+    #[test]
+    fn metamask_register_expired_is_deadline_expired() {
+        check_expired("metamask");
+    }
+    #[test]
+    fn metamask_other_env_is_owner_mismatch() {
+        check_other_env("metamask");
+    }
+    #[test]
+    fn metamask_one_byte_flip_is_refused() {
+        check_mutated("metamask");
+    }
+
+    #[test]
+    fn freighter_register() {
+        check_register("freighter");
+    }
+    #[test]
+    fn freighter_retire() {
+        check_retire("freighter");
+    }
+    #[test]
+    fn freighter_cancel_pending() {
+        check_cancel("freighter");
+    }
+    #[test]
+    fn freighter_revoke() {
+        check_revoke("freighter");
+    }
+    #[test]
+    fn freighter_register_expired_is_deadline_expired() {
+        check_expired("freighter");
+    }
+    #[test]
+    fn freighter_other_env_is_a_crypto_trap() {
+        check_other_env("freighter");
+    }
+    #[test]
+    fn freighter_one_byte_flip_is_a_crypto_trap() {
+        check_mutated("freighter");
+    }
+}
