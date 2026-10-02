@@ -1,0 +1,451 @@
+{
+  "_meta": {
+    "source": "wallet",
+    "warning": "Real wallet signatures. The identity walletSig derives M (secretKey omitted, but the signature is enough): use a throwaway account.",
+    "generatedAt": "2026-10-02T07:26:49.421Z",
+    "generator": "scripts/wallet-check (PRs #493 / #494)",
+    "spec": "docs/engineering/t2/2.6-build/13-owner-signature-unification.md D1\u2013D5, D8",
+    "env": "testnet",
+    "domainType": "EIP712Domain(string name,string version,bytes32 salt)",
+    "domain": {
+      "name": "ProofBridge Keys",
+      "version": "2",
+      "salt": "0xfd7d76e497f6a375ab444422d2a39195d3c8de4542b0199067543b27f1a1d0e0"
+    },
+    "envs": {
+      "local": {
+        "salt": "0xd656fbe9a4ab530e933db662c08a54ffb719bf15ab7e865deda338e9fbf25525",
+        "domainSeparator": "0xa133b48859649284b46638358f68704581e3a10ba6f4be7c83450b8695f645a4"
+      },
+      "testnet": {
+        "salt": "0xfd7d76e497f6a375ab444422d2a39195d3c8de4542b0199067543b27f1a1d0e0",
+        "domainSeparator": "0xcc869df6e0e307988f83e7827d13e328a06963ee96ad55660bb6be9e0df344b8"
+      }
+    },
+    "chains": {},
+    "registries": {
+      "testnet": {
+        "evm": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+        "soroban": "CD7FXNXI4Y6EVY2ZHH7SGYILYU4R4YWCPOXDNYP7VZFAKGHE6HYBWVWD"
+      },
+      "local": {
+        "evm": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+        "soroban": "CC2ZJG5LYZ47GRCCM2GJV5TDLKSM5LUSOLKLGLUNOXHBY7XKMD4NRK3K"
+      }
+    },
+    "layout": "ownerAuth.<wallet>.<group>[]: register (both legs, current nonces), registerExpired (deadline past), otherEnv (signed for env, legs name the other env's registries), retire, cancel, revoke; identity.<wallet>[]: index 0 and 1",
+    "browser": "Firefox",
+    "wallets": {
+      "metamask": {
+        "version": "MetaMask/v13.49.0",
+        "display": "Shown as a normal typed-data signature request, every field laid out; no warning about the chain-less salted domain (only an HTTP-origin badge for 127.0.0.1)."
+      },
+      "freighter": {
+        "version": "5.48.0",
+        "display": "Signed the exact multi-line text; the popup collapses line breaks into one paragraph, every field keeps its label, long values scroll sideways."
+      }
+    },
+    "identityRepeat": "Index 0 was signed twice in each wallet; the two signatures were byte-identical (same M).",
+    "registries_note": "Registry addresses are from the local chains (Anvil 31337, Stellar localnet 1000001) the signatures were checked against."
+  },
+  "ownerAuth": {
+    "freighter": {
+      "scheme": "sep53",
+      "account": "0xc13f2c67613298025045d3b105b6cb4546fa87d70885a30287a2199e9b784819",
+      "wallet": "Freighter",
+      "walletVersion": "5.48.0",
+      "signer": "GDAT6LDHMEZJQASQIXJ3CBNWZNCUN6UH24EILIYCQ6RBTHU3PBEBSGP7",
+      "register": [
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0xc13f2c67613298025045d3b105b6cb4546fa87d70885a30287a2199e9b784819",
+          "keyCommitment": "0x320364b2f388985909feb512584a85d8d74a9a2ca64fef6157bd5c0c71d64ef9",
+          "deadline": "1791185031",
+          "legs": [
+            {
+              "chainId": "31337",
+              "registry": "0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9",
+              "nonce": "0"
+            },
+            {
+              "chainId": "1000001",
+              "registry": "0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b",
+              "nonce": "0"
+            }
+          ],
+          "structHash": "0x9486a44835caa1c748e13014879f315cafc799a82c4c7de3e6a97a9152bac6e1",
+          "digest": "0xe56d088a68d0d6a5ba4c07355f9fca1c2330fae63db990d2bb3cbe64bdafa097",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0xc13f2c67613298025045d3b105b6cb4546fa87d70885a30287a2199e9b784819\nKey fingerprint: 0x320364b2f388985909feb512584a85d8d74a9a2ca64fef6157bd5c0c71d64ef9\nValid until: 2026-10-05 07:23:51 UTC (1791185031)\n\nChain 31337, registry 0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9, nonce 0\nChain 1000001, registry 0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b, nonce 0",
+          "sep53Payload": "0x5ffefa458994b4903f9c42c1b60d81d18609a5246800c927aa5b44a0ff83c24a",
+          "scheme": "sep53",
+          "sig": "0x0ad6f7d74ae37b0fe1ecf15fe65cb0ba0da118d6ecd6ac8c7bf5c32fce06c729dd2ade1fd5e40aa7a1b1d9d9487df33bb23786ae58246fe83da161c776af2b0a",
+          "evmSig": "0x0ad6f7d74ae37b0fe1ecf15fe65cb0ba0da118d6ecd6ac8c7bf5c32fce06c729dd2ade1fd5e40aa7a1b1d9d9487df33bb23786ae58246fe83da161c776af2b0a25e3b26a49b5663bbc6823e662fc6a635547f5f9c5be5ad6074fd2f48a5c86081948789b9e19a28702a38508d787fa4645cbb605b1d3455002983261672c3fc1",
+          "check": "6\u20137",
+          "display": "Signed the exact multi-line text; the popup collapses line breaks into one paragraph, every field keeps its label, long values scroll sideways.",
+          "passed": true
+        }
+      ],
+      "registerExpired": [
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0xc13f2c67613298025045d3b105b6cb4546fa87d70885a30287a2199e9b784819",
+          "keyCommitment": "0x320364b2f388985909feb512584a85d8d74a9a2ca64fef6157bd5c0c71d64ef9",
+          "deadline": "1790922240",
+          "legs": [
+            {
+              "chainId": "31337",
+              "registry": "0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9",
+              "nonce": "0"
+            },
+            {
+              "chainId": "1000001",
+              "registry": "0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b",
+              "nonce": "0"
+            }
+          ],
+          "structHash": "0xe0d012a1671eb74568e5cdae622d18c290d9539bec0d8f897ae766611c1105f3",
+          "digest": "0x81a1670be129fb71d9b4c3829691a222cec216e5906f5bdd94fd116832b5ac74",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0xc13f2c67613298025045d3b105b6cb4546fa87d70885a30287a2199e9b784819\nKey fingerprint: 0x320364b2f388985909feb512584a85d8d74a9a2ca64fef6157bd5c0c71d64ef9\nValid until: 2026-10-02 06:24:00 UTC (1790922240)\n\nChain 31337, registry 0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9, nonce 0\nChain 1000001, registry 0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b, nonce 0",
+          "sep53Payload": "0xaabca3188967f7213c20f2565853c219db58e91edcb34db245d1f8cf9524b277",
+          "scheme": "sep53",
+          "sig": "0x8e4250285266ea1561112e681361c7718d6e7b53c60f7b5b06cd61d605762a260a722ca17c9b4dd72e4dbce3c2499c9ab94e67f896e499351f22e404189d4603",
+          "evmSig": "0x8e4250285266ea1561112e681361c7718d6e7b53c60f7b5b06cd61d605762a260a722ca17c9b4dd72e4dbce3c2499c9ab94e67f896e499351f22e404189d460325e3b26a49b5663bbc6823e662fc6a635547f5f9c5be5ad6074fd2f48a5c86081948789b9e19a28702a38508d787fa4645cbb605b1d3455002983261672c3fc1",
+          "check": "12",
+          "display": "Signed the exact multi-line text; the popup collapses line breaks into one paragraph, every field keeps its label, long values scroll sideways.",
+          "passed": true
+        }
+      ],
+      "otherEnv": [
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0xc13f2c67613298025045d3b105b6cb4546fa87d70885a30287a2199e9b784819",
+          "keyCommitment": "0x320364b2f388985909feb512584a85d8d74a9a2ca64fef6157bd5c0c71d64ef9",
+          "deadline": "1791185043",
+          "legs": [
+            {
+              "chainId": "31337",
+              "registry": "0x000000000000000000000000dc64a140aa3e981100a9beca4e685f962f0cf6c9",
+              "nonce": "0"
+            },
+            {
+              "chainId": "1000001",
+              "registry": "0xb5949babc679f34442668c9af6635aa4ceae9272d4b32e8d75ce1c7eea60f8d8",
+              "nonce": "0"
+            }
+          ],
+          "structHash": "0x7af28b91cac5f51a43653689d303dc906c489747b71fd5066c5ce7f4fc658bbd",
+          "digest": "0x6448f5c0148870a24b3ef0ae39f3a589c6b8cb5cdd8ddf8536a8786e8d281646",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0xc13f2c67613298025045d3b105b6cb4546fa87d70885a30287a2199e9b784819\nKey fingerprint: 0x320364b2f388985909feb512584a85d8d74a9a2ca64fef6157bd5c0c71d64ef9\nValid until: 2026-10-05 07:24:03 UTC (1791185043)\n\nChain 31337, registry 0x000000000000000000000000dc64a140aa3e981100a9beca4e685f962f0cf6c9, nonce 0\nChain 1000001, registry 0xb5949babc679f34442668c9af6635aa4ceae9272d4b32e8d75ce1c7eea60f8d8, nonce 0",
+          "sep53Payload": "0x59499b8e0ee4a84748287eee809cca156571cf7223601f4144a7444f130f8fcd",
+          "scheme": "sep53",
+          "sig": "0x3218bafc9768c5d1d28f7e7866a9d1e7722a6c940fda1bfdaac991e7037159cef9c51ecb64bcd8ced07b13cb87085d422dd6071240c5a6885ebf7978f3bc1704",
+          "evmSig": "0x3218bafc9768c5d1d28f7e7866a9d1e7722a6c940fda1bfdaac991e7037159cef9c51ecb64bcd8ced07b13cb87085d422dd6071240c5a6885ebf7978f3bc170425e3b26a49b5663bbc6823e662fc6a635547f5f9c5be5ad6074fd2f48a5c86081948789b9e19a28702a38508d787fa4645cbb605b1d3455002983261672c3fc1",
+          "check": "10",
+          "display": "Signed the exact multi-line text; the popup collapses line breaks into one paragraph, every field keeps its label, long values scroll sideways.",
+          "passed": true
+        }
+      ],
+      "retire": [
+        {
+          "kind": "retire",
+          "env": "testnet",
+          "account": "0xc13f2c67613298025045d3b105b6cb4546fa87d70885a30287a2199e9b784819",
+          "keyCommitment": "0x320364b2f388985909feb512584a85d8d74a9a2ca64fef6157bd5c0c71d64ef9",
+          "validUntil": "1793517853",
+          "structHash": "0x1348028d73644c545e81b65eb7962525aecd87286d7e7f0f9efb1bf88461cc02",
+          "digest": "0xe4a764507de5a893685ab488319d402dc79438f430f490ed79a467cf901648cd",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0xc13f2c67613298025045d3b105b6cb4546fa87d70885a30287a2199e9b784819\nKey fingerprint: 0x320364b2f388985909feb512584a85d8d74a9a2ca64fef6157bd5c0c71d64ef9\n\nValid until: 1793517853",
+          "sep53Payload": "0xc9dc4d95be229f5c0cfd5ddf5e4d7c80c0f6ca3da9f2555854aae09fc8b1359c",
+          "scheme": "sep53",
+          "sig": "0x51c13c711d99a0bf6feae4061523b47d61f8be2f6c05c7309f676ce290f220b5d007f62b58fb5f77277acca528c01539ce13ffb9a8226ddb0ad62b7bd872f909",
+          "evmSig": "0x51c13c711d99a0bf6feae4061523b47d61f8be2f6c05c7309f676ce290f220b5d007f62b58fb5f77277acca528c01539ce13ffb9a8226ddb0ad62b7bd872f90925e3b26a49b5663bbc6823e662fc6a635547f5f9c5be5ad6074fd2f48a5c86081948789b9e19a28702a38508d787fa4645cbb605b1d3455002983261672c3fc1",
+          "check": "8",
+          "display": "Signed the exact multi-line text; the popup collapses line breaks into one paragraph, every field keeps its label, long values scroll sideways.",
+          "passed": true
+        }
+      ],
+      "cancel": [
+        {
+          "kind": "cancel",
+          "env": "testnet",
+          "account": "0xc13f2c67613298025045d3b105b6cb4546fa87d70885a30287a2199e9b784819",
+          "legs": [
+            {
+              "chainId": "31337",
+              "registry": "0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9",
+              "nonce": "1"
+            },
+            {
+              "chainId": "1000001",
+              "registry": "0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b",
+              "nonce": "1"
+            }
+          ],
+          "structHash": "0x17f90f822fb9907d3ec0ed62eb88d40bbcae88b5e551e4a38b4125a7bfa95859",
+          "digest": "0xb9a1e8bd834e9c4f88279af96d66ebfbd34feaf61796c9eb725da56c09c5ee2e",
+          "text": "ProofBridge: cancel a pending key registration\n\nNetwork: testnet\nAccount: 0xc13f2c67613298025045d3b105b6cb4546fa87d70885a30287a2199e9b784819\n\nChain 31337, registry 0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9, nonce 1\nChain 1000001, registry 0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b, nonce 1",
+          "sep53Payload": "0xd303af8f980d83eeeae9faba3ecf42d2eb08b1c8ec020668e83d5a555630e6d6",
+          "scheme": "sep53",
+          "sig": "0xd7370771ea88d995fecefe3353e60b11e432fc38118f708cba60bbe912856a4802dc2b35f35208d0c3306165701a3ec77b23ff75430128c10b46c313b71bea07",
+          "evmSig": "0xd7370771ea88d995fecefe3353e60b11e432fc38118f708cba60bbe912856a4802dc2b35f35208d0c3306165701a3ec77b23ff75430128c10b46c313b71bea0725e3b26a49b5663bbc6823e662fc6a635547f5f9c5be5ad6074fd2f48a5c86081948789b9e19a28702a38508d787fa4645cbb605b1d3455002983261672c3fc1",
+          "check": "8",
+          "display": "Signed the exact multi-line text; the popup collapses line breaks into one paragraph, every field keeps its label, long values scroll sideways.",
+          "passed": true
+        }
+      ],
+      "revoke": [
+        {
+          "kind": "revoke",
+          "env": "testnet",
+          "account": "0xc13f2c67613298025045d3b105b6cb4546fa87d70885a30287a2199e9b784819",
+          "legs": [
+            {
+              "chainId": "31337",
+              "registry": "0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9",
+              "nonce": "1"
+            },
+            {
+              "chainId": "1000001",
+              "registry": "0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b",
+              "nonce": "1"
+            }
+          ],
+          "structHash": "0x8742d863eb4f8ca41ca1fdf12f1f0535f609e4cdf4637ca2304121b709db156b",
+          "digest": "0xc71daca4c491d08799379a0bfd3b121746a314e3120afa38b1eca42fba57a410",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0xc13f2c67613298025045d3b105b6cb4546fa87d70885a30287a2199e9b784819\n\nChain 31337, registry 0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9, nonce 1\nChain 1000001, registry 0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b, nonce 1",
+          "sep53Payload": "0x3bb5b1a1f104d924c13c06fbf933c806e31406dcfc6ec316f21c997e2e2becf3",
+          "scheme": "sep53",
+          "sig": "0x4bc9f4c85ca0a2387866957e487c9bf8ec505fabeb31bb6eff60a2c2cb9eae5cf0dfbd8170c01aea8ffb8ec962fc0e35a6982337875253801fe8739231058201",
+          "evmSig": "0x4bc9f4c85ca0a2387866957e487c9bf8ec505fabeb31bb6eff60a2c2cb9eae5cf0dfbd8170c01aea8ffb8ec962fc0e35a6982337875253801fe873923105820125e3b26a49b5663bbc6823e662fc6a635547f5f9c5be5ad6074fd2f48a5c86081948789b9e19a28702a38508d787fa4645cbb605b1d3455002983261672c3fc1",
+          "check": "8",
+          "display": "Signed the exact multi-line text; the popup collapses line breaks into one paragraph, every field keeps its label, long values scroll sideways.",
+          "passed": true
+        }
+      ]
+    },
+    "metamask": {
+      "scheme": "secp256k1",
+      "account": "0x00000000000000000000000012b979d8f82ecd9184e7c372bf207b57240f9848",
+      "wallet": "MetaMask",
+      "walletVersion": "MetaMask/v13.49.0",
+      "signer": "0x12b979d8f82ecd9184e7c372bf207b57240f9848",
+      "register": [
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x00000000000000000000000012b979d8f82ecd9184e7c372bf207b57240f9848",
+          "keyCommitment": "0x87145a1ec73cc2c5fc3ae0e163804e18056312239133e64ed50c3cf30696d069",
+          "deadline": "1791185161",
+          "legs": [
+            {
+              "chainId": "31337",
+              "registry": "0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9",
+              "nonce": "0"
+            },
+            {
+              "chainId": "1000001",
+              "registry": "0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b",
+              "nonce": "0"
+            }
+          ],
+          "structHash": "0x95b09c005d2b340bee7b8ba9513e9a621f6d63b93e727d68ee3bb4b07b185074",
+          "digest": "0x2ceebe1fba509687252ced7772c49cf0facad3406322c4c124f057ee6b2a6907",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x00000000000000000000000012b979d8f82ecd9184e7c372bf207b57240f9848\nKey fingerprint: 0x87145a1ec73cc2c5fc3ae0e163804e18056312239133e64ed50c3cf30696d069\nValid until: 2026-10-05 07:26:01 UTC (1791185161)\n\nChain 31337, registry 0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9, nonce 0\nChain 1000001, registry 0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b, nonce 0",
+          "sep53Payload": "0x87e21c9ab8614a7b5b85a0f53ac741e8276e1be5226a2807deb22490493500bb",
+          "scheme": "secp256k1",
+          "sig": "0xdcf93dc1b32fe85bc021bee600fd2c27d709c2f7edcb378b85cc24a1fbdf852046f53b47dba91fae0ede38f1e8a90e6d0c037abcb8e7a760a8883dc0192f77ca1b",
+          "check": "1\u20133",
+          "display": "Shown as a normal typed-data signature request, every field laid out; no warning about the chain-less salted domain (only an HTTP-origin badge for 127.0.0.1).",
+          "passed": true
+        }
+      ],
+      "registerExpired": [
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x00000000000000000000000012b979d8f82ecd9184e7c372bf207b57240f9848",
+          "keyCommitment": "0x87145a1ec73cc2c5fc3ae0e163804e18056312239133e64ed50c3cf30696d069",
+          "deadline": "1790922368",
+          "legs": [
+            {
+              "chainId": "31337",
+              "registry": "0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9",
+              "nonce": "0"
+            },
+            {
+              "chainId": "1000001",
+              "registry": "0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b",
+              "nonce": "0"
+            }
+          ],
+          "structHash": "0x88234d8ad935556bfc183d3c5c123da66e9f5ffec8a6cde23ddf8ca46079e388",
+          "digest": "0x336d5bc3e92f0f3ba391ce981fa6740b6d4a7c41efafb538e527427770095c80",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x00000000000000000000000012b979d8f82ecd9184e7c372bf207b57240f9848\nKey fingerprint: 0x87145a1ec73cc2c5fc3ae0e163804e18056312239133e64ed50c3cf30696d069\nValid until: 2026-10-02 06:26:08 UTC (1790922368)\n\nChain 31337, registry 0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9, nonce 0\nChain 1000001, registry 0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b, nonce 0",
+          "sep53Payload": "0x3ed3f386c35bffbe3c44808cce4397e4421c1359932fd662fb264856be6020e6",
+          "scheme": "secp256k1",
+          "sig": "0x10eccf215cfaf78732b9e96632d84adcd6786e0a5d508786eb7968d8de73cbde3f8ba31bc7b49814922b0c027d6444e41ef6df2e221f54ce5eba694c5c8b69a01b",
+          "check": "12",
+          "display": "Shown as a normal typed-data signature request, every field laid out; no warning about the chain-less salted domain (only an HTTP-origin badge for 127.0.0.1).",
+          "passed": true
+        }
+      ],
+      "otherEnv": [
+        {
+          "kind": "register",
+          "env": "testnet",
+          "account": "0x00000000000000000000000012b979d8f82ecd9184e7c372bf207b57240f9848",
+          "keyCommitment": "0x87145a1ec73cc2c5fc3ae0e163804e18056312239133e64ed50c3cf30696d069",
+          "deadline": "1791185172",
+          "legs": [
+            {
+              "chainId": "31337",
+              "registry": "0x000000000000000000000000dc64a140aa3e981100a9beca4e685f962f0cf6c9",
+              "nonce": "0"
+            },
+            {
+              "chainId": "1000001",
+              "registry": "0xb5949babc679f34442668c9af6635aa4ceae9272d4b32e8d75ce1c7eea60f8d8",
+              "nonce": "0"
+            }
+          ],
+          "structHash": "0xab6840dbd1fdddeb97947e195d086bdaeda65d2e44de8ab9081d1e0f9ccdb341",
+          "digest": "0x97edc3e01acc42658c7d48a1583675e989b88f2025238ac38cbe5226b80580e3",
+          "text": "ProofBridge: register a settlement key\n\nNetwork: testnet\nAccount: 0x00000000000000000000000012b979d8f82ecd9184e7c372bf207b57240f9848\nKey fingerprint: 0x87145a1ec73cc2c5fc3ae0e163804e18056312239133e64ed50c3cf30696d069\nValid until: 2026-10-05 07:26:12 UTC (1791185172)\n\nChain 31337, registry 0x000000000000000000000000dc64a140aa3e981100a9beca4e685f962f0cf6c9, nonce 0\nChain 1000001, registry 0xb5949babc679f34442668c9af6635aa4ceae9272d4b32e8d75ce1c7eea60f8d8, nonce 0",
+          "sep53Payload": "0x468b4d0b041338e20ad1669bd3ae0b3351784e44a09d500c40ea428043c51871",
+          "scheme": "secp256k1",
+          "sig": "0xbc12848a178e733055b521f57768dda45a0bf73033010c174a2dd63138af990440cd892960a1c044e7b3bb4941ef556b8ae6e7b571ccfd4c39143b8f17605d601b",
+          "check": "10",
+          "display": "Shown as a normal typed-data signature request, every field laid out; no warning about the chain-less salted domain (only an HTTP-origin badge for 127.0.0.1).",
+          "passed": true
+        }
+      ],
+      "retire": [
+        {
+          "kind": "retire",
+          "env": "testnet",
+          "account": "0x00000000000000000000000012b979d8f82ecd9184e7c372bf207b57240f9848",
+          "keyCommitment": "0x87145a1ec73cc2c5fc3ae0e163804e18056312239133e64ed50c3cf30696d069",
+          "validUntil": "1793517982",
+          "structHash": "0xa23eea72ccc3573243e2f85de187f115627e9931c58b34d3d2e8bbfd1eb52d25",
+          "digest": "0xa756773e0af5b83753ae2b8b0128c92ffa93e0de612c8e2a88eb7b6a5b97434d",
+          "text": "ProofBridge: retire a settlement key\n\nNetwork: testnet\nAccount: 0x00000000000000000000000012b979d8f82ecd9184e7c372bf207b57240f9848\nKey fingerprint: 0x87145a1ec73cc2c5fc3ae0e163804e18056312239133e64ed50c3cf30696d069\n\nValid until: 1793517982",
+          "sep53Payload": "0xefa5ffa0f4c3c19f43a7e0159ceb0ff45b750e7c8fe6a962848d68689fdfeba4",
+          "scheme": "secp256k1",
+          "sig": "0xca4f5a35f12bc597257574cc244aebf074913db76ac97fe6f77deee7f60685ec1b8215dd75ce1771ae94d3694522f0f2e8daa37bff6251b38e4d73c8a62edd131b",
+          "check": "4",
+          "display": "Shown as a normal typed-data signature request, every field laid out; no warning about the chain-less salted domain (only an HTTP-origin badge for 127.0.0.1).",
+          "passed": true
+        }
+      ],
+      "cancel": [
+        {
+          "kind": "cancel",
+          "env": "testnet",
+          "account": "0x00000000000000000000000012b979d8f82ecd9184e7c372bf207b57240f9848",
+          "legs": [
+            {
+              "chainId": "31337",
+              "registry": "0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9",
+              "nonce": "1"
+            },
+            {
+              "chainId": "1000001",
+              "registry": "0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b",
+              "nonce": "1"
+            }
+          ],
+          "structHash": "0x3638dc9c23a6c781dfd1597d7580f37f77dc94b6a981bc5322d69ddeae33b385",
+          "digest": "0x93574497094637faaaa80a896050abe75c62e9bcd259986a784d6d9ffa1573c5",
+          "text": "ProofBridge: cancel a pending key registration\n\nNetwork: testnet\nAccount: 0x00000000000000000000000012b979d8f82ecd9184e7c372bf207b57240f9848\n\nChain 31337, registry 0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9, nonce 1\nChain 1000001, registry 0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b, nonce 1",
+          "sep53Payload": "0x894160b97171f14d50c359c351de2dade5bf42091148e3c3292990b23377c06f",
+          "scheme": "secp256k1",
+          "sig": "0xf7e7ac5fb81efb1315665b2c6613bdfbe420c29a6722c614f02cb5ab99bb6e5c336a96da847362d0c0f7a47798057bc4c61f0a1f42e197cd6533462f4dbd59e91c",
+          "check": "4",
+          "display": "Shown as a normal typed-data signature request, every field laid out; no warning about the chain-less salted domain (only an HTTP-origin badge for 127.0.0.1).",
+          "passed": true
+        }
+      ],
+      "revoke": [
+        {
+          "kind": "revoke",
+          "env": "testnet",
+          "account": "0x00000000000000000000000012b979d8f82ecd9184e7c372bf207b57240f9848",
+          "legs": [
+            {
+              "chainId": "31337",
+              "registry": "0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9",
+              "nonce": "1"
+            },
+            {
+              "chainId": "1000001",
+              "registry": "0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b",
+              "nonce": "1"
+            }
+          ],
+          "structHash": "0x01829ff944e593ff04e7c253e54e49b2aea1a6ebd49ce8d07a45031eb4fa66ca",
+          "digest": "0xa9546d6f4037952cbe4224b9b4d34108dfbb911e6115dcdacd6939598a46a728",
+          "text": "ProofBridge: remove every settlement key\n\nNetwork: testnet\nAccount: 0x00000000000000000000000012b979d8f82ecd9184e7c372bf207b57240f9848\n\nChain 31337, registry 0x000000000000000000000000cf7ed3acca5a467e9e704c703e8d87f634fb0fc9, nonce 1\nChain 1000001, registry 0xfe5bb6e8e63c4ae35939ff23610bc5391e62c27bae36e1ffae4a0518e4f1f01b, nonce 1",
+          "sep53Payload": "0xfd6fdb82d2d776f8200fc3ca19f16be7bd5593b4bee0656e06a1b8556b3d7520",
+          "scheme": "secp256k1",
+          "sig": "0xa95ad1fa9e4669aa58d881384a2f88c80d7b734e5f79d3d22fad0e40a12519f01dd2f988c94d00cb30bd7881552c57e0feedb9c0c632e77dfb8fea475480bd011c",
+          "check": "4",
+          "display": "Shown as a normal typed-data signature request, every field laid out; no warning about the chain-less salted domain (only an HTTP-origin badge for 127.0.0.1).",
+          "passed": true
+        }
+      ]
+    }
+  },
+  "identity": {
+    "freighter": [
+      {
+        "index": 0,
+        "text": "ProofBridge Settlement Identity\n\nIndex: 0",
+        "sep53Payload": "0xdbfd376e6386876a9e63fc0863c837e54f3a6db91da1ffa0ddae4ad5fb5459cc",
+        "walletSig": "0x1540c79028063450ee8ed3b09d6d7eae972e36c34615ec7256bbdcafb512b4d7ddd53d2d73e73ec3efc2bb0795540fb32021654d81bc2355dbf4ea6971fec40a",
+        "address": "0xc81e64cd029ee0884dde85567b3f50e0b2361743",
+        "account32": "0x000000000000000000000000c81e64cd029ee0884dde85567b3f50e0b2361743",
+        "wallet": "Freighter",
+        "walletVersion": "5.48.0",
+        "signer": "GDAT6LDHMEZJQASQIXJ3CBNWZNCUN6UH24EILIYCQ6RBTHU3PBEBSGP7"
+      },
+      {
+        "index": 1,
+        "text": "ProofBridge Settlement Identity\n\nIndex: 1",
+        "sep53Payload": "0x4840c26c15748445041f4d440cbc75c00491f502c7dcc8ae52034ef44f03c1fb",
+        "walletSig": "0x554a249ad60f9878ebcad457686a2bd9c37f47a78d6a27bab0ef471a5507b872df5356799183a0a78b1ca1a51f370ed026285efbd639834b710467e3633f7709",
+        "address": "0x4ed75148f997ea0976e5ebea031390d9523f14d0",
+        "account32": "0x0000000000000000000000004ed75148f997ea0976e5ebea031390d9523f14d0",
+        "wallet": "Freighter",
+        "walletVersion": "5.48.0",
+        "signer": "GDAT6LDHMEZJQASQIXJ3CBNWZNCUN6UH24EILIYCQ6RBTHU3PBEBSGP7"
+      }
+    ],
+    "metamask": [
+      {
+        "index": 0,
+        "digest": "0x1ade008366a280e136cbdfb952cb148378a1b5929eedd60638628f687ee83e80",
+        "walletSig": "0x69cb38c527382721940b5084778683282debc5b349f8be9b88554691e982049a47a56b470dd83fb84ed15f49851b1219c53d1cee5ff2b71ba091e1524a2c1dcd1c",
+        "address": "0x92570ee7eae988bdadc72eee2ee77932b59e0189",
+        "account32": "0x00000000000000000000000092570ee7eae988bdadc72eee2ee77932b59e0189",
+        "ikm": "0x69cb38c527382721940b5084778683282debc5b349f8be9b88554691e982049a47a56b470dd83fb84ed15f49851b1219c53d1cee5ff2b71ba091e1524a2c1dcd",
+        "wallet": "MetaMask",
+        "walletVersion": "MetaMask/v13.49.0",
+        "signer": "0x12b979d8f82ecd9184e7c372bf207b57240f9848"
+      },
+      {
+        "index": 1,
+        "digest": "0xd2306f71286018ac9083d14bacd76e69b7a924daf149508e723ca731c2b84eb8",
+        "walletSig": "0xd24db8d086527cc124541e1d7434bc969a56b9e522f17519827c881ba0b3149e2900741c2eb2d627d38d5c75b632e0f2c4db884dde7d76d19a2f8181dce5e78f1b",
+        "address": "0xb6e0a15c0f5080d01ca0cd245777015d1186885f",
+        "account32": "0x000000000000000000000000b6e0a15c0f5080d01ca0cd245777015d1186885f",
+        "ikm": "0xd24db8d086527cc124541e1d7434bc969a56b9e522f17519827c881ba0b3149e2900741c2eb2d627d38d5c75b632e0f2c4db884dde7d76d19a2f8181dce5e78f",
+        "wallet": "MetaMask",
+        "walletVersion": "MetaMask/v13.49.0",
+        "signer": "0x12b979d8f82ecd9184e7c372bf207b57240f9848"
+      }
+    ]
+  }
+}
