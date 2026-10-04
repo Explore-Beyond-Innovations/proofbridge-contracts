@@ -57,6 +57,7 @@ pub trait DisputeManagerInterface {
         order_hash: BytesN<32>,
         responder: Address,
         evidence: BytesN<32>,
+        escrow_paused_seconds: u64,
     );
     fn outcome_of(
         env: Env,

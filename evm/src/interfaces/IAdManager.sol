@@ -206,6 +206,7 @@ interface IAdManager is IEscrow {
     /// @notice Record the counterparty's evidence hash on an open dispute. Only the order's other
     ///         party may call it (D11): the responder slot is single, not an append, so anyone able
     ///         to write it could overwrite the genuine response a block before the arbiter reads it.
+    ///         One non-zero answer, before the effective challenge deadline (D5, the module refuses).
     function respondToDispute(OrderParams calldata params, bytes32 evidence) external;
     /// @notice Apply the module's outcome once its window is over, and settle the bond.
     function finalizeDispute(OrderParams calldata params) external;

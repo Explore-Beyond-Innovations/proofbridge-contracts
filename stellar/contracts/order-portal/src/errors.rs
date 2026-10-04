@@ -218,6 +218,10 @@ impl From<proofbridge_core::escrow_ops::Fault> for OrderPortalError {
             DisputeChallengeOpen => OrderPortalError::DisputeChallengeOpen,
             DisputeChallengeClosed => OrderPortalError::DisputeChallengeClosed,
             DisputeBondTransferFailed => OrderPortalError::DisputeBondTransferFailed,
+            // Unreachable: the follower records no answers (disputes are primary-only).
+            DisputeResponseWindowClosed | DisputeAlreadyResponded | DisputeZeroResponse => {
+                OrderPortalError::DisputeModuleRejected
+            }
         }
     }
 }

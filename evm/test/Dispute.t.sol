@@ -412,7 +412,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         vm.prank(maker);
         adManager.respondToDispute(p, bytes32("first"));
         vm.prank(maker);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__AlreadyResponded.selector, h));
         adManager.respondToDispute(p, bytes32("second"));
         (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
         assertEq(responderEvidence, bytes32("first"), "the first answer stands");
@@ -425,7 +425,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         uint256 until = dm.effectiveChallengeDeadline(h);
         vm.warp(until);
         vm.prank(maker);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__ResponseWindowClosed.selector, until));
         adManager.respondToDispute(p, bytes32("late"));
         // One second earlier it lands.
         vm.warp(until - 1);
@@ -433,12 +433,28 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         adManager.respondToDispute(p, bytes32("on time"));
     }
 
+    /// D5: the answer deadline is the effective one, so a pause after the filing moves it.
+    function test_d5_aPauseMovesTheAnswerDeadline() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(29);
+        _file(p, filer);
+        uint256 until = dm.effectiveChallengeDeadline(h);
+        vm.prank(admin);
+        adManager.pause();
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(admin);
+        adManager.unpause();
+        assertEq(dm.effectiveChallengeDeadline(h), until + 1 hours);
+        vm.warp(until);
+        vm.prank(maker);
+        adManager.respondToDispute(p, bytes32("still open"));
+    }
+
     /// D5: an empty answer is refused, so "answered" is exactly "the slot is non-zero".
     function test_d5_aZeroAnswerIsRefused() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(28);
         _file(p, filer);
         vm.prank(maker);
-        vm.expectRevert();
+        vm.expectRevert(DisputeManager.DisputeManager__ZeroResponse.selector);
         adManager.respondToDispute(p, bytes32(0));
         (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
         assertEq(responderEvidence, bytes32(0));

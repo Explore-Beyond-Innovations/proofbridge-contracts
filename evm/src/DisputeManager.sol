@@ -101,6 +101,12 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     error DisputeManager__ChallengeClosed(uint256 since);
     error DisputeManager__AlreadyRuled(bytes32 orderHash);
     error DisputeManager__NotResponder();
+    /// @notice D5: answers close with the challenge window, the instant the arbiter's ruling does.
+    error DisputeManager__ResponseWindowClosed(uint256 since);
+    /// @notice D5: the responder slot takes one answer; the first one stands.
+    error DisputeManager__AlreadyResponded(bytes32 orderHash);
+    /// @notice D5: an empty answer is refused, so "answered" is exactly "the slot is non-zero".
+    error DisputeManager__ZeroResponse();
     error DisputeManager__NothingToClaim();
 
     modifier onlyEscrow() {
@@ -222,7 +228,8 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
                              THE DISPUTE ITSELF
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Record the counterparty's evidence hash. Moves no funds, posts no bond (D11).
+    /// @notice Record the counterparty's evidence hash. Moves no funds, posts no bond (D11). One
+    ///         non-zero answer, before the effective challenge deadline (D5).
     /// @dev Escrow-only. Authenticating "an address that is not the filer" here would let any
     ///      passer-by overwrite the genuine counterparty's hash — the slot is single, not an append
     ///      — so the responder's identity has to come from the side that knows the order's parties,
@@ -232,6 +239,10 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         Dispute.Record storage d = disputes[orderHash];
         if (d.initiator == address(0)) revert DisputeManager__NotDisputed(orderHash);
         if (responder == d.initiator) revert DisputeManager__NotResponder();
+        if (evidence == bytes32(0)) revert DisputeManager__ZeroResponse();
+        if (d.responderEvidence != bytes32(0)) revert DisputeManager__AlreadyResponded(orderHash);
+        uint256 until_ = effectiveChallengeDeadline(orderHash);
+        if (block.timestamp >= until_) revert DisputeManager__ResponseWindowClosed(until_);
         d.responderEvidence = evidence;
         emit DisputeResponded(orderHash, responder, evidence);
     }

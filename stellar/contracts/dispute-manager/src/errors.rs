@@ -50,4 +50,10 @@ pub enum DisputeManagerError {
     AlreadyRuled = 23,
     /// 49S-3: the bond token refused the transfer (no trustline, a shortfall, a frozen account).
     BondTransferFailed = 24,
+    /// D5: answers close with the challenge window, the instant the arbiter's ruling does.
+    ResponseWindowClosed = 25,
+    /// D5: the responder slot takes one answer; the first one stands.
+    AlreadyResponded = 26,
+    /// D5: an empty answer is refused, so "answered" is exactly "the slot is non-zero".
+    ZeroResponse = 27,
 }

@@ -747,8 +747,13 @@ fn an_undisputed_order_is_not_disputed() {
         Err(Ok(Error::NotDisputed))
     );
     assert_eq!(
-        f.client
-            .try_record_response(&f.escrow, &h, &Address::generate(&f.env), &hash(&f.env, 1)),
+        f.client.try_record_response(
+            &f.escrow,
+            &h,
+            &Address::generate(&f.env),
+            &hash(&f.env, 1),
+            &0
+        ),
         Err(Ok(Error::NotDisputed))
     );
 }
@@ -761,7 +766,7 @@ fn the_filer_cannot_respond_to_their_own_dispute() {
     file(&f, &h, 100_000);
     assert_eq!(
         f.client
-            .try_record_response(&f.escrow, &h, &f.filer, &hash(&f.env, 0x11)),
+            .try_record_response(&f.escrow, &h, &f.filer, &hash(&f.env, 0x11), &0),
         Err(Ok(Error::NotResponder))
     );
     assert_eq!(
@@ -773,7 +778,7 @@ fn the_filer_cannot_respond_to_their_own_dispute() {
     // The real counterparty still can.
     let counterparty = Address::generate(&f.env);
     f.client
-        .record_response(&f.escrow, &h, &counterparty, &hash(&f.env, 0x11));
+        .record_response(&f.escrow, &h, &counterparty, &hash(&f.env, 0x11), &0);
     assert_eq!(
         f.client.get_dispute(&h).unwrap().responder_evidence,
         hash(&f.env, 0x11)
@@ -789,8 +794,13 @@ fn a_response_through_another_escrow_is_wrong_escrow() {
     let h = hash(&f.env, 42);
     file(&f, &h, 100_000);
     assert_eq!(
-        f.client
-            .try_record_response(&other, &h, &Address::generate(&f.env), &hash(&f.env, 0x11)),
+        f.client.try_record_response(
+            &other,
+            &h,
+            &Address::generate(&f.env),
+            &hash(&f.env, 0x11),
+            &0
+        ),
         Err(Ok(Error::WrongEscrow))
     );
 }
@@ -913,6 +923,9 @@ fn relayed_error_codes_match_the_shared_definitions() {
         (Error::NoDisputeParams, c::NO_DISPUTE_PARAMS),
         (Error::WrongEscrow, c::WRONG_ESCROW),
         (Error::BondTransferFailed, c::BOND_TRANSFER_FAILED),
+        (Error::ResponseWindowClosed, c::RESPONSE_WINDOW_CLOSED),
+        (Error::AlreadyResponded, c::ALREADY_RESPONDED),
+        (Error::ZeroResponse, c::ZERO_RESPONSE),
     ];
     for (e, code) in pairs {
         assert_eq!(e as u32, code, "{e:?}");
@@ -929,11 +942,12 @@ fn d5_a_second_answer_is_refused() {
     file(&f, &h, 100_000);
     let other = Address::generate(&f.env);
     f.client
-        .record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11));
-    assert!(f
-        .client
-        .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x22))
-        .is_err());
+        .record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11), &0);
+    assert_eq!(
+        f.client
+            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x22), &0),
+        Err(Ok(Error::AlreadyResponded))
+    );
     assert_eq!(
         f.client.get_dispute(&h).unwrap().responder_evidence,
         hash(&f.env, 0x11)
@@ -949,13 +963,14 @@ fn d5_an_answer_at_the_challenge_deadline_is_refused() {
     let until = f.client.effective_challenge_deadline(&h);
     let other = Address::generate(&f.env);
     f.env.ledger().set_timestamp(until);
-    assert!(f
-        .client
-        .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11))
-        .is_err());
+    assert_eq!(
+        f.client
+            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11), &0),
+        Err(Ok(Error::ResponseWindowClosed))
+    );
     f.env.ledger().set_timestamp(until - 1);
     f.client
-        .record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11));
+        .record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11), &0);
 }
 
 /// D5: an empty answer is refused, so "answered" is exactly "the slot is non-zero".
@@ -964,8 +979,31 @@ fn d5_a_zero_answer_is_refused() {
     let f = fixture();
     let h = hash(&f.env, 52);
     file(&f, &h, 100_000);
-    assert!(f
-        .client
-        .try_record_response(&f.escrow, &h, &Address::generate(&f.env), &hash(&f.env, 0))
-        .is_err());
+    assert_eq!(
+        f.client.try_record_response(
+            &f.escrow,
+            &h,
+            &Address::generate(&f.env),
+            &hash(&f.env, 0),
+            &0
+        ),
+        Err(Ok(Error::ZeroResponse))
+    );
+}
+
+/// D5: the deadline is the pause-adjusted one, from the counter the escrow passes in.
+#[test]
+fn d5_the_escrows_pause_moves_the_answer_deadline() {
+    let f = fixture();
+    let h = hash(&f.env, 53);
+    file(&f, &h, 100_000);
+    let until = f.client.effective_challenge_deadline(&h);
+    f.env.ledger().set_timestamp(until);
+    f.client.record_response(
+        &f.escrow,
+        &h,
+        &Address::generate(&f.env),
+        &hash(&f.env, 0x11),
+        &3_600,
+    );
 }

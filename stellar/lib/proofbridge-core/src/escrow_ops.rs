@@ -57,6 +57,10 @@ pub enum Fault {
     DisputeChallengeClosed,
     /// 49S-3: the module could not move the bond (a token refusal, e.g. no trustline or a shortfall).
     DisputeBondTransferFailed,
+    /// D5: the module's answer rules (window closed, already answered, empty answer), relayed.
+    DisputeResponseWindowClosed,
+    DisputeAlreadyResponded,
+    DisputeZeroResponse,
     /// A public input at or above the field prime (2.3h, residual 9). Defence in depth: both shipped
     /// verifiers already reject one, but the escrow's nullifier ledger keys on raw bytes, so a
     /// verifier that reduced instead would turn one proof into many nullifiers.
@@ -413,6 +417,9 @@ pub fn dispute_module_fault(e: Result<soroban_sdk::Error, soroban_sdk::InvokeErr
             code::NO_DISPUTE_PARAMS => Fault::DisputeNoParams,
             code::WRONG_ESCROW => Fault::DisputeWrongEscrow,
             code::BOND_TRANSFER_FAILED => Fault::DisputeBondTransferFailed,
+            code::RESPONSE_WINDOW_CLOSED => Fault::DisputeResponseWindowClosed,
+            code::ALREADY_RESPONDED => Fault::DisputeAlreadyResponded,
+            code::ZERO_RESPONSE => Fault::DisputeZeroResponse,
             _ => Fault::DisputeModuleRejected,
         },
         _ => Fault::DisputeModuleRejected,
@@ -470,7 +477,8 @@ pub fn settle_bond(
 }
 
 /// Record the counterparty's response. Escrow-only on the module's side, because only the escrow
-/// knows the order's two parties (D11).
+/// knows the order's two parties (D11). The pause counter rides along: the module cannot read back
+/// into its caller, and the answer deadline is the pause-adjusted challenge deadline (D5).
 pub fn record_response(
     env: &Env,
     escrow: &Address,
@@ -480,7 +488,13 @@ pub fn record_response(
 ) -> Result<(), Fault> {
     let manager = order_dispute_manager(env, order_hash)?;
     cross_contract::DisputeManagerClient::new(env, &manager)
-        .try_record_response(escrow, order_hash, responder, evidence)
+        .try_record_response(
+            escrow,
+            order_hash,
+            responder,
+            evidence,
+            &storage::get_paused_seconds(env),
+        )
         .map_err(dispute_module_fault)?
         .map_err(|_| Fault::DisputeModuleRejected)
 }

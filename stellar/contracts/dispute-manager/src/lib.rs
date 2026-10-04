@@ -237,7 +237,9 @@ impl DisputeManagerContract {
 
     // ── the dispute itself ───────────────────────────────────────────────
 
-    /// Record the counterparty's evidence hash. Moves no funds, posts no bond.
+    /// Record the counterparty's evidence hash. Moves no funds, posts no bond. One non-zero answer,
+    /// strictly before the pause-adjusted challenge deadline (D5); the escrow passes its pause
+    /// counter because the module cannot read back into its caller.
     ///
     /// Escrow-only. `require_auth` on the responder proves *an* address consented, not that it is
     /// *the* counterparty — and the responder slot is single rather than an append, so anyone able
@@ -249,6 +251,7 @@ impl DisputeManagerContract {
         order_hash: BytesN<32>,
         responder: Address,
         evidence: BytesN<32>,
+        escrow_paused_seconds: u64,
     ) -> Result<(), Error> {
         escrow.require_auth();
         // The escrow proves the named responder is a party; only this proves the caller is them.
@@ -260,6 +263,15 @@ impl DisputeManagerContract {
         }
         if d.initiator == responder {
             return Err(Error::NotResponder);
+        }
+        if evidence == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(Error::ZeroResponse);
+        }
+        if d.responder_evidence != BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(Error::AlreadyResponded);
+        }
+        if env.ledger().timestamp() >= Self::deadline_at(&d, escrow_paused_seconds) {
+            return Err(Error::ResponseWindowClosed);
         }
         d.responder_evidence = evidence.clone();
         storage::set_dispute(&env, &order_hash, &d);
@@ -369,9 +381,7 @@ impl DisputeManagerContract {
     ) -> u64 {
         match storage::get_dispute(&env, &order_hash) {
             None => 0,
-            Some(d) => d
-                .challenge_deadline
-                .saturating_add(escrow_paused_seconds.saturating_sub(d.paused_at_open)),
+            Some(d) => Self::deadline_at(&d, escrow_paused_seconds),
         }
     }
 
@@ -471,6 +481,11 @@ impl DisputeManagerContract {
     /// name, and would leave the failure D10 describes unfixed.
     fn effective_challenge_deadline_of(env: &Env, d: &DisputeRecord) -> u64 {
         let escrow_paused = cross_contract::EscrowPauseClient::new(env, &d.escrow).paused_seconds();
+        Self::deadline_at(d, escrow_paused)
+    }
+
+    /// The recorded deadline plus the escrow's seconds paused past the filing's snapshot.
+    fn deadline_at(d: &DisputeRecord, escrow_paused: u64) -> u64 {
         d.challenge_deadline
             .saturating_add(escrow_paused.saturating_sub(d.paused_at_open))
     }

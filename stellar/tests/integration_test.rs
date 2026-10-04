@@ -7644,7 +7644,7 @@ fn test_49s3_every_relayed_code_from_the_real_module() {
     );
     assert_eq!(
         relay(
-            dm.try_record_response(&esc, &h, &filer, &ev)
+            dm.try_record_response(&esc, &h, &filer, &ev, &0)
                 .unwrap_err()
                 .unwrap()
         ),
@@ -7653,7 +7653,7 @@ fn test_49s3_every_relayed_code_from_the_real_module() {
     dm.set_escrow(&stranger, &true);
     assert_eq!(
         relay(
-            dm.try_record_response(&stranger, &h, &filer, &ev)
+            dm.try_record_response(&stranger, &h, &filer, &ev, &0)
                 .unwrap_err()
                 .unwrap()
         ),
@@ -8961,10 +8961,11 @@ fn test_d5_a_second_answer_is_refused() {
     let bridger = account_addr(&s, &s.tp.order_recipient);
     s.ad_manager
         .respond_to_dispute(&p, &bridger, &evidence(&s, 0x11));
-    assert!(s
-        .ad_manager
-        .try_respond_to_dispute(&p, &bridger, &evidence(&s, 0x22))
-        .is_err());
+    assert_eq!(
+        s.ad_manager
+            .try_respond_to_dispute(&p, &bridger, &evidence(&s, 0x22)),
+        Err(Ok(AdErr::DisputeAlreadyResponded))
+    );
     assert_eq!(
         dm.get_dispute(&h).unwrap().responder_evidence,
         evidence(&s, 0x11)
@@ -8982,10 +8983,11 @@ fn test_d5_an_answer_at_the_challenge_deadline_is_refused() {
     let until = dm.effective_challenge_deadline(&h);
     let bridger = account_addr(&s, &s.tp.order_recipient);
     warp(&s, until);
-    assert!(s
-        .ad_manager
-        .try_respond_to_dispute(&p, &bridger, &evidence(&s, 0x11))
-        .is_err());
+    assert_eq!(
+        s.ad_manager
+            .try_respond_to_dispute(&p, &bridger, &evidence(&s, 0x11)),
+        Err(Ok(AdErr::DisputeResponseWindowClosed))
+    );
     warp(&s, until - 1);
     s.ad_manager
         .respond_to_dispute(&p, &bridger, &evidence(&s, 0x11));
@@ -8999,8 +9001,28 @@ fn test_d5_a_zero_answer_is_refused() {
     let p = locked_ad_order(&s);
     s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
     let bridger = account_addr(&s, &s.tp.order_recipient);
-    assert!(s
-        .ad_manager
-        .try_respond_to_dispute(&p, &bridger, &zero32(&s))
-        .is_err());
+    assert_eq!(
+        s.ad_manager
+            .try_respond_to_dispute(&p, &bridger, &zero32(&s)),
+        Err(Ok(AdErr::DisputeZeroResponse))
+    );
+}
+
+/// D5: the escrow passes its own pause counter, so a pause after the filing moves the deadline.
+#[test]
+fn test_d5_a_pause_moves_the_answer_deadline() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    let until = dm.effective_challenge_deadline(&h);
+    s.ad_manager.pause();
+    warp(&s, s.env.ledger().timestamp() + 3_600);
+    s.ad_manager.unpause();
+    assert_eq!(dm.effective_challenge_deadline(&h), until + 3_600);
+    warp(&s, until);
+    let bridger = account_addr(&s, &s.tp.order_recipient);
+    s.ad_manager
+        .respond_to_dispute(&p, &bridger, &evidence(&s, 0x11));
 }

@@ -29,6 +29,9 @@ pub mod error_code {
     pub const NO_DISPUTE_PARAMS: u32 = 17;
     pub const WRONG_ESCROW: u32 = 21;
     pub const BOND_TRANSFER_FAILED: u32 = 24;
+    pub const RESPONSE_WINDOW_CLOSED: u32 = 25;
+    pub const ALREADY_RESPONDED: u32 = 26;
+    pub const ZERO_RESPONSE: u32 = 27;
 }
 
 /// Which field failed: 1 challenge_period, 2 bond_floor, 3 bond_bps.
