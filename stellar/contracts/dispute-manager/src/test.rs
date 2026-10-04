@@ -918,3 +918,54 @@ fn relayed_error_codes_match_the_shared_definitions() {
         assert_eq!(e as u32, code, "{e:?}");
     }
 }
+
+// ── D5: one answer, inside the window, never empty ───────────────────────
+
+/// D5: the slot holds one answer; a second is refused and the first stands.
+#[test]
+fn d5_a_second_answer_is_refused() {
+    let f = fixture();
+    let h = hash(&f.env, 50);
+    file(&f, &h, 100_000);
+    let other = Address::generate(&f.env);
+    f.client
+        .record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11));
+    assert!(f
+        .client
+        .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x22))
+        .is_err());
+    assert_eq!(
+        f.client.get_dispute(&h).unwrap().responder_evidence,
+        hash(&f.env, 0x11)
+    );
+}
+
+/// D5: answers close with the challenge window, the instant the arbiter's ruling does.
+#[test]
+fn d5_an_answer_at_the_challenge_deadline_is_refused() {
+    let f = fixture();
+    let h = hash(&f.env, 51);
+    file(&f, &h, 100_000);
+    let until = f.client.effective_challenge_deadline(&h);
+    let other = Address::generate(&f.env);
+    f.env.ledger().set_timestamp(until);
+    assert!(f
+        .client
+        .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11))
+        .is_err());
+    f.env.ledger().set_timestamp(until - 1);
+    f.client
+        .record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11));
+}
+
+/// D5: an empty answer is refused, so "answered" is exactly "the slot is non-zero".
+#[test]
+fn d5_a_zero_answer_is_refused() {
+    let f = fixture();
+    let h = hash(&f.env, 52);
+    file(&f, &h, 100_000);
+    assert!(f
+        .client
+        .try_record_response(&f.escrow, &h, &Address::generate(&f.env), &hash(&f.env, 0))
+        .is_err());
+}

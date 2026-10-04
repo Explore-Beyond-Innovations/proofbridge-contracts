@@ -8929,3 +8929,78 @@ fn test_owner_sig_register_metering() {
 
 const OWNER_SIG_REGISTER_SECP_CPU: i64 = 37_600_000;
 const OWNER_SIG_REGISTER_SEP53_CPU: i64 = 35_600_000;
+
+// ── D4 / D5: the dispute's finalize time, and the answer rules ──────────
+
+/// D4: the effective challenge deadline (what a reader of the module alone would show) is too
+/// early for a denied dispute: finalize there is refused with the grace still to run.
+#[test]
+fn test_d4_the_challenge_deadline_is_too_early_when_denied() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    let until = dm.effective_challenge_deadline(&h);
+    warp(&s, until);
+    assert_eq!(
+        s.ad_manager.try_finalize_dispute(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+}
+
+/// D5: through the escrow, a second answer is refused and the first stands.
+#[test]
+fn test_d5_a_second_answer_is_refused() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    let bridger = account_addr(&s, &s.tp.order_recipient);
+    s.ad_manager
+        .respond_to_dispute(&p, &bridger, &evidence(&s, 0x11));
+    assert!(s
+        .ad_manager
+        .try_respond_to_dispute(&p, &bridger, &evidence(&s, 0x22))
+        .is_err());
+    assert_eq!(
+        dm.get_dispute(&h).unwrap().responder_evidence,
+        evidence(&s, 0x11)
+    );
+}
+
+/// D5: through the escrow, answers close at the effective challenge deadline.
+#[test]
+fn test_d5_an_answer_at_the_challenge_deadline_is_refused() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    let until = dm.effective_challenge_deadline(&h);
+    let bridger = account_addr(&s, &s.tp.order_recipient);
+    warp(&s, until);
+    assert!(s
+        .ad_manager
+        .try_respond_to_dispute(&p, &bridger, &evidence(&s, 0x11))
+        .is_err());
+    warp(&s, until - 1);
+    s.ad_manager
+        .respond_to_dispute(&p, &bridger, &evidence(&s, 0x11));
+}
+
+/// D5: through the escrow, an empty answer is refused.
+#[test]
+fn test_d5_a_zero_answer_is_refused() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    let bridger = account_addr(&s, &s.tp.order_recipient);
+    assert!(s
+        .ad_manager
+        .try_respond_to_dispute(&p, &bridger, &zero32(&s))
+        .is_err());
+}

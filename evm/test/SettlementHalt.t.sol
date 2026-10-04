@@ -346,6 +346,19 @@ contract SettlementHaltTest is AdManagerCancellationTest {
 /// Review F1: the dispute fallback is a door too. Every outcome but MakerForfeit hands the lock back
 /// to the maker, so a denied payout waits the grace past the challenge deadline.
 contract SettlementHaltDisputeTest is DisputeTest {
+    /// D4: the effective challenge deadline (what a reader of the module alone would show) is too
+    /// early for a denied dispute: finalize there reverts with the grace still to run.
+    function test_d4_theChallengeDeadlineIsTooEarly_whenDenied() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(24);
+        vm.prank(maker);
+        adManager.haltSettlement();
+        _file(p, maker);
+        uint256 until_ = dm.effectiveChallengeDeadline(h);
+        vm.warp(until_);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, until_ + 30 minutes));
+        adManager.finalizeDispute(p);
+    }
+
     function test_finalizeDispute_fallback_waitsTheGrace_whenHalted() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(21);
         vm.prank(maker);

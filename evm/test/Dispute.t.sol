@@ -403,6 +403,47 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         assertEq(responderEvidence, bytes32("response"), "the counterparty's hash is recorded");
     }
 
+    /*//////////////// D5: one answer, inside the window, never empty ////////////////*/
+
+    /// D5: the slot holds one answer; a second one is refused and the first stands.
+    function test_d5_aSecondAnswerIsRefused() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(26);
+        _file(p, filer);
+        vm.prank(maker);
+        adManager.respondToDispute(p, bytes32("first"));
+        vm.prank(maker);
+        vm.expectRevert();
+        adManager.respondToDispute(p, bytes32("second"));
+        (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        assertEq(responderEvidence, bytes32("first"), "the first answer stands");
+    }
+
+    /// D5: answers close with the challenge window, the same instant the arbiter's ruling does.
+    function test_d5_anAnswerAtTheChallengeDeadlineIsRefused() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(27);
+        _file(p, filer);
+        uint256 until = dm.effectiveChallengeDeadline(h);
+        vm.warp(until);
+        vm.prank(maker);
+        vm.expectRevert();
+        adManager.respondToDispute(p, bytes32("late"));
+        // One second earlier it lands.
+        vm.warp(until - 1);
+        vm.prank(maker);
+        adManager.respondToDispute(p, bytes32("on time"));
+    }
+
+    /// D5: an empty answer is refused, so "answered" is exactly "the slot is non-zero".
+    function test_d5_aZeroAnswerIsRefused() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(28);
+        _file(p, filer);
+        vm.prank(maker);
+        vm.expectRevert();
+        adManager.respondToDispute(p, bytes32(0));
+        (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        assertEq(responderEvidence, bytes32(0));
+    }
+
     /// S4, tightened by C-17: the bond is paid exactly. An overpaid or underpaid bond is refused,
     /// so no surplus is ever wrapped and nothing needs refunding.
     /// 49E-2: the bond is exact, so the amount is quoted by the contract, not re-derived by clients.
