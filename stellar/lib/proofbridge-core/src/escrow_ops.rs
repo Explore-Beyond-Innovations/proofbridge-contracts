@@ -448,6 +448,17 @@ pub fn dispute_outcome(
     Ok((settled, initiator))
 }
 
+/// The module's ruling as it stands (`None` while unruled), whether or not its window is over: the
+/// finalize-time view needs it before the window closes (D4).
+pub fn dispute_ruling(env: &Env, order_hash: &BytesN<32>) -> Result<DisputeOutcome, Fault> {
+    let manager = order_dispute_manager(env, order_hash)?;
+    let (outcome, _, _) = cross_contract::DisputeManagerClient::new(env, &manager)
+        .try_outcome_of(order_hash, &storage::get_paused_seconds(env))
+        .map_err(dispute_module_fault)?
+        .map_err(|_| Fault::DisputeModuleRejected)?;
+    Ok(outcome)
+}
+
 /// The dispute's challenge deadline in real time, from the order's own module (#422, C-11).
 pub fn dispute_challenge_deadline(env: &Env, order_hash: &BytesN<32>) -> Result<u64, Fault> {
     let manager = order_dispute_manager(env, order_hash)?;

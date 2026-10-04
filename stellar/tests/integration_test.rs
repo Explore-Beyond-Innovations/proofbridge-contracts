@@ -8948,6 +8948,124 @@ fn test_d4_the_challenge_deadline_is_too_early_when_denied() {
         s.ad_manager.try_finalize_dispute(&p),
         Err(Ok(AdErr::TooEarly))
     );
+    // The view names the real time: the challenge deadline plus the grace (the buffer, no anchor).
+    assert_eq!(s.ad_manager.dispute_finalizes_at(&p), until + SUITE_BUFFER);
+    finalizes_exactly_at(&s, &p, AdErr::TooEarly);
+}
+
+/// One second before `dispute_finalizes_at` finalize is refused with `early`; at it, it lands.
+fn finalizes_exactly_at(s: &TestSetup, p: &ad_manager_contract::OrderParams, early: AdErr) {
+    let at = s.ad_manager.dispute_finalizes_at(p);
+    assert!(at > 0, "disputed");
+    warp(s, at - 1);
+    assert_eq!(s.ad_manager.try_finalize_dispute(p), Err(Ok(early)));
+    warp(s, at);
+    s.ad_manager.finalize_dispute(p);
+    assert_eq!(
+        s.ad_manager.get_order_status(&s.ad_manager.hash_order(p)),
+        ad_manager_contract::Status::Resolved
+    );
+    assert_eq!(s.ad_manager.dispute_finalizes_at(p), 0, "terminal");
+}
+
+/// D4: not disputed reads 0, like `cancel_finalizes_at` off `Claimed`.
+#[test]
+fn test_d4_dispute_finalizes_at_is_zero_when_not_disputed() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    assert_eq!(s.ad_manager.dispute_finalizes_at(&p), 0);
+}
+
+/// D4: payout not denied: the effective challenge deadline itself, and finalize agrees.
+#[test]
+fn test_d4_dispute_finalizes_at_not_denied_is_the_challenge_deadline() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    assert_eq!(
+        s.ad_manager.dispute_finalizes_at(&p),
+        dm.effective_challenge_deadline(&h)
+    );
+    finalizes_exactly_at(&s, &p, AdErr::DisputeNotResolved);
+}
+
+/// D4: a halt adds the grace (anchor delay + buffer) to every non-forfeit outcome, ruled or not.
+#[test]
+fn test_d4_dispute_finalizes_at_halted_adds_the_grace() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    anchor.set_anchor_delay(&s.tp.order_chain_id, &3_600u64);
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    let until = dm.effective_challenge_deadline(&h);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    assert_eq!(
+        s.ad_manager.dispute_finalizes_at(&p),
+        until + 3_600 + SUITE_BUFFER
+    );
+    dm.resolve_dispute(
+        &h,
+        &dispute_manager_contract::DisputeOutcome::BridgerForfeit,
+    );
+    assert_eq!(
+        s.ad_manager.dispute_finalizes_at(&p),
+        dm.effective_challenge_deadline(&h) + 3_600 + SUITE_BUFFER
+    );
+    finalizes_exactly_at(&s, &p, AdErr::TooEarly);
+}
+
+/// D4: a MakerForfeit ruling pays the counterparty anyway, so no grace, halted or not.
+#[test]
+fn test_d4_dispute_finalizes_at_maker_forfeit_no_grace() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.halt_settlement(&maker_addr(&s));
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    dm.resolve_dispute(&h, &dispute_manager_contract::DisputeOutcome::MakerForfeit);
+    assert_eq!(
+        s.ad_manager.dispute_finalizes_at(&p),
+        dm.effective_challenge_deadline(&h)
+    );
+    finalizes_exactly_at(&s, &p, AdErr::DisputeNotResolved);
+}
+
+/// D4: a pause after the filing moves the time by the paused seconds.
+#[test]
+fn test_d4_dispute_finalizes_at_a_pause_moves_it() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    let before = s.ad_manager.dispute_finalizes_at(&p);
+    s.ad_manager.pause();
+    warp(&s, s.env.ledger().timestamp() + 7_200);
+    s.ad_manager.unpause();
+    assert_eq!(s.ad_manager.dispute_finalizes_at(&p), before + 7_200);
+    finalizes_exactly_at(&s, &p, AdErr::DisputeNotResolved);
+}
+
+/// D4: a key kill inside the window adds the grace; the view and the door agree to the second.
+#[test]
+fn test_d4_real_registry_kill_in_the_window_adds_the_grace() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    let h = s.ad_manager.hash_order(&p);
+    warp(&s, p.deadline - 3_600);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    let until = dm.effective_challenge_deadline(&h);
+    assert_eq!(s.ad_manager.dispute_finalizes_at(&p), until, "no kill yet");
+    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
+    assert_eq!(s.ad_manager.dispute_finalizes_at(&p), until + SUITE_BUFFER);
+    finalizes_exactly_at(&s, &p, AdErr::TooEarly);
 }
 
 /// D5: through the escrow, a second answer is refused and the first stands.

@@ -441,6 +441,20 @@ impl AdManagerContract {
         storage::get_halt(&env, &maker)
     }
 
+    /// D4: when `finalize_dispute` can run — the effective challenge deadline, plus the evidence
+    /// grace when the co-signed payout was denied and the ruling is not MakerForfeit. 0 when the
+    /// order is not `Disputed`. `cancel_finalizes_at`'s dispute twin, built from the door's own clock.
+    pub fn dispute_finalizes_at(env: Env, params: OrderParams) -> Result<u64, AdManagerError> {
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        if storage::get_order_status(&env, &order_hash) != Status::Disputed {
+            return Ok(0);
+        }
+        let ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
+        let outcome = ops::dispute_ruling(&env, &order_hash)?;
+        Self::dispute_end(&env, &ad.maker, &params, &order_hash, outcome)
+    }
+
     /// When a claimed cancel really finalizes: the claim window's end plus the evidence grace when
     /// the co-signed payout was denied (#422). 0 when the order is not `Claimed`. The relayer's
     /// janitor asks this instead of computing the clock itself.
@@ -908,14 +922,10 @@ impl AdManagerContract {
         let mut ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
         // #422 rule 3, this door too: every outcome but MakerForfeit hands the lock back to the
         // maker, so a denied payout waits the evidence grace past the challenge deadline (F1).
-        if outcome != DisputeOutcome::MakerForfeit {
-            let until = ops::dispute_challenge_deadline(&env, &order_hash)?;
-            if Self::co_sign_denied(&env, &ad.maker, &params, &order_hash, until) {
-                let buffer = Self::timing(&env, params.order_chain_id)?.buffer;
-                let grace = Self::evidence_grace(&env, params.order_chain_id, buffer)?;
-                Self::require_reached(&env, until.saturating_add(grace))?;
-            }
-        }
+        Self::require_reached(
+            &env,
+            Self::dispute_end(&env, &ad.maker, &params, &order_hash, outcome)?,
+        )?;
         ad.locked -= ad_amount;
         if outcome == DisputeOutcome::MakerForfeit {
             // The maker forfeits its stake: the locked amount leaves the ad for the order's
@@ -1452,6 +1462,25 @@ impl AdManagerContract {
         proofbridge_core::cross_contract::any_slot_expired_within(
             env, &registry, signer, locked_at, until,
         )
+    }
+
+    /// The one dispute clock `finalize_dispute` waits on and `dispute_finalizes_at` reports.
+    fn dispute_end(
+        env: &Env,
+        maker: &Address,
+        params: &OrderParams,
+        order_hash: &BytesN<32>,
+        outcome: DisputeOutcome,
+    ) -> Result<u64, AdManagerError> {
+        let until = ops::dispute_challenge_deadline(env, order_hash)?;
+        if outcome == DisputeOutcome::MakerForfeit
+            || !Self::co_sign_denied(env, maker, params, order_hash, until)
+        {
+            return Ok(until);
+        }
+        let buffer = Self::timing(env, params.order_chain_id)?.buffer;
+        let grace = Self::evidence_grace(env, params.order_chain_id, buffer)?;
+        Ok(until.saturating_add(grace))
     }
 
     /// How long a denied order's cancel waits past its window: the order chain's anchor delay (the

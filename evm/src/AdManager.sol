@@ -62,8 +62,8 @@ contract AdManager is EscrowBase, IAdManager {
     /// @notice The maker's settlement halt (#422). While set, the co-signed `unlock` of every order
     ///         against every ad this maker owns is refused. Custody-authorized, instant both ways,
     ///         never pause-gated. Read by `unlock`, by the cancel doors (`finalizeCancel`,
-    ///         `finalizeDispute`) for their grace, and by `cancelFinalizesAt`: every evidence path
-    ///         ignores it, so a halt can delay a payout but never keep both sides.
+    ///         `finalizeDispute`) for their grace, and by `cancelFinalizesAt` / `disputeFinalizesAt`:
+    ///         every evidence path ignores it, so a halt can delay a payout but never keep both sides.
     mapping(address maker => bool) public halted;
 
     /// @notice When `maker` last resumed. A halt in force at any point at or after an order's
@@ -250,7 +250,7 @@ contract AdManager is EscrowBase, IAdManager {
         _requireSettleable(orderHash, nullifierHash);
         // #422: the maker's halt refuses the co-signed payout; evidence (`presentSettled`) still pays.
         // One cold read of the maker's flag on the metered path (~2.4k; UnlockGas re-baselined).
-        address maker = ads[params.adId].maker;
+        address maker = _adOf(params).maker;
         if (halted[maker]) revert AdManager__Halted(maker);
         // Gate 2 — root authenticity (the co-signed root); mandatory, reverts NoRootVerifier when unwired.
         _requireRootValid(
@@ -294,11 +294,9 @@ contract AdManager is EscrowBase, IAdManager {
         // #422 rule 3: when the co-signed payout was denied, the cancel waits for the order chain's
         // SETTLED evidence to be anchorable and presented, so a maker paid on the other chain cannot
         // also take the lock back.
-        if (_coSignDenied(params, orderHash, _presentationCutoff(orderHash, params))) {
-            _requireReached(_claimedWindowEnd(orderHash) + _evidenceGrace(params.orderChainId));
-        }
+        _requireReached(_finalizesAt(params, orderHash, Status.Claimed));
 
-        Ad storage ad = ads[params.adId];
+        Ad storage ad = _adOf(params);
         uint256 adAmount = _adAmount(params);
         ad.locked -= adAmount;
         _cancel(orderHash, params.adSettlementSigner, false);
@@ -316,7 +314,7 @@ contract AdManager is EscrowBase, IAdManager {
         bytes32 orderHash = _orderHash(params);
         // Only the order's two parties may file. Without this any address could dispute any live
         // order and, one short challenge period later, cancel it out from under both of them.
-        _requireParty(ads[params.adId].maker, params.orderRecipient.toAddressChecked());
+        _requireParty(_adOf(params).maker, params.orderRecipient.toAddressChecked());
         // The amount is validated by the hash the caller had to reproduce, which is why filing
         // starts here and not on the module: only this contract can vouch for it.
         _openDispute(
@@ -334,7 +332,7 @@ contract AdManager is EscrowBase, IAdManager {
         bytes32 orderHash = _orderHash(params);
         _requireStatus(orderHash, Status.Disputed);
         // Either party may call; the module refuses the filer, so only the other one gets through.
-        _requireParty(ads[params.adId].maker, params.orderRecipient.toAddressChecked());
+        _requireParty(_adOf(params).maker, params.orderRecipient.toAddressChecked());
         disputeModuleOf[orderHash].recordResponse(orderHash, msg.sender, evidence);
     }
 
@@ -343,22 +341,15 @@ contract AdManager is EscrowBase, IAdManager {
         bytes32 orderHash = _orderHash(params);
         _requireStatus(orderHash, Status.Disputed);
         // D5: the module the order was filed under, whatever is wired now.
-        IDisputeManager m = disputeModuleOf[orderHash];
-
-        (Dispute.Outcome outcome, bool windowOver, address initiator) = m.outcomeOf(orderHash, pausedSeconds);
+        (IDisputeManager m, Dispute.Outcome outcome, bool windowOver, address initiator) = _disputeOf(orderHash);
         if (!windowOver) revert Escrow__DisputeNotResolved(orderHash);
         // No ruling means the fallback: a mutual refund, the unified primitive's terminal (D4).
         if (outcome == Dispute.Outcome.None) outcome = Dispute.Outcome.MutualRefund;
         // #422 rule 3, this door too: every outcome but MakerForfeit hands the lock back to the maker,
         // so a denied payout waits the evidence grace past the challenge deadline (review F1).
-        if (outcome != Dispute.Outcome.MakerForfeit) {
-            uint256 until = m.effectiveChallengeDeadline(orderHash);
-            if (_coSignDenied(params, orderHash, until)) {
-                _requireReached(until + _evidenceGrace(params.orderChainId));
-            }
-        }
+        _requireReached(_finalizesAt(params, orderHash, Status.Disputed));
 
-        Ad storage ad = ads[params.adId];
+        Ad storage ad = _adOf(params);
         uint256 adAmount = _adAmount(params);
         ad.locked -= adAmount;
         if (outcome == Dispute.Outcome.MakerForfeit) {
@@ -521,7 +512,7 @@ contract AdManager is EscrowBase, IAdManager {
 
         // Evidence beats arbitration: if this order was disputed, that dispute is now over and the
         // bond settles on what the proof shows, not on whatever the arbiter had ruled.
-        _closeDisputeByEvidence(orderHash, ads[params.adId].maker);
+        _closeDisputeByEvidence(orderHash, _adOf(params).maker);
         _fill(orderHash, params.adSettlementSigner, true);
         _payFromAd(params);
     }
@@ -574,6 +565,11 @@ contract AdManager is EscrowBase, IAdManager {
         return _hashOrder(p, block.chainid, address(this));
     }
 
+    /// @dev The order's ad: one keccak-of-calldata-string site instead of eight (EIP-170 margin).
+    function _adOf(OrderParams calldata p) private view returns (Ad storage) {
+        return ads[p.adId];
+    }
+
     /// @dev The signed amount in ad-chain units — what the lock reserved and the payout releases.
     function _adAmount(OrderParams calldata p) private pure returns (uint256) {
         return ProofBridgeUtils.scale(p.amount, p.orderDecimals, p.adDecimals);
@@ -581,7 +577,7 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @dev Pay the bridger's recipient from the ad, in the units the lock reserved.
     function _payFromAd(OrderParams calldata p) private {
-        Ad storage ad = ads[p.adId];
+        Ad storage ad = _adOf(p);
         uint256 adAmount = _adAmount(p);
         ad.balance -= adAmount;
         ad.locked -= adAmount;
@@ -614,7 +610,7 @@ contract AdManager is EscrowBase, IAdManager {
     ///      choose later. No registry wired means no lever 2 to read. #461: no "no usable slot" term —
     ///      the lock required one, so losing it by the cutoff is an expiry in the interval already.
     function _coSignDenied(OrderParams calldata p, bytes32 orderHash, uint256 until) private view returns (bool) {
-        address maker = ads[p.adId].maker;
+        address maker = _adOf(p).maker;
         if (halted[maker] || lastResumedAt[maker] >= p.deadline) return true;
         // #465: the registry the order was locked under, not the live one: a migration mid-order
         // would otherwise read a registry that never saw the kill.
@@ -646,12 +642,43 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @inheritdoc IAdManager
     function cancelFinalizesAt(OrderParams calldata params) external view returns (uint256) {
-        bytes32 orderHash = _orderHash(params);
-        if (_statusOf(orderHash) != Status.Claimed) return 0;
-        uint256 end = _claimedWindowEnd(orderHash);
-        return _coSignDenied(params, orderHash, _presentationCutoff(orderHash, params))
-            ? end + _evidenceGrace(params.orderChainId)
-            : end;
+        return _finalizesAt(params, _orderHash(params), Status.Claimed);
+    }
+
+    /// @inheritdoc IAdManager
+    function disputeFinalizesAt(OrderParams calldata params) external view returns (uint256) {
+        return _finalizesAt(params, _orderHash(params), Status.Disputed);
+    }
+
+    /// @dev The one clock both finalize doors wait on and both views report: the cancel window's end
+    ///      or the effective challenge deadline, plus the evidence grace when the co-signed payout was
+    ///      denied (#422) and the outcome hands the lock back (all but MakerForfeit). 0 off `status`.
+    function _finalizesAt(OrderParams calldata params, bytes32 orderHash, Status status)
+        private
+        view
+        returns (uint256 end)
+    {
+        if (_statusOf(orderHash) != status) return 0;
+        uint256 cutoff;
+        if (status == Status.Claimed) {
+            end = _claimedWindowEnd(orderHash);
+            cutoff = _presentationCutoff(orderHash, params);
+        } else {
+            (IDisputeManager m, Dispute.Outcome outcome,,) = _disputeOf(orderHash);
+            end = cutoff = m.effectiveChallengeDeadline(orderHash);
+            if (outcome == Dispute.Outcome.MakerForfeit) return end;
+        }
+        if (_coSignDenied(params, orderHash, cutoff)) end += _evidenceGrace(params.orderChainId);
+    }
+
+    /// @dev The module the order was filed under (D5) and its verdict, read at this escrow's pause clock.
+    function _disputeOf(bytes32 orderHash)
+        private
+        view
+        returns (IDisputeManager m, Dispute.Outcome outcome, bool windowOver, address initiator)
+    {
+        m = disputeModuleOf[orderHash];
+        (outcome, windowOver, initiator) = m.outcomeOf(orderHash, pausedSeconds);
     }
 
     /// @dev How long a denied order's cancel waits past its window: the order chain's anchor delay
