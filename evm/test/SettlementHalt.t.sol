@@ -346,6 +346,104 @@ contract SettlementHaltTest is AdManagerCancellationTest {
 /// Review F1: the dispute fallback is a door too. Every outcome but MakerForfeit hands the lock back
 /// to the maker, so a denied payout waits the grace past the challenge deadline.
 contract SettlementHaltDisputeTest is DisputeTest {
+    /// D4: the effective challenge deadline (what a reader of the module alone would show) is too
+    /// early for a denied dispute: finalize there reverts with the grace still to run.
+    function test_d4_theChallengeDeadlineIsTooEarly_whenDenied() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(24);
+        vm.prank(maker);
+        adManager.haltSettlement();
+        _file(p, maker);
+        uint256 until_ = dm.effectiveChallengeDeadline(h);
+        vm.warp(until_);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, until_ + 30 minutes));
+        adManager.finalizeDispute(p);
+        // The view names the real time: the challenge deadline plus the grace (buffer, no delay).
+        assertEq(adManager.disputeFinalizesAt(p), until_ + 30 minutes);
+        _finalizesExactlyAt(p, h);
+    }
+
+    /// One second before `disputeFinalizesAt` finalize is refused; at it, finalize lands. The refusal
+    /// is typed (R4): inside the grace the door says `TooEarly(at)`; with no grace the view equals the
+    /// challenge deadline, so a second before it the module's window is simply not over yet.
+    function _finalizesExactlyAt(IAdManager.OrderParams memory p, bytes32 h) internal {
+        uint256 at = adManager.disputeFinalizesAt(p);
+        assertGt(at, 0, "disputed");
+        vm.warp(at - 1);
+        if (at > dm.effectiveChallengeDeadline(h)) {
+            vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, at));
+        } else {
+            vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeNotResolved.selector, h));
+        }
+        adManager.finalizeDispute(p);
+        vm.warp(at);
+        adManager.finalizeDispute(p);
+        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
+        assertEq(adManager.disputeFinalizesAt(p), 0, "terminal");
+    }
+
+    /// D4: not disputed reads 0, like `cancelFinalizesAt` off `Claimed`.
+    function test_d4_disputeFinalizesAt_isZeroWhenNotDisputed() public {
+        (IAdManager.OrderParams memory p,) = _lockedOrder(30);
+        assertEq(adManager.disputeFinalizesAt(p), 0);
+    }
+
+    /// D4: payout not denied: the effective challenge deadline itself, and finalize agrees to the second.
+    function test_d4_disputeFinalizesAt_notDenied_isTheChallengeDeadline() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(31);
+        _file(p, maker);
+        assertEq(adManager.disputeFinalizesAt(p), dm.effectiveChallengeDeadline(h));
+        uint256 at = adManager.disputeFinalizesAt(p);
+        vm.warp(at - 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeNotResolved.selector, h));
+        adManager.finalizeDispute(p);
+        _finalizesExactlyAt(p, h);
+    }
+
+    /// D4: a halt in the order's life adds the grace (anchor delay + buffer) to every non-forfeit outcome.
+    function test_d4_disputeFinalizesAt_halted_addsTheGrace() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(32);
+        _file(p, maker);
+        uint256 until_ = dm.effectiveChallengeDeadline(h);
+        vm.prank(admin);
+        anchor.setAnchorDelay(orderChainId, 1 hours);
+        vm.prank(maker);
+        adManager.haltSettlement();
+        assertEq(adManager.disputeFinalizesAt(p), until_ + 1 hours + 30 minutes);
+        vm.prank(arbiter);
+        dm.resolveDispute(h, Dispute.Outcome.BridgerForfeit);
+        assertEq(adManager.disputeFinalizesAt(p), dm.effectiveChallengeDeadline(h) + 1 hours + 30 minutes);
+        vm.warp(adManager.disputeFinalizesAt(p) - 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, adManager.disputeFinalizesAt(p)));
+        adManager.finalizeDispute(p);
+        _finalizesExactlyAt(p, h);
+    }
+
+    /// D4: a MakerForfeit ruling pays the counterparty anyway, so no grace, halted or not.
+    function test_d4_disputeFinalizesAt_makerForfeit_noGrace() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(33);
+        vm.prank(maker);
+        adManager.haltSettlement();
+        _file(p, maker);
+        vm.prank(arbiter);
+        dm.resolveDispute(h, Dispute.Outcome.MakerForfeit);
+        assertEq(adManager.disputeFinalizesAt(p), dm.effectiveChallengeDeadline(h));
+        _finalizesExactlyAt(p, h);
+    }
+
+    /// D4: a pause after the filing moves the time by the paused seconds.
+    function test_d4_disputeFinalizesAt_aPauseMovesIt() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(34);
+        _file(p, maker);
+        uint256 before = adManager.disputeFinalizesAt(p);
+        vm.prank(admin);
+        adManager.pause();
+        vm.warp(block.timestamp + 2 hours);
+        vm.prank(admin);
+        adManager.unpause();
+        assertEq(adManager.disputeFinalizesAt(p), before + 2 hours);
+        _finalizesExactlyAt(p, h);
+    }
+
     function test_finalizeDispute_fallback_waitsTheGrace_whenHalted() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(21);
         vm.prank(maker);
@@ -917,6 +1015,26 @@ contract SettlementHaltDisputeRealRegistryTest is RealRegistryFixture, DisputeTe
         adManager.finalizeDispute(p);
         vm.warp(until_ + 30 minutes);
         adManager.finalizeDispute(p);
+    }
+
+    /// D4: a key kill inside the window adds the grace; the view and the door agree to the second.
+    function test_d4_realRegistry_killInTheWindow_disputeFinalizesAtAddsTheGrace() public {
+        _realRegistry();
+        IAdManager.OrderParams memory p = _lockAs(14);
+        bytes32 h = adManager.hashOrderPublic(p);
+        vm.warp(p.deadline - 1 hours);
+        _file(p, maker);
+        uint256 until_ = dm.effectiveChallengeDeadline(h);
+        assertEq(adManager.disputeFinalizesAt(p), until_, "no kill yet");
+        vm.warp(p.deadline + 45 minutes);
+        _setValidUntil(0, true);
+        assertEq(adManager.disputeFinalizesAt(p), until_ + 30 minutes);
+        vm.warp(until_ + 30 minutes - 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, until_ + 30 minutes));
+        adManager.finalizeDispute(p);
+        vm.warp(until_ + 30 minutes);
+        adManager.finalizeDispute(p);
+        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
     }
 
     function test_realRegistry_killAfterTheChallengeDeadline_fallbackOrdinaryTiming() public {

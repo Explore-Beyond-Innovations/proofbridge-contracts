@@ -403,6 +403,78 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         assertEq(responderEvidence, bytes32("response"), "the counterparty's hash is recorded");
     }
 
+    /*//////////////// D5: one answer, inside the window, never empty ////////////////*/
+
+    /// D5: the slot holds one answer; a second one is refused and the first stands.
+    function test_d5_aSecondAnswerIsRefused() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(26);
+        _file(p, filer);
+        vm.prank(maker);
+        adManager.respondToDispute(p, bytes32("first"));
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__AlreadyResponded.selector, h));
+        adManager.respondToDispute(p, bytes32("second"));
+        (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        assertEq(responderEvidence, bytes32("first"), "the first answer stands");
+    }
+
+    /// D5: answers close with the challenge window, the same instant the arbiter's ruling does.
+    function test_d5_anAnswerAtTheChallengeDeadlineIsRefused() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(27);
+        _file(p, filer);
+        uint256 until = dm.effectiveChallengeDeadline(h);
+        vm.warp(until);
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__ResponseWindowClosed.selector, until));
+        adManager.respondToDispute(p, bytes32("late"));
+        // One second earlier it lands.
+        vm.warp(until - 1);
+        vm.prank(maker);
+        adManager.respondToDispute(p, bytes32("on time"));
+    }
+
+    /// D5: the answer deadline is the effective one, so a pause after the filing moves it.
+    function test_d5_aPauseMovesTheAnswerDeadline() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(29);
+        _file(p, filer);
+        uint256 until = dm.effectiveChallengeDeadline(h);
+        vm.prank(admin);
+        adManager.pause();
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(admin);
+        adManager.unpause();
+        assertEq(dm.effectiveChallengeDeadline(h), until + 1 hours);
+        vm.warp(until);
+        vm.prank(maker);
+        adManager.respondToDispute(p, bytes32("still open"));
+    }
+
+    /// D5 (R1, 2026-10-05): the ruling closes the answer window. Without the guard the record's
+    /// deadline is the ruling's finalize time, so a late answer lands with nothing left to act on it.
+    function test_d5_anAnswerAfterTheRulingIsRefused() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(33);
+        _file(p, filer);
+        vm.prank(arbiter);
+        dm.resolveDispute(h, Dispute.Outcome.MutualRefund);
+        assertLt(block.timestamp, dm.effectiveChallengeDeadline(h), "the ruling's window is still open");
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__AlreadyRuled.selector, h));
+        adManager.respondToDispute(p, bytes32("too late"));
+        (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        assertEq(responderEvidence, bytes32(0), "nothing recorded");
+    }
+
+    /// D5: an empty answer is refused, so "answered" is exactly "the slot is non-zero".
+    function test_d5_aZeroAnswerIsRefused() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(28);
+        _file(p, filer);
+        vm.prank(maker);
+        vm.expectRevert(DisputeManager.DisputeManager__ZeroResponse.selector);
+        adManager.respondToDispute(p, bytes32(0));
+        (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        assertEq(responderEvidence, bytes32(0));
+    }
+
     /// S4, tightened by C-17: the bond is paid exactly. An overpaid or underpaid bond is refused,
     /// so no surplus is ever wrapped and nothing needs refunding.
     /// 49E-2: the bond is exact, so the amount is quoted by the contract, not re-derived by clients.

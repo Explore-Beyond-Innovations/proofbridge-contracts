@@ -159,8 +159,14 @@ interface IAdManager is IEscrow {
      * @notice When a claimed cancel really finalizes: the claim window's end plus the evidence grace
      *         when the co-signed payout was denied (#422). 0 when the order is not `Claimed`. The
      *         relayer's janitor asks this instead of computing the clock itself.
+     * @dev During a pause this under-reports: paused seconds accrue at `unpause`, so the time jumps
+     *      forward then. The doors are `whenNotPaused`, so acceptance never drifts from the view, but
+     *      a caller that cached it before a pause must re-read after the unpause.
      */
     function cancelFinalizesAt(OrderParams calldata params) external view returns (uint256);
+    /// @notice `cancelFinalizesAt`'s dispute twin: when `finalizeDispute` can run, grace included; 0 off `Disputed`.
+    /// @dev Same pause caveat as `cancelFinalizesAt`: re-read after an unpause.
+    function disputeFinalizesAt(OrderParams calldata params) external view returns (uint256);
     function fundAd(string calldata adId, uint256 amount) external payable;
     function withdrawFromAd(string calldata adId, uint256 amount, address to) external;
     function closeAd(string calldata adId, address to) external;
@@ -206,6 +212,7 @@ interface IAdManager is IEscrow {
     /// @notice Record the counterparty's evidence hash on an open dispute. Only the order's other
     ///         party may call it (D11): the responder slot is single, not an append, so anyone able
     ///         to write it could overwrite the genuine response a block before the arbiter reads it.
+    ///         One non-zero answer, before the effective challenge deadline (D5, the module refuses).
     function respondToDispute(OrderParams calldata params, bytes32 evidence) external;
     /// @notice Apply the module's outcome once its window is over, and settle the bond.
     function finalizeDispute(OrderParams calldata params) external;

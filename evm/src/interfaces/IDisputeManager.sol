@@ -63,7 +63,8 @@ interface IDisputeManager {
     ) external payable returns (uint128 bond);
 
     /**
-     * @notice Record the counterparty's response to an open dispute.
+     * @notice Record the counterparty's response to an open dispute: one non-zero hash, strictly
+     *         before the effective challenge deadline (D5).
      * @dev Escrow-only: only the escrow knows who the order's two parties are, so only it can say
      *      that this responder is the one that did not file (D11). The module authenticating "some
      *      address that is not the filer" would let anyone overwrite the genuine counterparty's
