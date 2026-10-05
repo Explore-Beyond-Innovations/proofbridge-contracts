@@ -926,6 +926,7 @@ fn relayed_error_codes_match_the_shared_definitions() {
         (Error::ResponseWindowClosed, c::RESPONSE_WINDOW_CLOSED),
         (Error::AlreadyResponded, c::ALREADY_RESPONDED),
         (Error::ZeroResponse, c::ZERO_RESPONSE),
+        (Error::AlreadyRuled, c::ALREADY_RULED),
     ];
     for (e, code) in pairs {
         assert_eq!(e as u32, code, "{e:?}");
@@ -951,6 +952,27 @@ fn d5_a_second_answer_is_refused() {
     assert_eq!(
         f.client.get_dispute(&h).unwrap().responder_evidence,
         hash(&f.env, 0x11)
+    );
+}
+
+/// D5 (R1): the ruling closes the answer window, even though the record's deadline moved on to
+/// the ruling's finalize time.
+#[test]
+fn d5_an_answer_after_the_ruling_is_refused() {
+    let f = fixture();
+    let h = hash(&f.env, 52);
+    file(&f, &h, 100_000);
+    f.client.resolve_dispute(&h, &DisputeOutcome::MutualRefund);
+    assert!(f.env.ledger().timestamp() < f.client.effective_challenge_deadline(&h));
+    let other = Address::generate(&f.env);
+    assert_eq!(
+        f.client
+            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11), &0),
+        Err(Ok(Error::AlreadyRuled))
+    );
+    assert_eq!(
+        f.client.get_dispute(&h).unwrap().responder_evidence,
+        BytesN::from_array(&f.env, &[0u8; 32])
     );
 }
 

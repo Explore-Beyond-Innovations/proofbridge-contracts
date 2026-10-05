@@ -61,6 +61,8 @@ pub enum Fault {
     DisputeResponseWindowClosed,
     DisputeAlreadyResponded,
     DisputeZeroResponse,
+    /// The ruling closed the answer window (D5, R1), or the fallback was claimed on a ruled dispute.
+    DisputeAlreadyRuled,
     /// A public input at or above the field prime (2.3h, residual 9). Defence in depth: both shipped
     /// verifiers already reject one, but the escrow's nullifier ledger keys on raw bytes, so a
     /// verifier that reduced instead would turn one proof into many nullifiers.
@@ -420,6 +422,7 @@ pub fn dispute_module_fault(e: Result<soroban_sdk::Error, soroban_sdk::InvokeErr
             code::RESPONSE_WINDOW_CLOSED => Fault::DisputeResponseWindowClosed,
             code::ALREADY_RESPONDED => Fault::DisputeAlreadyResponded,
             code::ZERO_RESPONSE => Fault::DisputeZeroResponse,
+            code::ALREADY_RULED => Fault::DisputeAlreadyRuled,
             _ => Fault::DisputeModuleRejected,
         },
         _ => Fault::DisputeModuleRejected,

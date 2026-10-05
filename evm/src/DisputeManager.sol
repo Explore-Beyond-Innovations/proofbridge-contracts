@@ -229,7 +229,7 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Record the counterparty's evidence hash. Moves no funds, posts no bond (D11). One
-    ///         non-zero answer, before the effective challenge deadline (D5).
+    ///         non-zero answer, before the effective challenge deadline and before any ruling (D5).
     /// @dev Escrow-only. Authenticating "an address that is not the filer" here would let any
     ///      passer-by overwrite the genuine counterparty's hash — the slot is single, not an append
     ///      — so the responder's identity has to come from the side that knows the order's parties,
@@ -241,6 +241,10 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         if (responder == d.initiator) revert DisputeManager__NotResponder();
         if (evidence == bytes32(0)) revert DisputeManager__ZeroResponse();
         if (d.responderEvidence != bytes32(0)) revert DisputeManager__AlreadyResponded(orderHash);
+        // The ruling closes the answer window. The record's deadline becomes the ruling's finalize
+        // time, so without this an answer would land until then — of use only to a re-ruling, which
+        // is #454's question (T3), not this door's.
+        if (d.ruling != Dispute.Outcome.None) revert DisputeManager__AlreadyRuled(orderHash);
         uint256 until_ = effectiveChallengeDeadline(orderHash);
         if (block.timestamp >= until_) revert DisputeManager__ResponseWindowClosed(until_);
         d.responderEvidence = evidence;

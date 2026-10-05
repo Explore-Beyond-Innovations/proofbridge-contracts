@@ -270,6 +270,11 @@ impl DisputeManagerContract {
         if d.responder_evidence != BytesN::from_array(&env, &[0u8; 32]) {
             return Err(Error::AlreadyResponded);
         }
+        // The ruling closes the answer window: the record's deadline is then the ruling's finalize
+        // time, and an answer until then could only serve a re-ruling (#454's question, T3).
+        if d.ruling != DisputeOutcome::None {
+            return Err(Error::AlreadyRuled);
+        }
         if env.ledger().timestamp() >= Self::deadline_at(&d, escrow_paused_seconds) {
             return Err(Error::ResponseWindowClosed);
         }
@@ -352,10 +357,7 @@ impl DisputeManagerContract {
         match storage::get_dispute(&env, &order_hash) {
             None => (DisputeOutcome::None, false, None),
             Some(d) => {
-                let until = d
-                    .challenge_deadline
-                    .saturating_add(escrow_paused_seconds.saturating_sub(d.paused_at_open));
-                let over = env.ledger().timestamp() >= until;
+                let over = env.ledger().timestamp() >= Self::deadline_at(&d, escrow_paused_seconds);
                 (d.ruling, over, Some(d.initiator))
             }
         }

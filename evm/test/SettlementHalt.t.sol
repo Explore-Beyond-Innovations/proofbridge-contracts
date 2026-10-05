@@ -362,12 +362,18 @@ contract SettlementHaltDisputeTest is DisputeTest {
         _finalizesExactlyAt(p, h);
     }
 
-    /// One second before `disputeFinalizesAt` finalize is refused; at it, finalize lands.
+    /// One second before `disputeFinalizesAt` finalize is refused; at it, finalize lands. The refusal
+    /// is typed (R4): inside the grace the door says `TooEarly(at)`; with no grace the view equals the
+    /// challenge deadline, so a second before it the module's window is simply not over yet.
     function _finalizesExactlyAt(IAdManager.OrderParams memory p, bytes32 h) internal {
         uint256 at = adManager.disputeFinalizesAt(p);
         assertGt(at, 0, "disputed");
         vm.warp(at - 1);
-        vm.expectRevert();
+        if (at > dm.effectiveChallengeDeadline(h)) {
+            vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, at));
+        } else {
+            vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeNotResolved.selector, h));
+        }
         adManager.finalizeDispute(p);
         vm.warp(at);
         adManager.finalizeDispute(p);

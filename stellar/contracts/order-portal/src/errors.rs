@@ -151,6 +151,12 @@ pub enum OrderPortalError {
     DisputeChallengeClosed = 100,
     /// 49S-3: the dispute module could not move the bond (a token refusal, not a dispute rule).
     DisputeBondTransferFailed = 101,
+    /// D5: the module's answer rules, relayed 1:1 like every other module refusal (R6). Unreachable
+    /// today — the follower records no answers — but a table that collapses is a table that drifts.
+    DisputeResponseWindowClosed = 102,
+    DisputeAlreadyResponded = 103,
+    DisputeZeroResponse = 104,
+    DisputeAlreadyRuled = 105,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
@@ -218,10 +224,10 @@ impl From<proofbridge_core::escrow_ops::Fault> for OrderPortalError {
             DisputeChallengeOpen => OrderPortalError::DisputeChallengeOpen,
             DisputeChallengeClosed => OrderPortalError::DisputeChallengeClosed,
             DisputeBondTransferFailed => OrderPortalError::DisputeBondTransferFailed,
-            // Unreachable: the follower records no answers (disputes are primary-only).
-            DisputeResponseWindowClosed | DisputeAlreadyResponded | DisputeZeroResponse => {
-                OrderPortalError::DisputeModuleRejected
-            }
+            DisputeResponseWindowClosed => OrderPortalError::DisputeResponseWindowClosed,
+            DisputeAlreadyResponded => OrderPortalError::DisputeAlreadyResponded,
+            DisputeZeroResponse => OrderPortalError::DisputeZeroResponse,
+            DisputeAlreadyRuled => OrderPortalError::DisputeAlreadyRuled,
         }
     }
 }

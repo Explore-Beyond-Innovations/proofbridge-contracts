@@ -159,9 +159,13 @@ interface IAdManager is IEscrow {
      * @notice When a claimed cancel really finalizes: the claim window's end plus the evidence grace
      *         when the co-signed payout was denied (#422). 0 when the order is not `Claimed`. The
      *         relayer's janitor asks this instead of computing the clock itself.
+     * @dev During a pause this under-reports: paused seconds accrue at `unpause`, so the time jumps
+     *      forward then. The doors are `whenNotPaused`, so acceptance never drifts from the view, but
+     *      a caller that cached it before a pause must re-read after the unpause.
      */
     function cancelFinalizesAt(OrderParams calldata params) external view returns (uint256);
     /// @notice `cancelFinalizesAt`'s dispute twin: when `finalizeDispute` can run, grace included; 0 off `Disputed`.
+    /// @dev Same pause caveat as `cancelFinalizesAt`: re-read after an unpause.
     function disputeFinalizesAt(OrderParams calldata params) external view returns (uint256);
     function fundAd(string calldata adId, uint256 amount) external payable;
     function withdrawFromAd(string calldata adId, uint256 amount, address to) external;

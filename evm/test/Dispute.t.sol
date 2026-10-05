@@ -449,6 +449,21 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         adManager.respondToDispute(p, bytes32("still open"));
     }
 
+    /// D5 (R1, 2026-10-05): the ruling closes the answer window. Without the guard the record's
+    /// deadline is the ruling's finalize time, so a late answer lands with nothing left to act on it.
+    function test_d5_anAnswerAfterTheRulingIsRefused() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(33);
+        _file(p, filer);
+        vm.prank(arbiter);
+        dm.resolveDispute(h, Dispute.Outcome.MutualRefund);
+        assertLt(block.timestamp, dm.effectiveChallengeDeadline(h), "the ruling's window is still open");
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__AlreadyRuled.selector, h));
+        adManager.respondToDispute(p, bytes32("too late"));
+        (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        assertEq(responderEvidence, bytes32(0), "nothing recorded");
+    }
+
     /// D5: an empty answer is refused, so "answered" is exactly "the slot is non-zero".
     function test_d5_aZeroAnswerIsRefused() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(28);

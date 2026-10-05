@@ -465,21 +465,8 @@ impl AdManagerContract {
             return Ok(0);
         }
         let t = Self::timing(&env, params.order_chain_id)?;
-        let buffer = t.buffer;
-        let end = Self::window_end(&env, &order_hash, 0, buffer);
         let ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
-        if Self::co_sign_denied(
-            &env,
-            &ad.maker,
-            &params,
-            &order_hash,
-            end.saturating_sub(t.margin),
-        ) {
-            let grace = Self::evidence_grace(&env, params.order_chain_id, buffer)?;
-            Ok(end.saturating_add(grace))
-        } else {
-            Ok(end)
-        }
+        Self::cancel_end(&env, &ad.maker, &params, &order_hash, &t)
     }
 
     /// Re-point an ad's settlement signer. Custody-authorized, callable at any time — including
@@ -990,18 +977,11 @@ impl AdManagerContract {
         let mut ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
         // #422 rule 3: when the co-signed payout was denied, the cancel waits for the order chain's
         // SETTLED evidence to be anchorable and presented, so a maker paid on the other chain cannot
-        // also take the lock back.
-        let end = Self::window_end(&env, &order_hash, 0, buffer);
-        if Self::co_sign_denied(
+        // also take the lock back. The door's clock is the view's clock (R2): one `cancel_end`.
+        Self::require_reached(
             &env,
-            &ad.maker,
-            &params,
-            &order_hash,
-            end.saturating_sub(t.margin),
-        ) {
-            let grace = Self::evidence_grace(&env, params.order_chain_id, buffer)?;
-            Self::require_reached(&env, end.saturating_add(grace))?;
-        }
+            Self::cancel_end(&env, &ad.maker, &params, &order_hash, &t)?,
+        )?;
         ad.locked -= ad_amount;
         storage::set_ad(&env, &params.ad_id, &ad);
 
@@ -1462,6 +1442,23 @@ impl AdManagerContract {
         proofbridge_core::cross_contract::any_slot_expired_within(
             env, &registry, signer, locked_at, until,
         )
+    }
+
+    /// The one cancel clock `finalize_cancel` waits on and `cancel_finalizes_at` reports: the claim
+    /// window's end, plus the evidence grace when the co-signed payout was denied (#422).
+    fn cancel_end(
+        env: &Env,
+        maker: &Address,
+        params: &OrderParams,
+        order_hash: &BytesN<32>,
+        t: &RouteTiming,
+    ) -> Result<u64, AdManagerError> {
+        let end = Self::window_end(env, order_hash, 0, t.buffer);
+        if !Self::co_sign_denied(env, maker, params, order_hash, end.saturating_sub(t.margin)) {
+            return Ok(end);
+        }
+        let grace = Self::evidence_grace(env, params.order_chain_id, t.buffer)?;
+        Ok(end.saturating_add(grace))
     }
 
     /// The one dispute clock `finalize_dispute` waits on and `dispute_finalizes_at` reports.

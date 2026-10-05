@@ -346,8 +346,9 @@ contract AdManager is EscrowBase, IAdManager {
         // No ruling means the fallback: a mutual refund, the unified primitive's terminal (D4).
         if (outcome == Dispute.Outcome.None) outcome = Dispute.Outcome.MutualRefund;
         // #422 rule 3, this door too: every outcome but MakerForfeit hands the lock back to the maker,
-        // so a denied payout waits the evidence grace past the challenge deadline (review F1).
-        _requireReached(_finalizesAt(params, orderHash, Status.Disputed));
+        // so a denied payout waits the evidence grace past the challenge deadline (review F1). The
+        // clock from the module and outcome already in hand: one read, not three.
+        _requireReached(_disputeEnd(params, orderHash, m, outcome));
 
         Ad storage ad = _adOf(params);
         uint256 adAmount = _adAmount(params);
@@ -659,16 +660,28 @@ contract AdManager is EscrowBase, IAdManager {
         returns (uint256 end)
     {
         if (_statusOf(orderHash) != status) return 0;
-        uint256 cutoff;
         if (status == Status.Claimed) {
             end = _claimedWindowEnd(orderHash);
-            cutoff = _presentationCutoff(orderHash, params);
+            if (_coSignDenied(params, orderHash, _presentationCutoff(orderHash, params))) {
+                end += _evidenceGrace(params.orderChainId);
+            }
         } else {
             (IDisputeManager m, Dispute.Outcome outcome,,) = _disputeOf(orderHash);
-            end = cutoff = m.effectiveChallengeDeadline(orderHash);
-            if (outcome == Dispute.Outcome.MakerForfeit) return end;
+            end = _disputeEnd(params, orderHash, m, outcome);
         }
-        if (_coSignDenied(params, orderHash, cutoff)) end += _evidenceGrace(params.orderChainId);
+    }
+
+    /// @dev The dispute half of `_finalizesAt`, for a caller that has already read the module and
+    ///      the outcome (`finalizeDispute`): the effective challenge deadline, plus the grace unless
+    ///      the ruling is MakerForfeit.
+    function _disputeEnd(OrderParams calldata params, bytes32 orderHash, IDisputeManager m, Dispute.Outcome outcome)
+        private
+        view
+        returns (uint256 end)
+    {
+        end = m.effectiveChallengeDeadline(orderHash);
+        if (outcome == Dispute.Outcome.MakerForfeit) return end;
+        if (_coSignDenied(params, orderHash, end)) end += _evidenceGrace(params.orderChainId);
     }
 
     /// @dev The module the order was filed under (D5) and its verdict, read at this escrow's pause clock.

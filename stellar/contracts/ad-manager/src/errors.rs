@@ -169,6 +169,8 @@ pub enum AdManagerError {
     DisputeResponseWindowClosed = 82,
     DisputeAlreadyResponded = 83,
     DisputeZeroResponse = 84,
+    /// D5 (R1): the ruling closed the answer window; also a fallback claim on a ruled dispute.
+    DisputeAlreadyRuled = 85,
 }
 
 impl proofbridge_core::errors::ProofBridgeError for AdManagerError {
@@ -239,6 +241,7 @@ impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
             DisputeResponseWindowClosed => AdManagerError::DisputeResponseWindowClosed,
             DisputeAlreadyResponded => AdManagerError::DisputeAlreadyResponded,
             DisputeZeroResponse => AdManagerError::DisputeZeroResponse,
+            DisputeAlreadyRuled => AdManagerError::DisputeAlreadyRuled,
         }
     }
 }

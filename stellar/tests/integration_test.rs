@@ -9111,6 +9111,24 @@ fn test_d5_an_answer_at_the_challenge_deadline_is_refused() {
         .respond_to_dispute(&p, &bridger, &evidence(&s, 0x11));
 }
 
+/// D5 (R1): through the escrow, the ruling closes the answer window, relayed as the escrow's own
+/// `DisputeAlreadyRuled` (85), not the module's number nor `DisputeModuleRejected`.
+#[test]
+fn test_d5_an_answer_after_the_ruling_is_refused() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    dm.resolve_dispute(&h, &dispute_manager_contract::DisputeOutcome::MutualRefund);
+    let bridger = account_addr(&s, &s.tp.order_recipient);
+    assert_eq!(
+        s.ad_manager
+            .try_respond_to_dispute(&p, &bridger, &evidence(&s, 0x11)),
+        Err(Ok(AdErr::DisputeAlreadyRuled))
+    );
+}
+
 /// D5: through the escrow, an empty answer is refused.
 #[test]
 fn test_d5_a_zero_answer_is_refused() {
