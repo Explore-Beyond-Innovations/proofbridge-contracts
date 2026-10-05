@@ -134,7 +134,7 @@ jobs:
           done
 
           # Copy only the artifacts the deployer actually loads.
-          EVM_ARTIFACTS="OrderPortal AdManager MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20 BLSKeyRegistry CounterpartyVerifier libSCL_EIP6565 RootAnchor Registrar DisputeManager AgentPolicyCodec ProofBridgeAgentPolicy"
+          EVM_ARTIFACTS="OrderPortal AdManager ProofBridgeUtils MerkleManager Poseidon2Yul Verifier wNativeToken MockERC20 BLSKeyRegistry CounterpartyVerifier libSCL_EIP6565 RootAnchor Registrar DisputeManager AgentPolicyCodec ProofBridgeAgentPolicy"
           for c in $EVM_ARTIFACTS; do
             [ -d "evm/out/${c}.sol" ] || { echo "::error::the build produced no ${c}.sol artifact"; exit 1; }
             mkdir -p "$EVM_OUT/${c}.sol"
@@ -150,7 +150,7 @@ jobs:
           # a name it should not: that can only add a failure. The exact scan is the repo-check.
           MISSING=""
           for c in $(cat evm/deploy/src/*.ts | tr '\n' ' ' \
-                     | grep -oE '(contractFactoryLinked|contractFactory|attachContract|linkedLibraryIn|getAbi)\([^;]*' \
+                     | grep -oE '(contractFactoryLinked|contractFactory|attachContract|linkedLibraryIn|getAbi|deployedCode|methodIdentifier)\([^;]*' \
                      | grep -oE '"[A-Za-z0-9_]+" *, *"[A-Za-z0-9_]+"' \
                      | sed -E 's/"([A-Za-z0-9_]+)".*/\1/' | sort -u); do
             case " $EVM_ARTIFACTS " in *" $c "*) ;; *) MISSING="$MISSING $c" ;; esac

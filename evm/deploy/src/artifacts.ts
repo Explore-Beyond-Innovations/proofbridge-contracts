@@ -14,6 +14,7 @@ interface Artifact {
     object: string;
     linkReferences?: Record<string, Record<string, LinkReference[]>>;
   };
+  methodIdentifiers?: Record<string, string>;
   deployedBytecode?: {
     object?: string;
     linkReferences?: Record<string, Record<string, LinkReference[]>>;
@@ -55,6 +56,25 @@ export async function runtimeCodeOf(
 
 export function getAbi(contractFile: string, contractName: string): any[] {
   return loadArtifact(contractFile, contractName).abi;
+}
+
+/**
+ * A function's selector as solc computed it, by the signature `forge inspect <name> methodIdentifiers`
+ * prints. Needed where a client cannot derive it: a library's `public` function that takes a struct
+ * is hashed by the struct's declared name (`digest(OrderHash.Order)`), not the tuple the ABI lists, so
+ * ethers and cast both call a selector the library does not have.
+ */
+export function methodIdentifier(contractFile: string, contractName: string, signature: string): string {
+  const id = loadArtifact(contractFile, contractName).methodIdentifiers?.[signature];
+  if (!id) throw new Error(`artifact ${contractFile}.sol/${contractName}.json records no selector for ${signature}`);
+  return "0x" + id;
+}
+
+/** The artifact's runtime bytecode, as `forge build` recorded it (link placeholders unresolved). */
+export function deployedCode(contractFile: string, contractName: string): string {
+  const code = loadArtifact(contractFile, contractName).deployedBytecode?.object;
+  if (!code) throw new Error(`artifact ${contractFile}.sol/${contractName}.json records no deployedBytecode`);
+  return code;
 }
 
 export function contractFactory(

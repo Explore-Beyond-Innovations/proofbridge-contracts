@@ -21,10 +21,13 @@ import { assertReusedVk, vkRecord, assertVerifierCode } from "./vk.js";
 import {
   contractFactory,
   contractFactoryLinked,
+  deployedCode,
   linkedLibraryIn,
+  methodIdentifier,
   attachContract,
   runtimeCodeOf,
 } from "./artifacts.js";
+import { UTILS_LIBRARY, utilsLibraryLinkedBy, verifyUtilsLibrary, type LibraryVerdict } from "./utils-library.js";
 import {
   buildManifest,
   loadOrNull,
@@ -79,6 +82,7 @@ export interface DeployCoreResult {
     disputeManager: string;
     agentPolicyCodec: string;
     agentPolicy: string;
+    proofBridgeUtils: string;
   };
 }
 
@@ -168,6 +172,11 @@ async function deployCoreRun(
   if (!Number.isInteger(wDec) || wDec < 0 || wDec > 255) {
     throw new Error(`deploy-core: WNATIVE_DECIMALS must be an integer 0..255, got ${wDec}`);
   }
+  // The library's artifact must be whole: the reuse gate compares its runtime code and the probe
+  // calls `digest` by the selector solc recorded, and a stripped bundle has neither. Read here, so
+  // the refusal comes before the first transaction rather than after the library's.
+  deployedCode("ProofBridgeUtils", "ProofBridgeUtils");
+  methodIdentifier("ProofBridgeUtils", "ProofBridgeUtils", "digest(OrderHash.Order)");
   // Outside local the notary is named: after handover the deploy key must not stay the sole anchor signer.
   const anchorSigners = namedOutsideLocal("ANCHOR_PUBLISHER", env, admin)
     .split(",")
@@ -202,6 +211,8 @@ async function deployCoreRun(
   // ...and so is what depends on the chain. The manifest is a claim; the chain is the fact.
   const reusedAgentPolicy = existing?.contracts.agentPolicy?.address;
   let reusedAgentCodec = existing?.contracts.agentPolicyCodec?.address;
+  const manifestUtils = existing?.contracts.proofBridgeUtils?.address;
+  let reusedUtils: string | undefined;
   let foreign: string[] = [];
   let heldAdmins: Awaited<ReturnType<typeof adminsOf>> = [];
   if (existing) {
@@ -210,8 +221,9 @@ async function deployCoreRun(
       .map(([name, entry]) => ({ name, address: (entry as { address?: string } | undefined)?.address }))
       .filter((e): e is { name: string; address: string } => !!e.address)
       // Never taken on the manifest's word: with a module recorded, the module's code names its
-      // library (below); without one, the entry is not used at all.
-      .filter((e) => e.name !== "agentPolicyCodec");
+      // library (below); without one, the entry is not used at all. The escrows' library likewise:
+      // their code names it, and the entry is repaired from that.
+      .filter((e) => e.name !== "agentPolicyCodec" && e.name !== "proofBridgeUtils");
     const codeless: string[] = [];
     for (const e of entries) {
       if ((await provider.getCode(e.address)) === "0x") codeless.push(`${e.name} ${e.address}`);
@@ -247,6 +259,35 @@ async function deployCoreRun(
       throw new Error(
         `AdManager at ${existing.contracts.adManager.address} has no keyRegistry() (pre-2.3c bytecode?); redeploy it instead of reusing: ${err}`,
       );
+    }
+
+    // The escrows are reused only together with the library their own code links (EIP-170: both
+    // DELEGATECALL one ProofBridgeUtils). The manifest is a claim; the escrow's code is the fact.
+    const linkedUtils: { escrow: string; address: string }[] = [];
+    const verdicts = new Map<string, LibraryVerdict>();
+    for (const [key, artifact] of [["adManager", "AdManager"], ["orderPortal", "OrderPortal"]] as const) {
+      const escrow = existing.contracts[key].address;
+      const found = await utilsLibraryLinkedBy(artifact, escrow, signer, manifestUtils, (l) => console.warn(l), verdicts);
+      if (!found) {
+        throw new Error(
+          `${artifact} at ${escrow} links no working ${UTILS_LIBRARY}: nothing at this build's link offset, and the manifest's entry ` +
+            `(${manifestUtils ?? "absent"}) is not both in the escrow's code and able to answer as the library. ` +
+            `Pre-linked-library bytecode? Redeploy the escrow instead of reusing it; correcting the entry cannot help, the code names the library.`,
+        );
+      }
+      linkedUtils.push({ escrow: artifact, address: found });
+    }
+    reusedUtils = linkedUtils[0].address;
+    if (linkedUtils[1].address.toLowerCase() !== reusedUtils.toLowerCase()) {
+      // This CLI never makes a split: a redeploy of one escrow links the other's library. One entry
+      // records the library both escrows link, so a split is refused rather than half-recorded.
+      throw new Error(
+        `AdManager links ${UTILS_LIBRARY} ${reusedUtils} and OrderPortal links ${linkedUtils[1].address}: a split this CLI does not make or record. ` +
+          `Remove the entry of the escrow that should follow and redeploy it (it links the other's library), or keep both by hand, outside the manifest.`,
+      );
+    }
+    if (reusedUtils.toLowerCase() !== manifestUtils?.toLowerCase()) {
+      console.warn(`  [repair] manifest says ${UTILS_LIBRARY} is ${manifestUtils ?? "absent"}; the escrows' code links ${reusedUtils}. Recording ${reusedUtils}.`);
     }
 
     if (reusedAgentCodec && !reusedAgentPolicy) {
@@ -383,11 +424,30 @@ async function deployCoreRun(
     },
   );
 
+  // ── ProofBridgeUtils: the library both escrows link (EIP-170 headroom) ──
+  // Ownerless, one per chain; deployed before the escrows, whose bytecode carries its address.
+  // Reused only as what a reused escrow's code names (settled up front); a fresh copy is probed
+  // before anything links it, so a bundle whose artifact is not the library fails here, not at lock.
+  const proofBridgeUtilsAddr = await deployIfMissing(
+    UTILS_LIBRARY,
+    reusedUtils,
+    async () => {
+      const f = contractFactory("ProofBridgeUtils", "ProofBridgeUtils", signer);
+      const c = await f.deploy({ nonce: nonces.next() });
+      await c.deploymentTransaction()?.wait();
+      const verdict = await verifyUtilsLibrary(await c.getAddress(), signer);
+      if (!verdict.ok) {
+        throw new Error(`${UTILS_LIBRARY} deployed at ${await c.getAddress()} ${verdict.why}; the bundle's artifact is not the library this CLI expects`);
+      }
+      return c as ethers.Contract;
+    },
+  );
+
   const adManagerAddr = await deployIfMissing(
     "AdManager",
     existing?.contracts.adManager.address,
     async () => {
-      const f = contractFactory("AdManager", "AdManager", signer);
+      const f = contractFactoryLinked("AdManager", "AdManager", signer, { [UTILS_LIBRARY]: proofBridgeUtilsAddr });
       const c = await f.deploy(
         admin,
         verifierAddr,
@@ -404,7 +464,7 @@ async function deployCoreRun(
     "OrderPortal",
     existing?.contracts.orderPortal.address,
     async () => {
-      const f = contractFactory("OrderPortal", "OrderPortal", signer);
+      const f = contractFactoryLinked("OrderPortal", "OrderPortal", signer, { [UTILS_LIBRARY]: proofBridgeUtilsAddr });
       const c = await f.deploy(
         admin,
         verifierAddr,
@@ -670,6 +730,7 @@ async function deployCoreRun(
       disputeManager: disputeManagerAddr,
       agentPolicyCodec: agentPolicyCodecAddr,
       agentPolicy: agentPolicyAddr,
+      proofBridgeUtils: proofBridgeUtilsAddr,
     },
     // Preserve tokens already in the manifest (added by deploy-test-tokens / hand-curation).
     tokens: (existing?.tokens ?? []) as BuildManifestInput["tokens"],
@@ -717,6 +778,7 @@ async function deployCoreRun(
       disputeManager: disputeManagerAddr,
       agentPolicyCodec: agentPolicyCodecAddr,
       agentPolicy: agentPolicyAddr,
+      proofBridgeUtils: proofBridgeUtilsAddr,
     },
   };
 }

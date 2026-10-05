@@ -7,9 +7,9 @@ import {IVerifier} from "./interfaces/IVerifier.sol";
 import {IMerkleManager} from "./interfaces/IMerkleManager.sol";
 import {IwNativeToken} from "./wNativeToken.sol";
 import {AddressCast} from "./libraries/AddressCast.sol";
-import {DecimalScaling} from "./libraries/DecimalScaling.sol";
 import {LeafDomain} from "./libraries/LeafDomain.sol";
 import {OrderHash} from "./libraries/OrderHash.sol";
+import {ProofBridgeUtils} from "./libraries/ProofBridgeUtils.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {RouteTiming} from "./libraries/RouteTiming.sol";
 import {Termination} from "./libraries/Termination.sol";
@@ -228,7 +228,7 @@ contract OrderPortal is EscrowBase, IOrderPortal {
             deadline: p.deadline,
             adSettlementSigner: p.adSettlementSigner
         });
-        return OrderHash.digest(o);
+        return ProofBridgeUtils.digest(o);
     }
 
     /// @dev The maker's payout: the deposit, to the ad's recipient.
@@ -248,10 +248,10 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         if (params.bridger != msg.sender.toBytes32()) revert OrderPortal__BridgerMustBeSender();
         if (params.adRecipient == bytes32(0)) revert Escrow__ZeroAddress();
         params.adRecipient.assertEvmAddress();
-        OrderHash.checkWidths(params.amount, block.chainid, params.adChainId, params.deadline);
+        ProofBridgeUtils.checkWidths(params.amount, block.chainid, params.adChainId, params.deadline);
         // Both signed decimals are checked here so a bad route fails at create time, not at unlock.
-        DecimalScaling.assertInRange(params.orderDecimals);
-        DecimalScaling.assertInRange(params.adDecimals);
+        ProofBridgeUtils.assertInRange(params.orderDecimals);
+        ProofBridgeUtils.assertInRange(params.adDecimals);
 
         // The peer AdManager named in the order must be the one wired for that chain.
         bytes32 peer = peerEscrow[params.adChainId];
@@ -263,7 +263,7 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         bytes32 route = tokenRoute[orderTokenAddr][params.adChainId];
         if (route == bytes32(0)) revert Escrow__MissingRoute(params.adChainToken, params.adChainId);
         if (route != params.adChainToken) revert Escrow__PeerTokenMismatch(route, params.adChainToken);
-        DecimalScaling.assertMatchesOnChain(orderTokenAddr, params.orderDecimals);
+        ProofBridgeUtils.assertMatchesOnChain(orderTokenAddr, params.orderDecimals);
 
         orderHash = _hashOrder(params, block.chainid, address(this));
     }
