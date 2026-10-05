@@ -13,6 +13,7 @@ import {AddressCast} from "./libraries/AddressCast.sol";
 import {DecimalScaling} from "./libraries/DecimalScaling.sol";
 import {LeafDomain} from "./libraries/LeafDomain.sol";
 import {OrderHash} from "./libraries/OrderHash.sol";
+import {ProofBridgeUtils} from "./libraries/ProofBridgeUtils.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {RouteTiming} from "./libraries/RouteTiming.sol";
 import {Dispute} from "./libraries/Dispute.sol";
@@ -566,7 +567,7 @@ contract AdManager is EscrowBase, IAdManager {
             deadline: p.deadline,
             adSettlementSigner: p.adSettlementSigner
         });
-        return OrderHash.digest(o);
+        return ProofBridgeUtils.digest(o);
     }
 
     /// @dev This escrow's hash of `p`: the ad-chain context is this chain and this contract.
@@ -576,7 +577,7 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @dev The signed amount in ad-chain units — what the lock reserved and the payout releases.
     function _adAmount(OrderParams calldata p) private pure returns (uint256) {
-        return DecimalScaling.scale(p.amount, p.orderDecimals, p.adDecimals);
+        return ProofBridgeUtils.scale(p.amount, p.orderDecimals, p.adDecimals);
     }
 
     /// @dev Pay the bridger's recipient from the ad, in the units the lock reserved.
@@ -678,8 +679,8 @@ contract AdManager is EscrowBase, IAdManager {
         if (params.bridger == bytes32(0)) revert AdManager__BridgerZero();
         if (params.orderRecipient == bytes32(0)) revert AdManager__RecipientZero();
         params.orderRecipient.assertEvmAddress();
-        DecimalScaling.assertInRange(params.orderDecimals);
-        DecimalScaling.assertInRange(params.adDecimals);
+        ProofBridgeUtils.assertInRange(params.orderDecimals);
+        ProofBridgeUtils.assertInRange(params.adDecimals);
 
         // The peer OrderPortal named in the order must be the one wired for that chain.
         bytes32 peer = peerEscrow[params.orderChainId];
@@ -709,8 +710,8 @@ contract AdManager is EscrowBase, IAdManager {
         if (params.adRecipient != ad.adRecipient) {
             revert AdManager__AdRecipientMismatch(ad.adRecipient, params.adRecipient);
         }
-        DecimalScaling.assertMatchesOnChain(ad.token, params.adDecimals);
-        OrderHash.checkWidths(params.amount, params.orderChainId, block.chainid, params.deadline);
+        ProofBridgeUtils.assertMatchesOnChain(ad.token, params.adDecimals);
+        ProofBridgeUtils.checkWidths(params.amount, params.orderChainId, block.chainid, params.deadline);
 
         // A key retired after the ad was pointed at it (setValidUntil, a watchtower retirement) must
         // not take new locks: the bridger's deposit could never be unlocked (2.3c D2).

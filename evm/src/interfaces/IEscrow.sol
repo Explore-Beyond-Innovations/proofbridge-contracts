@@ -81,6 +81,15 @@ interface IEscrow {
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Declared here as well as in `DecimalScaling` / `OrderHash`: the escrows reach those through the
+    ///         linked `ProofBridgeUtils` library (EIP-170 headroom), so the reverts arrive by DELEGATECALL
+    ///         and the compiler no longer lists them in the escrow ABI on its own. Same selectors.
+    error DecimalScaling__DecimalsOutOfRange(uint8 value);
+    error DecimalScaling__DecimalsMismatch(uint8 expected, uint8 provided);
+    error DecimalScaling__DecimalsUnavailable(address token);
+    error OrderHash__AmountTooWide();
+    error OrderHash__ChainIdTooWide();
+    error OrderHash__DeadlineTooWide();
     error Escrow__ZeroAddress();
     error Escrow__ZeroAmount();
     error Escrow__ChainNotSupported(uint256 chainId);

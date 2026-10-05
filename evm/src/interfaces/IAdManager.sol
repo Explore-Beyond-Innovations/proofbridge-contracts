@@ -102,6 +102,8 @@ interface IAdManager is IEscrow {
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice `DecimalScaling.scale` (via the linked `ProofBridgeUtils`) reverts with this; only AdManager scales. See IEscrow.
+    error DecimalScaling__NonExactDownscale(uint256 amount, uint8 fromDec, uint8 toDec);
     error AdManager__TokenZeroAddress();
     error AdManager__AdNotFound();
     error AdManager__NotMaker();
