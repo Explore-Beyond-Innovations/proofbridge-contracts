@@ -65,13 +65,13 @@ export function libraryCodeMatches(artifactRuntime: string, onChain: string, add
  * mismatched, so the deploy log names it.
  */
 export async function probeUtilsLibrary(address: string, signer: ethers.Wallet): Promise<string | null> {
-  const lib = attachContract(address, UTILS_LIBRARY, UTILS_LIBRARY, signer);
+  const lib = attachContract(address, "ProofBridgeUtils", "ProofBridgeUtils", signer);
   try {
     // `digest` by raw call: solc hashes a library's struct parameter by its declared name, so the
     // selector ethers derives from the ABI's tuple is one the library does not answer (see
     // `methodIdentifier`). The argument encoding itself is the ordinary tuple encoding.
     const data = ethers.concat([
-      methodIdentifier(UTILS_LIBRARY, UTILS_LIBRARY, "digest(OrderHash.Order)"),
+      methodIdentifier("ProofBridgeUtils", "ProofBridgeUtils", "digest(OrderHash.Order)"),
       ethers.AbiCoder.defaultAbiCoder().encode([ORDER_TUPLE], [Object.values(ORDER_VECTOR_0.order)]),
     ]);
     const digest = await signer.provider!.call({ to: address, data });
@@ -81,12 +81,16 @@ export async function probeUtilsLibrary(address: string, signer: ethers.Wallet):
     const scaled = (await lib.getFunction("scale").staticCall(1_000_000n, 6, 18)) as bigint;
     if (scaled !== 10n ** 18n) return `scale(1e6, 6, 18) = ${scaled}, expected 1e18`;
   } catch (err) {
+    // Only a revert is the library's answer; an RPC failure or a stripped artifact is not "does
+    // not answer", it is the error it is, and the caller must not turn it into a redeploy.
+    if (!isRevert(err)) throw err;
     return `does not answer as ${UTILS_LIBRARY}: ${(err as Error).message ?? err}`;
   }
   try {
     await lib.getFunction("assertInRange").staticCall(31);
     return "assertInRange(31) did not revert";
   } catch (err) {
+    if (!isRevert(err)) throw err;
     const data = (err as { data?: string }).data ?? "";
     const want = ethers.id("DecimalScaling__DecimalsOutOfRange(uint8)").slice(0, 10);
     if (!String(data).toLowerCase().startsWith(want)) {
@@ -96,13 +100,18 @@ export async function probeUtilsLibrary(address: string, signer: ethers.Wallet):
   return null;
 }
 
+/** An ethers CALL_EXCEPTION: the call ran and reverted (or returned nothing decodable). */
+function isRevert(err: unknown): boolean {
+  return (err as { code?: string } | null)?.code === "CALL_EXCEPTION";
+}
+
 /** Code-equal to this build, or at least answering as the library (an earlier build's copy). */
 export type LibraryVerdict = { ok: true; sameBuild: boolean } | { ok: false; why: string };
 
 export async function verifyUtilsLibrary(address: string, signer: ethers.Wallet): Promise<LibraryVerdict> {
   const onChain = await signer.provider!.getCode(address);
   if (onChain === "0x") return { ok: false, why: "no code" };
-  if (libraryCodeMatches(deployedCode(UTILS_LIBRARY, UTILS_LIBRARY), onChain, address)) {
+  if (libraryCodeMatches(deployedCode("ProofBridgeUtils", "ProofBridgeUtils"), onChain, address)) {
     return { ok: true, sameBuild: true };
   }
   const why = await probeUtilsLibrary(address, signer);
@@ -113,6 +122,7 @@ export async function verifyUtilsLibrary(address: string, signer: ethers.Wallet)
  * The library a reused escrow is linked to, read out of its code: at this build's link offset, or,
  * for an escrow from a build that laid its code out differently, the manifest's entry if the
  * escrow's code carries it. Only an address that verifies counts. Null when nothing does.
+ * `verdicts` memoizes per address across the escrows, so one library is verified (and logged) once.
  */
 export async function utilsLibraryLinkedBy(
   escrowArtifact: string,
@@ -120,15 +130,22 @@ export async function utilsLibraryLinkedBy(
   signer: ethers.Wallet,
   manifestEntry: string | undefined,
   log: (line: string) => void,
+  verdicts: Map<string, LibraryVerdict> = new Map(),
 ): Promise<string | null> {
   const code = (await signer.provider!.getCode(escrowAddress)).toLowerCase();
   const candidates = [
     linkedLibraryIn(escrowArtifact, escrowArtifact, UTILS_LIBRARY, code),
     manifestEntry && code.includes(manifestEntry.slice(2).toLowerCase()) ? manifestEntry : null,
-  ];
+  ].filter((c, i, all): c is string => !!c && all.findIndex((o) => o?.toLowerCase() === c.toLowerCase()) === i);
   for (const c of candidates) {
-    if (!c) continue;
-    const v = await verifyUtilsLibrary(c, signer);
+    const key = c.toLowerCase();
+    const seen = verdicts.has(key);
+    const v = verdicts.get(key) ?? (await verifyUtilsLibrary(c, signer));
+    verdicts.set(key, v);
+    if (seen) {
+      if (v.ok) return c;
+      continue;
+    }
     if (v.ok) {
       if (!v.sameBuild) log(`  [note] ${escrowArtifact} ${escrowAddress} links ${UTILS_LIBRARY} ${c}, which answers as the library but is not this build's code (an earlier build); kept.`);
       return c;

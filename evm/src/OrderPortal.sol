@@ -7,7 +7,6 @@ import {IVerifier} from "./interfaces/IVerifier.sol";
 import {IMerkleManager} from "./interfaces/IMerkleManager.sol";
 import {IwNativeToken} from "./wNativeToken.sol";
 import {AddressCast} from "./libraries/AddressCast.sol";
-import {DecimalScaling} from "./libraries/DecimalScaling.sol";
 import {LeafDomain} from "./libraries/LeafDomain.sol";
 import {OrderHash} from "./libraries/OrderHash.sol";
 import {ProofBridgeUtils} from "./libraries/ProofBridgeUtils.sol";

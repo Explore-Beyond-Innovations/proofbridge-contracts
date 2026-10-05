@@ -21,11 +21,13 @@ import { assertReusedVk, vkRecord, assertVerifierCode } from "./vk.js";
 import {
   contractFactory,
   contractFactoryLinked,
+  deployedCode,
   linkedLibraryIn,
+  methodIdentifier,
   attachContract,
   runtimeCodeOf,
 } from "./artifacts.js";
-import { UTILS_LIBRARY, utilsLibraryLinkedBy, verifyUtilsLibrary } from "./utils-library.js";
+import { UTILS_LIBRARY, utilsLibraryLinkedBy, verifyUtilsLibrary, type LibraryVerdict } from "./utils-library.js";
 import {
   buildManifest,
   loadOrNull,
@@ -170,6 +172,11 @@ async function deployCoreRun(
   if (!Number.isInteger(wDec) || wDec < 0 || wDec > 255) {
     throw new Error(`deploy-core: WNATIVE_DECIMALS must be an integer 0..255, got ${wDec}`);
   }
+  // The library's artifact must be whole: the reuse gate compares its runtime code and the probe
+  // calls `digest` by the selector solc recorded, and a stripped bundle has neither. Read here, so
+  // the refusal comes before the first transaction rather than after the library's.
+  deployedCode("ProofBridgeUtils", "ProofBridgeUtils");
+  methodIdentifier("ProofBridgeUtils", "ProofBridgeUtils", "digest(OrderHash.Order)");
   // Outside local the notary is named: after handover the deploy key must not stay the sole anchor signer.
   const anchorSigners = namedOutsideLocal("ANCHOR_PUBLISHER", env, admin)
     .split(",")
@@ -257,9 +264,10 @@ async function deployCoreRun(
     // The escrows are reused only together with the library their own code links (EIP-170: both
     // DELEGATECALL one ProofBridgeUtils). The manifest is a claim; the escrow's code is the fact.
     const linkedUtils: { escrow: string; address: string }[] = [];
+    const verdicts = new Map<string, LibraryVerdict>();
     for (const [key, artifact] of [["adManager", "AdManager"], ["orderPortal", "OrderPortal"]] as const) {
       const escrow = existing.contracts[key].address;
-      const found = await utilsLibraryLinkedBy(artifact, escrow, signer, manifestUtils, (l) => console.warn(l));
+      const found = await utilsLibraryLinkedBy(artifact, escrow, signer, manifestUtils, (l) => console.warn(l), verdicts);
       if (!found) {
         throw new Error(
           `${artifact} at ${escrow} links no working ${UTILS_LIBRARY}: nothing at this build's link offset, and the manifest's entry ` +
@@ -271,9 +279,11 @@ async function deployCoreRun(
     }
     reusedUtils = linkedUtils[0].address;
     if (linkedUtils[1].address.toLowerCase() !== reusedUtils.toLowerCase()) {
-      console.warn(
-        `  [note] AdManager links ${UTILS_LIBRARY} ${reusedUtils} and OrderPortal links ${linkedUtils[1].address} (deployed at different times); ` +
-          `both work, each escrow keeps its own; recording AdManager's.`,
+      // This CLI never makes a split: a redeploy of one escrow links the other's library. One entry
+      // records the library both escrows link, so a split is refused rather than half-recorded.
+      throw new Error(
+        `AdManager links ${UTILS_LIBRARY} ${reusedUtils} and OrderPortal links ${linkedUtils[1].address}: a split this CLI does not make or record. ` +
+          `Remove the entry of the escrow that should follow and redeploy it (it links the other's library), or keep both by hand, outside the manifest.`,
       );
     }
     if (reusedUtils.toLowerCase() !== manifestUtils?.toLowerCase()) {
@@ -422,7 +432,7 @@ async function deployCoreRun(
     UTILS_LIBRARY,
     reusedUtils,
     async () => {
-      const f = contractFactory(UTILS_LIBRARY, UTILS_LIBRARY, signer);
+      const f = contractFactory("ProofBridgeUtils", "ProofBridgeUtils", signer);
       const c = await f.deploy({ nonce: nonces.next() });
       await c.deploymentTransaction()?.wait();
       const verdict = await verifyUtilsLibrary(await c.getAddress(), signer);

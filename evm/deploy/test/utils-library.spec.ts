@@ -18,7 +18,8 @@ test("ORDER_VECTOR_0 is .vectors[0] of order-hash-v2.json, field for field", () 
     assert.notEqual(have, undefined, `missing field ${k}`);
     assert.equal(String(have), String(want), `field ${k}`);
   }
-  assert.equal(Object.keys(ORDER_VECTOR_0.order).length, Object.keys(v0.order).length - 1, "same field count (minus saltHex)");
+  // Encoded positionally, so the order of the keys is part of the vector, not just their names.
+  assert.deepEqual(Object.keys(ORDER_VECTOR_0.order), Object.keys(v0.order).filter((k) => k !== "saltHex"), "same fields, same order");
   assert.equal(ORDER_VECTOR_0.orderHash, v0.expected.orderHash);
 });
 
@@ -52,6 +53,7 @@ import { contractFactory } from "../src/artifacts.ts";
 import { deployCore } from "../src/deploy-core.ts";
 import { probeUtilsLibrary, verifyUtilsLibrary, UTILS_LIBRARY } from "../src/utils-library.ts";
 import { K0, startAnvil, withEnv, type Anvil } from "./helpers/anvil.ts";
+import { artifactsDir } from "../src/common.ts";
 
 let a: Anvil;
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "evm-utils-library-"));
@@ -92,7 +94,36 @@ test("probe: a fresh library answers; another contract at the address does not, 
   assert.notEqual(tampered, code);
   await a.provider.send("anvil_setCode", [at, tampered]);
   assert.deepEqual(await verifyUtilsLibrary(at, signer), { ok: true, sameBuild: false });
+
+  // L4: a failure that is not the library's answer is rethrown as itself, never "does not answer".
+  await withEnv({ EVM_OUT_DIR: strippedOut() }, () =>
+    assert.rejects(probeUtilsLibrary(at, signer), /records no selector for digest\(OrderHash\.Order\)/),
+  );
   (signer.provider as ethers.JsonRpcProvider).destroy();
+});
+
+/** This build's `out/`, every artifact linked in, except a ProofBridgeUtils artifact with its runtime code and selectors stripped. */
+function strippedOut(): string {
+  const src = artifactsDir();
+  const out = fs.mkdtempSync(path.join(tmp, "out-"));
+  for (const entry of fs.readdirSync(src)) {
+    if (entry === "ProofBridgeUtils.sol") continue;
+    fs.symlinkSync(path.join(src, entry), path.join(out, entry));
+  }
+  fs.mkdirSync(path.join(out, "ProofBridgeUtils.sol"));
+  const a = JSON.parse(fs.readFileSync(path.join(src, "ProofBridgeUtils.sol", "ProofBridgeUtils.json"), "utf8"));
+  delete a.deployedBytecode;
+  delete a.methodIdentifiers;
+  fs.writeFileSync(path.join(out, "ProofBridgeUtils.sol", "ProofBridgeUtils.json"), JSON.stringify(a));
+  return out;
+}
+
+test("deploy: a stripped library artifact is refused before anything is sent (L5)", async () => {
+  const n0 = await a.nonce();
+  await withEnv({ EVM_OUT_DIR: strippedOut() }, () =>
+    assert.rejects(deploy("stripped.json"), /ProofBridgeUtils\.json records no deployedBytecode/),
+  );
+  assert.equal(await a.nonce(), n0, "nothing was sent");
 });
 
 test("deploy: a reused escrow is refused when its linked library no longer answers, with nothing sent", async () => {
