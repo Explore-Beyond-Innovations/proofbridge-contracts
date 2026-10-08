@@ -114,8 +114,10 @@ contract RootAnchor is IRootAnchor, TwoStepAdmin, Pausable {
         if (a.approvals == 0) {
             if (monotonic && ledgerSeq <= latest) revert RootAnchor__SeqNotMonotonic(latest, ledgerSeq);
             a.ledgerSeq = ledgerSeq;
-        } else if (ledgerSeq > a.ledgerSeq) {
-            // Independent publishers read the same root at different ledgers on a quiet chain (A6).
+        } else if (ledgerSeq < a.ledgerSeq) {
+            // Publishers read one root at different ledgers on a quiet chain (A6); keep the earliest,
+            // never at or below `latest`, so no single signer can raise or sink the recorded value.
+            if (monotonic && ledgerSeq <= latest) revert RootAnchor__SeqNotMonotonic(latest, ledgerSeq);
             a.ledgerSeq = ledgerSeq;
         }
 

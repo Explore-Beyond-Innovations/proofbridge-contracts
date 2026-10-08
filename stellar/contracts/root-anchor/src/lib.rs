@@ -242,8 +242,12 @@ impl RootAnchor {
                 return Err(RootAnchorError::SeqNotMonotonic);
             }
             rec.ledger_seq = ledger_seq;
-        } else if ledger_seq > rec.ledger_seq {
-            // Independent publishers read the same root at different ledgers on a quiet chain (A6).
+        } else if ledger_seq < rec.ledger_seq {
+            // Publishers read one root at different ledgers on a quiet chain (A6); keep the earliest,
+            // never at or below `latest`, so no single signer can raise or sink the recorded value.
+            if storage::get_monotonic(&env) && ledger_seq <= latest {
+                return Err(RootAnchorError::SeqNotMonotonic);
+            }
             rec.ledger_seq = ledger_seq;
         }
 

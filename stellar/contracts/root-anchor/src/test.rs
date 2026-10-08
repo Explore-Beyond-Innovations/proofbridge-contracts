@@ -298,23 +298,89 @@ fn threshold_2_of_3_needs_two_distinct_signers() {
 
 // --- the pending state under a quorum (A1, A2, A6) ------------------------------
 
-/// A6: two honest publishers read the same root of a quiet chain at different ledgers.
+/// A6: two honest publishers read the same root of a quiet chain at different ledgers. The
+/// earliest reading is kept (audit F11): both are true, and only the earliest is safe to keep.
 #[test]
-fn pending_root_accepts_any_seq_and_records_the_max() {
+fn pending_root_accepts_any_seq_and_records_the_earliest() {
     let f = fixture();
     three(&f, 2);
     let a = root(&f.env, 0xA1);
     f.client.anchor(&f.s1, &CHAIN, &a, &100);
-    f.client.anchor(&f.s2, &CHAIN, &a, &150);
+    f.client.anchor(&f.s2, &CHAIN, &a, &150); // higher than pending: accepted, earliest kept
     assert!(f.client.is_anchored(&CHAIN, &a));
-    assert_eq!(f.client.anchor_of(&CHAIN, &a).unwrap().ledger_seq, 150);
-    assert_eq!(f.client.latest_seq(&CHAIN), 150);
+    assert_eq!(f.client.anchor_of(&CHAIN, &a).unwrap().ledger_seq, 100);
+    assert_eq!(f.client.latest_seq(&CHAIN), 100);
 
     let b = root(&f.env, 0xB2);
     f.client.anchor(&f.s1, &CHAIN, &b, &200);
-    f.client.anchor(&f.s3, &CHAIN, &b, &180); // lower than pending: accepted, max kept
+    f.client.anchor(&f.s3, &CHAIN, &b, &180); // lower than pending, above latest: earliest kept
     assert!(f.client.is_anchored(&CHAIN, &b));
-    assert_eq!(f.client.anchor_of(&CHAIN, &b).unwrap().ledger_seq, 200);
+    assert_eq!(f.client.anchor_of(&CHAIN, &b).unwrap().ledger_seq, 180);
+}
+
+/// Audit F11: one signer below the threshold cannot choose the sequence the quorum records.
+#[test]
+fn f11_one_signer_cannot_pin_the_sequence() {
+    let f = fixture();
+    three(&f, 2);
+    let a = root(&f.env, 0xA1);
+    f.client.anchor(&f.s1, &CHAIN, &a, &1000);
+    f.client.anchor(&f.s2, &CHAIN, &a, &1000);
+
+    let b = root(&f.env, 0xB2);
+    f.client.anchor(&f.s3, &CHAIN, &b, &u64::MAX); // first approval names the maximum
+    f.client.anchor(&f.s1, &CHAIN, &b, &1001);
+    assert!(f.client.is_anchored(&CHAIN, &b));
+    assert_eq!(
+        f.client.latest_seq(&CHAIN),
+        1001,
+        "the honest reading is recorded"
+    );
+
+    let c = root(&f.env, 0xC3);
+    f.client.anchor(&f.s1, &CHAIN, &c, &1002);
+    f.client.anchor(&f.s2, &CHAIN, &c, &1002);
+    assert!(
+        f.client.is_anchored(&CHAIN, &c),
+        "the route keeps anchoring"
+    );
+}
+
+/// Audit F11: a signer that already approved cannot raise the pending value on a repeat call.
+#[test]
+fn f11_repeat_approval_cannot_raise_the_sequence() {
+    let f = fixture();
+    three(&f, 2);
+    let a = root(&f.env, 0xA1);
+    f.client.anchor(&f.s1, &CHAIN, &a, &1001);
+    f.client.anchor(&f.s1, &CHAIN, &a, &u64::MAX);
+    let rec = f.client.anchor_of(&CHAIN, &a).unwrap();
+    assert_eq!(rec.ledger_seq, 1001);
+    assert_eq!(rec.approvals, 1, "a repeat approval does not count");
+
+    f.client.anchor(&f.s2, &CHAIN, &a, &1001);
+    assert_eq!(f.client.latest_seq(&CHAIN), 1001);
+}
+
+/// Audit F11: a lowered value must stay above `latest_seq`, so no signer can sink a pending root
+/// below the threshold re-check and strand it.
+#[test]
+fn f11_lowered_sequence_must_stay_above_latest() {
+    let f = fixture();
+    three(&f, 2);
+    let a = root(&f.env, 0xA1);
+    f.client.anchor(&f.s1, &CHAIN, &a, &500);
+    f.client.anchor(&f.s2, &CHAIN, &a, &500);
+
+    let b = root(&f.env, 0xB2);
+    f.client.anchor(&f.s1, &CHAIN, &b, &600);
+    assert_eq!(
+        f.client.try_anchor(&f.s3, &CHAIN, &b, &499),
+        Err(Ok(RootAnchorError::SeqNotMonotonic))
+    );
+    let rec = f.client.anchor_of(&CHAIN, &b).unwrap();
+    assert_eq!(rec.ledger_seq, 600);
+    assert_eq!(rec.approvals, 1, "a refused lowering adds no approval");
 }
 
 /// A1: a rotated-out notary's approvals stop counting.
