@@ -182,63 +182,26 @@ fn spend_volume(
 
 /// Spend a matured schedule for exactly this call, or refuse.
 ///
-/// Shared by the owner's escrow path and by `set_guard_rail`'s loosening branch, so "announced,
-/// matured, unexpired, exact, single-use" means one thing in both places. `to` is `None` where the
-/// call has no destination to pin (loosening a guardrail).
-pub fn spend_schedule(
+/// The one spend for every delayed owner call (the escrow's withdraw / close / lock, a guardrail
+/// loosening, the account-wide changes), so "announced, matured, unexpired, exact, single-use"
+/// means one thing everywhere. `args` is the call's own argument list; its commitment must equal
+/// the one announced. It covers the arguments, not the called contract: with two pinned escrows
+/// (across a redeploy), an ad id present in both shares one row per action, still exact on the
+/// amount, destination or order.
+pub fn spend(
     env: &Env,
-    ad_id: &String,
+    scope: &policy::Scope,
     action: &Symbol,
-    amount: u128,
-    to: Option<Address>,
+    args: &Vec<Val>,
     now: u64,
 ) -> Result<(), AccountError> {
-    let s = policy::get_schedule(env, ad_id, action).ok_or(AccountError::NotScheduled)?;
-    // Exact on both, or a schedule for 100 to alice authorizes 101, or 100 to someone else.
-    if s.amount != amount || now < s.ready_at || now >= s.expires_at {
-        return Err(AccountError::NotScheduled);
-    }
-    if let Some(dest) = to {
-        if s.to != dest {
-            return Err(AccountError::NotScheduled);
-        }
-    }
-    // Single use. A spent row left in place is an authorization waiting to be replayed.
-    policy::clear_schedule(env, ad_id, action);
-    Ok(())
-}
-
-/// Spend a matured bound schedule whose commitment (and amount) match exactly, or refuse.
-/// The caller removes the row; one rule for the per-ad lock and the account-wide changes.
-fn check_bound(
-    s: Option<policy::BoundSchedule>,
-    commitment: &BytesN<32>,
-    amount: u128,
-    now: u64,
-) -> Result<(), AccountError> {
-    let s = s.ok_or(AccountError::NotScheduled)?;
-    if &s.commitment != commitment || s.amount != amount || now < s.ready_at || now >= s.expires_at
+    let s = policy::get_schedule(env, scope, action).ok_or(AccountError::NotScheduled)?;
+    if s.commitment != policy::args_commitment(env, args) || now < s.ready_at || now >= s.expires_at
     {
         return Err(AccountError::NotScheduled);
     }
-    Ok(())
-}
-
-/// An account-wide change while any ad is guarded: a matured schedule for this action naming
-/// exactly this commitment. Single use.
-pub fn spend_account_schedule(
-    env: &Env,
-    action: &Symbol,
-    commitment: &BytesN<32>,
-    now: u64,
-) -> Result<(), AccountError> {
-    check_bound(
-        policy::get_account_schedule(env, action),
-        commitment,
-        0,
-        now,
-    )?;
-    policy::clear_account_schedule(env, action);
+    // Single use. A spent row left in place is an authorization waiting to be replayed.
+    policy::clear_schedule(env, scope, action);
     Ok(())
 }
 
@@ -263,47 +226,9 @@ pub fn check_owner_call(env: &Env, c: &ContractContext) -> Result<(), AccountErr
         return Ok(());
     }
 
-    // `lock_for_order` carries the order struct; the other two take `ad_id` first. Fail closed on
-    // anything that does not decode: an extractive call the account cannot read is one it cannot
-    // judge.
-    let (ad_id, amount, to) = if c.fn_name == lock {
-        let raw = c.args.get(0).ok_or(AccountError::BadArgs)?;
-        let m: Map<Symbol, Val> =
-            Map::try_from_val(env, &raw).map_err(|_| AccountError::BadArgs)?;
-        let amount: u128 = field(env, &m, "amount")?;
-        let order_decimals: u32 = field(env, &m, "order_decimals")?;
-        let ad_decimals: u32 = field(env, &m, "ad_decimals")?;
-        let ad_amount =
-            proofbridge_core::decimal_scaling::scale(amount, order_decimals, ad_decimals)
-                .map_err(|_| AccountError::BadArgs)?;
-        (field::<String>(env, &m, "ad_id")?, ad_amount, None)
-    } else {
-        let ad_id: String = c
-            .args
-            .get(0)
-            .and_then(|v| String::try_from_val(env, &v).ok())
-            .ok_or(AccountError::BadArgs)?;
-        if c.fn_name == withdraw {
-            let amount: u128 = c
-                .args
-                .get(1)
-                .and_then(|v| u128::try_from_val(env, &v).ok())
-                .ok_or(AccountError::BadArgs)?;
-            let to: Address = c
-                .args
-                .get(2)
-                .and_then(|v| Address::try_from_val(env, &v).ok())
-                .ok_or(AccountError::BadArgs)?;
-            (ad_id, amount, Some(to))
-        } else {
-            let to: Address = c
-                .args
-                .get(1)
-                .and_then(|v| Address::try_from_val(env, &v).ok())
-                .ok_or(AccountError::BadArgs)?;
-            (ad_id, 0u128, Some(to))
-        }
-    };
+    // Decoded in the call's full shape, the same decode `schedule` runs. Fail closed on anything
+    // that does not decode: an extractive call the account cannot read is one it cannot judge.
+    let (ad_id, amount) = crate::args::decode_ad_call(env, &c.fn_name, &c.args)?;
 
     if !policy::is_guarded(env, &ad_id) {
         // Unguarded: every ad today, and a per-maker choice (design 02 §2.8). Absence means
@@ -325,19 +250,8 @@ pub fn check_owner_call(env: &Env, c: &ContractContext) -> Result<(), AccountErr
     };
 
     if announced {
-        if c.fn_name == lock {
-            // Bound to the exact order, not just its size (C-32).
-            let commitment = policy::args_commitment(env, &c.args);
-            check_bound(
-                policy::get_lock_schedule(env, &ad_id),
-                &commitment,
-                amount,
-                now,
-            )?;
-            policy::clear_lock_schedule(env, &ad_id);
-            return Ok(());
-        }
-        return spend_schedule(env, &ad_id, &c.fn_name, amount, to, now);
+        // Bound to the exact call: the amount and destination, or the exact order (C-32).
+        return spend(env, &policy::Scope::Ad(ad_id), &c.fn_name, &c.args, now);
     }
 
     // Under the threshold, and still bounded: the bucket is what makes design 02 §2.8's residual a

@@ -18,7 +18,8 @@ pub enum AccountError {
     TargetNotAllowed = 6,
     /// `ctx.fn_name` is not in the policy's `allowed_actions`.
     ActionNotAllowed = 7,
-    /// Lock args missing a required key, wrong type, or bad decimals.
+    /// Call args missing a required key, of the wrong type or arity, or with bad decimals (the lock,
+    /// the owner path's escrow calls, and `schedule`'s args for any action).
     BadArgs = 8,
     /// A token in the lock is not on the policy's whitelist.
     TokenNotAllowed = 9,
@@ -39,10 +40,10 @@ pub enum AccountError {
     /// The ad token is whitelisted but has no configured volume limit, on the policy or the
     /// account. Silence is not permission.
     NoVolumeLimit = 17,
-    /// An extractive owner call on a guarded ad with no matured schedule for exactly it (2.1e).
+    /// A delayed owner call with no matured, unexpired schedule committed to exactly its arguments.
     NotScheduled = 18,
-    /// `set_guard_rail` / `schedule_extractive` input failed validation (a zero delay, window,
-    /// capacity or refill; an amount on an action that has none; too many guarded ads; an overflow).
+    /// `set_guard_rail` / `schedule` input failed validation (a zero delay, window, capacity or
+    /// refill; too many guarded ads; a schedule window that overflows).
     BadGuardRail = 19,
     /// Scheduling against an ad that has no guardrail. Distinct from `NotScheduled`, which
     /// everywhere else means "no matured schedule" — overloading it made the two indistinguishable.
@@ -52,4 +53,7 @@ pub enum AccountError {
     GuardRailArchived = 21,
     /// `migrate` found a schema version newer than this code knows: a downgrade it cannot read.
     SchemaTooNew = 22,
+    /// `schedule` on an ad scope whose args name a different ad (`args[0]`, or the order's
+    /// `ad_id`): a schedule that could never be spent, and an event that would mislead a watcher.
+    ScopeMismatch = 23,
 }
