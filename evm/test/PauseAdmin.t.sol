@@ -167,6 +167,8 @@ contract RegistryPauseTest is Test {
 
     function test_twoStepAdmin_transferAndAccept() public {
         address next = makeAddr("nextAdmin");
+        vm.expectEmit(true, true, false, false, address(registry));
+        emit TwoStepAdmin.AdminTransferStarted(address(this), next);
         registry.transferAdmin(next);
         assertEq(registry.pendingAdmin(), next);
 
@@ -174,6 +176,8 @@ contract RegistryPauseTest is Test {
         vm.expectRevert(TwoStepAdmin.NotPendingAdmin.selector);
         registry.acceptAdmin();
 
+        vm.expectEmit(true, true, false, false, address(registry));
+        emit TwoStepAdmin.AdminTransferred(address(this), next);
         vm.prank(next);
         registry.acceptAdmin();
         assertEq(registry.admin(), next);
