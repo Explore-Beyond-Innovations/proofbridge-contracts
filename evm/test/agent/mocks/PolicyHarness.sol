@@ -13,7 +13,14 @@ contract PolicyHarness is ProofBridgeAgentPolicy {
 
     function decodeCalls(bytes calldata callData) external view returns (bool ok, uint256 count) {
         Call[] memory calls;
-        (ok, calls) = _decodeCalls(callData);
+        (ok, calls) = _decodeCalls(callData, false);
+        count = calls.length;
+    }
+
+    /// @dev The hook's reading, which also takes the full ABI `executeUserOp`.
+    function decodeCallsInHook(bytes calldata callData) external view returns (bool ok, uint256 count) {
+        Call[] memory calls;
+        (ok, calls) = _decodeCalls(callData, true);
         count = calls.length;
     }
 

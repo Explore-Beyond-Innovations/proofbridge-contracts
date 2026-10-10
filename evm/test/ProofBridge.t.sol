@@ -123,7 +123,7 @@ contract ProofBridge is Test {
         adToken = new ERC20Mock();
         // assign manager role
         vm.startPrank(admin);
-        adChainMerkleManager.grantRole(adChainMerkleManager.MANAGER_ROLE(), address(adManager));
+        adChainMerkleManager.setManager(address(adManager), true);
         vm.stopPrank();
 
         // Order chain Contracts
@@ -135,7 +135,7 @@ contract ProofBridge is Test {
         orderToken = new ERC20Mock();
         // assign manager role
         vm.startPrank(admin);
-        orderChainMerkleManager.grantRole(orderChainMerkleManager.MANAGER_ROLE(), address(orderPortal));
+        orderChainMerkleManager.setManager(address(orderPortal), true);
         vm.stopPrank();
 
         // Set Ad Chain configs

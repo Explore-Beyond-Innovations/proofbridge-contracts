@@ -48,7 +48,7 @@ contract RegistrarTest is Test {
     function setUp() public {
         mm = new MerkleManager(address(this), address(new Poseidon2Yul()));
         registrar = new Registrar(IMerkleManager(address(mm)));
-        mm.grantRole(mm.MANAGER_ROLE(), address(registrar));
+        mm.setManager(address(registrar), true);
     }
 
     // --- the subject -------------------------------------------------------------

@@ -77,7 +77,7 @@ contract OrderPortalTest is Test {
         );
 
         vm.startPrank(admin);
-        merkleManager.grantRole(merkleManager.MANAGER_ROLE(), address(portal));
+        merkleManager.setManager(address(portal), true);
         portal.setRootVerifier(adChainId, address(new MockRootVerifier(true)));
         // 2.3e: timing is fail-closed; the suite's clocks (buffer 30 min, no window bound, no stagger).
         portal.setRouteTiming(adChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));

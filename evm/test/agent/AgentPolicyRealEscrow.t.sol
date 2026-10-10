@@ -52,7 +52,7 @@ contract AgentPolicyRealEscrowTest is AgentPolicyBase {
         keys.set(settlementSigner, true);
 
         vm.startPrank(admin);
-        merkleManager.grantRole(merkleManager.MANAGER_ROLE(), address(adManager));
+        merkleManager.setManager(address(adManager), true);
         adManager.setKeyRegistry(keys);
         adManager.setRootVerifier(ORDER_CHAIN_ID, address(new MockRootVerifier(true)));
         adManager.setRouteTiming(ORDER_CHAIN_ID, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));

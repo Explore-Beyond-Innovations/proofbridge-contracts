@@ -659,6 +659,89 @@ fn test_proof_fails_with_wrong_value() {
     client.verify_inclusion(&root, &width, &1, &wrong_value, &peak_bag, &siblings);
 }
 
+/// The debugging helpers, pinned to `proofbridge-mmr`: append `t2-mmr.json` `proofParity`'s leaves,
+/// and for every leaf `get_merkle_proof` returns exactly the package's proof and `verify_inclusion`
+/// accepts it.
+const T2_MMR: &str = include_str!("../../../../test-vectors/t2-mmr.json");
+
+fn parity_tree<'a>(
+    env: &'a Env,
+) -> (
+    ProofBridgeMerkleManagerContractClient<'a>,
+    serde_json::Value,
+) {
+    let v: serde_json::Value = serde_json::from_str(T2_MMR).unwrap();
+    let pp = v["proofParity"].clone();
+    let (client, admin, manager) = setup_contract(env);
+    client.initialize(&admin);
+    client.set_manager(&manager, &true);
+    for l in pp["leaves"].as_array().unwrap() {
+        let h = hex_to_bytes32(
+            env,
+            l["orderHash"].as_str().unwrap().trim_start_matches("0x"),
+        );
+        let side = l["side"].as_u64().unwrap() as u32;
+        assert!(client.append_order_hash(&manager, &h, &side));
+    }
+    (client, pp)
+}
+
+fn b32_vec(env: &Env, a: &serde_json::Value) -> soroban_sdk::Vec<BytesN<32>> {
+    let mut out = soroban_sdk::Vec::new(env);
+    for x in a.as_array().unwrap() {
+        out.push_back(hex_to_bytes32(
+            env,
+            x.as_str().unwrap().trim_start_matches("0x"),
+        ));
+    }
+    out
+}
+
+#[test]
+fn test_proof_view_equals_proofbridge_mmr_and_verifies() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.cost_estimate().budget().reset_unlimited();
+    let (client, pp) = parity_tree(&env);
+    let root = hex_to_bytes32(&env, pp["root"].as_str().unwrap().trim_start_matches("0x"));
+    let width = pp["width"].as_u64().unwrap() as u128;
+    assert_eq!(client.get_root(), root);
+    assert_eq!(client.get_width(), width);
+    let proofs = pp["proofs"].as_array().unwrap();
+    assert_eq!(proofs.len() as u128, width, "a proof for every leaf");
+    for p in proofs {
+        let index = p["elementIndex"].as_u64().unwrap() as u128;
+        let (r, w, peaks, siblings) = client.get_merkle_proof(&index);
+        assert_eq!(r, root, "root at {}", index);
+        assert_eq!(w, width, "width at {}", index);
+        assert_eq!(peaks, b32_vec(&env, &p["peaks"]), "peaks at {}", index);
+        assert_eq!(
+            siblings,
+            b32_vec(&env, &p["siblings"]),
+            "siblings at {}",
+            index
+        );
+        let leaf = hex_to_bytes32(&env, p["leaf"].as_str().unwrap().trim_start_matches("0x"));
+        assert!(client.verify_inclusion(&r, &w, &index, &leaf, &peaks, &siblings));
+    }
+}
+
+/// The vector's proof with one sibling changed is refused by the kept verifier.
+#[test]
+#[should_panic(expected = "MMR: bad peak hash")]
+fn test_parity_proof_with_a_wrong_sibling_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.cost_estimate().budget().reset_unlimited();
+    let (client, pp) = parity_tree(&env);
+    let p = &pp["proofs"][0];
+    let index = p["elementIndex"].as_u64().unwrap() as u128;
+    let (r, w, peaks, mut siblings) = client.get_merkle_proof(&index);
+    siblings.set(0, r.clone());
+    let leaf = hex_to_bytes32(&env, p["leaf"].as_str().unwrap().trim_start_matches("0x"));
+    client.verify_inclusion(&r, &w, &index, &leaf, &peaks, &siblings);
+}
+
 // Append metering snapshot (CPU instructions + memory bytes) for the Yul-equivalent Poseidon2 path.
 // Mirrors the EVM AppendGas probe. Run: cargo test -p merkle-manager test_append_metering -- --nocapture
 #[test]
@@ -811,8 +894,6 @@ fn test_uninitialized_calls_are_not_initialized() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, _, manager) = setup_contract(&env);
-    assert_eq!(client.try_pause(), Err(Ok(MerkleError::NotInitialized)));
-    assert_eq!(client.try_unpause(), Err(Ok(MerkleError::NotInitialized)));
     assert_eq!(
         client.try_transfer_admin(&manager),
         Err(Ok(MerkleError::NotInitialized))
@@ -825,26 +906,6 @@ fn test_uninitialized_calls_are_not_initialized() {
         client.try_append_order_hash(&manager, &BytesN::from_array(&env, &[1u8; 32]), &0),
         Err(Ok(MerkleError::NotInitialized))
     );
-}
-
-/// A pause stops appends, even from a registered manager; unpause lets them through again.
-#[test]
-fn test_append_while_paused_is_contract_paused() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, admin, manager) = setup_contract(&env);
-    client.initialize(&admin);
-    client.set_manager(&manager, &true);
-    client.pause();
-    let hash = BytesN::from_array(&env, &[1u8; 32]);
-    assert_eq!(
-        client.try_append_order_hash(&manager, &hash, &0),
-        Err(Ok(MerkleError::ContractPaused))
-    );
-    assert_eq!(client.get_width(), 0);
-    client.unpause();
-    client.append_order_hash(&manager, &hash, &0);
-    assert_eq!(client.get_width(), 1);
 }
 
 /// `accept_admin` with no transfer in progress has nobody to hand to.

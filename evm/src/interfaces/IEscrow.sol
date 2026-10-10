@@ -102,7 +102,6 @@ interface IEscrow {
     error Escrow__NullifierUsed(bytes32 nullifierHash);
     error Escrow__InvalidProof();
     error Escrow__InsufficientLiquidity();
-    error Escrow__MerkleManagerAppendFailed();
     error Escrow__NothingToClaim();
     error Escrow__SelfCallOnly();
     /// @notice `deadline` is closer than the route's `minWindow` (2.3e D5).

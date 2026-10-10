@@ -7,7 +7,7 @@ interface IMerkleManager {
     function getRoot() external view returns (bytes32);
     function getRootAtIndex(uint256 leafIndex) external view returns (bytes32);
     function getWidth() external view returns (uint256);
-    function appendOrderHash(bytes32 orderHash, uint256 side) external returns (bool);
+    function appendOrderHash(bytes32 orderHash, uint256 side) external;
     function getSize() external view returns (uint256);
     function getNode(uint256 index) external view returns (bytes32);
     function getMerkleProof(uint256 index)

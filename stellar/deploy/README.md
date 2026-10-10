@@ -20,6 +20,8 @@ Node CLI wrapping the `stellar` command line. Emits a
 Deploys (or reuses) Verifier, MerkleManager, native XLM SAC
 (`w_native_token`), AdManager, OrderPortal. Calls `initialize` on each
 and wires `set_manager` on MerkleManager for both AdManager + OrderPortal.
+The Registrar is deployed but not made a manager: that is a step of proof
+registration's T3 flip (`set_manager(registrar, true)`).
 
 ```bash
 pnpm --filter @proofbridge/stellar-deploy cli deploy

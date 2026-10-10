@@ -263,7 +263,7 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
 
     /// @dev Append this leg's leaf to the chain's MMR under `domain` (a `LeafDomain` constant).
     function _appendLeaf(bytes32 orderHash, uint256 domain) internal {
-        if (!i_merkleManager.appendOrderHash(orderHash, domain)) revert Escrow__MerkleManagerAppendFailed();
+        i_merkleManager.appendOrderHash(orderHash, domain);
     }
 
     /// @dev One more open leg for `account`. Unchecked: bounded by gas long before 2^256.

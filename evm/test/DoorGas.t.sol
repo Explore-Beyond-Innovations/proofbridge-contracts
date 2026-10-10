@@ -125,9 +125,9 @@ contract EscrowDoorGas is Test {
         dm = new DisputeManager(admin, IwNativeToken(address(wNative)));
 
         vm.startPrank(admin);
-        adMmr.grantRole(adMmr.MANAGER_ROLE(), address(adManager));
-        adMmr.grantRole(adMmr.MANAGER_ROLE(), admin);
-        orderMmr.grantRole(orderMmr.MANAGER_ROLE(), address(portal));
+        adMmr.setManager(address(adManager), true);
+        adMmr.setManager(admin, true);
+        orderMmr.setManager(address(portal), true);
 
         adManager.setKeyRegistry(keyRegistry);
         adManager.setPeerEscrow(ORDER_CHAIN, _b32(address(portal)));
@@ -295,8 +295,8 @@ contract EscrowDoorGas is Test {
     function test_seedingMatchesARealTree() public {
         MerkleManager real = new MerkleManager(address(this), hasher);
         MerkleManager seeded = new MerkleManager(address(this), hasher);
-        real.grantRole(real.MANAGER_ROLE(), address(this));
-        seeded.grantRole(seeded.MANAGER_ROLE(), address(this));
+        real.setManager(address(this), true);
+        seeded.setManager(address(this), true);
         for (uint256 i = 0; i < 7; i++) {
             real.appendOrderHash(keccak256(abi.encode(i)), i % 2);
         }
@@ -348,8 +348,8 @@ contract EscrowDoorGas is Test {
         }
     }
 
-    // MerkleManager storage: `_tree` at slot 4 = {root, size, width, hasher, hashes}.
-    uint256 internal constant TREE_SLOT = 4;
+    // MerkleManager storage: `_tree` at slot 2 (after `admin`, `pendingAdmin`) = {root, size, width, hasher, hashes}.
+    uint256 internal constant TREE_SLOT = 2;
 
     function _seed(MerkleManager mmr, uint256 width, uint256[] memory peaks, bytes32[] memory values, bytes32 root)
         internal

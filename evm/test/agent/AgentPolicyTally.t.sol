@@ -110,11 +110,11 @@ contract AgentPolicyTallyTest is AgentPolicyBase {
         module.resetAgentTally(bytes32(uint256(0xabc)));
     }
 
-    /// The backstop, with the note forced wrong on purpose: the hook is removed from the *account*
-    /// behind the module's back, so the note still says "both". Whatever route got here, the agent
-    /// gets three capped trades in total — not one per token per transaction, indefinitely.
+    /// The backstop, with the hook forced blind on purpose: it is still mounted and still runs, and
+    /// charges nothing. Whatever route got here, the agent gets three capped trades in total — not
+    /// one per token per transaction, indefinitely.
     function test_withTheNoteWrongTheTallyStopsTheAgentAtThree() public {
-        _removeHookBehindTheModulesBack();
+        _silenceTheHook();
 
         uint256 landed;
         for (uint256 i = 0; i < 6; ++i) {
@@ -131,7 +131,8 @@ contract AgentPolicyTallyTest is AgentPolicyBase {
     /// transactions. Fifteen locks — 15M against an 8M account ceiling — under a docstring that
     /// promised three capped trades.
     function test_withTheHookGoneItIsOneBatchAndTwoSingleTrades() public {
-        _removeHookBehindTheModulesBack();
+        // A hook that proved itself (setUp) and then stopped charging.
+        _silenceTheHook();
 
         for (uint256 i = 0; i < 4; ++i) {
             UserOpData memory op = _agentBatch(_batch(5, MAX_PER_ORDER));
@@ -156,10 +157,9 @@ contract AgentPolicyTallyTest is AgentPolicyBase {
         bytes32 id2 = bytes32(uint256(uint160(agent2)));
         _asAccount(abi.encodeCall(module.setAgentPolicy, (id2, defaultPolicy())));
         _asAccount(abi.encodeCall(module.setAgentGasBudget, (id2, GAS_BUDGET)));
+        _markHookProven(id2); // the bound for a hook that went missing after proving itself
 
-        vm.mockCall(address(module), abi.encodeWithSelector(module.onUninstall.selector), "");
-        instance.uninstallModule(TYPE_HOOK, address(module), bytes.concat(bytes32(TYPE_HOOK)));
-        vm.clearMockedCalls();
+        _silenceTheHook();
 
         uint256[2] memory keys = [agentKey, key2];
         for (uint256 a = 0; a < 2; ++a) {

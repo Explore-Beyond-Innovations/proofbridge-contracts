@@ -81,6 +81,9 @@ A pnpm -s cli link --peer $MB > $L/2b2.log 2>&1; rc=$?
 cast send --rpc-url $RPA --private-key $K0 $(addrOf orderPortal) 'setRootVerifier(uint256,address)' 998 $(addrOf counterpartyVerifier) > /dev/null 2>&1
 A pnpm -s run deploy > $L/2b3.log 2>&1 && A pnpm -s cli link --peer $MB > $L/2b4.log 2>&1 && pass "wiring restored: deploy and link pass again" || fail "restore: $(grep -m1 -i 'error\|split' $L/2b3.log $L/2b4.log | cut -c1-140)"
 
+# The Registrar is deployed but not a MerkleManager manager until proof registration's T3 flip.
+[ "$(cast call --rpc-url http://127.0.0.1:$PA $(addrOf merkleManager) 'isManager(address)(bool)' $(addrOf registrar))" = "false" ] && [ "$(cast call --rpc-url http://127.0.0.1:$PA $(addrOf merkleManager) 'isManager(address)(bool)' $(addrOf adManager))" = "true" ] && pass "MerkleManager: the escrows are managers, the Registrar is not (T3 flip)" || fail "MerkleManager manager set: Registrar should be off, AdManager on"
+
 echo "== 3. --to 0x0 is refused; handover to $A1; rerun sends nothing"
 n0=$(nonceA); A pnpm -s cli handover --to 0x0000000000000000000000000000000000000000 > $L/3z.log 2>&1; rc=$?
 [ $rc -ne 0 ] && grep -q "is not a usable address" $L/3z.log && [ "$(nonceA)" = "$n0" ] && pass "--to 0x0 refused by name, 0 txs" || fail "--to 0x0: exit $rc, txs $(( $(nonceA) - n0 )), $(grep -m1 -i error $L/3z.log | cut -c1-120)"
@@ -94,7 +97,9 @@ for key in merkleManager adManager orderPortal blsKeyRegistry rootAnchor dispute
   cast send --rpc-url http://127.0.0.1:$PA --private-key $K1 $(addrOf $key) "acceptAdmin()" > /dev/null 2>&1 || fail "acceptAdmin on $key"
 done
 A pnpm -s cli handover --verify > $L/4.log 2>&1; [ "$(grep -c '\[accepted\]' $L/4.log)" = "6" ] && [ "$(adminOf current)" = "$A1" ] && [ "$(adminOf pending)" = "undefined" ] && pass "verify: 6 accepted, current=$A1, pending cleared" || fail "verify: $(node -p "JSON.stringify(require('$MA').admin)")"
-[ "$(cast call --rpc-url http://127.0.0.1:$PA $(addrOf merkleManager) 'hasRole(bytes32,address)(bool)' 0x0000000000000000000000000000000000000000000000000000000000000000 $A1)" = "true" ] && pass "DEFAULT_ADMIN_ROLE moved on the MerkleManager" || fail "DEFAULT_ADMIN_ROLE did not move"
+# The MerkleManager's manager list moves with the handover: only the new admin can edit it.
+MMA=$(addrOf merkleManager); RPCA=http://127.0.0.1:$PA
+[ "$(cast call --rpc-url $RPCA $MMA 'admin()(address)')" = "$A1" ] && cast call --rpc-url $RPCA --from $A1 $MMA 'setManager(address,bool)' $A1 true > /dev/null 2>&1 && ! cast call --rpc-url $RPCA --from $A0 $MMA 'setManager(address,bool)' $A0 true > /dev/null 2>&1 && pass "MerkleManager: only the new admin can setManager" || fail "MerkleManager manager list did not move with the handover"
 
 echo "== 5. (H2) a handover rerun after full acceptance leaves the manifest alone"
 cp $MA $WORK/ma.5; A pnpm -s cli handover --to $A1 > $L/5.log 2>&1; rc=$?

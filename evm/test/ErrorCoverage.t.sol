@@ -189,15 +189,14 @@ contract AdManagerErrorCoverageTest is AdManagerTest {
         vm.stopPrank();
     }
 
-    /// A MerkleManager that answers `false` fails the lock rather than leaving it without a leaf.
-    function test_c19_anAppendThatReturnsFalseRevertsTheLock() public {
+    /// An escrow the MerkleManager no longer serves cannot lock: the failed append reverts the lock.
+    function test_c19_anEscrowThatIsNotAManagerCannotLock() public {
         test_fundAd_makerOnly();
         IAdManager.OrderParams memory p = _defaultParams(lastAdId);
-        vm.mockCall(
-            address(merkleManager), abi.encodeWithSelector(IMerkleManager.appendOrderHash.selector), abi.encode(false)
-        );
+        vm.prank(admin);
+        merkleManager.setManager(address(adManager), false);
         vm.prank(maker);
-        vm.expectRevert(IEscrow.Escrow__MerkleManagerAppendFailed.selector);
+        vm.expectRevert(abi.encodeWithSelector(MerkleManager.MerkleManager__NotManager.selector, address(adManager)));
         adManager.lockForOrder(p);
     }
 }
@@ -281,17 +280,16 @@ contract StandaloneErrorCoverageTest is Test {
         new MerkleManager(address(this), address(0));
     }
 
-    function test_c19_registrarRefusesZeroAndAFalseAppend() public {
+    function test_c19_registrarRefusesZeroAndFailsWithoutTheManagerEntry() public {
         vm.expectRevert(IRegistrar.Registrar__ZeroAddress.selector);
         new Registrar(IMerkleManager(address(0)));
 
         MerkleManager mm = new MerkleManager(address(this), address(new Poseidon2Yul()));
         Registrar registrar = new Registrar(IMerkleManager(address(mm)));
-        mm.grantRole(mm.MANAGER_ROLE(), address(registrar));
-        vm.mockCall(address(mm), abi.encodeWithSelector(IMerkleManager.appendOrderHash.selector), abi.encode(false));
         bytes32 account = bytes32(uint256(uint160(address(this))));
-        vm.expectRevert(IRegistrar.Registrar__AppendFailed.selector);
+        vm.expectRevert(abi.encodeWithSelector(MerkleManager.MerkleManager__NotManager.selector, address(registrar)));
         registrar.registerLeaf(account, keccak256("pk"), 0, 1, bytes32(uint256(1)), "");
+        assertEq(mm.getWidth(), 0, "no leaf");
     }
 
     /// A key that is not a field element makes the pairing precompile fail, and the library says so.
