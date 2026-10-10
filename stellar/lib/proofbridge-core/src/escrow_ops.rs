@@ -6,21 +6,36 @@
 //! one chain and not the other — so they live once and each escrow calls in.
 //!
 //! **The error seam.** Each contract's `#[contracterror]` enum is its own ABI: the discriminants
-//! differ and must keep differing. So nothing here returns a contract error. A check that can fail
+//! differ and must keep differing. So nothing in this crate returns a contract error. A check that can fail
 //! returns [`Fault`], an opaque reason, and each contract converts it once through `From` — one
 //! small `match` per crate rather than a trait that grows a constructor per check.
 
 use soroban_sdk::{Address, BytesN, Env};
 
 use crate::cross_contract;
-use crate::errors::ProofBridgeError;
 use crate::escrow_events;
 use crate::escrow_storage as storage;
 use crate::types::{ClaimEntry, ClaimRecord, ContractConfig, DisputeOutcome, RouteTiming, Status};
 
-/// Why a shared check refused. Each escrow maps this onto its own error enum.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Fault {
+/// Declares `Fault` and `Fault::ALL` from one list, so `ALL` names every variant by construction.
+/// The escrows' code-table tests iterate `ALL` against an exhaustive `match`: a variant added here
+/// fails to compile there until it is given a number.
+macro_rules! faults {
+    ($($(#[$meta:meta])* $variant:ident,)*) => {
+        /// Why a shared check refused. Each escrow maps this onto its own error enum.
+        #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+        pub enum Fault {
+            $($(#[$meta])* $variant,)*
+        }
+
+        impl Fault {
+            /// Every variant, in declaration order.
+            pub const ALL: &'static [Fault] = &[$(Fault::$variant,)*];
+        }
+    };
+}
+
+faults! {
     ContractPaused,
     NoRouteTiming,
     DeadlineTooSoon,
@@ -47,26 +62,48 @@ pub enum Fault {
     /// C-31: the dispute module trapped or failed in the host; no contract error to relay.
     DisputeModuleRejected,
     /// 49S-3: the module's own refusals, relayed so the frontend and relayer can tell them apart.
-    DisputeBondTooSmall,
     DisputeNoParams,
     DisputeNotEscrow,
     DisputeExists,
     DisputeWrongEscrow,
     DisputeNotResponder,
-    DisputeChallengeOpen,
-    DisputeChallengeClosed,
     /// 49S-3: the module could not move the bond (a token refusal, e.g. no trustline or a shortfall).
     DisputeBondTransferFailed,
     /// D5: the module's answer rules (window closed, already answered, empty answer), relayed.
     DisputeResponseWindowClosed,
     DisputeAlreadyResponded,
     DisputeZeroResponse,
-    /// The ruling closed the answer window (D5, R1), or the fallback was claimed on a ruled dispute.
+    /// The ruling closed the answer window (D5, R1).
     DisputeAlreadyRuled,
     /// A public input at or above the field prime (2.3h, residual 9). Defence in depth: both shipped
     /// verifiers already reject one, but the escrow's nullifier ledger keys on raw bytes, so a
     /// verifier that reduced instead would turn one proof into many nullifiers.
     NonCanonicalInput,
+    /// A token address that names no contract (the zero / native marker where a contract is due).
+    TokenZeroAddress,
+    /// The MerkleManager refused or trapped the append.
+    MerkleAppendFailed,
+    /// The verifier refused the proof (or trapped).
+    InvalidProof,
+    /// Decimal scaling: a decimals value above `decimal_scaling::MAX_DECIMALS`.
+    DecimalsOutOfRange,
+    /// Decimal scaling: scaling down would lose precision.
+    NonExactDownscale,
+    /// Decimal scaling: the scaled amount overflows.
+    DecimalOverflow,
+    /// 32 bytes that cannot be an account address (all zero).
+    InvalidAccountAddress,
+}
+
+impl From<crate::decimal_scaling::DecimalScalingError> for Fault {
+    fn from(e: crate::decimal_scaling::DecimalScalingError) -> Self {
+        use crate::decimal_scaling::DecimalScalingError::*;
+        match e {
+            DecimalsOutOfRange => Fault::DecimalsOutOfRange,
+            NonExactDownscale => Fault::NonExactDownscale,
+            Overflow => Fault::DecimalOverflow,
+        }
+    }
 }
 
 // =============================================================================
@@ -198,18 +235,18 @@ pub fn pay_or_credit(
 }
 
 /// Pay out a credited amount. Permissionless: funds can only go to the credited recipient.
-pub fn claim<E: ProofBridgeError + From<Fault>>(
+pub fn claim(
     env: &Env,
     config: &ContractConfig,
     recipient: BytesN<32>,
     token: BytesN<32>,
-) -> Result<(), E> {
+) -> Result<(), Fault> {
     let amount = storage::get_claimable(env, &recipient, &token);
     if amount == 0 {
-        return Err(Fault::NothingToClaim.into());
+        return Err(Fault::NothingToClaim);
     }
     storage::set_claimable(env, &recipient, &token, 0);
-    crate::token::transfer_to_recipient_bytes32::<E>(
+    crate::token::transfer_to_recipient_bytes32(
         env,
         &token,
         &config.w_native_token,
@@ -412,9 +449,6 @@ pub fn dispute_module_fault(e: Result<soroban_sdk::Error, soroban_sdk::InvokeErr
         Ok(err) if err.is_type(ScErrorType::Contract) => match err.get_code() {
             code::NOT_ESCROW => Fault::DisputeNotEscrow,
             code::DISPUTE_EXISTS => Fault::DisputeExists,
-            code::BOND_TOO_SMALL => Fault::DisputeBondTooSmall,
-            code::CHALLENGE_OPEN => Fault::DisputeChallengeOpen,
-            code::CHALLENGE_CLOSED => Fault::DisputeChallengeClosed,
             code::NOT_RESPONDER => Fault::DisputeNotResponder,
             code::NO_DISPUTE_PARAMS => Fault::DisputeNoParams,
             code::WRONG_ESCROW => Fault::DisputeWrongEscrow,
@@ -527,9 +561,13 @@ pub fn dispute_filer(env: &Env, order_hash: &BytesN<32>) -> Result<Option<Addres
 
 /// Evidence terminated a disputed order, so the dispute is over whatever the arbiter thought.
 ///
-/// A no-op when nothing was disputed, so every path that admits `Disputed` can call it
-/// unconditionally — and every one of them must, or the bond has no exit at all: once the status
-/// leaves `Disputed`, `finalize_dispute` can never run again and the module holds the bond forever.
+/// A no-op when the order has no dispute record (never disputed, or already closed), so every path
+/// that admits `Disputed` can call it unconditionally — and every one of them must, or the bond has
+/// no exit at all: once the status leaves `Disputed`, `finalize_dispute` can never run again and the
+/// module holds the bond forever. The filer is looked up here, not by the caller, so the lookup that
+/// makes `settle_bond` safe cannot be skipped. With only two possible filers (D11), "not the maker"
+/// is "the bridger"; `maker_of` is only called once a record exists, so an undisputed order pays
+/// for no ad read.
 ///
 /// `outcome` is what the path proved, not what anyone ruled: a settle is `TradeProceeds`, a
 /// cancel-refund is `MutualRefund`. Reading the record's ruling here would route the bond by a
@@ -539,23 +577,20 @@ pub fn close_dispute_by_evidence(
     escrow: &Address,
     order_hash: &BytesN<32>,
     outcome: DisputeOutcome,
-    filer_is_bridger: bool,
+    maker_of: impl FnOnce() -> Option<Address>,
 ) -> Result<(), Fault> {
-    let Some(manager) = storage::get_order_dispute_manager(env, order_hash) else {
+    let Some(filer) = dispute_filer(env, order_hash)? else {
         return Ok(());
     };
-    let client = cross_contract::DisputeManagerClient::new(env, &manager);
-    let disputed = client
-        .try_is_disputed(order_hash)
+    let Some(maker) = maker_of() else {
+        return Ok(());
+    };
+    // `dispute_filer` returned a record, so the order has a module.
+    let manager = order_dispute_manager(env, order_hash)?;
+    cross_contract::DisputeManagerClient::new(env, &manager)
+        .try_settle_bond(escrow, order_hash, &outcome, &(filer != maker))
         .map_err(dispute_module_fault)?
-        .map_err(|_| Fault::DisputeModuleRejected)?;
-    if disputed {
-        client
-            .try_settle_bond(escrow, order_hash, &outcome, &filer_is_bridger)
-            .map_err(dispute_module_fault)?
-            .map_err(|_| Fault::DisputeModuleRejected)?;
-    }
-    Ok(())
+        .map_err(|_| Fault::DisputeModuleRejected)
 }
 
 /// `Open | Claimed → Filled`: close the window, count out. The SETTLED leaf (D8) is appended by
@@ -600,19 +635,19 @@ pub fn cancel(env: &Env, order_hash: &BytesN<32>, account: &BytesN<32>, by_evide
 
 /// Append this leg's SETTLED leaf for a `Filled` order, once (D8): what lets the other escrow's
 /// presenter prove this one paid. Permissionless; the caller only names the order.
-pub fn record_settled<E: ProofBridgeError + From<Fault>>(
+pub fn record_settled(
     env: &Env,
     merkle_manager: &Address,
     order_hash: &BytesN<32>,
-) -> Result<(), E> {
+) -> Result<(), Fault> {
     if storage::get_order_status(env, order_hash) != Status::Filled {
-        return Err(Fault::NotFilled.into());
+        return Err(Fault::NotFilled);
     }
     if storage::is_settled_recorded(env, order_hash) {
-        return Err(Fault::SettledRecorded.into());
+        return Err(Fault::SettledRecorded);
     }
     storage::set_settled_recorded(env, order_hash);
-    cross_contract::append_to_merkle::<E>(
+    cross_contract::append_to_merkle(
         env,
         merkle_manager,
         order_hash,

@@ -489,15 +489,10 @@ fn setup_opts(wire_root_verifiers: bool, wire_timing: bool) -> TestSetup<'static
     ad_manager.set_chain(
         &tp.order_chain_id,
         &bytes32_to_bytesn(&env, &tp.order_portal_id),
-        &true,
     );
 
     // --- Order-portal: set_chain (uses require_auth, mocked) ---
-    order_portal.set_chain(
-        &tp.ad_chain_id,
-        &bytes32_to_bytesn(&env, &tp.ad_manager_id),
-        &true,
-    );
+    order_portal.set_chain(&tp.ad_chain_id, &bytes32_to_bytesn(&env, &tp.ad_manager_id));
 
     // --- Ad-manager: set_token_route (uses require_auth, mocked) ---
     ad_manager.set_token_route(
@@ -1441,6 +1436,38 @@ fn test_termination_metering() {
     meter("order_portal.refund_by_cancel");
 }
 
+/// An unlock on a disputed order also closes the dispute in its module: two module calls
+/// (`initiator_of`, `settle_bond`) on top of the plain unlock.
+#[test]
+fn test_disputed_unlock_metering() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let params = locked_ad_order(&s);
+    s.ad_manager
+        .dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+
+    s.env.cost_estimate().budget().reset_unlimited();
+    s.ad_manager.unlock(
+        &params,
+        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+        &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
+    );
+    let b = s.env.cost_estimate().budget();
+    let (cpu, mem) = (b.cpu_instruction_cost(), b.memory_bytes_cost());
+    std::println!(
+        "ad_manager.unlock (disputed): cpu {} insns, mem {} bytes",
+        cpu,
+        mem
+    );
+    assert!(
+        cpu <= SOROBAN_TX_CPU_BUDGET,
+        "disputed unlock would not submit on chain"
+    );
+    assert!(mem <= AD_UNLOCK_MEM_CEILING);
+}
+
 // ---------------------------------------------------------------------------
 // Event claims (2.3d): the same circuit and the same verify_proof as deposits; the contract-built
 // public inputs (proofbridge_core::cross_contract::build_event_public_inputs) keep them apart.
@@ -1545,27 +1572,15 @@ fn test_2_3h_non_canonical_public_inputs_are_refused() {
     // there would reject most real orders. `test_2_3h_the_subject_is_reduced_not_rejected` pins it.
 
     // The deposit path binds the nullifier and the root.
-    assert!(build_deposit_inputs(
-        &s.env,
-        &s.merkle,
-        &at_prime,
-        &root,
-        &order_hash,
-        LEAF_DOMAIN_AD as u8
-    )
-    .is_err());
+    assert!(
+        build_deposit_inputs(&s.env, &at_prime, &root, &order_hash, LEAF_DOMAIN_AD as u8).is_err()
+    );
     // The root is deliberately *not* checked: every caller validates it before the builder runs,
     // against the co-signed root here and the notary's anchored root on the event path. Both are
     // equality checks against known-good data, so a non-canonical root is refused upstream.
-    assert!(build_deposit_inputs(
-        &s.env,
-        &s.merkle,
-        &zero,
-        &at_prime,
-        &order_hash,
-        LEAF_DOMAIN_AD as u8
-    )
-    .is_ok());
+    assert!(
+        build_deposit_inputs(&s.env, &zero, &at_prime, &order_hash, LEAF_DOMAIN_AD as u8).is_ok()
+    );
 
     // The event builder checks nothing and cannot fail — its nullifier slot is a literal zero and
     // its root is anchored-checked upstream — so it is infallible by type, not by convention.
@@ -1603,15 +1618,10 @@ fn test_2_3h_canonicality_matches_the_shared_vector() {
         if !expected {
             rejected += 1;
             // ...and the builder actually refuses it, on both paths it can reach.
-            assert!(build_deposit_inputs(
-                &s.env,
-                &s.merkle,
-                &value,
-                &root,
-                &order_hash,
-                LEAF_DOMAIN_AD as u8
-            )
-            .is_err());
+            assert!(
+                build_deposit_inputs(&s.env, &value, &root, &order_hash, LEAF_DOMAIN_AD as u8)
+                    .is_err()
+            );
         }
     }
     assert!(rejected >= 3, "the rejection cases shrank");
@@ -1654,15 +1664,8 @@ fn test_event_claim_rejected_under_another_domain_or_as_a_deposit() {
     assert!(s.verifier.try_verify_proof(&other_domain, &proof).is_err());
 
     let zero = BytesN::from_array(&s.env, &[0u8; 32]);
-    let as_deposit = build_deposit_inputs(
-        &s.env,
-        &s.merkle,
-        &zero,
-        &root,
-        &order_hash,
-        LEAF_DOMAIN_AD as u8,
-    )
-    .unwrap();
+    let as_deposit =
+        build_deposit_inputs(&s.env, &zero, &root, &order_hash, LEAF_DOMAIN_AD as u8).unwrap();
     assert!(s.verifier.try_verify_proof(&as_deposit, &proof).is_err());
 }
 
@@ -2113,7 +2116,6 @@ fn test_t14_create_ad_without_registry_fails_closed() {
     bare.set_chain(
         &s.tp.order_chain_id,
         &bytes32_to_bytesn(&s.env, &s.tp.order_portal_id),
-        &true,
     );
     bare.set_token_route(
         &bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token),
@@ -2354,11 +2356,11 @@ fn test_2_3h_settlement_bearing_entries_get_their_ttl_extended() {
     }
 }
 
-/// T-57, the per-contract writers the shared-storage sweep did not reach. `set_chain` and
-/// `set_ad_id_used` live in each escrow's own storage module rather than in `escrow_storage.rs`,
-/// which is why an audit of that one file missed them. Both are written once and then only read,
-/// and both fail *open* when archived: a missing chain row reads as unsupported, a missing ad-id
-/// row reads as unused.
+/// T-57, the per-contract writers the shared-storage sweep did not reach. `set_chain` and `set_ad`
+/// live in each escrow's own storage module rather than in `escrow_storage.rs`, which is why an
+/// audit of that one file missed them. Both are settlement-bearing: the chain row is what makes a peer
+/// supported, and the ad row holds the maker's liquidity and is the ad-id guard (2.7). An archived
+/// entry cannot be read without a restore.
 #[test]
 fn test_2_3h_per_contract_config_entries_get_their_ttl_extended() {
     use proofbridge_core::ttl::PERSISTENT_LIFETIME_THRESHOLD;
@@ -2375,8 +2377,8 @@ fn test_2_3h_per_contract_config_entries_get_their_ttl_extended() {
                 (soroban_sdk::symbol_short!("chains"), s.tp.order_chain_id).into_val(&s.env),
             ),
             (
-                "ad-id guard",
-                (soroban_sdk::symbol_short!("adids"), ad_id.clone()).into_val(&s.env),
+                "ad row (the ad-id guard)",
+                (soroban_sdk::symbol_short!("ads"), ad_id.clone()).into_val(&s.env),
             ),
         ]
     });
@@ -5976,7 +5978,7 @@ fn test_2_3g_in_flight_clears_on_resolved() {
 const DISPUTE_SCENARIOS_JSON: &str = include_str!("../../test-vectors/dispute-scenarios.json");
 #[allow(dead_code)]
 const DISPUTE_SCENARIOS_SHA256: &str =
-    "832864d8032f9a7f3df6e71d1c833b221bc94d1e7d8f6fb3945e9e90b13bc1cd";
+    "81694f5b2341bf014de61495376c63f977391daa24f85cc4d28967d3fba12de0";
 
 fn t24_wire(
     s: &TestSetup,
@@ -6110,7 +6112,7 @@ fn t24_horizon(filed_at: u64, challenge: u64, deadline: u64, buffer_s: u64) -> u
 }
 
 /// The window a ruling opens: max(ruledAt, orderDeadline) + buffer (D3). With no
-/// ruling the horizon itself is the window — a fallback claim extends nothing.
+/// ruling the horizon itself is the window.
 fn t24_window(horizon: u64, ruled_at: Option<u64>, deadline: u64, buffer_s: u64) -> u64 {
     match ruled_at {
         None => horizon,
@@ -6199,7 +6201,6 @@ fn t24_run_scenario(
                 );
                 s.env.ledger().set_timestamp(want + 1);
             }
-            "claimDispute" => dm.claim_dispute(&order_hash),
             "finalize" => s.ad_manager.finalize_dispute(&params),
             "present" => s
                 .ad_manager
@@ -6268,7 +6269,7 @@ fn t24_run_scenario(
 const JOINT_OUTCOMES_JSON: &str = include_str!("../../test-vectors/joint-outcomes.json");
 #[allow(dead_code)]
 const JOINT_OUTCOMES_SHA256: &str =
-    "c5409fb9a6647b7c052caa4aad6c33845a67749731ba2a492a8b71a741aab459";
+    "8dc63f3fcacaeee13be175e96afb49f21fa61c8a62b302fdd9dc320664476097";
 
 fn t25_wire(
     s: &TestSetup,
@@ -6754,7 +6755,6 @@ fn t25_step(
             );
             warp(s, want + 1);
         }
-        "claimDispute" => dm.claim_dispute(&w.h),
         "finalizeDispute" => {
             if neg {
                 t25_expect_ad_err(
@@ -7449,7 +7449,7 @@ fn wire_dispute_manager_bonded_in(
     bonded
 }
 
-/// A SAC bond the filer holds no trustline for is the transfer fault, never `DisputeBondTooSmall`
+/// A SAC bond the filer holds no trustline for is the transfer fault
 /// (the SAC's own #13, read as the module's number).
 #[test]
 fn test_49s3_a_sac_bond_without_a_trustline_is_the_transfer_fault() {
@@ -7601,11 +7601,10 @@ fn test_49s3_a_record_another_escrow_opened_is_wrong_escrow() {
 }
 
 /// Every code the escrows relay, produced by the real module and put through the escrows' relay.
-/// Codes 14 and 15 come from the module's permissionless / arbiter doors, which no escrow path
-/// calls; 13 is never raised by the Soroban module (the bond is pulled, not sent).
+/// Code 15 (`ChallengeClosed`) comes only from the arbiter's door, which no escrow path calls, so it
+/// is not relayed: it reads as the generic `DisputeModuleRejected`.
 #[test]
 fn test_49s3_every_relayed_code_from_the_real_module() {
-    use dispute_manager_contract::DisputeManagerError as DmErr;
     use proofbridge_core::escrow_ops::{dispute_module_fault, Fault};
     let relay = |e: soroban_sdk::Error| dispute_module_fault(Ok(e));
 
@@ -7639,10 +7638,6 @@ fn test_49s3_every_relayed_code_from_the_real_module() {
     s.ad_manager.dispute(&p, &filer, &ev);
     assert_eq!(relay(open(&esc, &h, chain, &filer)), Fault::DisputeExists);
     assert_eq!(
-        relay(dm.try_claim_dispute(&h).unwrap_err().unwrap()),
-        Fault::DisputeChallengeOpen
-    );
-    assert_eq!(
         relay(
             dm.try_record_response(&esc, &h, &filer, &ev, &0)
                 .unwrap_err()
@@ -7666,12 +7661,7 @@ fn test_49s3_every_relayed_code_from_the_real_module() {
                 .unwrap_err()
                 .unwrap()
         ),
-        Fault::DisputeChallengeClosed
-    );
-    // The one relayed code the Soroban module cannot raise still maps, for parity with EVM.
-    assert_eq!(
-        relay(soroban_sdk::Error::from(DmErr::BondTooSmall)),
-        Fault::DisputeBondTooSmall
+        Fault::DisputeModuleRejected
     );
 }
 
@@ -7953,16 +7943,16 @@ fn test_c19_accept_admin_without_a_transfer_is_not_pending_admin() {
     );
 }
 
-/// A supported chain must name a peer escrow; the order portal also refuses itself as admin.
+/// A chain entry must name a peer escrow (the entry is what makes it supported); the order portal also refuses itself as admin.
 #[test]
 fn test_c19_zero_peer_escrow_is_zero_address() {
     let s = setup();
     assert_eq!(
-        s.ad_manager.try_set_chain(&777, &zero32(&s), &true),
+        s.ad_manager.try_set_chain(&777, &zero32(&s)),
         Err(Ok(AdErr::ZeroAddress))
     );
     assert_eq!(
-        s.order_portal.try_set_chain(&777, &zero32(&s), &true),
+        s.order_portal.try_set_chain(&777, &zero32(&s)),
         Err(Ok(OpErr::ZeroAddress))
     );
     let env = Env::default();
@@ -8015,6 +8005,77 @@ fn test_c19_create_ad_with_a_zero_token_or_a_used_id_is_refused() {
         Err(Ok(AdErr::TokenZeroAddress))
     );
     assert_eq!(create(&s.tp.ad_id, &token), Err(Ok(AdErr::UsedAdId)));
+}
+
+/// The ad row is the id guard: a closed ad keeps its row, so its id can never be taken again.
+#[test]
+fn test_a_closed_ads_id_cannot_be_reused() {
+    let s = setup();
+    let id = SorobanString::from_str(&s.env, "closed-then-reused");
+    let create = || {
+        s.ad_manager.try_create_ad(
+            &s.maker_addr,
+            &id,
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token),
+            &s.tp.amount,
+            &s.tp.order_chain_id,
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_recipient),
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_settlement_signer),
+        )
+    };
+    assert!(create().is_ok());
+    assert_eq!(create(), Err(Ok(AdErr::UsedAdId)), "a duplicate is refused");
+    s.ad_manager.close_ad(&id, &s.maker_addr);
+    assert_eq!(
+        create(),
+        Err(Ok(AdErr::UsedAdId)),
+        "a closed ad's id stays taken"
+    );
+}
+
+/// One way to switch a peer off: `remove_chain`. A removed peer refuses locks, orders and route
+/// writes on both escrows; setting it again restores them.
+#[test]
+fn test_a_removed_peer_refuses_locks_orders_and_routes() {
+    let s = setup();
+    s.ad_manager.remove_chain(&s.tp.order_chain_id);
+    s.order_portal.remove_chain(&s.tp.ad_chain_id);
+
+    let lock = ad_manager_order_params(&s.env, &s.tp);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&lock),
+        Err(Ok(AdErr::ChainNotSupported))
+    );
+    let ad_token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
+    let order_token = bytes32_to_bytesn(&s.env, &s.tp.order_chain_token);
+    assert_eq!(
+        s.ad_manager
+            .try_set_token_route(&ad_token, &order_token, &s.tp.order_chain_id),
+        Err(Ok(AdErr::ChainNotSupported))
+    );
+    let bridger = account_addr(&s, &s.tp.bridger);
+    TokenContractClient::new(&s.env, &s.order_token_addr).mint(&bridger, &(s.tp.amount as i128));
+    let order = order_portal_order_params(&s.env, &s.tp);
+    assert_eq!(
+        s.order_portal.try_create_order(&order),
+        Err(Ok(OpErr::AdChainNotSupported))
+    );
+    assert_eq!(
+        s.order_portal
+            .try_set_token_route(&order_token, &s.tp.ad_chain_id, &ad_token),
+        Err(Ok(OpErr::AdChainNotSupported))
+    );
+
+    s.ad_manager.set_chain(
+        &s.tp.order_chain_id,
+        &bytes32_to_bytesn(&s.env, &s.tp.order_portal_id),
+    );
+    s.order_portal.set_chain(
+        &s.tp.ad_chain_id,
+        &bytes32_to_bytesn(&s.env, &s.tp.ad_manager_id),
+    );
+    s.ad_manager.lock_for_order(&lock);
+    s.order_portal.create_order(&order);
 }
 
 #[test]
@@ -8102,6 +8163,64 @@ fn test_c19_a_revoked_merkle_manager_is_merkle_append_failed() {
         s.order_portal.try_create_order(&q),
         Err(Ok(OpErr::MerkleAppendFailed))
     );
+}
+
+/// An upgradeable token's issuer changes `decimals()` after the lock. Decimals are read at entry
+/// only: the settlement still pays the signed, reserved amount instead of being pushed to a refund.
+fn change_decimals(s: &TestSetup, token: &Address, decimals: u32) {
+    s.env.as_contract(token, || {
+        Base::set_metadata(
+            &s.env,
+            decimals,
+            SorobanString::from_str(&s.env, "TestToken"),
+            SorobanString::from_str(&s.env, "TT"),
+        )
+    });
+    assert_eq!(TokenContractClient::new(&s.env, token).decimals(), decimals);
+}
+
+#[test]
+fn test_decimals_changed_after_the_lock_still_settle_the_ad_unlock() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    change_decimals(&s, &s.ad_token_addr, s.tp.ad_decimals + 1);
+    let recipient = account_addr(&s, &s.tp.order_recipient);
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let before = token.balance(&recipient);
+
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+    assert_eq!(token.balance(&recipient), before + s.tp.amount as i128);
+}
+
+#[test]
+fn test_decimals_changed_after_the_lock_still_settle_present_settled() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let p = locked_ad_order(&s);
+    change_decimals(&s, &s.ad_token_addr, s.tp.ad_decimals + 1);
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+    let recipient = account_addr(&s, &s.tp.order_recipient);
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let before = token.balance(&recipient);
+
+    s.ad_manager.present_settled(&p, &root, &proof);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Filled);
+    assert_eq!(token.balance(&recipient), before + s.tp.amount as i128);
+}
+
+#[test]
+fn test_decimals_changed_after_the_create_still_settle_the_portal_unlock() {
+    let s = setup();
+    let p = created_portal_order(&s);
+    change_decimals(&s, &s.order_token_addr, s.tp.order_decimals + 1);
+    let recipient = account_addr(&s, &s.tp.ad_recipient);
+    let token = TokenContractClient::new(&s.env, &s.order_token_addr);
+    let before = token.balance(&recipient);
+
+    assert_eq!(portal_unlock(&s, &p), Ok(()));
+    assert_eq!(token.balance(&recipient), before + s.tp.amount as i128);
 }
 
 /// The decimal scaling errors, each through the lock that scales.

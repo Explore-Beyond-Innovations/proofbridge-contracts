@@ -54,13 +54,6 @@ pub struct DisputeRuled {
     pub finalize_at: u64,
 }
 
-#[contractevent(topics = ["dsp_clm"], data_format = "vec")]
-pub struct DisputeClaimed {
-    #[topic]
-    pub order_hash: BytesN<32>,
-    pub finalize_at: u64,
-}
-
 #[contractevent(topics = ["bond_rt"], data_format = "vec")]
 pub struct BondRouted {
     #[topic]

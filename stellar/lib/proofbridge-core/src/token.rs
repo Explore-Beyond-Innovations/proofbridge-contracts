@@ -3,7 +3,7 @@
 use soroban_sdk::{token, Address, BytesN, Env, String as SorobanString};
 use stellar_strkey::Contract;
 
-use crate::errors::ProofBridgeError;
+use crate::escrow_ops::Fault;
 
 // =============================================================================
 // Constants
@@ -47,19 +47,16 @@ pub fn bytes32_to_token_address(env: &Env, bytes: &BytesN<32>) -> Option<Address
 
 /// Re-encode a BytesN<32> Ed25519 pubkey as a Soroban `G...` account `Address`.
 ///
-/// Rejects the all-zero 32-byte pubkey with `E::invalid_account_address()`.
+/// Rejects the all-zero 32-byte pubkey with `Fault::InvalidAccountAddress`.
 /// Any other 32-byte value is deterministically strkey-encoded and wrapped as
 /// an `Address`; this does NOT verify the key corresponds to a funded or
 /// existing Stellar account, and it only produces account (`G...`) addresses —
 /// Soroban contract (`C...`) addresses are not supported here.
-pub fn bytes32_to_account_address<E: ProofBridgeError>(
-    env: &Env,
-    bytes: &BytesN<32>,
-) -> Result<Address, E> {
+pub fn bytes32_to_account_address(env: &Env, bytes: &BytesN<32>) -> Result<Address, Fault> {
     use stellar_strkey::ed25519::PublicKey;
 
     if bytes.to_array().iter().all(|&b| b == 0) {
-        return Err(E::invalid_account_address());
+        return Err(Fault::InvalidAccountAddress);
     }
 
     let strkey = PublicKey(bytes.to_array()).to_string();
@@ -74,14 +71,14 @@ pub fn bytes32_to_account_address<E: ProofBridgeError>(
 /// Transfer tokens using BytesN<32> token address
 ///
 /// For native tokens, uses the wrapped native token contract.
-pub fn transfer_tokens<E: ProofBridgeError>(
+pub fn transfer_tokens(
     env: &Env,
     token_bytes: &BytesN<32>,
     w_native_addr: &Address,
     from: &Address,
     to: &Address,
     amount: u128,
-) -> Result<(), E> {
+) -> Result<(), Fault> {
     let amount_i128 = amount as i128;
 
     if is_native_token(token_bytes) {
@@ -92,7 +89,7 @@ pub fn transfer_tokens<E: ProofBridgeError>(
             let token_client = token::Client::new(env, &token_addr);
             token_client.transfer(from, to, &amount_i128);
         } else {
-            return Err(E::token_zero_address());
+            return Err(Fault::TokenZeroAddress);
         }
     }
 
@@ -100,13 +97,13 @@ pub fn transfer_tokens<E: ProofBridgeError>(
 }
 
 /// Transfer tokens from user to contract using BytesN<32> token address
-pub fn transfer_from_user_bytes32<E: ProofBridgeError>(
+pub fn transfer_from_user_bytes32(
     env: &Env,
     token_bytes: &BytesN<32>,
     w_native_addr: &Address,
     from: &Address,
     amount: u128,
-) -> Result<(), E> {
+) -> Result<(), Fault> {
     let contract_addr = env.current_contract_address();
     transfer_tokens(
         env,
@@ -119,44 +116,43 @@ pub fn transfer_from_user_bytes32<E: ProofBridgeError>(
 }
 
 /// Transfer tokens from contract to user using BytesN<32> token address
-pub fn transfer_to_user_bytes32<E: ProofBridgeError>(
+pub fn transfer_to_user_bytes32(
     env: &Env,
     token_bytes: &BytesN<32>,
     w_native_addr: &Address,
     to: &Address,
     amount: u128,
-) -> Result<(), E> {
+) -> Result<(), Fault> {
     let contract_addr = env.current_contract_address();
     transfer_tokens(env, token_bytes, w_native_addr, &contract_addr, to, amount)
 }
 
 /// Query the `decimals()` view of a token referenced by BytesN<32>.
-pub fn token_decimals_bytes32<E: ProofBridgeError>(
+pub fn token_decimals_bytes32(
     env: &Env,
     token_bytes: &BytesN<32>,
     w_native_addr: &Address,
-) -> Result<u32, E> {
+) -> Result<u32, Fault> {
     if is_native_token(token_bytes) {
         let token_client = token::Client::new(env, w_native_addr);
         return Ok(token_client.decimals());
     }
 
-    let token_addr =
-        bytes32_to_token_address(env, token_bytes).ok_or_else(E::token_zero_address)?;
+    let token_addr = bytes32_to_token_address(env, token_bytes).ok_or(Fault::TokenZeroAddress)?;
     let token_client = token::Client::new(env, &token_addr);
     Ok(token_client.decimals())
 }
 
 /// Transfer tokens from contract to recipient using BytesN<32> addresses
-pub fn transfer_to_recipient_bytes32<E: ProofBridgeError>(
+pub fn transfer_to_recipient_bytes32(
     env: &Env,
     token_bytes: &BytesN<32>,
     w_native_addr: &Address,
     recipient_bytes: &BytesN<32>,
     amount: u128,
-) -> Result<(), E> {
+) -> Result<(), Fault> {
     let contract_addr = env.current_contract_address();
-    let recipient = bytes32_to_account_address::<E>(env, recipient_bytes)?;
+    let recipient = bytes32_to_account_address(env, recipient_bytes)?;
     transfer_tokens(
         env,
         token_bytes,

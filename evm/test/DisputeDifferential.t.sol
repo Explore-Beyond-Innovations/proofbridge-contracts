@@ -22,7 +22,7 @@ import {RouteTiming} from "../src/libraries/RouteTiming.sol";
 /// wei. The fixture's sha256 is pinned below; scripts/repo-checks compares
 /// it against the file so neither driver can drift alone.
 contract DisputeDifferentialTest is DisputeTest {
-    string internal constant FIXTURE_SHA256 = "832864d8032f9a7f3df6e71d1c833b221bc94d1e7d8f6fb3945e9e90b13bc1cd";
+    string internal constant FIXTURE_SHA256 = "81694f5b2341bf014de61495376c63f977391daa24f85cc4d28967d3fba12de0";
 
     bytes32 private constant LEAF_TOPIC = keccak256("DepositHashAppended(uint256,bytes32,uint256,bytes32)");
 
@@ -151,18 +151,11 @@ contract DisputeDifferentialTest is DisputeTest {
             dm.resolveDispute(r.h, _outcome(vm.parseJsonString(v, string.concat(sAt, ".outcome"))));
             ruledAt = uint64(block.timestamp);
         } else if (_eq(action, "warpPastChallenge")) {
-            // Past the horizon the FIXTURE describes, which is what makes the
-            // permissionless fallback claimable. Distinct from the window a
-            // claim then OPENS — warpPastWindow below computes that one.
+            // Past the horizon the FIXTURE describes. Distinct from the window a
+            // ruling OPENS — warpPastWindow below computes that one.
             vm.warp(uint256(_horizon(r)) + 1);
-        } else if (_eq(action, "claimDispute")) {
-            // A fallback claim is an ANNOUNCEMENT, not a state change: it
-            // emits DisputeClaimed and extends nothing, because the horizon
-            // already provided the presentation window. Only a ruling opens a
-            // new one.
-            dm.claimDispute(r.h);
         } else if (_eq(action, "warpPastWindow")) {
-            // The window a ruling or a fallback claim opened:
+            // The window a ruling opened, or the horizon when nobody ruled:
             // max(openedAt, orderDeadline) + buffer (D3). Computed from the
             // fixture, then checked against the chain before relying on it.
             uint64 want;
