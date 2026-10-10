@@ -3,10 +3,7 @@
 //! Indexing is 1-based (not 0-based).
 
 use soroban_poseidon::poseidon2_hash;
-use soroban_sdk::{
-    crypto::{bn254::Bn254Fr as Fr, BnScalar},
-    Bytes, BytesN, Env, Vec, U256,
-};
+use soroban_sdk::{crypto::BnScalar, Bytes, BytesN, Env, Vec, U256};
 
 use crate::storage;
 
@@ -20,10 +17,10 @@ pub const DOMAIN_TAG: [u8; 32] = [
 // Field Operations
 // =============================================================================
 
-/// Apply BN254 field modulus to a hash.
-/// Reduces dataHash into the BN254 scalar field using the SDK's Fr type.
+/// Apply BN254 field modulus to a hash. The escrows build public inputs with the same function, so
+/// a leaf and the proof that cites it share one reduction.
 pub fn field_mod(_env: &Env, data_hash: &BytesN<32>) -> BytesN<32> {
-    Fr::from_bytes(data_hash.clone()).to_bytes()
+    proofbridge_core::cross_contract::field_mod(data_hash)
 }
 
 // =============================================================================

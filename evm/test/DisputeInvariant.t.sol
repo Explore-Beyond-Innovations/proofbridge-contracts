@@ -209,13 +209,6 @@ contract DisputeInvariantTest is Test {
         adManager.respondToDispute(orders[i], bytes32("answer"));
     }
 
-    /// Nobody ruled: anyone opens the fallback once the window is over.
-    function handlerClaim(uint256 pick) external {
-        uint256 i = _pick(pick, _mask(IEscrow.Status.Disputed));
-        _warpTo(_moduleOf(i).effectiveChallengeDeadline(hashes[i]));
-        _moduleOf(i).claimDispute(hashes[i]);
-    }
-
     /// Run the window out and finalize. Returns the outcome applied (no ruling means MutualRefund),
     /// and whether the dispute was filed under a module the escrow has since swapped out.
     function handlerFinalize(uint256 pick) external returns (uint8 outcome, bool onOldModule) {
@@ -697,10 +690,6 @@ contract DisputeHandler {
 
     function respond(uint256 pick) external {
         try t.handlerRespond(pick) {} catch {}
-    }
-
-    function claim(uint256 pick) external {
-        try t.handlerClaim(pick) {} catch {}
     }
 
     function finalize(uint256 pick) external {

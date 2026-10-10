@@ -74,7 +74,7 @@ The destination chain contract where liquidity providers (makers) manage their a
 
 **Key Storage:**
 
-* `chains[orderChainId] → { supported, orderPortal }`: Source chain configuration
+* `chains[orderChainId] → { orderPortal }`: Source chain configuration (an entry means supported)
 * `tokenRoute[adToken][orderChainId] → orderToken`: Cross-chain token mapping
 * `ads[adId] → { creator, token, balance, locked, open, … }`: Ad state management
 * `orders[orderHash] → Status`: Order execution tracking
@@ -92,7 +92,7 @@ The source chain contract where users initiate cross-chain transfers by creating
 
 **Key Storage:**
 
-* `chains[dstChainId] → { supported, adManager }`: Destination chain configuration
+* `chains[dstChainId] → { adManager }`: Destination chain configuration (an entry means supported)
 * `tokenRoute[token1][dstChainId] → token2`: Cross-chain token routing
 * `orders[orderHash] → Status`: Order lifecycle management
 * `nullifiers[hash] → bool`: Prevents proof reuse

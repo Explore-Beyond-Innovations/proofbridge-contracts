@@ -21,7 +21,7 @@ Shared Rust library used by both AdManager and OrderPortal:
 * **`token.rs`**: `BytesN<32>` <-> `Address` conversion, native token detection, transfer helpers
 * **`cross_contract.rs`**: Cross-contract call wrappers for MerkleManager and Verifier
 * **`types.rs`**: Shared types (OrderParams, etc.)
-* **`errors.rs`**: Error trait for contract-specific error enums
+* **`escrow_ops.rs`**: The shared escrow core; its `Fault` enum is the one error type the crate returns, and each escrow maps it onto its own error enum through `From<Fault>`
 
 ### Order Struct (Rust)
 

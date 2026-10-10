@@ -23,4 +23,5 @@ pub fn transfer_from_user_bytes32(
         from,
         amount,
     )
+    .map_err(Into::into)
 }

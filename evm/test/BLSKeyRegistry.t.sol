@@ -3,6 +3,7 @@ pragma solidity ^0.8.34;
 
 import {Test} from "forge-std/Test.sol";
 import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 import {BLSKeyRegistry, IPositionGuard} from "../src/BLSKeyRegistry.sol";
 import {KeyMessages} from "../src/libraries/KeyMessages.sol";
@@ -541,7 +542,7 @@ contract BLSKeyRegistryTest is Test {
         registerSlot("makerOnSepolia", 0);
         registry.pause();
 
-        vm.expectRevert(IBLSKeyRegistry.EnforcedPause.selector);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         registerSlot("makerOnSepolia", 1);
 
         setValidUntil("makerOnSepolia", 0, true);
@@ -1043,7 +1044,7 @@ contract BLSKeyRegistryTest is Test {
             assertEq(registry.nonceOf(account), 0);
         }
         registry.pause();
-        vm.expectRevert(IBLSKeyRegistry.EnforcedPause.selector);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         registry.cancel(v.readBytes32(".slots.bridgerOnSepolia.account"), oa("bridgerOnSepolia", "cancel[0]"), 0);
     }
 

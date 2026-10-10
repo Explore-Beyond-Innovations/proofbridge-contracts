@@ -6,8 +6,6 @@
 use crate::escrow_ops::Fault;
 use soroban_sdk::{contractclient, crypto::bn254::Bn254Fr, Address, Bytes, BytesN, Env};
 
-use crate::errors::ProofBridgeError;
-
 // =============================================================================
 // Client Traits
 // =============================================================================
@@ -20,7 +18,6 @@ pub trait MerkleManagerInterface {
     fn get_root(env: Env) -> BytesN<32>;
     fn get_root_at_index(env: Env, leaf_index: u128) -> BytesN<32>;
     fn get_width(env: Env) -> u128;
-    fn field_mod(env: Env, order_hash: BytesN<32>) -> BytesN<32>;
 }
 
 /// Typed interface for the DisputeManager module (2.3g).
@@ -65,7 +62,6 @@ pub trait DisputeManagerInterface {
         escrow_paused_seconds: u64,
     ) -> (crate::types::DisputeOutcome, bool, Option<Address>);
     fn initiator_of(env: Env, order_hash: BytesN<32>) -> Option<Address>;
-    fn is_disputed(env: Env, order_hash: BytesN<32>) -> bool;
     fn challenge_deadline_of(env: Env, order_hash: BytesN<32>, escrow_paused_seconds: u64) -> u64;
 }
 
@@ -117,17 +113,17 @@ pub trait KeyRegistryInterface {
 // =============================================================================
 
 /// Append an order hash to the MerkleManager.
-pub fn append_to_merkle<E: ProofBridgeError>(
+pub fn append_to_merkle(
     env: &Env,
     merkle_manager: &Address,
     order_hash: &BytesN<32>,
     side: u32,
-) -> Result<(), E> {
+) -> Result<(), Fault> {
     let client = MerkleManagerClient::new(env, merkle_manager);
     client
         .try_append_order_hash(&env.current_contract_address(), order_hash, &side)
-        .map_err(|_| E::merkle_append_failed())?
-        .map_err(|_| E::merkle_append_failed())?;
+        .map_err(|_| Fault::MerkleAppendFailed)?
+        .map_err(|_| Fault::MerkleAppendFailed)?;
     Ok(())
 }
 
@@ -146,27 +142,22 @@ pub fn get_merkle_width(env: &Env, merkle_manager: &Address) -> u128 {
     MerkleManagerClient::new(env, merkle_manager).get_width()
 }
 
-/// Apply BN254 field modulus to a hash via MerkleManager.
-pub fn get_field_mod(env: &Env, merkle_manager: &Address, order_hash: &BytesN<32>) -> BytesN<32> {
-    MerkleManagerClient::new(env, merkle_manager).field_mod(order_hash)
-}
-
 // =============================================================================
 // Verifier Helper
 // =============================================================================
 
 /// Verify a ZK proof via cross-contract call to the Verifier contract.
-pub fn verify_proof<E: ProofBridgeError>(
+pub fn verify_proof(
     env: &Env,
     verifier: &Address,
     public_inputs: &Bytes,
     proof_bytes: &Bytes,
-) -> Result<(), E> {
+) -> Result<(), Fault> {
     let client = VerifierClient::new(env, verifier);
     client
         .try_verify_proof(public_inputs, proof_bytes)
-        .map_err(|_| E::invalid_proof())?
-        .map_err(|_| E::invalid_proof())?;
+        .map_err(|_| Fault::InvalidProof)?
+        .map_err(|_| Fault::InvalidProof)?;
     Ok(())
 }
 
@@ -185,7 +176,6 @@ pub fn verify_proof<E: ProofBridgeError>(
 /// Total: 128 bytes (4 x 32-byte field elements)
 pub fn build_public_inputs(
     env: &Env,
-    merkle_manager: &Address,
     nullifier_hash: &BytesN<32>,
     target_root: &BytesN<32>,
     order_hash: &BytesN<32>,
@@ -199,7 +189,8 @@ pub fn build_public_inputs(
     if !is_canonical(nullifier_hash) {
         return Err(Fault::NonCanonicalInput);
     }
-    let order_hash_mod = get_field_mod(env, merkle_manager, order_hash);
+    // Reduced here, not by a call to the MerkleManager: both are `Bn254Fr::from_bytes(x).to_bytes()`.
+    let order_hash_mod = field_mod(order_hash);
 
     // Chain flag as bytes32 (big-endian)
     let mut chain_flag = [0u8; 32];
