@@ -125,24 +125,6 @@ pub fn put_bucket(policy: &mut AgentPolicy, token: &BytesN<32>, bucket: Bucket) 
     });
 }
 
-/// The 2.1c shape, kept so an account upgraded in place can still read what it wrote.
-///
-/// A `#[contracttype]` struct is an `ScMap` keyed by field name, and the derived conversion wants
-/// the exact key set — so a v1 entry read straight into `AgentPolicy` does not return `None`, it
-/// traps. Without this, upgrading an account with policies installed would leave every one of its
-/// agent ids unusable *and* unrepairable: `__check_auth`, `policy`, `revoke_agent` and `set_policy`
-/// all read the entry first, so the owner could not even revoke.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct AgentPolicyV1 {
-    pub allowed_actions: Vec<Symbol>,
-    pub token_whitelist: Vec<BytesN<32>>,
-    pub max_per_order: u128,
-    pub valid_until: u64,
-    pub revoked: bool,
-    pub settlement_signer: BytesN<32>,
-}
-
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -158,15 +140,20 @@ pub enum DataKey {
     /// One guarded ad's settings and live bucket. Absent **and not on the roster** = unguarded,
     /// which is every ad today; absent *while on the roster* refuses — see `guarded_ads`.
     GuardRail(String),
-    /// A scheduled extractive call, keyed by the ad and the function it authorizes. Single use.
-    Schedule(String, Symbol),
+    /// A delayed owner call, keyed by where it applies and the function it authorizes. Single use.
+    Schedule(Scope, Symbol),
     /// Instance-stored roster of ads the owner has guarded, so an archived row cannot read as
     /// "never guarded".
     GuardedAds,
-    /// An above-threshold owner lock scheduled on one ad, bound to the exact order. Single use.
-    LockSchedule(String),
-    /// An account-wide extractive change (upgrade, loosening policy/limit/targets), keyed by action.
-    AccountSchedule(Symbol),
+}
+
+/// Where a schedule applies: one ad (timed by its guardrail) or the whole account (timed by the
+/// strictest guardrail on the roster).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Scope {
+    Ad(String),
+    Account,
 }
 
 /// The owner's own brake on one ad (design 02 §2.8): instant to protect, slow to extract.
@@ -196,32 +183,12 @@ pub struct GuardRail {
     pub bucket: Bucket,
 }
 
-/// One scheduled extractive call. The stored `amount` and `to` are compared exactly, so a schedule
-/// for 100 to alice does not authorize 101, or 100 to someone else.
-///
-/// `close_ad` carries no amount at all — it empties the ad, and the account cannot see by how much
-/// for the same re-entrancy reason as above — so it is categorically extractive and stores
-/// `amount: 0`. `set_guard_rail` (loosening or disarming) stores the same.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Schedule {
-    pub amount: u128,
-    pub to: Address,
-    pub ready_at: u64,
-    pub expires_at: u64,
-}
-
-/// A schedule bound to a hash of the exact call rather than to an amount and a destination.
-///
-/// Used for the owner's above-threshold `lock_for_order` (per ad) and for the account-wide changes
-/// (`upgrade`, loosening `set_policy` / `set_account_limit` / `set_targets`). `commitment` is the
-/// new wasm hash for `upgrade`, and `sha256(XDR(ScVal::Vec(args)))` of the call's own argument list
-/// for everything else. `amount` is the lock's ad-side amount, and 0 for the account-wide actions.
+/// One announced owner call, bound to `args_commitment` of its exact argument list: a schedule for
+/// 100 to alice does not authorize 101, or 100 to someone else, or a different guardrail.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BoundSchedule {
+pub struct Schedule {
     pub commitment: BytesN<32>,
-    pub amount: u128,
     pub ready_at: u64,
     pub expires_at: u64,
 }
@@ -326,113 +293,59 @@ pub fn is_tightening(cur: &GuardRail, next: &GuardRail) -> bool {
         && next.rate.refill_per_second <= cur.rate.refill_per_second
 }
 
-pub fn get_schedule(env: &Env, ad_id: &String, action: &Symbol) -> Option<Schedule> {
+pub fn get_schedule(env: &Env, scope: &Scope, action: &Symbol) -> Option<Schedule> {
     env.storage()
         .persistent()
-        .get(&DataKey::Schedule(ad_id.clone(), action.clone()))
+        .get(&DataKey::Schedule(scope.clone(), action.clone()))
 }
 
-pub fn set_schedule(env: &Env, ad_id: &String, action: &Symbol, s: &Schedule) {
-    let key = DataKey::Schedule(ad_id.clone(), action.clone());
+pub fn set_schedule(env: &Env, scope: &Scope, action: &Symbol, s: &Schedule) {
+    let key = DataKey::Schedule(scope.clone(), action.clone());
     env.storage().persistent().set(&key, s);
     proofbridge_core::ttl::extend_persistent(env, &key);
 }
 
 /// Spent, or cancelled. Removing rather than flagging is what makes a schedule single-use: a spent
 /// row left behind is an authorization waiting to be replayed.
-pub fn clear_schedule(env: &Env, ad_id: &String, action: &Symbol) {
+pub fn clear_schedule(env: &Env, scope: &Scope, action: &Symbol) {
     env.storage()
         .persistent()
-        .remove(&DataKey::Schedule(ad_id.clone(), action.clone()));
+        .remove(&DataKey::Schedule(scope.clone(), action.clone()));
 }
 
-/// Every schedule for one ad. Called when a guardrail is disarmed or loosened: a matured row that
-/// outlives the settings it was made under would let the next arming be bypassed by an
-/// announcement nobody remembers.
+/// The actions a scope can schedule.
+pub fn actions_for(env: &Env, scope: &Scope) -> [Symbol; 4] {
+    match scope {
+        Scope::Ad(_) => ad_actions(env),
+        Scope::Account => account_actions(env),
+    }
+}
+
+/// Every schedule this ad's settings timed: its own rows and the account-wide ones (which take the
+/// strictest guardrail, so this ad's too). Called when a guardrail is disarmed or loosened: a
+/// matured row that outlives the settings it was made under would let the next arming be bypassed
+/// by an announcement nobody remembers.
 pub fn clear_all_schedules(env: &Env, ad_id: &String) {
-    for a in [withdraw_from_ad(env), close_ad(env), set_guard_rail(env)] {
-        clear_schedule(env, ad_id, &a);
-    }
-    clear_lock_schedule(env, ad_id);
-    // The account-wide rows were timed against this ad's settings too.
-    for a in account_actions(env) {
-        clear_account_schedule(env, &a);
+    for scope in [Scope::Ad(ad_id.clone()), Scope::Account] {
+        for a in actions_for(env, &scope) {
+            clear_schedule(env, &scope, &a);
+        }
     }
 }
 
-/// 49S-1: this ad's pending schedules (its three actions and its lock) mature no earlier than
-/// `not_before`. Called when the ad's own delay rises, so the new delay applies to what was pending.
-pub fn restamp_ad_schedules(env: &Env, ad_id: &String, not_before: u64) {
-    for a in [withdraw_from_ad(env), close_ad(env), set_guard_rail(env)] {
-        if let Some(mut s) = get_schedule(env, ad_id, &a) {
-            if restamp(&mut s.ready_at, &mut s.expires_at, not_before) {
-                set_schedule(env, ad_id, &a, &s);
+/// 49S-1: every pending row in `scope` matures no earlier than `not_before`. Called when the delay
+/// that times the scope rises, so the new delay applies to what was pending. The window keeps its
+/// length, or a re-stamped row would expire before it opens.
+pub fn restamp(env: &Env, scope: &Scope, not_before: u64) {
+    for a in actions_for(env, scope) {
+        if let Some(mut s) = get_schedule(env, scope, &a) {
+            if s.ready_at < not_before {
+                s.expires_at = s.expires_at.saturating_add(not_before - s.ready_at);
+                s.ready_at = not_before;
+                set_schedule(env, scope, &a, &s);
             }
         }
     }
-    if let Some(mut s) = get_lock_schedule(env, ad_id) {
-        if restamp(&mut s.ready_at, &mut s.expires_at, not_before) {
-            set_lock_schedule(env, ad_id, &s);
-        }
-    }
-}
-
-/// 49S-1: the account-wide rows, when the account-wide (longest) delay rises.
-pub fn restamp_account_schedules(env: &Env, not_before: u64) {
-    for a in account_actions(env) {
-        if let Some(mut s) = get_account_schedule(env, &a) {
-            if restamp(&mut s.ready_at, &mut s.expires_at, not_before) {
-                set_account_schedule(env, &a, &s);
-            }
-        }
-    }
-}
-
-/// Push a row's window later so it opens at `not_before`; the window keeps its length, or a
-/// re-stamped row would expire before it opens.
-fn restamp(ready_at: &mut u64, expires_at: &mut u64, not_before: u64) -> bool {
-    if *ready_at >= not_before {
-        return false;
-    }
-    *expires_at = expires_at.saturating_add(not_before - *ready_at);
-    *ready_at = not_before;
-    true
-}
-
-pub fn get_lock_schedule(env: &Env, ad_id: &String) -> Option<BoundSchedule> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::LockSchedule(ad_id.clone()))
-}
-
-pub fn set_lock_schedule(env: &Env, ad_id: &String, s: &BoundSchedule) {
-    let key = DataKey::LockSchedule(ad_id.clone());
-    env.storage().persistent().set(&key, s);
-    proofbridge_core::ttl::extend_persistent(env, &key);
-}
-
-pub fn clear_lock_schedule(env: &Env, ad_id: &String) {
-    env.storage()
-        .persistent()
-        .remove(&DataKey::LockSchedule(ad_id.clone()));
-}
-
-pub fn get_account_schedule(env: &Env, action: &Symbol) -> Option<BoundSchedule> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::AccountSchedule(action.clone()))
-}
-
-pub fn set_account_schedule(env: &Env, action: &Symbol, s: &BoundSchedule) {
-    let key = DataKey::AccountSchedule(action.clone());
-    env.storage().persistent().set(&key, s);
-    proofbridge_core::ttl::extend_persistent(env, &key);
-}
-
-pub fn clear_account_schedule(env: &Env, action: &Symbol) {
-    env.storage()
-        .persistent()
-        .remove(&DataKey::AccountSchedule(action.clone()));
 }
 
 /// Account-wide changes that go through the timelock while any ad is guarded (D6).
@@ -452,6 +365,16 @@ pub fn act_set_targets(env: &Env) -> Symbol {
     Symbol::new(env, "set_targets")
 }
 
+/// The per-ad calls an owner announces on a guarded ad.
+pub fn ad_actions(env: &Env) -> [Symbol; 4] {
+    [
+        withdraw_from_ad(env),
+        close_ad(env),
+        lock_for_order(env),
+        set_guard_rail(env),
+    ]
+}
+
 pub fn account_actions(env: &Env) -> [Symbol; 4] {
     [
         act_upgrade(env),
@@ -461,7 +384,7 @@ pub fn account_actions(env: &Env) -> [Symbol; 4] {
     ]
 }
 
-/// `sha256(XDR(ScVal::Vec(args)))`: the commitment a bound schedule names for a call's arguments.
+/// `sha256(XDR(ScVal::Vec(args)))`: the commitment a schedule names for a call's arguments.
 pub fn args_commitment(env: &Env, args: &Vec<Val>) -> BytesN<32> {
     use soroban_sdk::xdr::ToXdr;
     env.crypto().sha256(&args.clone().to_xdr(env)).to_bytes()
@@ -542,7 +465,7 @@ pub fn carry_buckets(cur: &AgentPolicy, next: &mut AgentPolicy, now: u64) {
 }
 
 /// The calls that move the maker's money out of reach, named here so the owner path, the schedule
-/// entry point and the tests agree on one list. `lock_for_order` is included because it moves the
+/// entry point and the tests agree on one list (`ad_actions`). `lock_for_order` is included because it moves the
 /// ad's free balance into escrow — it is bounded for the agent by `limits`, and leaving it unbounded
 /// for the owner would be a hole in a feature whose subject is bounding the owner.
 pub fn withdraw_from_ad(env: &Env) -> Symbol {
@@ -616,40 +539,12 @@ pub fn set_targets(env: &Env, targets: &Vec<Address>) -> Result<(), AccountError
     Ok(())
 }
 
-/// Read a policy, migrating a 2.1c entry on the way through.
-///
-/// Lazy migration rather than a sweep: Soroban cannot enumerate keys, so there is no upgrade-time
-/// pass that could find every agent id. A v1 entry surfaces as a v2 policy with **no limits**,
-/// which makes it useless rather than dangerous — `spend_volume` refuses a token with no limit, so
-/// the agent cannot lock — while leaving the owner every repair: `policy` reads it, `revoke_agent`
-/// tombstones it, `set_policy` replaces it with a metered one. The `revoked` flag is carried across
-/// so the tombstone survives the upgrade; losing it would let a revoked id be re-installed. The v1
-/// `max_per_order` is dropped rather than carried: it was one scalar for the whole whitelist, and
-/// there is no per-token row to put it in without inventing rates the owner never chose.
-///
-/// The migration is read-only. Writing it back here would mean `__check_auth` persisting on a path
-/// that may go on to reject, and the owner has to re-install anyway to supply limits.
+/// Read a policy. Current shape only: a `#[contracttype]` decode traps on any other field set, so
+/// once real accounts exist a shape change must ship a read fallback (design 02, "Stored shapes").
 pub fn get_policy(env: &Env, agent: &AgentId) -> Option<AgentPolicy> {
-    let key = DataKey::Policy(agent.clone());
-    let raw: Val = env.storage().persistent().get(&key)?;
-    if let Ok(p) = AgentPolicy::try_from_val(env, &raw) {
-        return Some(p);
-    }
-    if let Ok(v1) = AgentPolicyV1::try_from_val(env, &raw) {
-        return Some(AgentPolicy {
-            allowed_actions: v1.allowed_actions,
-            token_whitelist: v1.token_whitelist,
-            valid_until: v1.valid_until,
-            revoked: v1.revoked,
-            settlement_signer: v1.settlement_signer,
-            ad_scope: None,
-            limits: Vec::new(env),
-            buckets: Vec::new(env),
-        });
-    }
-    // Neither shape. Unreachable today — v1 and v2 are the only ones that have existed — and a
-    // strict read traps, which is what happened before this function knew about v1 at all.
-    env.storage().persistent().get(&key)
+    env.storage()
+        .persistent()
+        .get(&DataKey::Policy(agent.clone()))
 }
 
 pub fn set_policy(env: &Env, agent: &AgentId, policy: &AgentPolicy) {

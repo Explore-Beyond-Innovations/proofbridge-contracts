@@ -1,4 +1,6 @@
-use soroban_sdk::{contractevent, Address, BytesN, String, Symbol, Vec};
+use soroban_sdk::{contractevent, Address, BytesN, String, Symbol, Val, Vec};
+
+use crate::policy::Scope;
 
 /// `fingerprint` is the canonical policy hash (`policy_fingerprint`), so a watcher can tell which
 /// policy was installed without a storage read.
@@ -44,54 +46,26 @@ pub struct GuardRailSet {
     pub window: u64,
 }
 
-/// An extractive call was scheduled. **This is the point of the delay** — a window nobody can see
-/// start is not a warning, so the amount and the destination ride on the event rather than being
-/// left to a storage read.
-#[contractevent(topics = ["extr_sched"], data_format = "vec")]
-pub struct ExtractiveScheduled {
+/// A delayed owner call was announced. **This is the point of the delay**: a window nobody can see
+/// start is not a warning, so the call's arguments ride on the event in clear, beside the
+/// commitment the spend will compare.
+#[contractevent(topics = ["scheduled"], data_format = "vec")]
+pub struct Scheduled {
     #[topic]
-    pub ad_id: String,
+    pub scope: Scope,
     #[topic]
     pub action: Symbol,
-    pub amount: u128,
-    pub to: Address,
+    pub args: Vec<Val>,
+    pub commitment: BytesN<32>,
     pub ready_at: u64,
     pub expires_at: u64,
 }
 
 /// The owner stood a schedule down before it was spent.
-#[contractevent(topics = ["extr_cancel"], data_format = "vec")]
-pub struct ExtractiveCancelled {
+#[contractevent(topics = ["cancelled"], data_format = "vec")]
+pub struct Cancelled {
     #[topic]
-    pub ad_id: String,
-    #[topic]
-    pub action: Symbol,
-}
-
-/// An above-threshold owner lock was scheduled on a guarded ad, bound to the exact order.
-#[contractevent(topics = ["lock_sched"], data_format = "vec")]
-pub struct LockScheduled {
-    #[topic]
-    pub ad_id: String,
-    pub amount: u128,
-    pub commitment: BytesN<32>,
-    pub ready_at: u64,
-    pub expires_at: u64,
-}
-
-/// An account-wide change (`upgrade`, a loosening `set_policy` / `set_account_limit` /
-/// `set_targets`) was scheduled. `commitment` is the wasm hash for `upgrade`.
-#[contractevent(topics = ["acct_sched"], data_format = "vec")]
-pub struct AccountExtractiveScheduled {
-    #[topic]
-    pub action: Symbol,
-    pub commitment: BytesN<32>,
-    pub ready_at: u64,
-    pub expires_at: u64,
-}
-
-#[contractevent(topics = ["acct_cancel"], data_format = "single-value")]
-pub struct AccountExtractiveCancelled {
+    pub scope: Scope,
     #[topic]
     pub action: Symbol,
 }

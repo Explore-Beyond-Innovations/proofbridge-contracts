@@ -34,16 +34,16 @@ use soroban_sdk::{
     vec, Address, BytesN, ContractExecutable, Env, IntoVal, String, Symbol, Val, Vec,
 };
 
-use escrow::{spend_account_schedule, spend_schedule};
-use policy::{BoundSchedule, GuardRail, TokenLimit};
+use escrow::spend;
+use policy::{GuardRail, TokenLimit};
 use proofbridge_core::rate_limit::{self, Bucket, Limit};
 
 pub use auth::{AccountSig, Ed25519Sig, SecpSig};
 pub use errors::AccountError;
 pub use escrow::settlement_signer_of;
 pub use policy::{
-    lock_for_order, AccountVolume, AgentId, AgentPolicy, MAX_AD_SCOPE, MAX_ALLOWED_ACTIONS,
-    MAX_TARGETS, MAX_WHITELIST_TOKENS, SCHEMA_VERSION,
+    lock_for_order, AccountVolume, AgentId, AgentPolicy, Schedule, Scope, MAX_AD_SCOPE,
+    MAX_ALLOWED_ACTIONS, MAX_TARGETS, MAX_WHITELIST_TOKENS, SCHEMA_VERSION,
 };
 
 #[contract]
@@ -79,9 +79,14 @@ impl AgentAccount {
             let cur = policy::get_targets(&env);
             if targets.iter().any(|t| !cur.contains(&t)) {
                 let args: Vec<Val> = vec![&env, targets.to_val()];
-                let commitment = policy::args_commitment(&env, &args);
                 let now = env.ledger().timestamp();
-                spend_account_schedule(&env, &policy::act_set_targets(&env), &commitment, now)?;
+                spend(
+                    &env,
+                    &Scope::Account,
+                    &policy::act_set_targets(&env),
+                    &args,
+                    now,
+                )?;
             }
         }
         policy::set_targets(&env, &targets)?;
@@ -92,8 +97,8 @@ impl AgentAccount {
     /// Owner-only. Installs or replaces the agent's policy. A revoked agent id
     /// can never be re-installed (sticky); use a new key.
     ///
-    /// While any ad is guarded, a **loosening** write needs a matured `set_policy` schedule
-    /// (`schedule_account_extractive`) naming `sha256(XDR(ScVal::Vec(args)))` of this call. Only a
+    /// While any ad is guarded, a **loosening** write needs a matured
+    /// `schedule(Account, set_policy, args)` for exactly this call's arguments. Only a
     /// write that is no wider than the live policy on every axis is instant: a new agent key, a new
     /// action, token or ad, a wider or dropped ad scope, a higher cap, capacity or refill, a later or
     /// removed expiry, or a changed settlement signer all count as loosening (`is_policy_tightening`).
@@ -142,10 +147,13 @@ impl AgentAccount {
                 Some(cur) if policy::is_policy_tightening(&cur, &p) => {
                     policy::carry_buckets(&cur, &mut p, now);
                 }
-                _ => {
-                    let commitment = policy::args_commitment(&env, &args);
-                    spend_account_schedule(&env, &policy::act_set_policy(&env), &commitment, now)?;
-                }
+                _ => spend(
+                    &env,
+                    &Scope::Account,
+                    &policy::act_set_policy(&env),
+                    &args,
+                    now,
+                )?,
             }
         }
         let fingerprint = fingerprint::fingerprint(&env, &p)?;
@@ -168,8 +176,8 @@ impl AgentAccount {
     /// which is the fixed window this replaced.
     ///
     /// While any ad is guarded, a first limit for a token or a higher capacity or refill is
-    /// loosening and needs a matured `set_account_limit` schedule naming the call's argument
-    /// commitment. Lowering either number stays instant.
+    /// loosening and needs a matured `schedule(Account, set_account_limit, [token, limit])`.
+    /// Lowering either number stays instant.
     pub fn set_account_limit(
         env: Env,
         token: BytesN<32>,
@@ -182,8 +190,13 @@ impl AgentAccount {
         let current = policy::get_account_volume(&env, &token);
         if policy::any_guarded(&env) && !policy::is_limit_tightening(current.as_ref(), &limit) {
             let args: Vec<Val> = vec![&env, token.to_val(), limit.into_val(&env)];
-            let commitment = policy::args_commitment(&env, &args);
-            spend_account_schedule(&env, &policy::act_set_account_limit(&env), &commitment, now)?;
+            spend(
+                &env,
+                &Scope::Account,
+                &policy::act_set_account_limit(&env),
+                &args,
+                now,
+            )?;
         }
         let bucket = match current {
             Some(v) => {
@@ -226,6 +239,10 @@ impl AgentAccount {
     /// runs the other way. Delay on both: the attacker waits `delay` whichever route they take.
     /// Disarm instant: disarm, then withdraw, and the wait is zero. The delay is not relocated, it
     /// is removed.
+    ///
+    /// A loosening or disarm spends `schedule(Ad(ad_id), set_guard_rail, [ad_id, guard_rail])` for
+    /// exactly these values: a schedule for one loosening authorizes that one, not any loosening,
+    /// and a disarm needs a schedule committed to `None`.
     pub fn set_guard_rail(
         env: Env,
         ad_id: String,
@@ -247,7 +264,14 @@ impl AgentAccount {
             (Some(cur), Some(next)) => !policy::is_tightening(cur, next),
         };
         if loosening {
-            spend_schedule(&env, &ad_id, &policy::set_guard_rail(&env), 0, None, now)?;
+            let args: Vec<Val> = vec![&env, ad_id.to_val(), guard_rail.into_val(&env)];
+            spend(
+                &env,
+                &Scope::Ad(ad_id.clone()),
+                &policy::set_guard_rail(&env),
+                &args,
+                now,
+            )?;
         }
 
         match guard_rail {
@@ -295,10 +319,10 @@ impl AgentAccount {
                     // lands after the owner arms a 7-day guard. Only a delay that rises re-stamps:
                     // a threshold-only tightening leaves pending clocks alone.
                     if armed.delay > ad_delay_before {
-                        policy::restamp_ad_schedules(&env, &ad_id, now + armed.delay);
+                        policy::restamp(&env, &Scope::Ad(ad_id.clone()), now + armed.delay);
                     }
                     if armed.delay > account_delay_before {
-                        policy::restamp_account_schedules(&env, now + armed.delay);
+                        policy::restamp(&env, &Scope::Account, now + armed.delay);
                     }
                 }
                 events::GuardRailSet {
@@ -326,81 +350,54 @@ impl AgentAccount {
         Ok(())
     }
 
-    /// Owner-only. Announce an extractive call and start its clock.
+    /// Owner-only. Announce a delayed call and start its clock.
     ///
-    /// The account cannot delay a call — `__check_auth` answers yes or no — so the timelock is two
-    /// transactions: this one, then the call itself once the delay has elapsed. `amount` and `to`
-    /// are stored and later compared exactly, or a schedule for a small withdrawal would authorize
-    /// a large one, or one to a different address.
-    pub fn schedule_extractive(
+    /// The account cannot delay a call (`__check_auth` answers yes or no), so the timelock is two
+    /// transactions: this one, then the call itself once the delay has elapsed. `args` is the exact
+    /// argument list of that call, in call order; only `args_commitment(args)` is stored, and the
+    /// call must match it. Per scope:
+    ///   - `Ad(ad_id)`: `withdraw_from_ad [ad_id, amount, to]`, `close_ad [ad_id, to]`,
+    ///     `lock_for_order [order]`, `set_guard_rail [ad_id, Option<GuardRail>]`; timed by that
+    ///     ad's guardrail.
+    ///   - `Account`: `upgrade [new_wasm_hash]`, and the loosening `set_policy` /
+    ///     `set_account_limit` / `set_targets` with their own arguments; timed by the longest delay
+    ///     and shortest window across every guarded ad (D6).
+    ///
+    /// One pending row per (scope, action); a new one replaces it.
+    pub fn schedule(
         env: Env,
-        ad_id: String,
+        scope: Scope,
         action: Symbol,
-        amount: u128,
-        to: Address,
+        args: Vec<Val>,
     ) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
-        let withdraw = policy::withdraw_from_ad(&env);
-        let close = policy::close_ad(&env);
-        let guard_change = policy::set_guard_rail(&env);
-        if action != withdraw && action != close && action != guard_change {
+        if !policy::actions_for(&env, &scope).contains(&action) {
             return Err(AccountError::ActionNotAllowed);
         }
-        // Only `withdraw_from_ad` has an amount to match. Accepting one for the others would store
-        // a row that can never be spent, while the event published it as though it meant something.
-        if action != withdraw && amount != 0 {
-            return Err(AccountError::BadGuardRail);
-        }
-        let g = guard_rail_for_schedule(&env, &ad_id)?;
-        let (ready_at, expires_at) = window_from_now(&env, g.delay, g.window)?;
-        let s = policy::Schedule {
-            amount,
-            to: to.clone(),
-            ready_at,
-            expires_at,
+        let (delay, window) = match &scope {
+            Scope::Ad(ad_id) => {
+                let g = guard_rail_for_schedule(&env, ad_id)?;
+                (g.delay, g.window)
+            }
+            Scope::Account => policy::account_timelock(&env)?,
         };
-        policy::set_schedule(&env, &ad_id, &action, &s);
-        events::ExtractiveScheduled {
-            ad_id,
-            action,
-            amount,
-            to,
-            ready_at,
-            expires_at,
-        }
-        .publish(&env);
-        Ok(())
-    }
-
-    /// Owner-only. Schedule an above-threshold owner `lock_for_order` on a guarded ad (C-32).
-    ///
-    /// `amount` is the ad-side amount the escrow will lock and `commitment` is
-    /// `sha256(XDR(ScVal::Vec([order])))`, so the schedule authorizes that one order and nothing
-    /// else. One pending lock per ad; a new one replaces it. Cancel with `cancel_extractive`.
-    pub fn schedule_lock(
-        env: Env,
-        ad_id: String,
-        amount: u128,
-        commitment: BytesN<32>,
-    ) -> Result<(), AccountError> {
-        policy::get_owner(&env).require_auth();
-        proofbridge_core::ttl::extend_instance(&env);
-        let g = guard_rail_for_schedule(&env, &ad_id)?;
-        let (ready_at, expires_at) = window_from_now(&env, g.delay, g.window)?;
-        policy::set_lock_schedule(
+        let (ready_at, expires_at) = window_from_now(&env, delay, window)?;
+        let commitment = policy::args_commitment(&env, &args);
+        policy::set_schedule(
             &env,
-            &ad_id,
-            &BoundSchedule {
+            &scope,
+            &action,
+            &Schedule {
                 commitment: commitment.clone(),
-                amount,
                 ready_at,
                 expires_at,
             },
         );
-        events::LockScheduled {
-            ad_id,
-            amount,
+        events::Scheduled {
+            scope,
+            action,
+            args,
             commitment,
             ready_at,
             expires_at,
@@ -409,83 +406,25 @@ impl AgentAccount {
         Ok(())
     }
 
-    /// Owner-only. Stand a schedule down — the lever an owner reaches for on seeing an
-    /// `ExtractiveScheduled` event they did not cause. `lock_for_order` cancels the ad's lock
-    /// schedule.
-    pub fn cancel_extractive(env: Env, ad_id: String, action: Symbol) -> Result<(), AccountError> {
+    /// Owner-only. Stand a schedule down: the lever an owner reaches for on seeing a `Scheduled`
+    /// event they did not cause.
+    pub fn cancel(env: Env, scope: Scope, action: Symbol) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
         // Existence checked, so the audit trail this event exists for does not fill with
         // cancellations of schedules that were never made.
-        if action == policy::lock_for_order(&env) {
-            if policy::get_lock_schedule(&env, &ad_id).is_none() {
-                return Err(AccountError::NotScheduled);
-            }
-            policy::clear_lock_schedule(&env, &ad_id);
-        } else {
-            if policy::get_schedule(&env, &ad_id, &action).is_none() {
-                return Err(AccountError::NotScheduled);
-            }
-            policy::clear_schedule(&env, &ad_id, &action);
-        }
-        events::ExtractiveCancelled { ad_id, action }.publish(&env);
-        Ok(())
-    }
-
-    /// Owner-only. Announce an account-wide change (D6): `upgrade` (commitment = the new wasm
-    /// hash), or a loosening `set_policy` / `set_account_limit` / `set_targets` (commitment =
-    /// `sha256(XDR(ScVal::Vec(args)))` of that call). The delay is the longest and the window the
-    /// shortest across every guarded ad. One pending row per action; a new one replaces it.
-    pub fn schedule_account_extractive(
-        env: Env,
-        action: Symbol,
-        commitment: BytesN<32>,
-    ) -> Result<(), AccountError> {
-        policy::get_owner(&env).require_auth();
-        proofbridge_core::ttl::extend_instance(&env);
-        if !policy::account_actions(&env).contains(&action) {
-            return Err(AccountError::ActionNotAllowed);
-        }
-        let (delay, window) = policy::account_timelock(&env)?;
-        let (ready_at, expires_at) = window_from_now(&env, delay, window)?;
-        policy::set_account_schedule(
-            &env,
-            &action,
-            &BoundSchedule {
-                commitment: commitment.clone(),
-                amount: 0,
-                ready_at,
-                expires_at,
-            },
-        );
-        events::AccountExtractiveScheduled {
-            action,
-            commitment,
-            ready_at,
-            expires_at,
-        }
-        .publish(&env);
-        Ok(())
-    }
-
-    /// Owner-only. Stand an account-wide schedule down.
-    pub fn cancel_account_extractive(env: Env, action: Symbol) -> Result<(), AccountError> {
-        policy::get_owner(&env).require_auth();
-        proofbridge_core::ttl::extend_instance(&env);
-        if policy::get_account_schedule(&env, &action).is_none() {
+        if policy::get_schedule(&env, &scope, &action).is_none() {
             return Err(AccountError::NotScheduled);
         }
-        policy::clear_account_schedule(&env, &action);
-        events::AccountExtractiveCancelled { action }.publish(&env);
+        policy::clear_schedule(&env, &scope, &action);
+        events::Cancelled { scope, action }.publish(&env);
         Ok(())
     }
 
-    pub fn lock_schedule(env: Env, ad_id: String) -> Option<BoundSchedule> {
-        policy::get_lock_schedule(&env, &ad_id)
-    }
-
-    pub fn account_schedule(env: Env, action: Symbol) -> Option<BoundSchedule> {
-        policy::get_account_schedule(&env, &action)
+    /// The pending schedule for (scope, action), if any. Named apart from `schedule` because
+    /// Soroban exports are flat names.
+    pub fn scheduled(env: Env, scope: Scope, action: Symbol) -> Option<Schedule> {
+        policy::get_schedule(&env, &scope, &action)
     }
 
     pub fn guard_rail(env: Env, ad_id: String) -> Option<GuardRail> {
@@ -494,10 +433,6 @@ impl AgentAccount {
 
     pub fn guarded_ads(env: Env) -> Vec<String> {
         policy::guarded_ads(&env)
-    }
-
-    pub fn schedule(env: Env, ad_id: String, action: Symbol) -> Option<policy::Schedule> {
-        policy::get_schedule(&env, &ad_id, &action)
     }
 
     /// The canonical fingerprint of a **live** policy — the value the EVM module stores for the same
@@ -528,15 +463,22 @@ impl AgentAccount {
     }
 
     /// Owner-only. Replaces this account's code; storage (owner, targets, policies) stays.
-    /// While any ad is guarded it needs a matured `upgrade` schedule naming exactly this wasm
-    /// hash (C-5). Call `migrate` next: the swap lands after this call returns, so a version
+    /// While any ad is guarded it needs a matured `schedule(Account, upgrade, [new_wasm_hash])`
+    /// for exactly this hash (C-5). Call `migrate` next: the swap lands after this call returns, so a version
     /// written here would be the old code's (C-40).
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
         if policy::any_guarded(&env) {
             let now = env.ledger().timestamp();
-            spend_account_schedule(&env, &policy::act_upgrade(&env), &new_wasm_hash, now)?;
+            let args: Vec<Val> = vec![&env, new_wasm_hash.to_val()];
+            spend(
+                &env,
+                &Scope::Account,
+                &policy::act_upgrade(&env),
+                &args,
+                now,
+            )?;
         }
         env.deployer()
             .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
@@ -545,8 +487,7 @@ impl AgentAccount {
     }
 
     /// Owner-only. Runs under the new code after `upgrade` and moves the schema marker to what
-    /// this code expects. Policies migrate lazily on read (`policy::get_policy`); a marker newer
-    /// than this code is a downgrade and is refused.
+    /// this code expects. A marker newer than this code is a downgrade and is refused.
     pub fn migrate(env: Env) -> Result<u32, AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
