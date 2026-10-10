@@ -142,6 +142,14 @@ abstract contract AgentPolicyBase is RhinestoneModuleKit, Test {
         return abi.encodeCall(IAdManager.lockForOrder, (orderParams(amount)));
     }
 
+    /// @dev A distinct order: the module queues one identical operation per transaction, as the
+    ///      escrow locks one order hash, so several locks in one bundle need several salts.
+    function lockCall(uint256 amount, uint256 salt) internal view returns (bytes memory) {
+        IAdManager.OrderParams memory p = orderParams(amount);
+        p.salt = salt;
+        return abi.encodeCall(IAdManager.lockForOrder, (p));
+    }
+
     /*//////////////////////////////////////////////////////////////
                                EXECUTION
     //////////////////////////////////////////////////////////////*/
