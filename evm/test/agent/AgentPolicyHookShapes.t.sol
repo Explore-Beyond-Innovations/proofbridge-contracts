@@ -3,7 +3,7 @@ pragma solidity ^0.8.34;
 
 import {ModuleKitHelpers, UserOpData, PackedUserOperation} from "modulekit/ModuleKit.sol";
 
-import {ProofBridgeAgentPolicy} from "src/agent/ProofBridgeAgentPolicy.sol";
+import {ProofBridgeAgentPolicy, IKernelView} from "src/agent/ProofBridgeAgentPolicy.sol";
 import {AgentPolicyBase} from "./AgentPolicyBase.t.sol";
 
 /// @dev A hook forwarder. `wide` appends `forwarder ‖ account` (Kernel's multiplexer); otherwise
@@ -117,6 +117,11 @@ contract AgentPolicyHookShapesTest is AgentPolicyBase {
         assertTrue(multiplexer != address(0), "ModuleKit mounts Kernel's hook through its multiplexer");
 
         _asAccount(abi.encodeCall(module.setTrustedForwarder, (makeAddr("wrong"))));
+        (ProofBridgeAgentPolicy.Refusal why,) =
+            module.preflight(instance.account, agentId, _agentOp(lockCall(1)).userOp.callData);
+        assertEq(
+            uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.NotMounted), "Kernel's hook for this validator is not ours"
+        );
         _asAccount(abi.encodeCall(module.setAgentGasBudget, (agentId, 2 ether)));
         assertEq(module.gasBudgetOf(instance.account, agentId), 2 ether, "an owner op through the multiplexer");
 
@@ -201,6 +206,14 @@ contract AgentPolicyHookShapesTest is AgentPolicyBase {
     /// A plain ERC-2771 forwarder appends the account alone.
     function test_aTwentyByteTrustedForwarderCharges() public {
         _asAccount(abi.encodeCall(module.setTrustedForwarder, (address(forwarder))));
+        // Kernel's install check wants its config to name the forwarder as this validator's hook.
+        if (_mount("KERNEL")) {
+            vm.mockCall(
+                instance.account,
+                abi.encodeWithSelector(IKernelView.validationConfig.selector),
+                abi.encode(uint32(0), address(forwarder))
+            );
+        }
         UserOpData memory op = _agentOp(lockCall(MAX_PER_ORDER));
         _validateAsAccount(op);
         forwarder.forward(address(module), _hookCall(op.userOp.callData), instance.account, false);
@@ -249,6 +262,27 @@ contract AgentPolicyHookShapesTest is AgentPolicyBase {
     }
 
     /*//////////////////////////////////////////////////////////////
+                       THE ACCOUNT MUST LIST THE HOOK
+    //////////////////////////////////////////////////////////////*/
+
+    /// The module's note says "both" and the account no longer has the hook. Validation asks the
+    /// account, so the agent is refused before anything runs, on every account type.
+    function test_aHookRemovedBehindTheModulesBackIsRefusedAtValidation() public {
+        _removeHookBehindTheModulesBack();
+        UserOpData memory op = _agentOp(lockCall(MAX_PER_ORDER));
+        (ProofBridgeAgentPolicy.Refusal why,) = module.preflight(instance.account, agentId, op.userOp.callData);
+        assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.NotMounted), "preflight");
+        assertEq(_validateAsAccount(op), 1, "VALIDATION_FAILED");
+    }
+
+    /// ...and a correct mount passes the same check on every account type.
+    function test_aCorrectMountPassesTheInstallCheck() public {
+        (ProofBridgeAgentPolicy.Refusal why,) =
+            module.preflight(instance.account, agentId, _agentOp(lockCall(1)).userOp.callData);
+        assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.None));
+    }
+
+    /*//////////////////////////////////////////////////////////////
                      BATCHES WAIT FOR THE HOOK'S PROOF
     //////////////////////////////////////////////////////////////*/
 
@@ -282,7 +316,7 @@ contract AgentPolicyHookShapesTest is AgentPolicyBase {
     /// batch, then the agent pauses.
     function test_aHookThatNeverChargesAllowsThreeSingleTradesAndNoBatch() public {
         _asAccount(abi.encodeCall(module.setAgentPolicy, (agentId, defaultPolicy())));
-        _removeHookBehindTheModulesBack();
+        _silenceTheHook();
 
         UserOpData memory batch = _agentBatch(_batch(5, MAX_PER_ORDER));
         instance.expect4337Revert();

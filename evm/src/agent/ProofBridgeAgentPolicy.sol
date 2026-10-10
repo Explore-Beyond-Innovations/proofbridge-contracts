@@ -18,6 +18,19 @@ import {
     VALIDATION_FAILED
 } from "./interfaces/IERC7579Module.sol";
 
+/// @dev The two account reads `_hookMounted` makes. ERC-7579's, and Kernel's per-validator config
+///      (`ValidationConfig { uint32 nonce; IHook hook; }`).
+interface IERC7579AccountView {
+    function isModuleInstalled(uint256 moduleTypeId, address module, bytes calldata additionalContext)
+        external
+        view
+        returns (bool);
+}
+
+interface IKernelView {
+    function validationConfig(bytes21 vId) external view returns (uint32 nonce, address hook);
+}
+
 /**
  * @title ProofBridgeAgentPolicy
  * @author Proofbridge
@@ -216,7 +229,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
     /// @notice The hook multiplexer an account routes its single hook slot through, if it uses one.
     ///         ERC-7579 gives an account one hook, so a maker who already runs one mounts ours
     ///         behind a multiplexer and the account arrives appended to the calldata instead of as
-    ///         `msg.sender`. Read only during execution, never during validation.
+    ///         `msg.sender`. Validation reads it only to check the account mounted the hook (Kernel).
     mapping(address account => address forwarder) public trustedForwarder;
 
     /// @notice The policy's identity, and its liveness switch: zero means no agent here. Revoking
@@ -780,6 +793,12 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
             gate.refusal = Refusal.NotMounted;
             return gate;
         }
+        // The note above is the module's; this asks the account. The hook running is the proof, so
+        // the hook itself does not ask.
+        if (mode != Mode.Commit && !_hookMounted(account)) {
+            gate.refusal = Refusal.NotMounted;
+            return gate;
+        }
         gate.epoch = _epoch[account];
         gate.aKey = _agentKey(gate.epoch, agentId);
         if (_fingerprint[gate.aKey][account] == bytes32(0)) {
@@ -809,6 +828,36 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
     ///         and policy version.
     function hookProvenOf(address account, bytes32 agentId) external view returns (bool) {
         return _gate(account, agentId, Mode.Commit).hookProven;
+    }
+
+    /**
+     * @dev Does the account itself report this module as its hook? ERC-7579's `isModuleInstalled`,
+     *      with Safe7579's global-hook context (the reference account and Nexus ignore it; Safe
+     *      reverts without it). Kernel answers false for every hook and mounts ours behind its
+     *      multiplexer, so there the hook its config names for this validator must be the forwarder
+     *      the account nominated. Whether that multiplexer still lists this module is in its own
+     *      storage, outside what validation may read; the tally and `HookNotProven` bound that case.
+     *      Anything that reverts or answers oddly is "not mounted".
+     */
+    function _hookMounted(address account) internal view returns (bool) {
+        (bool ok, bytes memory ret) = account.staticcall(
+            abi.encodeCall(
+                IERC7579AccountView.isModuleInstalled,
+                (MODULE_TYPE_HOOK, address(this), abi.encode(uint8(0), bytes4(0)))
+            )
+        );
+        if (ok && ret.length >= 32 && abi.decode(ret, (uint256)) == 1) return true;
+        address forwarder = trustedForwarder[account];
+        if (forwarder == address(0)) return false;
+        (ok, ret) = account.staticcall(
+            abi.encodeCall(IKernelView.validationConfig, (bytes21(abi.encodePacked(bytes1(0x01), address(this)))))
+        );
+        if (!ok || ret.length < 64) return false;
+        uint256 hook;
+        assembly ("memory-safe") {
+            hook := mload(add(ret, 64))
+        }
+        return hook == uint256(uint160(forwarder));
     }
 
     function uncountedOf(address account, bytes32 agentId) external view returns (uint256) {

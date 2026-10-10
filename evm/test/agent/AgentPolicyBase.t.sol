@@ -221,6 +221,12 @@ abstract contract AgentPolicyBase is RhinestoneModuleKit, Test {
         assertTrue(module.isInitialized(instance.account), "the note still says installed");
     }
 
+    /// @dev The hook stays on the account and runs, but charges nothing: a calldata shape it cannot
+    ///      read. (Removing it from the account outright is refused at validation now.)
+    function _silenceTheHook() internal {
+        vm.mockCall(address(module), abi.encodeWithSelector(module.preCheck.selector), abi.encode(bytes("")));
+    }
+
     /// @dev `_version`, `_hookInstalls` and `_hookProven` in the module's layout, for the suites that
     ///      are about batches and not about earning them: `_markHookProven` checks the module's own
     ///      view agrees afterwards, so a layout change fails loudly rather than writing nowhere.
