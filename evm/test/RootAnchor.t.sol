@@ -220,28 +220,53 @@ contract RootAnchorTest is Test {
               the pending state under a quorum (A1, A2, A6)
     //////////////////////////////////////////////////////////////*/
 
-    /// A6: two honest publishers read the same root of a quiet chain at different ledgers. The
-    /// earliest reading is kept (audit F11): both are true, and only the earliest is safe to keep.
-    function test_pendingRoot_acceptsAnySeq_recordsTheEarliest() public {
+    /// The first approval sets a pending root's sequence; a later approval naming another value is
+    /// refused and adds nothing. Publishers send the root's own emission ledger, so honest ones agree.
+    function test_pendingRoot_laterApprovalMustMatchTheFirst() public {
         _three(2);
         vm.prank(s1);
         ra.anchor(CHAIN, ROOT_A, 100);
+
         vm.prank(s2);
-        ra.anchor(CHAIN, ROOT_A, 150); // higher than pending: accepted, earliest kept
+        vm.expectRevert(abi.encodeWithSelector(IRootAnchor.RootAnchor__SeqMismatch.selector, 100, 150));
+        ra.anchor(CHAIN, ROOT_A, 150);
+        vm.prank(s2);
+        vm.expectRevert(abi.encodeWithSelector(IRootAnchor.RootAnchor__SeqMismatch.selector, 100, 99));
+        ra.anchor(CHAIN, ROOT_A, 99);
+        assertEq(ra.anchorOf(CHAIN, ROOT_A).approvals, 1, "a refused approval adds nothing");
+
+        vm.prank(s2);
+        ra.anchor(CHAIN, ROOT_A, 100);
         assertTrue(ra.isAnchored(CHAIN, ROOT_A));
         assertEq(ra.anchorOf(CHAIN, ROOT_A).ledgerSeq, 100);
         assertEq(ra.latestSeq(CHAIN), 100);
-
-        vm.prank(s1);
-        ra.anchor(CHAIN, ROOT_B, 200);
-        vm.prank(s3);
-        ra.anchor(CHAIN, ROOT_B, 180); // lower than pending, above latest: accepted, earliest kept
-        assertTrue(ra.isAnchored(CHAIN, ROOT_B));
-        assertEq(ra.anchorOf(CHAIN, ROOT_B).ledgerSeq, 180);
     }
 
-    /// Audit F11: one signer below the threshold cannot choose the sequence the quorum records.
-    function test_F11_oneSignerCannotPinTheSequence() public {
+    /// Threshold 3: the mismatching second approval does not reach the threshold, so only the match
+    /// check can refuse it. Without the check it would count, and the quorum would complete on two
+    /// matching readings plus one that disagreed.
+    function test_threshold3_mismatchIsRefusedBelowTheThreshold() public {
+        _three(3);
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_A, 600);
+        vm.prank(s2);
+        vm.expectRevert(abi.encodeWithSelector(IRootAnchor.RootAnchor__SeqMismatch.selector, 600, 499));
+        ra.anchor(CHAIN, ROOT_A, 499);
+        assertEq(ra.anchorOf(CHAIN, ROOT_A).approvals, 1);
+
+        vm.prank(s3);
+        ra.anchor(CHAIN, ROOT_A, 600);
+        assertFalse(ra.isAnchored(CHAIN, ROOT_A), "two of three: still pending");
+        vm.prank(s2);
+        ra.anchor(CHAIN, ROOT_A, 600);
+        assertTrue(ra.isAnchored(CHAIN, ROOT_A));
+        assertEq(ra.latestSeq(CHAIN), 600);
+    }
+
+    /// One signer below the threshold that approves first with the maximum cannot get it recorded:
+    /// the honest approval is refused, `latestSeq` does not move, later roots keep anchoring, and a
+    /// revoke frees the stuck root to anchor at the honest value.
+    function test_oneSignerCannotPinTheSequence() public {
         _three(2);
         vm.prank(s1);
         ra.anchor(CHAIN, ROOT_A, 1000);
@@ -251,9 +276,10 @@ contract RootAnchorTest is Test {
         vm.prank(s3);
         ra.anchor(CHAIN, ROOT_B, type(uint64).max); // first approval names the maximum
         vm.prank(s1);
+        vm.expectRevert(abi.encodeWithSelector(IRootAnchor.RootAnchor__SeqMismatch.selector, type(uint64).max, 1001));
         ra.anchor(CHAIN, ROOT_B, 1001);
-        assertTrue(ra.isAnchored(CHAIN, ROOT_B));
-        assertEq(ra.latestSeq(CHAIN), 1001, "the honest reading is recorded");
+        assertFalse(ra.isAnchored(CHAIN, ROOT_B));
+        assertEq(ra.latestSeq(CHAIN), 1000, "latestSeq never saw the pinned value");
 
         bytes32 rootC = bytes32(uint256(0xC3));
         vm.prank(s1);
@@ -261,16 +287,37 @@ contract RootAnchorTest is Test {
         vm.prank(s2);
         ra.anchor(CHAIN, rootC, 1002);
         assertTrue(ra.isAnchored(CHAIN, rootC), "the route keeps anchoring");
+
+        // The revoke resets the stuck root's value with its approvals.
+        vm.prank(admin);
+        ra.revokeAnchor(CHAIN, ROOT_B);
+        bytes32 rootD = bytes32(uint256(0xD4));
+        vm.prank(s1);
+        ra.anchor(CHAIN, rootD, 1003);
+        vm.prank(s2);
+        ra.anchor(CHAIN, rootD, 1003);
+        assertEq(ra.anchorOf(CHAIN, ROOT_B).ledgerSeq, 0, "revoke cleared the recorded value");
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_B, 1004);
+        vm.prank(s2);
+        ra.anchor(CHAIN, ROOT_B, 1004);
+        assertTrue(ra.isAnchored(CHAIN, ROOT_B));
+        assertEq(ra.anchorOf(CHAIN, ROOT_B).ledgerSeq, 1004);
     }
 
-    /// Audit F11: a signer that already approved cannot raise the pending value on a repeat call.
-    function test_F11_repeatApprovalCannotRaiseTheSequence() public {
+    /// A signer that already approved cannot move the value on a repeat call, up or down.
+    function test_repeatApprovalCannotMoveTheSequence() public {
         _three(2);
         vm.prank(s1);
         ra.anchor(CHAIN, ROOT_A, 1001);
         vm.prank(s1);
+        vm.expectRevert(abi.encodeWithSelector(IRootAnchor.RootAnchor__SeqMismatch.selector, 1001, type(uint64).max));
         ra.anchor(CHAIN, ROOT_A, type(uint64).max);
-        assertEq(ra.anchorOf(CHAIN, ROOT_A).ledgerSeq, 1001);
+        vm.prank(s1);
+        vm.expectRevert(abi.encodeWithSelector(IRootAnchor.RootAnchor__SeqMismatch.selector, 1001, 1000));
+        ra.anchor(CHAIN, ROOT_A, 1000);
+        vm.prank(s1);
+        ra.anchor(CHAIN, ROOT_A, 1001); // a matching retry is a harmless repeat
         assertEq(ra.anchorOf(CHAIN, ROOT_A).approvals, 1, "a repeat approval does not count");
 
         vm.prank(s2);
@@ -278,22 +325,25 @@ contract RootAnchorTest is Test {
         assertEq(ra.latestSeq(CHAIN), 1001);
     }
 
-    /// Audit F11: a lowered value must stay above `latestSeq`, so no signer can sink a pending root
-    /// below the threshold re-check and strand it.
-    function test_F11_loweredSequenceMustStayAboveLatest() public {
+    /// A signer rotation resets the recorded value with the approvals: the new set's first approval
+    /// sets it fresh, so a value named by a rotated-out signer binds nobody.
+    function test_rotationResetsTheRecordedSequence() public {
         _three(2);
-        vm.prank(s1);
-        ra.anchor(CHAIN, ROOT_A, 500);
-        vm.prank(s2);
-        ra.anchor(CHAIN, ROOT_A, 500);
+        vm.prank(s3);
+        ra.anchor(CHAIN, ROOT_A, 900); // s3 names a wrong value, then is rotated out
+
+        address[] memory two = new address[](2);
+        two[0] = s1;
+        two[1] = s2;
+        _set(two, 2);
 
         vm.prank(s1);
-        ra.anchor(CHAIN, ROOT_B, 600);
-        vm.prank(s3);
-        vm.expectRevert(abi.encodeWithSelector(IRootAnchor.RootAnchor__SeqNotMonotonic.selector, 500, 499));
-        ra.anchor(CHAIN, ROOT_B, 499);
-        assertEq(ra.anchorOf(CHAIN, ROOT_B).ledgerSeq, 600);
-        assertEq(ra.anchorOf(CHAIN, ROOT_B).approvals, 1, "a refused lowering adds no approval");
+        ra.anchor(CHAIN, ROOT_A, 500);
+        assertEq(ra.anchorOf(CHAIN, ROOT_A).ledgerSeq, 500);
+        vm.prank(s2);
+        ra.anchor(CHAIN, ROOT_A, 500);
+        assertTrue(ra.isAnchored(CHAIN, ROOT_A));
+        assertEq(ra.latestSeq(CHAIN), 500);
     }
 
     /// A1: a rotated-out notary's approvals stop counting.

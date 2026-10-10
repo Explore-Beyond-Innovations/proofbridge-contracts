@@ -19,10 +19,11 @@ import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
  *         module or the escrows. Settlement never touches this — co-signed roots keep their own oracle.
  * @dev Approvals accumulate per authenticated signer up to `threshold` (2.3f D1) and count only under
  *      the current signer set and the root's current generation, so rotating a compromised notary
- *      out or revoking a root discards its work. Any ledger sequence is accepted for a pending root
- *      and the highest is recorded (independent publishers read a quiet chain's root at different
- *      ledgers); monotonicity is checked at the first approval and again when the threshold is
- *      reached. {isAnchored} is never pausable: it sits on the refund path, and a pause must not be
+ *      out or revoking a root discards its work. The first approval sets a pending root's ledger
+ *      sequence and every later approval must name the same value (publishers send the root's own
+ *      emission ledger), so no signer below the threshold can move it; a revoke or a rotation resets
+ *      it with the approvals. Monotonicity is checked at the first approval and again when the
+ *      threshold is reached. {isAnchored} is never pausable: it sits on the refund path, and a pause must not be
  *      able to freeze a claim (D4). The delay is read at query time, so lowering it un-delays anchored
  *      roots retroactively — an admin power, deliberately.
  */
@@ -114,11 +115,9 @@ contract RootAnchor is IRootAnchor, TwoStepAdmin, Pausable {
         if (a.approvals == 0) {
             if (monotonic && ledgerSeq <= latest) revert RootAnchor__SeqNotMonotonic(latest, ledgerSeq);
             a.ledgerSeq = ledgerSeq;
-        } else if (ledgerSeq < a.ledgerSeq) {
-            // Publishers read one root at different ledgers on a quiet chain (A6); keep the earliest,
-            // never at or below `latest`, so no single signer can raise or sink the recorded value.
-            if (monotonic && ledgerSeq <= latest) revert RootAnchor__SeqNotMonotonic(latest, ledgerSeq);
-            a.ledgerSeq = ledgerSeq;
+        } else if (ledgerSeq != a.ledgerSeq) {
+            // The first approval sets the value; no later signer, repeat or not, can move it.
+            revert RootAnchor__SeqMismatch(a.ledgerSeq, ledgerSeq);
         }
 
         uint64 stamp = _stamp(a.setEpoch, a.gen);

@@ -10,6 +10,7 @@ pragma solidity ^0.8.34;
  */
 interface IRootAnchor {
     struct Anchor {
+        /// Set by the first approval under (`setEpoch`, `gen`); every later approval must match it.
         uint64 ledgerSeq;
         uint64 anchoredAt;
         uint32 approvals;
@@ -32,6 +33,8 @@ interface IRootAnchor {
     error RootAnchor__SeqNotMonotonic(uint64 latest, uint64 given);
     error RootAnchor__DelayTooLong(uint64 max, uint64 given);
     error RootAnchor__NoSuchAnchor();
+    /// @notice A later approval named a different ledger sequence than the pending root's first one.
+    error RootAnchor__SeqMismatch(uint64 recorded, uint64 given);
 
     // consumer surface
     function isAnchored(uint256 sourceChainId, bytes32 root) external view returns (bool);
