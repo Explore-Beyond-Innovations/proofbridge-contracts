@@ -126,7 +126,9 @@ impl ProofBridgeMerkleManagerContract {
     ///
     /// Only the admin can call this function. Managers are authorized
     /// to append order hashes to the MMR. No pause of its own: every escrow
-    /// path that appends is gated by that escrow; unsetting a manager stops it.
+    /// path that appends is gated by that escrow's pause. The Registrar, the
+    /// one non-escrow appender (a manager only from proof registration's T3
+    /// flip), has none: `set_manager(registrar, false)` is its brake.
     pub fn set_manager(env: Env, manager: Address, status: bool) -> Result<(), MerkleError> {
         if !storage::is_initialized(&env) {
             return Err(MerkleError::NotInitialized);

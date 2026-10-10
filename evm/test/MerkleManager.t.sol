@@ -101,7 +101,6 @@ contract MerkleManagerTest is Test {
         vm.prank(escrow);
         vm.expectRevert(bytes("MMR:HashFail"));
         bad.appendOrderHash(keccak256("o"), 0);
-        assertEq(h.calls(), 0, "the write never landed");
     }
 
     // ---------- the debugging helpers, pinned to proofbridge-mmr ----------

@@ -8,8 +8,10 @@ import {IMerkleManager} from "./interfaces/IMerkleManager.sol";
 /**
  * @title MerkleManager
  * @dev Manages all order hashes for ProofBridge protocol per chain. One admin (`TwoStepAdmin`) keeps
- *      the list of managers (the escrows and the Registrar) that may append. No pause of its own:
- *      every escrow path that appends is gated by that escrow.
+ *      the list of managers that may append: the escrows, and from proof registration's T3 flip the
+ *      Registrar. No pause of its own: every escrow path that appends is gated by that escrow's
+ *      pause; the Registrar, the one non-escrow appender, has none, and `setManager(registrar,
+ *      false)` is its brake.
  */
 contract MerkleManager is IMerkleManager, TwoStepAdmin {
     using MMRPoseidon2 for MMRPoseidon2.Tree;
@@ -19,7 +21,7 @@ contract MerkleManager is IMerkleManager, TwoStepAdmin {
     // Mapping of width count to roothistory
     mapping(uint256 => bytes32) internal rootHistory;
 
-    /// @notice Who may append: the escrows and the Registrar.
+    /// @notice Who may append: the escrows (and the Registrar once proof registration is on).
     mapping(address => bool) public isManager;
 
     // Errors

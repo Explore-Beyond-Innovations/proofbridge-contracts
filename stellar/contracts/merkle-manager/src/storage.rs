@@ -15,7 +15,6 @@ const KEY_SIZE: Symbol = symbol_short!("size");
 const KEY_WIDTH: Symbol = symbol_short!("width");
 /// Key for the admin address
 const KEY_ADMIN: Symbol = symbol_short!("admin");
-/// Pause flag for every state-changing entry point.
 /// Pending admin for the two-step handover.
 const KEY_PENDADM: Symbol = symbol_short!("pendadm");
 /// Key for initialization flag
