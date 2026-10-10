@@ -1200,7 +1200,7 @@ fn escrow_fixture() -> Escrow {
         &Address::generate(&env),
         &2_000_000_002_u128,
     );
-    am.set_chain(&order_chain_id, &portal, &true);
+    am.set_chain(&order_chain_id, &portal);
     am.set_token_route(&ad_token, &order_token, &order_chain_id);
     // 2.3e: timing is fail-closed; the smallest legal clocks.
     am.set_route_timing(
@@ -3756,7 +3756,7 @@ fn test_agent_lock_metering() {
         &Address::generate(&env),
         &2_000_000_002_u128,
     );
-    am.set_chain(&order_chain_id, &portal, &true);
+    am.set_chain(&order_chain_id, &portal);
     am.set_token_route(&ad_token, &order_token, &order_chain_id);
     am.set_route_timing(
         &order_chain_id,

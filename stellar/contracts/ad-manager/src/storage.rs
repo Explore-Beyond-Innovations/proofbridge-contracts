@@ -16,8 +16,6 @@ pub use proofbridge_core::escrow_storage::*;
 const KEY_CHAINS: Symbol = symbol_short!("chains");
 /// Prefix for ads
 const KEY_ADS: Symbol = symbol_short!("ads");
-/// Prefix for ad IDs
-const KEY_AD_IDS: Symbol = symbol_short!("adids");
 /// The key registry consulted when an ad's settlement signer is set (2.3c D2).
 const KEY_KEYREG: Symbol = symbol_short!("keyreg");
 /// #465: the current key-registry epoch, and the registry each epoch opened with.
@@ -76,20 +74,6 @@ pub fn get_ad(env: &Env, ad_id: &String) -> Option<Ad> {
 pub fn set_ad(env: &Env, ad_id: &String, ad: &Ad) {
     let key = (KEY_ADS, ad_id.clone());
     env.storage().persistent().set(&key, ad);
-    proofbridge_core::ttl::extend_persistent(env, &key);
-}
-
-/// Check if ad ID has been used
-pub fn is_ad_id_used(env: &Env, ad_id: &String) -> bool {
-    let key = (KEY_AD_IDS, ad_id.clone());
-    env.storage().persistent().get(&key).unwrap_or(false)
-}
-
-/// The ad-id uniqueness guard. Extended for the same reason as the nullifier ledger: an archived
-/// entry reads as absent, absence reads as *unused*, so an aged-out row lets an ad id be taken twice.
-pub fn set_ad_id_used(env: &Env, ad_id: &String) {
-    let key = (KEY_AD_IDS, ad_id.clone());
-    env.storage().persistent().set(&key, &true);
     proofbridge_core::ttl::extend_persistent(env, &key);
 }
 

@@ -39,9 +39,6 @@ pub fn validate_order(env: &Env, params: &OrderParams) -> Result<(), OrderPortal
 
     let chain_info =
         storage::get_chain(env, params.ad_chain_id).ok_or(OrderPortalError::AdChainNotSupported)?;
-    if !chain_info.supported {
-        return Err(OrderPortalError::AdChainNotSupported);
-    }
 
     if chain_info.ad_manager != params.ad_manager {
         return Err(OrderPortalError::AdManagerMismatch);

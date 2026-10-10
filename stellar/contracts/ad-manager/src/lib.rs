@@ -146,17 +146,16 @@ impl AdManagerContract {
         env: Env,
         order_chain_id: u128,
         order_portal: BytesN<32>,
-        supported: bool,
     ) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
 
-        if supported && auth::is_zero_bytes32(&order_portal) {
+        // A stored entry is what makes the chain supported, so it must name a counterpart.
+        if auth::is_zero_bytes32(&order_portal) {
             return Err(AdManagerError::ZeroAddress);
         }
 
         let chain_info = ChainInfo {
-            supported,
             order_portal: order_portal.clone(),
         };
         storage::set_chain(&env, order_chain_id, &chain_info);
@@ -164,7 +163,7 @@ impl AdManagerContract {
         events::ChainSet {
             chain_id: order_chain_id,
             order_portal: order_portal.clone(),
-            supported,
+            supported: true,
         }
         .publish(&env);
 
@@ -273,11 +272,7 @@ impl AdManagerContract {
             return Err(AdManagerError::TokenZeroAddress);
         }
 
-        let chain_info =
-            storage::get_chain(&env, order_chain_id).ok_or(AdManagerError::ChainNotSupported)?;
-        if !chain_info.supported {
-            return Err(AdManagerError::ChainNotSupported);
-        }
+        storage::get_chain(&env, order_chain_id).ok_or(AdManagerError::ChainNotSupported)?;
 
         storage::set_token_route(&env, &ad_token, order_chain_id, &order_token);
 
@@ -350,7 +345,8 @@ impl AdManagerContract {
         if routed_order_token.is_none() {
             return Err(AdManagerError::ChainNotSupported);
         }
-        if storage::is_ad_id_used(&env, &ad_id) {
+        // Ads are never deleted (`close_ad` keeps the row), so the row is the id's "taken" mark.
+        if storage::get_ad(&env, &ad_id).is_some() {
             return Err(AdManagerError::UsedAdId);
         }
 
@@ -378,7 +374,6 @@ impl AdManagerContract {
             settlement_signer: settlement_signer.clone(),
         };
         storage::set_ad(&env, &ad_id, &ad);
-        storage::set_ad_id_used(&env, &ad_id);
 
         events::AdCreated {
             ad_id: ad_id.clone(),
@@ -731,8 +726,8 @@ impl AdManagerContract {
         }
         let config = storage::get_config(&env)?;
 
-        // Permissionless (EVM parity): the recipient is hash-bound, so anyone may submit.
-        Self::assert_ad_decimals(&env, &params, &config.w_native_token)?;
+        // Permissionless (EVM parity): the recipient is hash-bound, so anyone may submit. Decimals
+        // were checked at the lock; the payout scales by the signed, hash-bound values.
 
         let contract_bytes = eip712::contract_address_to_bytes32(&env);
         let order_hash = eip712::hash_order(&env, &params, config.chain_id, &contract_bytes);
@@ -776,13 +771,8 @@ impl AdManagerContract {
             return Err(AdManagerError::RootNotValid);
         }
 
-        let public_inputs = cross_contract::build_public_inputs(
-            &env,
-            &config.merkle_manager,
-            &nullifier_hash,
-            &target_root,
-            &order_hash,
-        )?;
+        let public_inputs =
+            cross_contract::build_public_inputs(&env, &nullifier_hash, &target_root, &order_hash)?;
         cross_contract::verify_proof(&env, &config.verifier, &public_inputs, &proof)?;
 
         storage::set_nullifier_used(&env, &nullifier_hash);
@@ -1012,11 +1002,7 @@ impl AdManagerContract {
         Self::require_status(&env, &order_hash, Status::None)?;
         Self::require_reached(&env, params.deadline)?;
         // D5: a lock needs `deadline >= now + min_window`, so past the deadline none can follow.
-        let chain = storage::get_chain(&env, params.order_chain_id)
-            .ok_or(AdManagerError::ChainNotSupported)?;
-        if !chain.supported {
-            return Err(AdManagerError::ChainNotSupported);
-        }
+        storage::get_chain(&env, params.order_chain_id).ok_or(AdManagerError::ChainNotSupported)?;
         Self::timing(&env, params.order_chain_id)?;
 
         storage::set_order_status(&env, &order_hash, Status::Cancelled);
@@ -1046,7 +1032,6 @@ impl AdManagerContract {
     ) -> Result<(), AdManagerError> {
         Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
-        Self::assert_ad_decimals(&env, &params, &config.w_native_token)?;
         let order_hash = Self::order_hash(&env, &config, &params);
         Self::require_presentable(&env, &order_hash)?;
         Self::require_anchored(&env, params.order_chain_id, &target_root)?;

@@ -37,14 +37,12 @@ pub fn verify_proof(
 /// Uses chain_flag=1 for destination/ad chain.
 pub fn build_public_inputs(
     env: &Env,
-    merkle_manager: &Address,
     nullifier_hash: &BytesN<32>,
     target_root: &BytesN<32>,
     order_hash: &BytesN<32>,
 ) -> Result<Bytes, AdManagerError> {
     Ok(proofbridge_core::cross_contract::build_public_inputs(
         env,
-        merkle_manager,
         nullifier_hash,
         target_root,
         order_hash,
