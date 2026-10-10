@@ -61,6 +61,9 @@ abstract contract AgentPolicyBase is RhinestoneModuleKit, Test {
         _asAccount(abi.encodeCall(module.setAgentPolicy, (agentId, defaultPolicy())));
         // Generous: these suites are about the policy, and AgentPolicyReviewPass1 is about the budget.
         _asAccount(abi.encodeCall(module.setAgentGasBudget, (agentId, GAS_BUDGET)));
+        // As if the hook had already charged this agent once: most suites are about what a batch
+        // does, not about earning the right to send one. `AgentPolicyHookShapesTest` starts unproven.
+        _markHookProven();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -216,6 +219,34 @@ abstract contract AgentPolicyBase is RhinestoneModuleKit, Test {
         instance.uninstallModule(TYPE_HOOK, address(module), bytes.concat(bytes32(TYPE_HOOK)));
         vm.clearMockedCalls();
         assertTrue(module.isInitialized(instance.account), "the note still says installed");
+    }
+
+    /// @dev `_version`, `_hookInstalls` and `_hookProven` in the module's layout, for the suites that
+    ///      are about batches and not about earning them: `_markHookProven` checks the module's own
+    ///      view agrees afterwards, so a layout change fails loudly rather than writing nowhere.
+    uint256 internal constant VERSION_SLOT = 7;
+    uint256 internal constant HOOK_INSTALLS_SLOT = 14;
+    uint256 internal constant HOOK_PROVEN_SLOT = 15;
+
+    /// @dev What the hook records on its first charge of `id` (`hookProvenOf`), without a trade: the
+    ///      batch suites keep their exact bucket and lock counts. `AgentPolicyHookShapesTest` earns it.
+    function _markHookProven(bytes32 id) internal {
+        address a = instance.account;
+        bytes32 aKey = keccak256(abi.encode(module.epochOf(a), id));
+        uint256 version = uint256(vm.load(address(module), _nested(aKey, a, VERSION_SLOT)));
+        bytes32 vKey = keccak256(abi.encode(aKey, version));
+        uint256 installs = uint256(vm.load(address(module), keccak256(abi.encode(a, HOOK_INSTALLS_SLOT))));
+        bytes32 proofKey = keccak256(abi.encode(vKey, "hook", installs));
+        vm.store(address(module), _nested(proofKey, a, HOOK_PROVEN_SLOT), bytes32(uint256(1)));
+        assertTrue(module.hookProvenOf(a, id), "the module reads the flag where it was written");
+    }
+
+    function _markHookProven() internal {
+        _markHookProven(agentId);
+    }
+
+    function _nested(bytes32 key, address a, uint256 slot) internal pure returns (bytes32) {
+        return keccak256(abi.encode(a, keccak256(abi.encode(key, slot))));
     }
 
     function _sign(bytes32 userOpHash, uint256 key) internal pure returns (bytes memory) {

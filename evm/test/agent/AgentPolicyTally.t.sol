@@ -156,6 +156,7 @@ contract AgentPolicyTallyTest is AgentPolicyBase {
         bytes32 id2 = bytes32(uint256(uint160(agent2)));
         _asAccount(abi.encodeCall(module.setAgentPolicy, (id2, defaultPolicy())));
         _asAccount(abi.encodeCall(module.setAgentGasBudget, (id2, GAS_BUDGET)));
+        _markHookProven(id2); // the bound for a hook that went missing after proving itself
 
         vm.mockCall(address(module), abi.encodeWithSelector(module.onUninstall.selector), "");
         instance.uninstallModule(TYPE_HOOK, address(module), bytes.concat(bytes32(TYPE_HOOK)));

@@ -273,6 +273,10 @@ contract AgentPolicyParityTest is AgentPolicyBase {
     function _judge(Loaded memory step) internal {
         UserOpData memory op;
         if (step.request) {
+            // The EVM refuses a batch until its hook has charged the agent once (`HookNotProven`), a
+            // mount-health rule like the tally, not a policy one, so the shared fixture does not carry
+            // it: the hook is taken as proven here, under whatever policy version the case is on.
+            if (module.fingerprintOf(instance.account, agentId) != bytes32(0)) _markHookProven();
             // One authorization for several locks: a batch, judged whole.
             Execution[] memory calls = new Execution[](step.callData.length);
             for (uint256 i = 0; i < calls.length; ++i) {

@@ -235,6 +235,68 @@ contract AgentPolicyHookShapesTest is AgentPolicyBase {
         forwarder.forward(address(module), ownerCall, instance.account, true);
     }
 
+    /// The EntryPoint routes to `executeUserOp` only for a `callData` that starts with the wrapper,
+    /// and the account executes `callData[4:]`. A full-ABI call whose `callData` is a bare `execute`
+    /// is not what would run, so it matches nothing.
+    function test_aFullAbiCallWithoutTheWrapperPrefixMatchesNothing() public {
+        UserOpData memory op = _wrapped(lockCall(MAX_PER_ORDER, 1), 0);
+        _validateAsAccount(op);
+        op.userOp.callData = _inner(op.userOp.callData);
+        vm.prank(instance.account);
+        module.preCheck(address(0), 0, _fullAbi(op));
+        assertEq(module.agentBucket(instance.account, agentId, AD_TOKEN).lastTs, 0, "nothing charged");
+        assertEq(module.uncountedOf(instance.account, agentId), 1, "still owed");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                     BATCHES WAIT FOR THE HOOK'S PROOF
+    //////////////////////////////////////////////////////////////*/
+
+    /// A new policy version starts unproven: one single trade the hook charges, then batches.
+    function test_aBatchBeforeTheHookHasChargedTheAgentIsRefused() public {
+        _asAccount(abi.encodeCall(module.setAgentPolicy, (agentId, defaultPolicy())));
+        assertFalse(module.hookProvenOf(instance.account, agentId), "a new policy version is unproven");
+
+        UserOpData memory batch = _agentBatch(_batch(2, 1_000));
+        (ProofBridgeAgentPolicy.Refusal why,) = module.preflight(instance.account, agentId, batch.userOp.callData);
+        assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.HookNotProven), "preflight");
+        instance.expect4337Revert();
+        batch.execUserOps();
+        assertEq(escrow.locks(), 0, "the validator refuses it too");
+
+        _agentOp(lockCall(1_000, 7)).execUserOps();
+        assertTrue(module.hookProvenOf(instance.account, agentId), "the hook charged a single: proven");
+        _agentBatch(_batch(2, 1_000)).execUserOps();
+        assertEq(escrow.locks(), 3, "and batches are welcome");
+    }
+
+    /// A re-installed hook proves itself again, whatever it proved before.
+    function test_reinstallingTheHookStartsUnproven() public {
+        assertTrue(module.hookProvenOf(instance.account, agentId));
+        instance.uninstallModule(TYPE_HOOK, address(module), bytes.concat(bytes32(TYPE_HOOK)));
+        instance.installModule(TYPE_HOOK, address(module), bytes.concat(bytes32(TYPE_HOOK)));
+        assertFalse(module.hookProvenOf(instance.account, agentId), "a new hook install is unproven");
+    }
+
+    /// The bound for a mount or shape the hook never charges: `MAX_UNCOUNTED` single trades, no
+    /// batch, then the agent pauses.
+    function test_aHookThatNeverChargesAllowsThreeSingleTradesAndNoBatch() public {
+        _asAccount(abi.encodeCall(module.setAgentPolicy, (agentId, defaultPolicy())));
+        _removeHookBehindTheModulesBack();
+
+        UserOpData memory batch = _agentBatch(_batch(5, MAX_PER_ORDER));
+        instance.expect4337Revert();
+        batch.execUserOps();
+        assertEq(escrow.locks(), 0, "no batch before the hook has proven itself");
+
+        for (uint256 i = 0; i < 5; ++i) {
+            UserOpData memory op = _agentOp(lockCall(MAX_PER_ORDER, 100 + i));
+            instance.expect4337Revert();
+            op.execUserOps();
+        }
+        assertEq(escrow.locks(), 3, "three single trades, then the agent is paused");
+    }
+
     /*//////////////////////////////////////////////////////////////
                                MODE BYTES
     //////////////////////////////////////////////////////////////*/
