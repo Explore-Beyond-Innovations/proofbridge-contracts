@@ -198,41 +198,25 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         _file(p, filer);
     }
 
-    /// T-50 (disputed half): the fallback cannot open before the challenge period is really over,
-    /// and "really" counts paused seconds.
+    /// T-50 (disputed half): the no-ruling fallback cannot finalize before the challenge period is
+    /// really over, and "really" counts paused seconds.
     function test_t50_fallbackWaitsOutTheChallengePeriod() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(7);
         _file(p, filer);
 
-        uint256 until_ = dm.effectiveChallengeDeadline(h);
-        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__ChallengeOpen.selector, until_));
-        dm.claimDispute(h);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeNotResolved.selector, h));
+        adManager.finalizeDispute(p);
 
         // The challenge period alone is NOT enough: the order still has time on its own clock, and
         // no dispute path may complete before `deadline + buffer` (D3, T-50). This is the bug that
         // let any filer cancel a week-long order an hour after filing.
         vm.warp(block.timestamp + CHALLENGE + 1);
-        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__ChallengeOpen.selector, until_));
-        dm.claimDispute(h);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeNotResolved.selector, h));
+        adManager.finalizeDispute(p);
 
         _warpPastWindow(h);
-        dm.claimDispute(h); // now allowed
-    }
-
-    /// #452: once the arbiter rules, the no-ruling fallback is refused with its own error, even
-    /// after the ruling's window has passed.
-    function test_claimAfterARulingIsAlreadyRuled() public {
-        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(31);
-        _file(p, filer);
-        vm.prank(arbiter);
-        dm.resolveDispute(h, Dispute.Outcome.MutualRefund);
-
-        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__AlreadyRuled.selector, h));
-        dm.claimDispute(h);
-
-        _warpPastWindow(h);
-        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__AlreadyRuled.selector, h));
-        dm.claimDispute(h);
+        adManager.finalizeDispute(p); // now allowed: the fallback applies
+        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Resolved));
     }
 
     /// c41-J: a pause between the lock and the filing extends the bridger's unlock on this leg; the
@@ -1009,14 +993,12 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         dm.resolveDispute(h, Dispute.Outcome.MutualRefund);
     }
 
-    /// C-19: ruling, claiming or answering an order that holds no dispute names the order.
+    /// C-19: ruling an order that holds no dispute names the order.
     function test_c19_noDisputeNoRecord() public {
         bytes32 none = keccak256("never filed");
         vm.prank(arbiter);
         vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__NotDisputed.selector, none));
         dm.resolveDispute(none, Dispute.Outcome.MutualRefund);
-        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__NotDisputed.selector, none));
-        dm.claimDispute(none);
     }
 
     /// C-19: only an allowed escrow opens a dispute, and the module holds one per order even if an

@@ -628,7 +628,7 @@ mod validation_tests {
         let env = Env::default();
         let zero = zero_bytes32(&env);
         let result: Result<Address, AdManagerError> =
-            proofbridge_core::token::bytes32_to_account_address(&env, &zero);
+            proofbridge_core::token::bytes32_to_account_address(&env, &zero).map_err(Into::into);
         assert_eq!(result, Err(AdManagerError::InvalidAccountAddress));
     }
 
@@ -637,7 +637,7 @@ mod validation_tests {
         let env = Env::default();
         let bytes = make_bytes32(&env, 0xAB);
         let result: Result<Address, AdManagerError> =
-            proofbridge_core::token::bytes32_to_account_address(&env, &bytes);
+            proofbridge_core::token::bytes32_to_account_address(&env, &bytes).map_err(Into::into);
         assert!(result.is_ok(), "any non-zero 32-byte pubkey must decode");
     }
 
@@ -1537,5 +1537,60 @@ mod order_hash_parity {
         assert!(r[0]["value"].as_str().unwrap().parse::<u128>().is_err());
         assert_eq!(r[1]["field"], "deadline");
         assert!(r[1]["value"].as_str().unwrap().parse::<u64>().is_err());
+    }
+}
+
+// =============================================================================
+// Error codes are ABI
+// =============================================================================
+
+/// Every shared `Fault` lands on the number this contract has always used for it. A renumbered
+/// variant or a wrong `From` arm turns this red; the frontend and relayer maps key on these numbers.
+#[test]
+fn fault_codes_never_move() {
+    use crate::errors::AdManagerError;
+    use proofbridge_core::escrow_ops::Fault::{self, *};
+    let table: [(Fault, u32); 38] = [
+        (TokenZeroAddress, 1),
+        (InvalidProof, 20),
+        (MerkleAppendFailed, 28),
+        (DecimalsOutOfRange, 34),
+        (NonExactDownscale, 35),
+        (DecimalOverflow, 36),
+        (InvalidAccountAddress, 40),
+        (ContractPaused, 41),
+        (NotPendingAdmin, 42),
+        (NothingToClaim, 43),
+        (NoRouteTiming, 51),
+        (InvalidTiming, 52),
+        (DeadlineTooSoon, 53),
+        (NotClaimable, 54),
+        (TooEarly, 55),
+        (NotClaimed, 56),
+        (NoRootAnchor, 57),
+        (RootNotAnchored, 58),
+        (SettledRecorded, 59),
+        (NotFilled, 60),
+        (NoDisputeManager, 61),
+        (NotDisputable, 62),
+        (DisputeNotResolved, 63),
+        (NonCanonicalInput, 65),
+        (DeadlineTooFar, 69),
+        (DisputeWindowClosed, 71),
+        (DisputeModuleRejected, 72),
+        (DisputeNoParams, 74),
+        (DisputeNotEscrow, 75),
+        (DisputeExists, 76),
+        (DisputeWrongEscrow, 77),
+        (DisputeNotResponder, 78),
+        (DisputeChallengeClosed, 80),
+        (DisputeBondTransferFailed, 81),
+        (DisputeResponseWindowClosed, 82),
+        (DisputeAlreadyResponded, 83),
+        (DisputeZeroResponse, 84),
+        (DisputeAlreadyRuled, 85),
+    ];
+    for (fault, code) in table {
+        assert_eq!(AdManagerError::from(fault) as u32, code, "{fault:?}");
     }
 }

@@ -199,7 +199,7 @@ mod validation_tests {
         // Direct call into the refactored helper — zero bytes must surface as
         // the typed contract-specific error, not a panic.
         let result: Result<Address, OrderPortalError> =
-            proofbridge_core::token::bytes32_to_account_address(&env, &zero);
+            proofbridge_core::token::bytes32_to_account_address(&env, &zero).map_err(Into::into);
         assert_eq!(result, Err(OrderPortalError::InvalidAccountAddress));
     }
 
@@ -208,7 +208,7 @@ mod validation_tests {
         let env = Env::default();
         let bytes = make_bytes32(&env, 0xAB);
         let result: Result<Address, OrderPortalError> =
-            proofbridge_core::token::bytes32_to_account_address(&env, &bytes);
+            proofbridge_core::token::bytes32_to_account_address(&env, &bytes).map_err(Into::into);
         assert!(result.is_ok(), "any non-zero 32-byte pubkey must decode");
     }
 
@@ -620,5 +620,61 @@ mod order_hash_parity {
         assert!(r[0]["value"].as_str().unwrap().parse::<u128>().is_err());
         assert_eq!(r[1]["field"], "deadline");
         assert!(r[1]["value"].as_str().unwrap().parse::<u64>().is_err());
+    }
+}
+
+// =============================================================================
+// Error codes are ABI
+// =============================================================================
+
+/// Every shared `Fault` lands on the number this contract has always used for it, and every dispute
+/// fault collapses to `DisputeModuleRejected` (92): the follower never calls the dispute module. A
+/// renumbered variant or a wrong `From` arm turns this red.
+#[test]
+fn fault_codes_never_move() {
+    use crate::errors::OrderPortalError;
+    use proofbridge_core::escrow_ops::Fault::{self, *};
+    let table: [(Fault, u32); 38] = [
+        (TokenZeroAddress, 1),
+        (InvalidProof, 23),
+        (MerkleAppendFailed, 40),
+        (DecimalsOutOfRange, 60),
+        (NonExactDownscale, 61),
+        (DecimalOverflow, 62),
+        (InvalidAccountAddress, 70),
+        (ContractPaused, 71),
+        (NotPendingAdmin, 72),
+        (NothingToClaim, 73),
+        (NoRouteTiming, 75),
+        (InvalidTiming, 76),
+        (DeadlineTooSoon, 77),
+        (NotClaimable, 78),
+        (TooEarly, 79),
+        (NotClaimed, 80),
+        (NoRootAnchor, 81),
+        (RootNotAnchored, 82),
+        (SettledRecorded, 83),
+        (NotFilled, 84),
+        (NonCanonicalInput, 89),
+        (DeadlineTooFar, 90),
+        (NoDisputeManager, 92),
+        (NotDisputable, 92),
+        (DisputeNotResolved, 92),
+        (DisputeWindowClosed, 92),
+        (DisputeModuleRejected, 92),
+        (DisputeNoParams, 92),
+        (DisputeNotEscrow, 92),
+        (DisputeExists, 92),
+        (DisputeWrongEscrow, 92),
+        (DisputeNotResponder, 92),
+        (DisputeChallengeClosed, 92),
+        (DisputeBondTransferFailed, 92),
+        (DisputeResponseWindowClosed, 92),
+        (DisputeAlreadyResponded, 92),
+        (DisputeZeroResponse, 92),
+        (DisputeAlreadyRuled, 92),
+    ];
+    for (fault, code) in table {
+        assert_eq!(OrderPortalError::from(fault) as u32, code, "{fault:?}");
     }
 }

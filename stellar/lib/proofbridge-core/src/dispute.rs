@@ -22,8 +22,6 @@ const BPS_DENOMINATOR: u128 = 10_000;
 pub mod error_code {
     pub const NOT_ESCROW: u32 = 3;
     pub const DISPUTE_EXISTS: u32 = 10;
-    pub const BOND_TOO_SMALL: u32 = 13;
-    pub const CHALLENGE_OPEN: u32 = 14;
     pub const CHALLENGE_CLOSED: u32 = 15;
     pub const NOT_RESPONDER: u32 = 16;
     pub const NO_DISPUTE_PARAMS: u32 = 17;

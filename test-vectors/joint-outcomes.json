@@ -449,10 +449,6 @@
         },
         {
           "leg": "primary",
-          "action": "claimDispute"
-        },
-        {
-          "leg": "primary",
           "action": "warpPastWindow"
         },
         {

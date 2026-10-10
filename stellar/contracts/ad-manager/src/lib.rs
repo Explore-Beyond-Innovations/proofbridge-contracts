@@ -1072,7 +1072,7 @@ impl AdManagerContract {
         Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
-        ops::record_settled(&env, &config.merkle_manager, &order_hash)
+        ops::record_settled(&env, &config.merkle_manager, &order_hash).map_err(Into::into)
     }
 
     // =========================================================================
@@ -1101,7 +1101,7 @@ impl AdManagerContract {
     /// hostage while one is investigated (2.3h D1, 03 F9).
     pub fn claim(env: Env, recipient: BytesN<32>, token: BytesN<32>) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
-        ops::claim(&env, &config, recipient, token)
+        ops::claim(&env, &config, recipient, token).map_err(Into::into)
     }
 
     pub fn has_open_positions(env: Env, account: BytesN<32>) -> bool {
@@ -1268,7 +1268,7 @@ impl AdManagerContract {
             params.order_decimals,
             params.ad_decimals,
         )
-        .map_err(proofbridge_core::errors::map_decimal_scaling_error::<AdManagerError>)
+        .map_err(|e| AdManagerError::from(ops::Fault::from(e)))
     }
 
     /// Pay the bridger's recipient from the ad, in the units the lock reserved.
@@ -1338,10 +1338,7 @@ impl AdManagerContract {
         if filer == maker {
             return Ok(());
         }
-        let bridger = proofbridge_core::token::bytes32_to_account_address::<AdManagerError>(
-            env,
-            bridger_side,
-        )?;
+        let bridger = proofbridge_core::token::bytes32_to_account_address(env, bridger_side)?;
         if *filer == bridger {
             return Ok(());
         }
@@ -1530,7 +1527,7 @@ impl AdManagerContract {
         params: &OrderParams,
         w_native_addr: &Address,
     ) -> Result<(), AdManagerError> {
-        let on_chain = proofbridge_core::token::token_decimals_bytes32::<AdManagerError>(
+        let on_chain = proofbridge_core::token::token_decimals_bytes32(
             env,
             &params.ad_chain_token,
             w_native_addr,

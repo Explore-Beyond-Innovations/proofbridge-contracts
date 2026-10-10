@@ -332,42 +332,31 @@ fn a_ruling_opens_a_window_it_does_not_pay() {
 
 // ── the clock ────────────────────────────────────────────────────────────
 
+/// T-50: with no ruling, the window the escrow's fallback waits on is not over until the challenge
+/// period AND the order's own deadline + buffer have passed.
 #[test]
 fn the_fallback_waits_out_the_challenge_period() {
     let f = fixture();
     let h = hash(&f.env, 7);
     file(&f, &h, 100_000);
-    assert_eq!(
-        f.client.try_claim_dispute(&h),
-        Err(Ok(Error::ChallengeOpen))
-    );
+    let (_, window_over, _) = f.client.outcome_of(&h, &0u64);
+    assert!(!window_over);
 
     // The challenge period alone is NOT enough: the order still has time on its own clock, and no
     // dispute path may complete before `deadline + buffer` (D3, T-50). This is the bug that let a
     // filer cancel a week-long order an hour after filing.
     f.env.ledger().with_mut(|l| l.timestamp += CHALLENGE + 1);
+    let (_, window_over, _) = f.client.outcome_of(&h, &0u64);
+    assert!(!window_over);
+
+    warp_past_window(&f, &h);
+    let (outcome, window_over, _) = f.client.outcome_of(&h, &0u64);
+    assert!(window_over);
     assert_eq!(
-        f.client.try_claim_dispute(&h),
-        Err(Ok(Error::ChallengeOpen))
+        outcome,
+        DisputeOutcome::None,
+        "no ruling: the escrow applies the fallback"
     );
-
-    warp_past_window(&f, &h);
-    f.client.claim_dispute(&h);
-}
-
-/// #452: once the arbiter rules, the no-ruling fallback is refused with its own error, even after
-/// the ruling's window has passed.
-#[test]
-fn a_claim_after_a_ruling_is_already_ruled() {
-    let f = fixture();
-    let h = hash(&f.env, 31);
-    file(&f, &h, 100_000);
-    f.client.resolve_dispute(&h, &DisputeOutcome::MutualRefund);
-
-    assert_eq!(f.client.try_claim_dispute(&h), Err(Ok(Error::AlreadyRuled)));
-
-    warp_past_window(&f, &h);
-    assert_eq!(f.client.try_claim_dispute(&h), Err(Ok(Error::AlreadyRuled)));
 }
 
 /// B1: the window floors at the order's own deadline plus the route buffer, so a short challenge
@@ -740,7 +729,6 @@ fn an_undisputed_order_is_not_disputed() {
             .try_resolve_dispute(&h, &DisputeOutcome::MutualRefund),
         Err(Ok(Error::NotDisputed))
     );
-    assert_eq!(f.client.try_claim_dispute(&h), Err(Ok(Error::NotDisputed)));
     assert_eq!(
         f.client
             .try_settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false),
@@ -916,8 +904,6 @@ fn relayed_error_codes_match_the_shared_definitions() {
     let pairs = [
         (Error::NotEscrow, c::NOT_ESCROW),
         (Error::DisputeExists, c::DISPUTE_EXISTS),
-        (Error::BondTooSmall, c::BOND_TOO_SMALL),
-        (Error::ChallengeOpen, c::CHALLENGE_OPEN),
         (Error::ChallengeClosed, c::CHALLENGE_CLOSED),
         (Error::NotResponder, c::NOT_RESPONDER),
         (Error::NoDisputeParams, c::NO_DISPUTE_PARAMS),

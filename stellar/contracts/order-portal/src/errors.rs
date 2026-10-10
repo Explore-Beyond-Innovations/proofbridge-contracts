@@ -122,71 +122,16 @@ pub enum OrderPortalError {
     /// record_settled: the order is not `Filled`
     NotFilled = 84,
 
-    // Disputes (2.3g)
-    /// No dispute module is wired, so disputes are unavailable on this escrow.
-    NoDisputeManager = 85,
-    /// The order is not in a state a dispute can be filed on.
-    NotDisputable = 86,
-    /// The module's window has not closed, so there is nothing to apply yet.
-    DisputeNotResolved = 87,
-    /// Only the order's two parties may file or respond to a dispute (D11).
-    NotAParty = 88,
+    // Disputes (2.3g). Disputes are filed and finalized on the ad chain only, so this escrow returns
+    // none of the dispute codes; 85-88, 91 and 93-105 are retired, never reused.
     /// A public input at or above the field prime (2.3h, residual 9). Refused here as defence in
     /// depth — both shipped verifiers already reject one.
     NonCanonicalInput = 89,
     /// #453: the deadline is past `now + MAX_ORDER_WINDOW`.
     DeadlineTooFar = 90,
-    /// C-10: the primary's window has closed, so a dispute can no longer be filed.
-    DisputeWindowClosed = 91,
-    /// C-31: the dispute module refused or trapped the call.
+    /// Every dispute-module fault, collapsed: the follower never calls the module, so none can occur
+    /// here; the one code keeps the `From<Fault>` table total without a wildcard.
     DisputeModuleRejected = 92,
-    /// 49S-3: the dispute module's own refusals, relayed (codes only ever appended).
-    DisputeBondTooSmall = 93,
-    DisputeNoParams = 94,
-    DisputeNotEscrow = 95,
-    DisputeExists = 96,
-    DisputeWrongEscrow = 97,
-    DisputeNotResponder = 98,
-    DisputeChallengeOpen = 99,
-    DisputeChallengeClosed = 100,
-    /// 49S-3: the dispute module could not move the bond (a token refusal, not a dispute rule).
-    DisputeBondTransferFailed = 101,
-    /// D5: the module's answer rules, relayed 1:1 like every other module refusal (R6). Unreachable
-    /// today — the follower records no answers — but a table that collapses is a table that drifts.
-    DisputeResponseWindowClosed = 102,
-    DisputeAlreadyResponded = 103,
-    DisputeZeroResponse = 104,
-    DisputeAlreadyRuled = 105,
-}
-
-impl proofbridge_core::errors::ProofBridgeError for OrderPortalError {
-    fn token_zero_address() -> Self {
-        Self::TokenZeroAddress
-    }
-    fn merkle_append_failed() -> Self {
-        Self::MerkleAppendFailed
-    }
-    fn invalid_proof() -> Self {
-        Self::InvalidProof
-    }
-    fn decimals_out_of_range() -> Self {
-        Self::DecimalsOutOfRange
-    }
-    fn non_exact_downscale() -> Self {
-        Self::NonExactDownscale
-    }
-    fn decimal_overflow() -> Self {
-        Self::DecimalOverflow
-    }
-    fn order_decimals_mismatch() -> Self {
-        Self::OrderDecimalsMismatch
-    }
-    fn ad_decimals_mismatch() -> Self {
-        Self::AdDecimalsMismatch
-    }
-    fn invalid_account_address() -> Self {
-        Self::InvalidAccountAddress
-    }
 }
 
 /// The shared escrow code reports an opaque reason; this is where it becomes this contract's own
@@ -209,25 +154,32 @@ impl From<proofbridge_core::escrow_ops::Fault> for OrderPortalError {
             NothingToClaim => OrderPortalError::NothingToClaim,
             InvalidTiming => OrderPortalError::InvalidTiming,
             NotPendingAdmin => OrderPortalError::NotPendingAdmin,
-            NoDisputeManager => OrderPortalError::NoDisputeManager,
-            NotDisputable => OrderPortalError::NotDisputable,
             NonCanonicalInput => OrderPortalError::NonCanonicalInput,
-            DisputeNotResolved => OrderPortalError::DisputeNotResolved,
-            DisputeWindowClosed => OrderPortalError::DisputeWindowClosed,
-            DisputeModuleRejected => OrderPortalError::DisputeModuleRejected,
-            DisputeBondTooSmall => OrderPortalError::DisputeBondTooSmall,
-            DisputeNoParams => OrderPortalError::DisputeNoParams,
-            DisputeNotEscrow => OrderPortalError::DisputeNotEscrow,
-            DisputeExists => OrderPortalError::DisputeExists,
-            DisputeWrongEscrow => OrderPortalError::DisputeWrongEscrow,
-            DisputeNotResponder => OrderPortalError::DisputeNotResponder,
-            DisputeChallengeOpen => OrderPortalError::DisputeChallengeOpen,
-            DisputeChallengeClosed => OrderPortalError::DisputeChallengeClosed,
-            DisputeBondTransferFailed => OrderPortalError::DisputeBondTransferFailed,
-            DisputeResponseWindowClosed => OrderPortalError::DisputeResponseWindowClosed,
-            DisputeAlreadyResponded => OrderPortalError::DisputeAlreadyResponded,
-            DisputeZeroResponse => OrderPortalError::DisputeZeroResponse,
-            DisputeAlreadyRuled => OrderPortalError::DisputeAlreadyRuled,
+            TokenZeroAddress => OrderPortalError::TokenZeroAddress,
+            MerkleAppendFailed => OrderPortalError::MerkleAppendFailed,
+            InvalidProof => OrderPortalError::InvalidProof,
+            DecimalsOutOfRange => OrderPortalError::DecimalsOutOfRange,
+            NonExactDownscale => OrderPortalError::NonExactDownscale,
+            DecimalOverflow => OrderPortalError::DecimalOverflow,
+            InvalidAccountAddress => OrderPortalError::InvalidAccountAddress,
+            // The leader relays module refusals 1:1; the follower collapses them. Named, not a
+            // wildcard: a new `Fault` still fails to compile until someone places it.
+            NoDisputeManager
+            | NotDisputable
+            | DisputeNotResolved
+            | DisputeWindowClosed
+            | DisputeModuleRejected
+            | DisputeNoParams
+            | DisputeNotEscrow
+            | DisputeExists
+            | DisputeWrongEscrow
+            | DisputeNotResponder
+            | DisputeChallengeClosed
+            | DisputeBondTransferFailed
+            | DisputeResponseWindowClosed
+            | DisputeAlreadyResponded
+            | DisputeZeroResponse
+            | DisputeAlreadyRuled => OrderPortalError::DisputeModuleRejected,
         }
     }
 }

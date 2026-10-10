@@ -19,6 +19,7 @@ pub fn append_to_merkle(
     side: u32,
 ) -> Result<(), OrderPortalError> {
     proofbridge_core::cross_contract::append_to_merkle(env, merkle_manager, order_hash, side)
+        .map_err(Into::into)
 }
 
 /// Verify a ZK proof via cross-contract call to the Verifier contract.
@@ -29,6 +30,7 @@ pub fn verify_proof(
     proof_bytes: &Bytes,
 ) -> Result<(), OrderPortalError> {
     proofbridge_core::cross_contract::verify_proof(env, verifier, public_inputs, proof_bytes)
+        .map_err(Into::into)
 }
 
 /// Build public inputs for the ZK proof verification.

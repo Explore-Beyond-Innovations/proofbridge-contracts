@@ -6,8 +6,6 @@
 use crate::escrow_ops::Fault;
 use soroban_sdk::{contractclient, crypto::bn254::Bn254Fr, Address, Bytes, BytesN, Env};
 
-use crate::errors::ProofBridgeError;
-
 // =============================================================================
 // Client Traits
 // =============================================================================
@@ -65,7 +63,6 @@ pub trait DisputeManagerInterface {
         escrow_paused_seconds: u64,
     ) -> (crate::types::DisputeOutcome, bool, Option<Address>);
     fn initiator_of(env: Env, order_hash: BytesN<32>) -> Option<Address>;
-    fn is_disputed(env: Env, order_hash: BytesN<32>) -> bool;
     fn challenge_deadline_of(env: Env, order_hash: BytesN<32>, escrow_paused_seconds: u64) -> u64;
 }
 
@@ -117,17 +114,17 @@ pub trait KeyRegistryInterface {
 // =============================================================================
 
 /// Append an order hash to the MerkleManager.
-pub fn append_to_merkle<E: ProofBridgeError>(
+pub fn append_to_merkle(
     env: &Env,
     merkle_manager: &Address,
     order_hash: &BytesN<32>,
     side: u32,
-) -> Result<(), E> {
+) -> Result<(), Fault> {
     let client = MerkleManagerClient::new(env, merkle_manager);
     client
         .try_append_order_hash(&env.current_contract_address(), order_hash, &side)
-        .map_err(|_| E::merkle_append_failed())?
-        .map_err(|_| E::merkle_append_failed())?;
+        .map_err(|_| Fault::MerkleAppendFailed)?
+        .map_err(|_| Fault::MerkleAppendFailed)?;
     Ok(())
 }
 
@@ -156,17 +153,17 @@ pub fn get_field_mod(env: &Env, merkle_manager: &Address, order_hash: &BytesN<32
 // =============================================================================
 
 /// Verify a ZK proof via cross-contract call to the Verifier contract.
-pub fn verify_proof<E: ProofBridgeError>(
+pub fn verify_proof(
     env: &Env,
     verifier: &Address,
     public_inputs: &Bytes,
     proof_bytes: &Bytes,
-) -> Result<(), E> {
+) -> Result<(), Fault> {
     let client = VerifierClient::new(env, verifier);
     client
         .try_verify_proof(public_inputs, proof_bytes)
-        .map_err(|_| E::invalid_proof())?
-        .map_err(|_| E::invalid_proof())?;
+        .map_err(|_| Fault::InvalidProof)?
+        .map_err(|_| Fault::InvalidProof)?;
     Ok(())
 }
 

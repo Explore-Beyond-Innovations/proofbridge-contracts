@@ -16,20 +16,16 @@ pub enum DisputeManagerError {
     NotInitialized = 2,
     /// The caller is not an escrow this module serves.
     NotEscrow = 3,
-    /// The caller is not the arbiter.
-    NotArbiter = 4,
-    /// An address argument was the zero/unset address.
-    ZeroAddress = 5,
+    // 4 (`NotArbiter`) and 5 (`ZeroAddress`) are retired: no path returned them (the arbiter is
+    // checked by `require_auth`). Numbers are ABI and never reused.
     /// A dispute is already open on this order.
     DisputeExists = 10,
     /// The order has no open dispute.
     NotDisputed = 11,
     /// The arbiter cannot rule that the trade went through — only evidence reaches that.
     ArbiterCannotSettle = 12,
-    /// The value sent does not cover the route's bond.
-    BondTooSmall = 13,
-    /// The challenge period has not expired yet.
-    ChallengeOpen = 14,
+    // 13 (`BondTooSmall`) and 14 (`ChallengeOpen`) are retired: the bond is pulled at the exact
+    // amount, and the no-ruling claim that raised 14 is gone (the fallback lives in finalize).
     /// The challenge period has expired; the arbiter can no longer rule.
     ChallengeClosed = 15,
     /// Only the counterparty may respond.
@@ -46,7 +42,7 @@ pub enum DisputeManagerError {
     WrongEscrow = 21,
     /// Nothing credited to claim.
     NothingToClaim = 22,
-    /// The arbiter already ruled, so the no-ruling fallback does not apply.
+    /// The arbiter already ruled, which closes the answer window.
     AlreadyRuled = 23,
     /// 49S-3: the bond token refused the transfer (no trustline, a shortfall, a frozen account).
     BondTransferFailed = 24,
