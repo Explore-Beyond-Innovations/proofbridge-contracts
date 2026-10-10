@@ -72,7 +72,7 @@ contract AgentPolicyBundlesTest is AgentPolicyBase {
         PackedUserOperation[] memory ops = new PackedUserOperation[](4);
         ops[0] = _uninstallHookOp();
         for (uint256 i = 0; i < 3; ++i) {
-            ops[i + 1] = _agentOpAt(i, lockCall(MAX_PER_ORDER));
+            ops[i + 1] = _agentOpAt(i, lockCall(MAX_PER_ORDER, 10 + i));
         }
         // the third asks for more than the stored level holds: refused in validation, by the floor
         vm.expectRevert(abi.encodeWithSelector(FailedOp.selector, uint256(3), "AA24 signature error"));
@@ -88,8 +88,8 @@ contract AgentPolicyBundlesTest is AgentPolicyBase {
         }
         PackedUserOperation[] memory ops = new PackedUserOperation[](3);
         ops[0] = _uninstallHookOp();
-        ops[1] = _agentOpAt(0, lockCall(MAX_PER_ORDER));
-        ops[2] = _agentOpAt(1, lockCall(MAX_PER_ORDER));
+        ops[1] = _agentOpAt(0, lockCall(MAX_PER_ORDER, 10));
+        ops[2] = _agentOpAt(1, lockCall(MAX_PER_ORDER, 11));
         instance.aux.entrypoint.handleOps(ops, payable(address(0x69)));
         assertEq(escrow.locks(), 5, "the race is real; the floor is what contains it");
     }
@@ -105,7 +105,7 @@ contract AgentPolicyBundlesTest is AgentPolicyBase {
         PackedUserOperation[] memory ops = new PackedUserOperation[](4);
         ops[0] = uninstall.userOp;
         for (uint256 i = 0; i < 3; ++i) {
-            ops[i + 1] = _agentOpAt(i, lockCall(MAX_PER_ORDER));
+            ops[i + 1] = _agentOpAt(i, lockCall(MAX_PER_ORDER, 10 + i));
         }
         instance.aux.entrypoint.handleOps(ops, payable(address(0x69)));
         assertEq(escrow.locks(), 3, "the race is real; the bound is what contains it");

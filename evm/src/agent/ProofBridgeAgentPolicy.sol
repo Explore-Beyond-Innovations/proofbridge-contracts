@@ -18,6 +18,19 @@ import {
     VALIDATION_FAILED
 } from "./interfaces/IERC7579Module.sol";
 
+/// @dev The two account reads `_hookMounted` makes. ERC-7579's, and Kernel's per-validator config
+///      (`ValidationConfig { uint32 nonce; IHook hook; }`).
+interface IERC7579AccountView {
+    function isModuleInstalled(uint256 moduleTypeId, address module, bytes calldata additionalContext)
+        external
+        view
+        returns (bool);
+}
+
+interface IKernelView {
+    function validationConfig(bytes21 vId) external view returns (uint32 nonce, address hook);
+}
+
 /**
  * @title ProofBridgeAgentPolicy
  * @author Proofbridge
@@ -97,7 +110,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         NoAccountCeiling,
         OverStoredAllowance, // the validator's clockless floor (`_reserve`)
         AgentAllowanceExceeded, // the hook, or preflight: the real, refilled number
-        AccountCeilingExceeded
+        AccountCeilingExceeded,
+        HookNotProven // a batch before the hook has charged this agent under this mount and policy
     }
 
     /// @notice The `callIndex` of a refusal that is about the request or the agent as a whole —
@@ -171,8 +185,12 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
      *      **one batch plus two single trades, per token, per agent**, where the batch can never
      *      exceed the stored allowance (`_reserve`). Per *agent*: the validator's running totals are
      *      transient, so with the hook gone nothing lowers the stored ceiling, and each agent on the
-     *      account gets its own batch and its own two trades. The one batch is unavoidable in any design that allows
-     *      batches: when the hook first goes missing the tally still reads zero. An agent is expected
+     *      account gets its own batch and its own two trades. That one batch needs a hook that has
+     *      already charged this agent under the current hook install and policy version
+     *      (`hookProvenOf`); before that, batches are refused (`HookNotProven`). So for a mount or a
+     *      calldata shape the hook never charges, the bound is **`MAX_UNCOUNTED` single trades**,
+     *      each within `maxPerOrder` and the stored floor. The one batch remains for a hook that
+     *      goes missing *after* proving itself: then the tally still reads zero. An agent is expected
      *      to read `uncountedOf` and, if it is not zero, lead with a single trade.
      *
      *      Costs, stated rather than discovered. An approved request that does not end up counted
@@ -211,7 +229,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
     /// @notice The hook multiplexer an account routes its single hook slot through, if it uses one.
     ///         ERC-7579 gives an account one hook, so a maker who already runs one mounts ours
     ///         behind a multiplexer and the account arrives appended to the calldata instead of as
-    ///         `msg.sender`. Read only during execution, never during validation.
+    ///         `msg.sender`. Validation reads it only to check the account mounted the hook (Kernel).
     mapping(address account => address forwarder) public trustedForwarder;
 
     /// @notice The policy's identity, and its liveness switch: zero means no agent here. Revoking
@@ -251,6 +269,12 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
     ///         to spend without limit.
     mapping(bytes32 ceilKey => mapping(address account => AgentRateLimit.Limit)) private _accountLimit;
     mapping(bytes32 ceilKey => mapping(address account => AgentRateLimit.Bucket)) private _accountBucket;
+
+    /// @notice Hook installs on this account, counted so a re-installed hook has to prove itself again.
+    mapping(address account => uint256) private _hookInstalls;
+    /// @notice The hook has charged this agent under this policy version and hook install, so the
+    ///         agent may batch. Keyed by `_proofKey`, account last (ERC-7562 association).
+    mapping(bytes32 proofKey => mapping(address account => bool)) private _hookProven;
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -293,6 +317,9 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
     ///      multiplexer replace it with their own. `preflight` answers the same question on every
     ///      account, before anything is sent.
     error AgentPolicy__RefusedAtExecution(uint256 callIndex, Refusal reason);
+    /// @notice The hook was called by `caller`, which is neither an account with this module nor a
+    ///         forwarder an account nominated, and an approved agent trade is waiting for this call.
+    error AgentPolicy__UnknownHookCaller(address caller);
 
     /*//////////////////////////////////////////////////////////////
                              MODULE PLUMBING
@@ -320,6 +347,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         if (types & bit != 0) revert AgentPolicy__AlreadyInstalled();
         if (types == 0) _epoch[msg.sender] += 1;
         _installedTypes[msg.sender] = types | bit;
+        if (bit == TYPE_BIT_HOOK) _hookInstalls[msg.sender] += 1;
 
         if (moduleTypeId == MODULE_TYPE_VALIDATOR && extra.length > 0) {
             address[] memory targets = abi.decode(extra, (address[]));
@@ -567,10 +595,21 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
     /**
      * @notice Debit the buckets for an operation the validator already approved.
      * @dev Anything without a marker is not an agent operation — the owner acting directly, or
-     *      another validator's work — and passes through untouched.
+     *      another validator's work — and passes through untouched. When the caller cannot be
+     *      resolved to an account, the hook refuses only if an approved agent trade is waiting for
+     *      this very call under the address in the calldata's last 20 bytes, where both supported
+     *      forwarder layouts put the account: that trade would otherwise run uncharged. An owner
+     *      operation passes, so a missing or wrong forwarder never locks the owner out. Shapes the
+     *      hook cannot parse or never sees are not caught here; the tally and `HookNotProven` bound
+     *      them (see `MAX_UNCOUNTED`).
      */
     function preCheck(address, uint256, bytes calldata msgData) external returns (bytes memory) {
-        address account = _getAccount();
+        (address account, bool resolved) = _getAccount();
+        if (!resolved) {
+            (, uint256 waiting) = _markerAt(_tailAddress(), msgData);
+            if (waiting != 0) revert AgentPolicy__UnknownHookCaller(msg.sender);
+            return "";
+        }
         bytes32 agentId = _popMarker(account, msgData);
         if (agentId == bytes32(0)) return "";
 
@@ -588,6 +627,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         // Counted. If the trade reverts after this, so does this line — which is why a failed trade
         // and a missing hook look alike to the validator.
         _uncounted[gate.aKey][account] = 0;
+        // The hook has shown it sees this agent's operations on this mount: batches may follow.
+        if (!gate.hookProven) _hookProven[gate.proofKey][account] = true;
         return "";
     }
 
@@ -616,23 +657,27 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         return forwarder != address(0) && forwarder == trustedForwarder[account];
     }
 
-    /// @dev The account this hook call is about: `msg.sender` normally, or the address appended to
-    ///      the calldata when a multiplexer the account itself nominated made the call.
-    function _getAccount() internal view returns (address account) {
-        account = msg.sender;
+    /// @dev The account this hook call is about: `msg.sender` normally, or the address in the
+    ///      calldata's last 20 bytes when `msg.sender` is the forwarder that account nominated.
+    ///      Kernel's multiplexer appends `forwarder ‖ account`, a plain ERC-2771 forwarder `account`:
+    ///      either way the account is last, and the nomination is what binds the caller to it.
+    ///      `resolved` false: neither, and `preCheck` decides what that means.
+    function _getAccount() internal view returns (address account, bool resolved) {
         // A caller with this module installed *is* an account, and the bytes after its calldata are
         // the agent's to choose. Believing them let anyone who had nominated the maker's account as
         // their own "forwarder" have the hook look for the marker under their address, find none,
         // and debit nothing. A multiplexer has nothing installed, so its path is unchanged.
-        if (_installedTypes[msg.sender] != 0) return account;
-        if (msg.data.length >= 40) {
-            address appended;
-            address forwarder;
-            assembly ("memory-safe") {
-                appended := shr(96, calldataload(sub(calldatasize(), 20)))
-                forwarder := shr(96, calldataload(sub(calldatasize(), 40)))
-            }
-            if (forwarder == msg.sender && isTrustedForwarder(forwarder, appended)) account = appended;
+        if (_installedTypes[msg.sender] != 0) return (msg.sender, true);
+        account = _tailAddress();
+        if (isTrustedForwarder(msg.sender, account)) return (account, true);
+        return (msg.sender, false);
+    }
+
+    /// @dev The address in this call's last 20 bytes. No marker is ever queued under it unless it
+    ///      is an account: a hook call is always longer than 20 bytes.
+    function _tailAddress() internal pure returns (address a) {
+        assembly ("memory-safe") {
+            a := shr(96, calldataload(sub(calldatasize(), 20)))
         }
     }
 
@@ -727,6 +772,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         bytes32 vKey;
         PolicyMeta meta;
         uint256 maxCalls;
+        bytes32 proofKey;
+        bool hookProven;
     }
 
     /**
@@ -746,6 +793,12 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
             gate.refusal = Refusal.NotMounted;
             return gate;
         }
+        // The note above is the module's; this asks the account. The hook running is the proof, so
+        // the hook itself does not ask.
+        if (mode != Mode.Commit && !_hookMounted(account)) {
+            gate.refusal = Refusal.NotMounted;
+            return gate;
+        }
         gate.epoch = _epoch[account];
         gate.aKey = _agentKey(gate.epoch, agentId);
         if (_fingerprint[gate.aKey][account] == bytes32(0)) {
@@ -755,6 +808,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         gate.meta = _meta[gate.aKey][account];
         gate.vKey = _versionKey(gate.aKey, _version[gate.aKey][account]);
         gate.maxCalls = MAX_BATCH;
+        gate.proofKey = keccak256(abi.encode(gate.vKey, "hook", _hookInstalls[account]));
+        gate.hookProven = _hookProven[gate.proofKey][account];
         if (mode == Mode.Commit) return gate;
 
         if (mode == Mode.Dry && gate.meta.validUntil != 0 && block.timestamp >= gate.meta.validUntil) {
@@ -767,6 +822,42 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
             return gate;
         }
         if (uncounted != 0) gate.maxCalls = 1;
+    }
+
+    /// @notice Whether this agent may batch: the hook has charged it under the current hook install
+    ///         and policy version.
+    function hookProvenOf(address account, bytes32 agentId) external view returns (bool) {
+        return _gate(account, agentId, Mode.Commit).hookProven;
+    }
+
+    /**
+     * @dev Does the account itself report this module as its hook? ERC-7579's `isModuleInstalled`,
+     *      with Safe7579's global-hook context (the reference account and Nexus ignore it; Safe
+     *      reverts without it). Kernel answers false for every hook and mounts ours behind its
+     *      multiplexer, so there the hook its config names for this validator must be the forwarder
+     *      the account nominated. Whether that multiplexer still lists this module is in its own
+     *      storage, outside what validation may read; the tally and `HookNotProven` bound that case.
+     *      Anything that reverts or answers oddly is "not mounted".
+     */
+    function _hookMounted(address account) internal view returns (bool) {
+        (bool ok, bytes memory ret) = account.staticcall(
+            abi.encodeCall(
+                IERC7579AccountView.isModuleInstalled,
+                (MODULE_TYPE_HOOK, address(this), abi.encode(uint8(0), bytes4(0)))
+            )
+        );
+        if (ok && ret.length >= 32 && abi.decode(ret, (uint256)) == 1) return true;
+        address forwarder = trustedForwarder[account];
+        if (forwarder == address(0)) return false;
+        (ok, ret) = account.staticcall(
+            abi.encodeCall(IKernelView.validationConfig, (bytes21(abi.encodePacked(bytes1(0x01), address(this)))))
+        );
+        if (!ok || ret.length < 64) return false;
+        uint256 hook;
+        assembly ("memory-safe") {
+            hook := mload(add(ret, 64))
+        }
+        return hook == uint256(uint160(forwarder));
     }
 
     function uncountedOf(address account, bytes32 agentId) external view returns (uint256) {
@@ -804,13 +895,32 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
     /// @dev `mode` and `executionCalldata` out of an `execute`, with Kernel's `executeUserOp`
     ///      wrapper stripped. The validator and the hook both come through here, so they agree on
     ///      what an operation *is* however the account chose to wrap or pad it.
-    function _executeArgs(bytes calldata cd) internal pure returns (bool ok, bytes32 mode, bytes calldata ec) {
+    ///
+    ///      `hookPath` adds the full ABI form, `executeUserOp(PackedUserOperation, bytes32)`, which
+    ///      is what an account that hooks `executeUserOp` itself hands the hook (Nexus, Safe). There
+    ///      the struct is the EntryPoint's, the real operation. Never during validation: the struct
+    ///      would be one the agent wrote inside its own `callData`, while the account executes
+    ///      `callData[4:]` — one inner call approved, another executed.
+    function _executeArgs(bytes calldata cd, bool hookPath)
+        internal
+        pure
+        returns (bool ok, bytes32 mode, bytes calldata ec)
+    {
         ec = cd[0:0];
         if (cd.length < 4) return (false, mode, ec);
         bytes calldata body = cd;
         if (bytes4(body[0:4]) == EXECUTE_USER_OP_SELECTOR) {
             if (body.length < 8) return (false, mode, ec);
             body = body[4:];
+            if (hookPath && bytes4(body[0:4]) != EXECUTE_SELECTOR) {
+                (ok, body) = _userOpCallData(body);
+                // The EntryPoint routes here only for a `callData` that starts with the wrapper, and
+                // the account executes `callData[4:]`: anything else is not what will run.
+                if (!ok || body.length < 4 || bytes4(body[0:4]) != EXECUTE_USER_OP_SELECTOR) {
+                    return (false, mode, ec);
+                }
+                body = body[4:];
+            }
         }
         if (body.length < 68 || bytes4(body[0:4]) != EXECUTE_SELECTOR) return (false, mode, ec);
         mode = bytes32(body[4:36]);
@@ -821,6 +931,23 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         uint256 len = uint256(bytes32(body[at:at + 32]));
         if (len > body.length || at + 32 + len > body.length) return (false, mode, ec);
         return (true, mode, body[at + 32:at + 32 + len]);
+    }
+
+    /// @dev `op.callData` out of `abi.encode(PackedUserOperation op, bytes32)`, every offset read
+    ///      bounds-checked: false, not a revert, on anything malformed.
+    function _userOpCallData(bytes calldata args) internal pure returns (bool, bytes calldata out) {
+        out = args[0:0];
+        if (args.length < 64) return (false, out);
+        uint256 op = uint256(bytes32(args[0:32]));
+        // The struct's head is nine words; `callData`'s offset is the fourth.
+        if (op > args.length || op + 288 > args.length) return (false, out);
+        uint256 rel = uint256(bytes32(args[op + 96:op + 128]));
+        if (rel > args.length) return (false, out);
+        uint256 at = op + rel;
+        if (at + 32 > args.length) return (false, out);
+        uint256 len = uint256(bytes32(args[at:at + 32]));
+        if (len > args.length || at + 32 + len > args.length) return (false, out);
+        return (true, args[at + 32:at + 32 + len]);
     }
 
     /// @dev External only so `_decodeCalls` can `try` it: `abi.decode` reverts on malformed input,
@@ -836,15 +963,18 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         return abi.decode(data[4:], (IAdManager.OrderParams));
     }
 
-    function _decodeCalls(bytes calldata cd) internal view returns (bool ok, Call[] memory calls) {
+    function _decodeCalls(bytes calldata cd, bool hookPath) internal view returns (bool ok, Call[] memory calls) {
         bytes32 mode;
         bytes calldata ec;
-        (ok, mode, ec) = _executeArgs(cd);
+        (ok, mode, ec) = _executeArgs(cd, hookPath);
         if (!ok) return (false, calls);
         uint8 callType = uint8(mode[0]);
         // ExecType 0x01 is "try": the account swallows a failing call, so the hook's debit would
         // stick although no trade happened — and the agent is the one who picks the mode.
         if (uint8(mode[1]) != 0) return (false, calls);
+        // Bytes 2–31 (unused, selector, payload) must be zero: an account that switched layout on
+        // them could run calls this decoder never read.
+        if (uint256(mode) << 16 != 0) return (false, calls);
 
         if (callType == CALLTYPE_SINGLE) {
             if (ec.length < 52) return (false, calls);
@@ -949,12 +1079,17 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         returns (Refusal refusal, Call[] memory calls, WalkCtx memory ctx)
     {
         bool decoded;
-        (decoded, calls) = _decodeCalls(callData);
+        (decoded, calls) = _decodeCalls(callData, mode == Mode.Commit);
         if (!decoded || calls.length == 0 || calls.length > MAX_BATCH) {
             return (Refusal.MalformedRequest, calls, ctx);
         }
         // Batches only while the tally is zero: see `MAX_UNCOUNTED`.
         if (calls.length > gate.maxCalls) return (Refusal.SinglesOnly, calls, ctx);
+        // ...and only once the hook has charged this agent here. The hook never refuses this: by the
+        // time it runs, it is the proof.
+        if (calls.length > 1 && !gate.hookProven && mode != Mode.Commit) {
+            return (Refusal.HookNotProven, calls, ctx);
+        }
 
         ctx = WalkCtx({
             account: account,
@@ -1360,41 +1495,46 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         return keccak256(abi.encode(account, keccak256(abi.encode(MARKER_NAMESPACE, mode, keccak256(ec)))));
     }
 
-    /// @return false when another agent already queued the identical operation in this
-    ///         transaction; the hook could not tell the two apart, so the second is refused.
+    /// @return false when the identical operation is already queued in this transaction, by any
+    ///         agent. The count is then only ever 0 or 1, so an account that calls the hook twice
+    ///         for one execution (Nexus, for a wrapped operation) can never pop two markers. Two
+    ///         identical `lockForOrder` calls are one order hash, which the escrow refuses anyway.
     function _pushMarker(address account, bytes calldata callData, bytes32 agentId) internal returns (bool) {
-        (bool ok, bytes32 mode, bytes calldata ec) = _executeArgs(callData);
+        (bool ok, bytes32 mode, bytes calldata ec) = _executeArgs(callData, false);
         if (!ok) return false;
         bytes32 slot = _markerSlot(account, mode, ec);
-        bytes32 queued;
         uint256 count;
         assembly ("memory-safe") {
-            queued := tload(slot)
             count := tload(add(slot, 1))
         }
-        if (count != 0 && queued != agentId) return false;
+        if (count != 0) return false;
         assembly ("memory-safe") {
             tstore(slot, agentId)
-            tstore(add(slot, 1), add(count, 1))
+            tstore(add(slot, 1), 1)
         }
         return true;
+    }
+
+    /// @dev The marker slot for this hook call's execution under `account`, and its count (0 or 1;
+    ///      0 also when the call does not decode). Read-only; `_popMarker` is the one that consumes.
+    function _markerAt(address account, bytes calldata msgData) internal view returns (bytes32 slot, uint256 count) {
+        (bool ok, bytes32 mode, bytes calldata ec) = _executeArgs(msgData, true);
+        if (!ok) return (slot, 0);
+        slot = _markerSlot(account, mode, ec);
+        assembly ("memory-safe") {
+            count := tload(add(slot, 1))
+        }
     }
 
     /// @return agentId zero when this execution was not queued by the validator — the owner acting
     ///         directly, or another validator's work.
     function _popMarker(address account, bytes calldata msgData) internal returns (bytes32 agentId) {
-        (bool ok, bytes32 mode, bytes calldata ec) = _executeArgs(msgData);
-        if (!ok) return bytes32(0);
-        bytes32 slot = _markerSlot(account, mode, ec);
-        uint256 count;
-        assembly ("memory-safe") {
-            agentId := tload(slot)
-            count := tload(add(slot, 1))
-        }
+        (bytes32 slot, uint256 count) = _markerAt(account, msgData);
         if (count == 0) return bytes32(0);
         assembly ("memory-safe") {
-            tstore(add(slot, 1), sub(count, 1))
-            if eq(count, 1) { tstore(slot, 0) }
+            agentId := tload(slot)
+            tstore(slot, 0)
+            tstore(add(slot, 1), 0)
         }
     }
 

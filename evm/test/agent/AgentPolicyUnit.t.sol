@@ -151,6 +151,7 @@ contract AgentPolicyUnitTest is Test {
         assertEq(uint8(ProofBridgeAgentPolicy.Refusal.OverStoredAllowance), 18);
         assertEq(uint8(ProofBridgeAgentPolicy.Refusal.AgentAllowanceExceeded), 19);
         assertEq(uint8(ProofBridgeAgentPolicy.Refusal.AccountCeilingExceeded), 20);
-        assertEq(uint8(type(ProofBridgeAgentPolicy.Refusal).max), 20, "a new reason: pin it here");
+        assertEq(uint8(ProofBridgeAgentPolicy.Refusal.HookNotProven), 21);
+        assertEq(uint8(type(ProofBridgeAgentPolicy.Refusal).max), 21, "a new reason: pin it here");
     }
 }
