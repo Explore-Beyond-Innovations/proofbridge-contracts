@@ -13,6 +13,8 @@ import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {LeafDomain} from "./libraries/LeafDomain.sol";
 import {KeyMessages} from "./libraries/KeyMessages.sol";
 import {ShortString, ShortStrings} from "@openzeppelin/contracts/utils/ShortStrings.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
 
 /// @title BLSKeyRegistry v2 — maps a 32-byte account id to up to five BLS key slots.
 /// @notice State changes are authenticated by the owner's wallet sig + BLS
@@ -20,7 +22,7 @@ import {ShortString, ShortStrings} from "@openzeppelin/contracts/utils/ShortStri
 ///         the per-account nonce; `setValidUntil` is shorten-only and nonce-free so
 ///         a pre-signed retirement never expires (design 03 §3.4, 05 §5.6). One owner
 ///         signature serves both registries (2.6 plan 13, `KeyMessages`).
-contract BLSKeyRegistry is IBLSKeyRegistry {
+contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
     struct RegistryEntry {
         uint32 nextSlotId; // monotonic, never reused
         uint32[] liveSlots; // stored slot ids, length <= MAX_ACTIVE_SLOTS
@@ -45,10 +47,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
     /// ed25519 Edwards d (the SCL field lib only exports the Weierstrass form).
     uint256 private constant ED_D = 37095705934669439343138083508754565189542113879843219016388785533085940283555;
 
-    address public admin;
     IPositionGuard[] public positionGuards;
-    address public pendingAdmin;
-    bool public paused;
 
     /// Review D3: the environment the key messages are bound to, fixed at deploy (immutable, so it
     /// survives a code move) and its EIP-712 domain separator.
@@ -80,38 +79,20 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         if (admin_ == address(0)) revert ZeroAdmin();
         bytes32 h = keccak256(bytes(env_));
         if (h != keccak256("local") && h != keccak256("testnet") && h != keccak256("mainnet")) revert BadEnv();
-        admin = admin_;
+        _initAdmin(admin_);
         _env = ShortStrings.toShortString(env_);
         _domainSeparator = KeyMessages.domainSeparator(KeyMessages.salt(env_));
     }
 
-    function pause() external {
-        if (msg.sender != admin) revert NotAdmin();
-        paused = true;
-        emit Paused(msg.sender);
+    function pause() external onlyAdmin {
+        _pause();
     }
 
-    function unpause() external {
-        if (msg.sender != admin) revert NotAdmin();
-        paused = false;
-        emit Unpaused(msg.sender);
+    function unpause() external onlyAdmin {
+        _unpause();
     }
 
-    function transferAdmin(address to) external {
-        if (msg.sender != admin) revert NotAdmin();
-        pendingAdmin = to;
-        emit AdminTransferStarted(admin, to);
-    }
-
-    function acceptAdmin() external {
-        if (msg.sender != pendingAdmin) revert NotPendingAdmin();
-        emit AdminTransferred(admin, msg.sender);
-        admin = msg.sender;
-        pendingAdmin = address(0);
-    }
-
-    function setPositionGuards(address[] calldata guards) external {
-        if (msg.sender != admin) revert NotAdmin();
+    function setPositionGuards(address[] calldata guards) external onlyAdmin {
         delete positionGuards;
         for (uint256 i = 0; i < guards.length; i++) {
             positionGuards.push(IPositionGuard(guards[i]));
@@ -124,8 +105,8 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
     /// redeploy (2.1b D3). This chain is never a source: its own leaves belong to another registry.
     function setProofRegistration(IRootAnchor anchor_, IVerifier verifier_, uint256[] calldata sources, bool enabled)
         external
+        onlyAdmin
     {
-        if (msg.sender != admin) revert NotAdmin();
         if (
             enabled && (address(anchor_).code.length == 0 || address(verifier_).code.length == 0 || sources.length == 0)
         ) revert ProofRegistrationRefsUnset();
@@ -151,8 +132,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         bytes calldata pop,
         uint256 nonce,
         uint64 deadline
-    ) external returns (uint32 slotId) {
-        if (paused) revert EnforcedPause();
+    ) external whenNotPaused returns (uint32 slotId) {
         if (block.timestamp > deadline) revert DeadlineExpired();
         if (deadline > block.timestamp + MAX_REGISTER_TTL) revert DeadlineTooFar();
         if (blsPubKey.length != 128 || pop.length != 256) revert BadLength();
@@ -185,8 +165,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
         uint256 sourceChainId,
         bytes32 targetRoot,
         bytes calldata proof
-    ) external returns (uint32 slotId) {
-        if (paused) revert EnforcedPause();
+    ) external whenNotPaused returns (uint32 slotId) {
         if (!proofRegistrationEnabled) revert ProofRegistrationDisabled();
         if (blsPubKey.length != 128 || pop.length != 256) revert BadLength();
         bytes32 commitment = keccak256(blsPubKey);
@@ -252,8 +231,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
 
     /// Leaves the protocol: drops every slot, guarded while there are slots (t1-design §1.8). With
     /// none it still consumes the nonce, so an owner can kill an unfiled registration (review D2).
-    function revoke(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external {
-        if (paused) revert EnforcedPause();
+    function revoke(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external whenNotPaused {
         RegistryEntry storage e = entries[account];
         if (nonce != nonceOf[account]) revert BadNonce();
         if (e.liveSlots.length != 0) _requireNoOpenPositions(account);
@@ -272,8 +250,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry {
 
     /// Kills every outstanding signature naming `nonce` here (a pending registration) by consuming
     /// the nonce; no slot changes, so live keys stay and no guard is asked (review D2).
-    function cancel(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external {
-        if (paused) revert EnforcedPause();
+    function cancel(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external whenNotPaused {
         if (nonce != nonceOf[account]) revert BadNonce();
         _requireOwnLeg(owner.legs, nonce);
         _checkOwner(account, owner, KeyMessages.Kind.Cancel, bytes32(0), 0);

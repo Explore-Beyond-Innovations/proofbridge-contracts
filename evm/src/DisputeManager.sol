@@ -80,7 +80,6 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     );
     event DisputeResponded(bytes32 indexed orderHash, address indexed responder, bytes32 evidence);
     event DisputeRuled(bytes32 indexed orderHash, Dispute.Outcome outcome, uint64 finalizeAt);
-    event DisputeClaimed(bytes32 indexed orderHash, uint64 finalizeAt);
     event BondRouted(bytes32 indexed orderHash, address indexed to, uint128 amount, bool returnedToFiler);
     event PayoutCredited(address indexed recipient, uint256 amount);
     /// @notice A credited bond payout left for `to` (`to == recipient` for `claim`). Named apart from
@@ -97,7 +96,6 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     error DisputeManager__NativeAmountMismatch(uint256 sent, uint256 expected);
     /// @notice Plain native sends are refused; only the wrapped-native contract's unwraps land.
     error DisputeManager__NativeNotAccepted(address sender);
-    error DisputeManager__ChallengeOpen(uint256 until);
     error DisputeManager__ChallengeClosed(uint256 since);
     error DisputeManager__AlreadyRuled(bytes32 orderHash);
     error DisputeManager__NotResponder();
@@ -261,7 +259,8 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         if (outcome == Dispute.Outcome.TradeProceeds || outcome == Dispute.Outcome.None) {
             revert DisputeManager__ArbiterCannotSettle();
         }
-        Dispute.Record storage d = _unwindowed(orderHash);
+        Dispute.Record storage d = disputes[orderHash];
+        if (d.initiator == address(0)) revert DisputeManager__NotDisputed(orderHash);
         uint256 until_ = effectiveChallengeDeadline(orderHash);
         if (block.timestamp >= until_) revert DisputeManager__ChallengeClosed(until_);
 
@@ -276,16 +275,6 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         uint64 finalizeAt = base + d.buffer;
         d.challengeDeadline = finalizeAt;
         emit DisputeRuled(orderHash, outcome, finalizeAt);
-    }
-
-    /// @notice Open the fallback window once the challenge period expired with no ruling (D4).
-    /// @dev Permissionless: an unresolved dispute must not depend on the arbiter ever showing up.
-    function claimDispute(bytes32 orderHash) external {
-        Dispute.Record storage d = _unwindowed(orderHash);
-        if (d.ruling != Dispute.Outcome.None) revert DisputeManager__AlreadyRuled(orderHash);
-        uint256 until_ = effectiveChallengeDeadline(orderHash);
-        if (block.timestamp < until_) revert DisputeManager__ChallengeOpen(until_);
-        emit DisputeClaimed(orderHash, uint64(until_));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -360,11 +349,6 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         claimable[recipient] = 0;
         i_wNativeToken.safeWithdrawTo(amount, to);
         emit BondClaimed(recipient, to, amount);
-    }
-
-    function _unwindowed(bytes32 orderHash) private view returns (Dispute.Record storage d) {
-        d = disputes[orderHash];
-        if (d.initiator == address(0)) revert DisputeManager__NotDisputed(orderHash);
     }
 
     /// @notice The payout transfer, self-callable only so {_payOrCredit} can catch it.

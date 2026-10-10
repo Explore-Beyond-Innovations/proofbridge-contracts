@@ -21,6 +21,7 @@ pub fn transfer_from_user_bytes32(
         from,
         amount,
     )
+    .map_err(Into::into)
 }
 
 /// Transfer tokens from contract to user using BytesN<32> token address
@@ -32,4 +33,5 @@ pub fn transfer_to_user_bytes32(
     amount: u128,
 ) -> Result<(), AdManagerError> {
     proofbridge_core::token::transfer_to_user_bytes32(env, token_bytes, w_native_addr, to, amount)
+        .map_err(Into::into)
 }

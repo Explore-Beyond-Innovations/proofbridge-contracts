@@ -154,53 +154,23 @@ pub enum AdManagerError {
     DisputeWindowClosed = 71,
     /// C-31: the dispute module refused or trapped the call.
     DisputeModuleRejected = 72,
-    /// 49S-3: the dispute module's own refusals, relayed (codes only ever appended).
-    DisputeBondTooSmall = 73,
+    /// 49S-3: the dispute module's own refusals, relayed 1:1 (codes only ever appended). Retired,
+    /// never reused: 73 (the module never raised `BondTooSmall`), 79 (`ChallengeOpen`, raised only by
+    /// the deleted no-ruling claim) and 80 (`ChallengeClosed`, raised only by the arbiter's door, which
+    /// no escrow path calls).
     DisputeNoParams = 74,
     DisputeNotEscrow = 75,
     DisputeExists = 76,
     DisputeWrongEscrow = 77,
     DisputeNotResponder = 78,
-    DisputeChallengeOpen = 79,
-    DisputeChallengeClosed = 80,
     /// 49S-3: the dispute module could not move the bond (a token refusal, not a dispute rule).
     DisputeBondTransferFailed = 81,
     /// D5: the module's answer rules, relayed.
     DisputeResponseWindowClosed = 82,
     DisputeAlreadyResponded = 83,
     DisputeZeroResponse = 84,
-    /// D5 (R1): the ruling closed the answer window; also a fallback claim on a ruled dispute.
+    /// D5 (R1): the ruling closed the answer window.
     DisputeAlreadyRuled = 85,
-}
-
-impl proofbridge_core::errors::ProofBridgeError for AdManagerError {
-    fn token_zero_address() -> Self {
-        Self::TokenZeroAddress
-    }
-    fn merkle_append_failed() -> Self {
-        Self::MerkleAppendFailed
-    }
-    fn invalid_proof() -> Self {
-        Self::InvalidProof
-    }
-    fn decimals_out_of_range() -> Self {
-        Self::DecimalsOutOfRange
-    }
-    fn non_exact_downscale() -> Self {
-        Self::NonExactDownscale
-    }
-    fn decimal_overflow() -> Self {
-        Self::DecimalOverflow
-    }
-    fn order_decimals_mismatch() -> Self {
-        Self::OrderDecimalsMismatch
-    }
-    fn ad_decimals_mismatch() -> Self {
-        Self::AdDecimalsMismatch
-    }
-    fn invalid_account_address() -> Self {
-        Self::InvalidAccountAddress
-    }
 }
 
 /// The shared escrow code reports an opaque reason; this is where it becomes this contract's own
@@ -229,19 +199,23 @@ impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
             DisputeNotResolved => AdManagerError::DisputeNotResolved,
             DisputeWindowClosed => AdManagerError::DisputeWindowClosed,
             DisputeModuleRejected => AdManagerError::DisputeModuleRejected,
-            DisputeBondTooSmall => AdManagerError::DisputeBondTooSmall,
             DisputeNoParams => AdManagerError::DisputeNoParams,
             DisputeNotEscrow => AdManagerError::DisputeNotEscrow,
             DisputeExists => AdManagerError::DisputeExists,
             DisputeWrongEscrow => AdManagerError::DisputeWrongEscrow,
             DisputeNotResponder => AdManagerError::DisputeNotResponder,
-            DisputeChallengeOpen => AdManagerError::DisputeChallengeOpen,
-            DisputeChallengeClosed => AdManagerError::DisputeChallengeClosed,
             DisputeBondTransferFailed => AdManagerError::DisputeBondTransferFailed,
             DisputeResponseWindowClosed => AdManagerError::DisputeResponseWindowClosed,
             DisputeAlreadyResponded => AdManagerError::DisputeAlreadyResponded,
             DisputeZeroResponse => AdManagerError::DisputeZeroResponse,
             DisputeAlreadyRuled => AdManagerError::DisputeAlreadyRuled,
+            TokenZeroAddress => AdManagerError::TokenZeroAddress,
+            MerkleAppendFailed => AdManagerError::MerkleAppendFailed,
+            InvalidProof => AdManagerError::InvalidProof,
+            DecimalsOutOfRange => AdManagerError::DecimalsOutOfRange,
+            NonExactDownscale => AdManagerError::NonExactDownscale,
+            DecimalOverflow => AdManagerError::DecimalOverflow,
+            InvalidAccountAddress => AdManagerError::InvalidAccountAddress,
         }
     }
 }

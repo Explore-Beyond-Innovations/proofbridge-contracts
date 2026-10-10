@@ -496,7 +496,6 @@ mod validation_tests {
     /// Set up storage with chain info and token route so validate_order passes
     fn setup_chain_and_route(env: &Env, params: &crate::types::OrderParams) {
         let chain_info = ChainInfo {
-            supported: true,
             order_portal: params.src_order_portal.clone(),
         };
         storage::set_chain(env, params.order_chain_id, &chain_info);
@@ -628,7 +627,7 @@ mod validation_tests {
         let env = Env::default();
         let zero = zero_bytes32(&env);
         let result: Result<Address, AdManagerError> =
-            proofbridge_core::token::bytes32_to_account_address(&env, &zero);
+            proofbridge_core::token::bytes32_to_account_address(&env, &zero).map_err(Into::into);
         assert_eq!(result, Err(AdManagerError::InvalidAccountAddress));
     }
 
@@ -637,7 +636,7 @@ mod validation_tests {
         let env = Env::default();
         let bytes = make_bytes32(&env, 0xAB);
         let result: Result<Address, AdManagerError> =
-            proofbridge_core::token::bytes32_to_account_address(&env, &bytes);
+            proofbridge_core::token::bytes32_to_account_address(&env, &bytes).map_err(Into::into);
         assert!(result.is_ok(), "any non-zero 32-byte pubkey must decode");
     }
 
@@ -665,28 +664,12 @@ mod validation_tests {
     }
 
     #[test]
-    fn test_validate_order_chain_not_supported_disabled() {
-        let env = setup_validation_env();
-        env.as_contract(&env.register(AdManagerContract, ()), || {
-            let (ad, params) = valid_ad_and_params(&env);
-            let chain_info = ChainInfo {
-                supported: false,
-                order_portal: params.src_order_portal.clone(),
-            };
-            storage::set_chain(&env, params.order_chain_id, &chain_info);
-            let result = validation::validate_order(&env, &ad, &params);
-            assert_eq!(result, Err(AdManagerError::ChainNotSupported));
-        });
-    }
-
-    #[test]
     fn test_validate_order_portal_mismatch() {
         let env = setup_validation_env();
         env.as_contract(&env.register(AdManagerContract, ()), || {
             let (ad, mut params) = valid_ad_and_params(&env);
             // Chain has a specific portal, but params has a different one
             let chain_info = ChainInfo {
-                supported: true,
                 order_portal: make_bytes32(&env, 0x11),
             };
             storage::set_chain(&env, params.order_chain_id, &chain_info);
@@ -699,28 +682,6 @@ mod validation_tests {
             params.src_order_portal = make_bytes32(&env, 0x22); // Different from chain's portal
             let result = validation::validate_order(&env, &ad, &params);
             assert_eq!(result, Err(AdManagerError::OrderPortalMismatch));
-        });
-    }
-
-    #[test]
-    fn test_validate_order_portal_zero_skips_check() {
-        let env = setup_validation_env();
-        env.as_contract(&env.register(AdManagerContract, ()), || {
-            let (ad, params) = valid_ad_and_params(&env);
-            // Chain portal is zero → portal check is skipped
-            let chain_info = ChainInfo {
-                supported: true,
-                order_portal: zero_bytes32(&env),
-            };
-            storage::set_chain(&env, params.order_chain_id, &chain_info);
-            storage::set_token_route(
-                &env,
-                &params.ad_chain_token,
-                params.order_chain_id,
-                &params.order_chain_token,
-            );
-            let result = validation::validate_order(&env, &ad, &params);
-            assert!(result.is_ok());
         });
     }
 
@@ -743,7 +704,6 @@ mod validation_tests {
             let (ad, params) = valid_ad_and_params(&env);
             // Set chain but NOT the token route
             let chain_info = ChainInfo {
-                supported: true,
                 order_portal: params.src_order_portal.clone(),
             };
             storage::set_chain(&env, params.order_chain_id, &chain_info);
@@ -758,7 +718,6 @@ mod validation_tests {
         env.as_contract(&env.register(AdManagerContract, ()), || {
             let (ad, params) = valid_ad_and_params(&env);
             let chain_info = ChainInfo {
-                supported: true,
                 order_portal: params.src_order_portal.clone(),
             };
             storage::set_chain(&env, params.order_chain_id, &chain_info);
@@ -822,14 +781,12 @@ mod storage_tests {
 
             // Set chain
             let chain_info = ChainInfo {
-                supported: true,
                 order_portal: BytesN::from_array(&env, &[0xAA; 32]),
             };
             storage::set_chain(&env, chain_id, &chain_info);
 
             // Read it back
-            let stored = storage::get_chain(&env, chain_id).unwrap();
-            assert!(stored.supported);
+            assert!(storage::get_chain(&env, chain_id).is_some());
 
             // Remove it
             storage::remove_chain(&env, chain_id);
@@ -925,21 +882,6 @@ mod storage_tests {
             assert!(storage::is_nullifier_used(&env, &nullifier));
         });
     }
-
-    #[test]
-    fn test_ad_id_tracking() {
-        let env = Env::default();
-        let contract_id = env.register(AdManagerContract, ());
-
-        env.as_contract(&contract_id, || {
-            let ad_id = SorobanString::from_str(&env, "my-ad");
-
-            assert!(!storage::is_ad_id_used(&env, &ad_id));
-
-            storage::set_ad_id_used(&env, &ad_id);
-            assert!(storage::is_ad_id_used(&env, &ad_id));
-        });
-    }
 }
 
 // =============================================================================
@@ -974,7 +916,6 @@ mod ad_lifecycle_tests {
 
             // Set up chain
             let chain_info = ChainInfo {
-                supported: true,
                 order_portal: BytesN::from_array(&env, &[0xFF; 32]),
             };
             storage::set_chain(&env, 1, &chain_info);
@@ -997,7 +938,6 @@ mod ad_lifecycle_tests {
                 settlement_signer: BytesN::from_array(&env, &[0x77; 32]),
             };
             storage::set_ad(&env, &ad_id, &ad);
-            storage::set_ad_id_used(&env, &ad_id);
         });
 
         let ad = env.as_contract(&contract_id, || storage::get_ad(&env, &ad_id).unwrap());
@@ -1202,7 +1142,7 @@ mod ad_lifecycle_tests {
 
 mod order_lifecycle_tests {
     use crate::storage;
-    use crate::types::{Ad, ChainInfo, Status};
+    use crate::types::{Ad, Status};
     use crate::{AdManagerContract, AdManagerContractClient};
     use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String as SorobanString};
 
@@ -1374,36 +1314,6 @@ mod order_lifecycle_tests {
     }
 
     #[test]
-    fn test_chain_configuration_lifecycle() {
-        let env = Env::default();
-        let contract_id = env.register(AdManagerContract, ());
-        env.as_contract(&contract_id, || {
-            // No chain initially
-            assert!(storage::get_chain(&env, 1).is_none());
-
-            // Add chain
-            let chain_info = ChainInfo {
-                supported: true,
-                order_portal: BytesN::from_array(&env, &[0xAA; 32]),
-            };
-            storage::set_chain(&env, 1, &chain_info);
-
-            let stored = storage::get_chain(&env, 1).unwrap();
-            assert!(stored.supported);
-
-            // Disable chain
-            let disabled = ChainInfo {
-                supported: false,
-                order_portal: stored.order_portal,
-            };
-            storage::set_chain(&env, 1, &disabled);
-
-            let stored = storage::get_chain(&env, 1).unwrap();
-            assert!(!stored.supported);
-        });
-    }
-
-    #[test]
     fn test_view_functions_after_init() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1537,5 +1447,67 @@ mod order_hash_parity {
         assert!(r[0]["value"].as_str().unwrap().parse::<u128>().is_err());
         assert_eq!(r[1]["field"], "deadline");
         assert!(r[1]["value"].as_str().unwrap().parse::<u64>().is_err());
+    }
+}
+
+// =============================================================================
+// Error codes are ABI
+// =============================================================================
+
+/// Every shared `Fault` lands on the number this contract has always used for it. A renumbered
+/// variant or a wrong `From` arm turns this red; the frontend and relayer maps key on these numbers.
+#[test]
+fn fault_codes_never_move() {
+    use crate::errors::AdManagerError;
+    use proofbridge_core::escrow_ops::Fault::{self, *};
+    // Exhaustive, no wildcard: a new `Fault` fails to compile here until it is pinned to a number.
+    fn pinned(f: Fault) -> u32 {
+        match f {
+            TokenZeroAddress => 1,
+            InvalidProof => 20,
+            MerkleAppendFailed => 28,
+            DecimalsOutOfRange => 34,
+            NonExactDownscale => 35,
+            DecimalOverflow => 36,
+            InvalidAccountAddress => 40,
+            ContractPaused => 41,
+            NotPendingAdmin => 42,
+            NothingToClaim => 43,
+            NoRouteTiming => 51,
+            InvalidTiming => 52,
+            DeadlineTooSoon => 53,
+            NotClaimable => 54,
+            TooEarly => 55,
+            NotClaimed => 56,
+            NoRootAnchor => 57,
+            RootNotAnchored => 58,
+            SettledRecorded => 59,
+            NotFilled => 60,
+            NoDisputeManager => 61,
+            NotDisputable => 62,
+            DisputeNotResolved => 63,
+            NonCanonicalInput => 65,
+            DeadlineTooFar => 69,
+            DisputeWindowClosed => 71,
+            DisputeModuleRejected => 72,
+            DisputeNoParams => 74,
+            DisputeNotEscrow => 75,
+            DisputeExists => 76,
+            DisputeWrongEscrow => 77,
+            DisputeNotResponder => 78,
+            DisputeBondTransferFailed => 81,
+            DisputeResponseWindowClosed => 82,
+            DisputeAlreadyResponded => 83,
+            DisputeZeroResponse => 84,
+            DisputeAlreadyRuled => 85,
+        }
+    }
+    // `Fault::ALL` is generated with the enum, so it names every variant.
+    for &fault in Fault::ALL {
+        assert_eq!(
+            AdManagerError::from(fault) as u32,
+            pinned(fault),
+            "{fault:?}"
+        );
     }
 }

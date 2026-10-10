@@ -321,25 +321,6 @@ impl DisputeManagerContract {
         Ok(())
     }
 
-    /// Open the fallback window once the challenge period expired with no ruling.
-    /// Permissionless: an unresolved dispute must not depend on the arbiter ever showing up.
-    pub fn claim_dispute(env: Env, order_hash: BytesN<32>) -> Result<(), Error> {
-        let d = storage::get_dispute(&env, &order_hash).ok_or(Error::NotDisputed)?;
-        if d.ruling != DisputeOutcome::None {
-            return Err(Error::AlreadyRuled);
-        }
-        let until = Self::effective_challenge_deadline_of(&env, &d);
-        if env.ledger().timestamp() < until {
-            return Err(Error::ChallengeOpen);
-        }
-        events::DisputeClaimed {
-            order_hash,
-            finalize_at: until,
-        }
-        .publish(&env);
-        Ok(())
-    }
-
     // ── views ────────────────────────────────────────────────────────────
 
     /// How a dispute has ended, if it has: the ruling, whether its window is over in real time, and
