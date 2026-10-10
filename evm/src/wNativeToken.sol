@@ -9,8 +9,6 @@ interface IwNativeToken {
 }
 
 library SafeNativeToken {
-    uint256 private constant _RAW_CALL_GAS_LIMIT = 5000;
-
     /**
      * @notice Safely deposits a specified amount of Native token into the IwNativeToken contract. Consumes less gas than regular `IwNativeToken.deposit`.
      * @param nativeToken The IwNativeToken token contract.
@@ -63,7 +61,9 @@ library SafeNativeToken {
         if (to != address(this)) {
             assembly ("memory-safe") {
                 // solhint-disable-line no-inline-assembly
-                if iszero(call(_RAW_CALL_GAS_LIMIT, to, amount, 0, 0, 0, 0)) {
+                // All remaining gas: a 5,000 cap refuses proxy and smart-account wallets. Every caller
+                // is nonReentrant and settles its own ledger first; the push path runs under a 150k cap.
+                if iszero(call(gas(), to, amount, 0, 0, 0, 0)) {
                     let ptr := mload(0x40)
                     returndatacopy(ptr, 0, returndatasize())
                     revert(ptr, returndatasize())
