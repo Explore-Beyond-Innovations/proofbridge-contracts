@@ -50,10 +50,6 @@ interface IBLSKeyRegistry is IKeyRegistry {
     event ProofRegistrationSet(address rootAnchor, address verifier, uint256[] sources, bool enabled);
     event SlotValidUntilSet(bytes32 indexed account, uint32 indexed slotId, uint64 validUntil);
     event SlotPruned(bytes32 indexed account, uint32 indexed slotId);
-    event Paused(address account);
-    event Unpaused(address account);
-    event AdminTransferStarted(address indexed from, address indexed to);
-    event AdminTransferred(address indexed from, address indexed to);
     event KeyRevoked(bytes32 indexed account, uint256 nonce);
     /// Review D2: the nonce moved and no slot changed; every signature naming `nonce` here is dead.
     event RegistrationCancelled(bytes32 indexed account, uint256 nonce);
@@ -63,14 +59,10 @@ interface IBLSKeyRegistry is IKeyRegistry {
     error IdentityKey();
     error InvalidPop();
     error OwnerMismatch();
-    error NotRegistered();
     error AccountInFlight();
     error BadLength();
-    error NotAdmin();
-    error NotPendingAdmin();
     /// @notice The constructor was given no admin (C-37).
     error ZeroAdmin();
-    error EnforcedPause();
     error RegistryFull();
     error NoSuchSlot();
     error SlotExpired();
@@ -91,11 +83,9 @@ interface IBLSKeyRegistry is IKeyRegistry {
     error RootNotAnchored(uint256 chainId, bytes32 root);
     error InvalidLeafProof();
 
-    // admin
+    // admin (the handover, `admin`, `pendingAdmin` and `paused` come from TwoStepAdmin and Pausable)
     function pause() external;
     function unpause() external;
-    function transferAdmin(address to) external;
-    function acceptAdmin() external;
     function setPositionGuards(address[] calldata guards) external;
     function setProofRegistration(IRootAnchor anchor_, IVerifier verifier_, uint256[] calldata sources, bool enabled)
         external;
@@ -123,9 +113,6 @@ interface IBLSKeyRegistry is IKeyRegistry {
     function cancel(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external;
 
     // views
-    function admin() external view returns (address);
-    function pendingAdmin() external view returns (address);
-    function paused() external view returns (bool);
     function nonceOf(bytes32 account) external view returns (uint256);
     function usedCommitment(bytes32 account, bytes32 commitment) external view returns (bool);
     function rootAnchor() external view returns (IRootAnchor);

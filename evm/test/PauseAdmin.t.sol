@@ -5,6 +5,8 @@ import {TestField} from "test/utils/TestField.sol";
 
 import {Test} from "forge-std/Test.sol";
 import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
+import {IRootAnchor} from "src/interfaces/IRootAnchor.sol";
+import {IVerifier} from "src/interfaces/IVerifier.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
 import {IOrderPortal} from "src/interfaces/IOrderPortal.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
@@ -152,10 +154,10 @@ contract RegistryPauseTest is Test {
 
         IBLSKeyRegistry.OwnerAuth memory auth;
         auth.sig = new bytes(65);
-        vm.expectRevert(IBLSKeyRegistry.EnforcedPause.selector);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         registry.register(bytes32(uint256(1)), auth, new bytes(128), new bytes(256), 0, uint64(block.timestamp));
 
-        vm.expectRevert(IBLSKeyRegistry.EnforcedPause.selector);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         registry.revoke(bytes32(uint256(1)), auth, 0);
 
         registry.unpause();
@@ -165,21 +167,90 @@ contract RegistryPauseTest is Test {
 
     function test_twoStepAdmin_transferAndAccept() public {
         address next = makeAddr("nextAdmin");
+        vm.expectEmit(true, true, false, false, address(registry));
+        emit TwoStepAdmin.AdminTransferStarted(address(this), next);
         registry.transferAdmin(next);
         assertEq(registry.pendingAdmin(), next);
 
         vm.prank(makeAddr("rando"));
-        vm.expectRevert(IBLSKeyRegistry.NotPendingAdmin.selector);
+        vm.expectRevert(TwoStepAdmin.NotPendingAdmin.selector);
         registry.acceptAdmin();
 
+        vm.expectEmit(true, true, false, false, address(registry));
+        emit TwoStepAdmin.AdminTransferred(address(this), next);
         vm.prank(next);
         registry.acceptAdmin();
         assertEq(registry.admin(), next);
 
-        vm.expectRevert(IBLSKeyRegistry.NotAdmin.selector);
+        vm.expectRevert(TwoStepAdmin.NotAdmin.selector);
         registry.pause();
         vm.prank(next);
         registry.pause();
+    }
+
+    function test_pause_blocksRegisterByProofAndCancel() public {
+        registry.pause();
+        IBLSKeyRegistry.OwnerAuth memory auth;
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        registry.registerByProof(bytes32(uint256(1)), new bytes(128), new bytes(256), 0, 1, bytes32(0), "");
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        registry.cancel(bytes32(uint256(1)), auth, 0);
+    }
+
+    /// The registry runs the shared handover: nominating the sitting admin is refused.
+    function test_twoStepAdmin_selfTransferRefused() public {
+        vm.expectRevert(abi.encodeWithSelector(TwoStepAdmin.InvalidAdmin.selector, address(this)));
+        registry.transferAdmin(address(this));
+    }
+
+    function test_twoStepAdmin_cancelByZero() public {
+        address next = makeAddr("nextAdmin");
+        registry.transferAdmin(next);
+        registry.transferAdmin(address(0));
+        assertEq(registry.pendingAdmin(), address(0));
+        vm.prank(next);
+        vm.expectRevert(TwoStepAdmin.NotPendingAdmin.selector);
+        registry.acceptAdmin();
+    }
+
+    /// After the handover the old admin holds none of the admin calls.
+    function test_twoStepAdmin_oldAdminLosesEveryAdminCall() public {
+        address next = makeAddr("nextAdmin");
+        registry.transferAdmin(next);
+        vm.prank(next);
+        registry.acceptAdmin();
+        assertEq(registry.pendingAdmin(), address(0));
+
+        vm.expectRevert(TwoStepAdmin.NotAdmin.selector);
+        registry.pause();
+        vm.expectRevert(TwoStepAdmin.NotAdmin.selector);
+        registry.transferAdmin(address(1));
+        vm.expectRevert(TwoStepAdmin.NotAdmin.selector);
+        registry.setPositionGuards(new address[](0));
+        vm.expectRevert(TwoStepAdmin.NotAdmin.selector);
+        registry.setProofRegistration(IRootAnchor(address(0)), IVerifier(address(0)), new uint256[](0), false);
+    }
+
+    function test_adminCalls_strangerRefused() public {
+        registry.pause();
+        vm.startPrank(makeAddr("rando"));
+        vm.expectRevert(TwoStepAdmin.NotAdmin.selector);
+        registry.unpause();
+        vm.expectRevert(TwoStepAdmin.NotAdmin.selector);
+        registry.setPositionGuards(new address[](0));
+        vm.stopPrank();
+    }
+
+    /// Pause and unpause are OZ's: repeating either reverts instead of re-emitting.
+    function test_pause_notIdempotent() public {
+        vm.expectRevert(Pausable.ExpectedPause.selector);
+        registry.unpause();
+        registry.pause();
+        assertTrue(registry.paused());
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        registry.pause();
+        registry.unpause();
+        assertFalse(registry.paused());
     }
 }
 
