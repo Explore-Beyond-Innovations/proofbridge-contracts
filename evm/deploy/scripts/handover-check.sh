@@ -81,6 +81,9 @@ A pnpm -s cli link --peer $MB > $L/2b2.log 2>&1; rc=$?
 cast send --rpc-url $RPA --private-key $K0 $(addrOf orderPortal) 'setRootVerifier(uint256,address)' 998 $(addrOf counterpartyVerifier) > /dev/null 2>&1
 A pnpm -s run deploy > $L/2b3.log 2>&1 && A pnpm -s cli link --peer $MB > $L/2b4.log 2>&1 && pass "wiring restored: deploy and link pass again" || fail "restore: $(grep -m1 -i 'error\|split' $L/2b3.log $L/2b4.log | cut -c1-140)"
 
+# The Registrar is deployed but not a MerkleManager manager until proof registration's T3 flip.
+[ "$(cast call --rpc-url http://127.0.0.1:$PA $(addrOf merkleManager) 'isManager(address)(bool)' $(addrOf registrar))" = "false" ] && [ "$(cast call --rpc-url http://127.0.0.1:$PA $(addrOf merkleManager) 'isManager(address)(bool)' $(addrOf adManager))" = "true" ] && pass "MerkleManager: the escrows are managers, the Registrar is not (T3 flip)" || fail "MerkleManager manager set: Registrar should be off, AdManager on"
+
 echo "== 3. --to 0x0 is refused; handover to $A1; rerun sends nothing"
 n0=$(nonceA); A pnpm -s cli handover --to 0x0000000000000000000000000000000000000000 > $L/3z.log 2>&1; rc=$?
 [ $rc -ne 0 ] && grep -q "is not a usable address" $L/3z.log && [ "$(nonceA)" = "$n0" ] && pass "--to 0x0 refused by name, 0 txs" || fail "--to 0x0: exit $rc, txs $(( $(nonceA) - n0 )), $(grep -m1 -i error $L/3z.log | cut -c1-120)"

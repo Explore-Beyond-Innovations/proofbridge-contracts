@@ -357,8 +357,9 @@ export async function deployCore(
     }
   }
 
-  // ── Grant MANAGER permission on MerkleManager (check first, then set) ─────
-  for (const manager of [adManager, orderPortal, registrar]) {
+  // ── MerkleManager managers: the escrows (check first, then set) ─────
+  // The Registrar is deployed but made a manager only at proof registration's T3 flip.
+  for (const manager of appendersAtDeploy({ adManager, orderPortal, registrar })) {
     if (readView(merkleManager, "is_manager", ["--addr", manager]) === true) {
       console.log(`  [skip] MerkleManager.set_manager(${manager}) already true`);
       continue;
@@ -463,3 +464,7 @@ export async function deployCore(
   };
 }
 
+/** Who the deploy makes a MerkleManager manager: the escrows. The Registrar waits for the T3 flip. */
+export function appendersAtDeploy(c: { adManager: string; orderPortal: string; registrar: string }): string[] {
+  return [c.adManager, c.orderPortal];
+}
