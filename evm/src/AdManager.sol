@@ -358,13 +358,16 @@ contract AdManager is EscrowBase, IAdManager {
             // recipient. Every other vacuum outcome just releases the lock back to liquidity,
             // which the decrement above already did.
             ad.balance -= adAmount;
-            _payOrCredit(params.orderRecipient.toAddressChecked(), ad.token, adAmount);
         }
 
         _resolve(orderHash, params.adSettlementSigner);
         // The flag is absolute: was this filed by the bridger? Filing is restricted to the order's
         // two parties, so on the ad leg "not the maker" is exactly "the bridger".
         m.settleBond(orderHash, outcome, initiator != ad.maker);
+        // Pay once the order and the dispute are closed, so the recipient's hook sees no mid-transition state.
+        if (outcome == Dispute.Outcome.MakerForfeit) {
+            _payOrCredit(params.orderRecipient.toAddressChecked(), ad.token, adAmount);
+        }
 
         // Broadcast the outcome to the follower, which has no dispute of its own and acts only on
         // this leaf. CANCEL means "refund the bridger" and already did before 2.3g; FORFEIT is the

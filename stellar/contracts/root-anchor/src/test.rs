@@ -298,23 +298,140 @@ fn threshold_2_of_3_needs_two_distinct_signers() {
 
 // --- the pending state under a quorum (A1, A2, A6) ------------------------------
 
-/// A6: two honest publishers read the same root of a quiet chain at different ledgers.
+/// The first approval sets a pending root's sequence; a later approval naming another value is
+/// refused and adds nothing. Publishers send the root's own emission ledger, so honest ones agree.
 #[test]
-fn pending_root_accepts_any_seq_and_records_the_max() {
+fn pending_root_later_approval_must_match_the_first() {
     let f = fixture();
     three(&f, 2);
     let a = root(&f.env, 0xA1);
     f.client.anchor(&f.s1, &CHAIN, &a, &100);
-    f.client.anchor(&f.s2, &CHAIN, &a, &150);
+    assert_eq!(
+        f.client.try_anchor(&f.s2, &CHAIN, &a, &150),
+        Err(Ok(RootAnchorError::SeqMismatch))
+    );
+    assert_eq!(
+        f.client.try_anchor(&f.s2, &CHAIN, &a, &99),
+        Err(Ok(RootAnchorError::SeqMismatch))
+    );
+    assert_eq!(
+        f.client.anchor_of(&CHAIN, &a).unwrap().approvals,
+        1,
+        "a refused approval adds nothing"
+    );
+
+    f.client.anchor(&f.s2, &CHAIN, &a, &100);
     assert!(f.client.is_anchored(&CHAIN, &a));
-    assert_eq!(f.client.anchor_of(&CHAIN, &a).unwrap().ledger_seq, 150);
-    assert_eq!(f.client.latest_seq(&CHAIN), 150);
+    assert_eq!(f.client.anchor_of(&CHAIN, &a).unwrap().ledger_seq, 100);
+    assert_eq!(f.client.latest_seq(&CHAIN), 100);
+}
+
+/// Threshold 3: the mismatching second approval does not reach the threshold, so only the match
+/// check can refuse it. Without the check it would count, and the quorum would complete on two
+/// matching readings plus one that disagreed.
+#[test]
+fn threshold_3_mismatch_is_refused_below_the_threshold() {
+    let f = fixture();
+    three(&f, 3);
+    let a = root(&f.env, 0xA1);
+    f.client.anchor(&f.s1, &CHAIN, &a, &600);
+    assert_eq!(
+        f.client.try_anchor(&f.s2, &CHAIN, &a, &499),
+        Err(Ok(RootAnchorError::SeqMismatch))
+    );
+    assert_eq!(f.client.anchor_of(&CHAIN, &a).unwrap().approvals, 1);
+
+    f.client.anchor(&f.s3, &CHAIN, &a, &600);
+    assert!(
+        !f.client.is_anchored(&CHAIN, &a),
+        "two of three: still pending"
+    );
+    f.client.anchor(&f.s2, &CHAIN, &a, &600);
+    assert!(f.client.is_anchored(&CHAIN, &a));
+    assert_eq!(f.client.latest_seq(&CHAIN), 600);
+}
+
+/// One signer below the threshold that approves first with the maximum cannot get it recorded:
+/// the honest approval is refused, `latest_seq` does not move, later roots keep anchoring, and a
+/// revoke frees the stuck root to anchor at the honest value.
+#[test]
+fn one_signer_cannot_pin_the_sequence() {
+    let f = fixture();
+    three(&f, 2);
+    let a = root(&f.env, 0xA1);
+    f.client.anchor(&f.s1, &CHAIN, &a, &1000);
+    f.client.anchor(&f.s2, &CHAIN, &a, &1000);
 
     let b = root(&f.env, 0xB2);
-    f.client.anchor(&f.s1, &CHAIN, &b, &200);
-    f.client.anchor(&f.s3, &CHAIN, &b, &180); // lower than pending: accepted, max kept
+    f.client.anchor(&f.s3, &CHAIN, &b, &u64::MAX); // first approval names the maximum
+    assert_eq!(
+        f.client.try_anchor(&f.s1, &CHAIN, &b, &1001),
+        Err(Ok(RootAnchorError::SeqMismatch))
+    );
+    assert!(!f.client.is_anchored(&CHAIN, &b));
+    assert_eq!(
+        f.client.latest_seq(&CHAIN),
+        1000,
+        "latest_seq never saw the pinned value"
+    );
+
+    let c = root(&f.env, 0xC3);
+    f.client.anchor(&f.s1, &CHAIN, &c, &1002);
+    f.client.anchor(&f.s2, &CHAIN, &c, &1002);
+    assert!(
+        f.client.is_anchored(&CHAIN, &c),
+        "the route keeps anchoring"
+    );
+
+    // The revoke resets the stuck root's value with its approvals.
+    f.client.revoke_anchor(&CHAIN, &b);
+    assert_eq!(f.client.anchor_of(&CHAIN, &b).unwrap().ledger_seq, 0);
+    f.client.anchor(&f.s1, &CHAIN, &b, &1003);
+    f.client.anchor(&f.s2, &CHAIN, &b, &1003);
     assert!(f.client.is_anchored(&CHAIN, &b));
-    assert_eq!(f.client.anchor_of(&CHAIN, &b).unwrap().ledger_seq, 200);
+    assert_eq!(f.client.anchor_of(&CHAIN, &b).unwrap().ledger_seq, 1003);
+}
+
+/// A signer that already approved cannot move the value on a repeat call, up or down.
+#[test]
+fn repeat_approval_cannot_move_the_sequence() {
+    let f = fixture();
+    three(&f, 2);
+    let a = root(&f.env, 0xA1);
+    f.client.anchor(&f.s1, &CHAIN, &a, &1001);
+    assert_eq!(
+        f.client.try_anchor(&f.s1, &CHAIN, &a, &u64::MAX),
+        Err(Ok(RootAnchorError::SeqMismatch))
+    );
+    assert_eq!(
+        f.client.try_anchor(&f.s1, &CHAIN, &a, &1000),
+        Err(Ok(RootAnchorError::SeqMismatch))
+    );
+    f.client.anchor(&f.s1, &CHAIN, &a, &1001); // a matching retry is a harmless repeat
+    let rec = f.client.anchor_of(&CHAIN, &a).unwrap();
+    assert_eq!(rec.ledger_seq, 1001);
+    assert_eq!(rec.approvals, 1, "a repeat approval does not count");
+
+    f.client.anchor(&f.s2, &CHAIN, &a, &1001);
+    assert_eq!(f.client.latest_seq(&CHAIN), 1001);
+}
+
+/// A signer rotation resets the recorded value with the approvals: the new set's first approval
+/// sets it fresh, so a value named by a rotated-out signer binds nobody.
+#[test]
+fn rotation_resets_the_recorded_sequence() {
+    let f = fixture();
+    three(&f, 2);
+    let a = root(&f.env, 0xA1);
+    f.client.anchor(&f.s3, &CHAIN, &a, &900); // s3 names a wrong value, then is rotated out
+
+    f.client
+        .set_signers(&vec![&f.env, f.s1.clone(), f.s2.clone()], &2);
+    f.client.anchor(&f.s1, &CHAIN, &a, &500);
+    assert_eq!(f.client.anchor_of(&CHAIN, &a).unwrap().ledger_seq, 500);
+    f.client.anchor(&f.s2, &CHAIN, &a, &500);
+    assert!(f.client.is_anchored(&CHAIN, &a));
+    assert_eq!(f.client.latest_seq(&CHAIN), 500);
 }
 
 /// A1: a rotated-out notary's approvals stop counting.

@@ -22,4 +22,6 @@ pub enum RootAnchorError {
     DelayTooLong = 9,
     /// Nothing to revoke for this (chain, root)
     NoSuchAnchor = 10,
+    /// A later approval named a different ledger sequence than the pending root's first one
+    SeqMismatch = 11,
 }

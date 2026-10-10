@@ -37,7 +37,7 @@ const KEY_APPRV: Symbol = symbol_short!("apprv");
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnchorRec {
-    /// The highest source-chain ledger any approval named; the monotonic check runs against it
+    /// The source-chain ledger the first approval named; every later approval must match it
     pub ledger_seq: u64,
     /// Whether the threshold has been reached. An explicit flag rather than `anchored_at != 0`:
     /// a test ledger starts at timestamp 0, and a real one may not be assumed non-zero either.
