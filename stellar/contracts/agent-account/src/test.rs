@@ -2843,9 +2843,40 @@ fn s4_disarming_clears_every_schedule() {
     let f = fixture();
     guard(&f, 0, 3_600, 86_400);
     let (up, _) = schedule_one_of_each(&f);
-    for name in ["set_policy", "set_account_limit", "set_targets"] {
+    let tokens = vec![&f.env, f.ad_token.clone()];
+    let account_rows: [(&str, Vec<Val>); 3] = [
+        (
+            "set_policy",
+            policy_args(
+                &f.env,
+                &f.agent.id(&f.env),
+                &tokens,
+                0,
+                &f.signer,
+                &None,
+                &wide(&f.env, &tokens),
+            ),
+        ),
+        (
+            "set_account_limit",
+            vec![
+                &f.env,
+                f.ad_token.to_val(),
+                Limit {
+                    capacity: 1,
+                    refill_per_second: 1,
+                }
+                .into_val(&f.env),
+            ],
+        ),
+        (
+            "set_targets",
+            vec![&f.env, vec![&f.env, f.target.clone()].to_val()],
+        ),
+    ];
+    for (name, args) in account_rows.iter() {
         f.client
-            .schedule(&Scope::Account, &sym_of(&f.env, name), &vec![&f.env]);
+            .schedule(&Scope::Account, &sym_of(&f.env, name), args);
     }
     // Close is the one ad action `schedule_one_of_each` leaves out.
     schedule_close(&f, &f.owner);
@@ -4126,5 +4157,310 @@ fn schedule_commitment_vectors() {
             "2d047a26baf1b80d141b7bedc641553c8439fcd002b11f2779722d165c9af7bf",
             "8f5cb79b26191bcf82ab1fd0a9117a100b1cef59b82171d821bc9cbec43382bb",
         ]
+    );
+}
+
+/// The largest `set_policy` an owner can install: 16 tokens with limits and 16 ad-scope ids of
+/// `MAX_AD_ID` (1,024) bytes. Its `Scheduled` event must fit the network's 16,384-byte
+/// per-transaction contract-event limit, or a guarded account could never schedule it.
+fn maximal_policy_args(f: &Fixture) -> Vec<Val> {
+    let mut tokens = Vec::new(&f.env);
+    let mut limits = Vec::new(&f.env);
+    for i in 0..policy::MAX_WHITELIST_TOKENS {
+        let t = b32(&f.env, 0x10 + i as u8);
+        tokens.push_back(t.clone());
+        limits.push_back(tl(&t, 1_000, 1_000, 1));
+    }
+    let mut scope = Vec::new(&f.env);
+    for i in 0..policy::MAX_AD_SCOPE {
+        let id = std::format!("{i:02}{}", "x".repeat(1_022));
+        scope.push_back(String::from_str(&f.env, &id));
+    }
+    policy_args(
+        &f.env,
+        &Agent::new(42).id(&f.env),
+        &tokens,
+        0,
+        &f.signer,
+        &Some(scope),
+        &limits,
+    )
+}
+
+#[test]
+fn a_maximal_set_policy_schedule_fits_the_event_limit() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let args = maximal_policy_args(&f);
+    let full = ScVal::try_from_val(&f.env, &args.to_val())
+        .unwrap()
+        .to_xdr(Limits::none())
+        .unwrap()
+        .len();
+    f.env.cost_estimate().budget().reset_default();
+    f.client
+        .schedule(&Scope::Account, &sym_of(&f.env, "set_policy"), &args);
+    let r = f.env.cost_estimate().resources();
+    std::println!(
+        "maximal set_policy: args XDR {full} bytes; Scheduled event {} bytes (limit 16384)",
+        r.contract_events_size_bytes
+    );
+    assert!(r.contract_events_size_bytes <= 16_384);
+    assert_eq!(
+        last_event_data(&f.env, &f.account),
+        ScVal::Vec(Some(
+            std::vec![
+                sc(&f.env, Vec::<Val>::new(&f.env)),
+                sc(&f.env, commit(&f.env, args)),
+                sc(&f.env, T0 + 3_600),
+                sc(&f.env, T0 + 3_600 + 86_400),
+            ]
+            .try_into()
+            .unwrap()
+        )),
+        "set_policy's event carries the commitment, not the args"
+    );
+}
+
+/// The next-largest event: an owner lock carries the whole order. A guarded ad's id is bounded by
+/// the 250-byte ledger-key limit (`Schedule(Ad(id), "withdraw_from_ad")` is the longest key, 128
+/// bytes plus the id, XDR-padded to 4), so 120 bytes is the longest id that can be armed at all.
+#[test]
+fn a_lock_schedule_on_the_longest_schedulable_ad_id_fits_the_event_limit() {
+    let f = fixture();
+    let long = "y".repeat(120);
+    let ad_id = String::from_str(&f.env, &long);
+    f.client.set_guard_rail(&ad_id, &Some(rail(0, 1_000)));
+    let mut order = params(&f);
+    order.ad_id = ad_id.clone();
+    f.env.cost_estimate().budget().reset_default();
+    f.client.schedule(
+        &Scope::Ad(ad_id),
+        &lock_for_order(&f.env),
+        &vec![&f.env, order.into_val(&f.env)],
+    );
+    let r = f.env.cost_estimate().resources();
+    std::println!(
+        "lock on a 120-byte ad id: Scheduled event {} bytes (limit 16384)",
+        r.contract_events_size_bytes
+    );
+    assert!(r.contract_events_size_bytes <= 16_384);
+}
+
+/// The guardrail commitment ignores the bucket: the owner schedules from one read, a
+/// sub-threshold withdrawal moves the bucket, and the spend built from a fresh read still matches.
+#[test]
+fn a_guardrail_schedule_survives_a_moved_bucket() {
+    let f = fixture();
+    let to = Address::generate(&f.env);
+    f.client
+        .set_guard_rail(&ad(&f.env), &Some(rail(100, 1_000)));
+    let looser = |g: GuardRail| GuardRail {
+        threshold: 200,
+        ..g
+    };
+    let first = f.client.guard_rail(&ad(&f.env)).unwrap();
+    schedule_guard(&f, &Some(looser(first.clone())));
+    f.env.ledger().set_timestamp(T0 + 600);
+    owner_check(&f, &withdraw_ctx(&f, 50, &to)).expect("under the threshold");
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    let fresh = f.client.guard_rail(&ad(&f.env)).unwrap();
+    assert_ne!(
+        (fresh.bucket.level, fresh.bucket.last_ts),
+        (first.bucket.level, first.bucket.last_ts),
+        "the bucket moved"
+    );
+    f.client.set_guard_rail(&ad(&f.env), &Some(looser(fresh)));
+    assert_eq!(f.client.guard_rail(&ad(&f.env)).unwrap().threshold, 200);
+}
+
+/// Single use, on paths that do not clear the ad's rows: the same withdraw, close, lock and upgrade
+/// spent twice. (A guardrail loosening also clears every row of the ad, so it cannot show this.)
+#[test]
+fn every_spend_is_single_use() {
+    let f = fixture();
+    let to = Address::generate(&f.env);
+    guard(&f, 0, 3_600, 86_400);
+    let order_args: Vec<Val> = vec![&f.env, params(&f).into_val(&f.env)];
+    let lock = lock_ctx(&f.env, &f.target, order_args.clone());
+    let hash = f.env.deployer().upload_contract_wasm(ACCOUNT_WASM);
+    schedule_withdraw(&f, 7, &to);
+    schedule_close(&f, &to);
+    f.client
+        .schedule(&ad_scope(&f.env), &lock_for_order(&f.env), &order_args);
+    f.client.schedule(
+        &Scope::Account,
+        &sym_of(&f.env, "upgrade"),
+        &vec![&f.env, hash.to_val()],
+    );
+    f.env.ledger().set_timestamp(T0 + 3_600);
+
+    for (label, ctxs) in [
+        ("withdraw", withdraw_ctx(&f, 7, &to)),
+        ("close", close_ctx(&f, &to)),
+        ("lock", lock),
+    ] {
+        owner_check(&f, &ctxs).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+        expect_err(owner_check(&f, &ctxs), AccountError::NotScheduled);
+    }
+    // `upgrade` swaps the code, but the uploaded wasm is this one, so the second call runs the
+    // same rule.
+    f.client.upgrade(&hash);
+    assert_eq!(
+        f.client.try_upgrade(&hash),
+        Err(Ok(AccountError::NotScheduled))
+    );
+}
+
+/// `schedule` reads its args in the call's own shape and, on an ad, refuses args that name another
+/// ad: an unspendable schedule would still publish an event a watcher reads as a pending call.
+#[test]
+fn schedule_checks_each_actions_args() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let e = &f.env;
+    let other = String::from_str(e, "ad-2");
+    let to = Address::generate(e);
+    let try_ad = |action: &str, args: Vec<Val>| {
+        f.client
+            .try_schedule(&ad_scope(e), &sym_of(e, action), &args)
+    };
+    let try_acct = |action: &str, args: Vec<Val>| {
+        f.client
+            .try_schedule(&Scope::Account, &sym_of(e, action), &args)
+    };
+    let mut other_order = params(&f);
+    other_order.ad_id = other.clone();
+
+    // Another ad, right shape.
+    for (action, args) in [
+        (
+            "withdraw_from_ad",
+            vec![e, other.to_val(), 1_u128.into_val(e), to.to_val()],
+        ),
+        ("close_ad", vec![e, other.to_val(), to.to_val()]),
+        ("lock_for_order", vec![e, other_order.into_val(e)]),
+        (
+            "set_guard_rail",
+            vec![e, other.to_val(), Option::<GuardRail>::None.into_val(e)],
+        ),
+    ] {
+        assert_eq!(
+            try_ad(action, args),
+            Err(Ok(AccountError::ScopeMismatch)),
+            "{action} naming ad-2 under ad-1"
+        );
+    }
+
+    // The right ad, wrong shape.
+    let bad_ad: [(&str, Vec<Val>); 6] = [
+        (
+            "withdraw_from_ad",
+            vec![e, ad(e).to_val(), 1_u128.into_val(e)],
+        ),
+        (
+            "withdraw_from_ad",
+            vec![e, ad(e).to_val(), 1_u128.into_val(e), 5_u32.into_val(e)],
+        ),
+        ("close_ad", vec![e, ad(e).to_val(), 1_u128.into_val(e)]),
+        ("lock_for_order", vec![e, ad(e).to_val()]),
+        ("set_guard_rail", vec![e, ad(e).to_val(), 5_u32.into_val(e)]),
+        ("set_guard_rail", vec![e, ad(e).to_val()]),
+    ];
+    for (action, args) in bad_ad.iter() {
+        assert_eq!(
+            try_ad(action, args.clone()),
+            Err(Ok(AccountError::BadArgs)),
+            "{action} {args:?}"
+        );
+    }
+
+    let tokens = vec![e, f.ad_token.clone()];
+    let mut short_policy = policy_args(
+        e,
+        &f.agent.id(e),
+        &tokens,
+        0,
+        &f.signer,
+        &None,
+        &wide(e, &tokens),
+    );
+    short_policy.pop_back();
+    let mut bad_tokens = policy_args(
+        e,
+        &f.agent.id(e),
+        &tokens,
+        0,
+        &f.signer,
+        &None,
+        &wide(e, &tokens),
+    );
+    bad_tokens.set(2, vec![e, 5_u32].to_val());
+    let bad_acct: [(&str, Vec<Val>); 6] = [
+        ("upgrade", vec![e, 5_u32.into_val(e)]),
+        ("set_targets", vec![e, vec![e, 5_u32].to_val()]),
+        ("set_account_limit", vec![e, f.ad_token.to_val()]),
+        (
+            "set_account_limit",
+            vec![e, f.ad_token.to_val(), 5_u32.into_val(e)],
+        ),
+        ("set_policy", short_policy),
+        ("set_policy", bad_tokens),
+    ];
+    for (action, args) in bad_acct.iter() {
+        assert_eq!(
+            try_acct(action, args.clone()),
+            Err(Ok(AccountError::BadArgs)),
+            "{action} {args:?}"
+        );
+    }
+    assert!(
+        f.env
+            .events()
+            .all()
+            .filter_by_contract(&f.account)
+            .events()
+            .iter()
+            .all(|ev| {
+                match &ev.body {
+                    xdr::ContractEventBody::V0(v0) => v0.topics.first() != Some(&sym("scheduled")),
+                }
+            }),
+        "no refused schedule published an event"
+    );
+}
+
+/// The owner path reads an escrow call in its full shape: a sub-threshold withdrawal whose
+/// destination does not decode is refused, even on an unguarded ad.
+#[test]
+fn the_owner_path_refuses_an_undecodable_destination() {
+    let f = fixture();
+    let bad = |fn_name: &str, args: Vec<Val>| {
+        vec![
+            &f.env,
+            Context::Contract(ContractContext {
+                contract: f.target.clone(),
+                fn_name: Symbol::new(&f.env, fn_name),
+                args,
+            }),
+        ]
+    };
+    let e = &f.env;
+    expect_err(
+        owner_check(
+            &f,
+            &bad(
+                "withdraw_from_ad",
+                vec![e, ad(e).to_val(), 1_u128.into_val(e), 5_u32.into_val(e)],
+            ),
+        ),
+        AccountError::BadArgs,
+    );
+    expect_err(
+        owner_check(
+            &f,
+            &bad("close_ad", vec![e, ad(e).to_val(), 5_u32.into_val(e)]),
+        ),
+        AccountError::BadArgs,
     );
 }

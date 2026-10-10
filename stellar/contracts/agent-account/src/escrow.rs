@@ -185,7 +185,9 @@ fn spend_volume(
 /// The one spend for every delayed owner call (the escrow's withdraw / close / lock, a guardrail
 /// loosening, the account-wide changes), so "announced, matured, unexpired, exact, single-use"
 /// means one thing everywhere. `args` is the call's own argument list; its commitment must equal
-/// the one announced.
+/// the one announced. It covers the arguments, not the called contract: with two pinned escrows
+/// (across a redeploy), an ad id present in both shares one row per action, still exact on the
+/// amount, destination or order.
 pub fn spend(
     env: &Env,
     scope: &policy::Scope,
@@ -224,37 +226,9 @@ pub fn check_owner_call(env: &Env, c: &ContractContext) -> Result<(), AccountErr
         return Ok(());
     }
 
-    // `lock_for_order` carries the order struct; the other two take `ad_id` first. Only the ad and
-    // the amount are decoded (the threshold needs the amount); the schedule's commitment covers the
-    // rest. Fail closed on anything that does not decode: an extractive call the account cannot
-    // read is one it cannot judge.
-    let (ad_id, amount) = if c.fn_name == lock {
-        let raw = c.args.get(0).ok_or(AccountError::BadArgs)?;
-        let m: Map<Symbol, Val> =
-            Map::try_from_val(env, &raw).map_err(|_| AccountError::BadArgs)?;
-        let amount: u128 = field(env, &m, "amount")?;
-        let order_decimals: u32 = field(env, &m, "order_decimals")?;
-        let ad_decimals: u32 = field(env, &m, "ad_decimals")?;
-        let ad_amount =
-            proofbridge_core::decimal_scaling::scale(amount, order_decimals, ad_decimals)
-                .map_err(|_| AccountError::BadArgs)?;
-        (field::<String>(env, &m, "ad_id")?, ad_amount)
-    } else {
-        let ad_id: String = c
-            .args
-            .get(0)
-            .and_then(|v| String::try_from_val(env, &v).ok())
-            .ok_or(AccountError::BadArgs)?;
-        let amount: u128 = if c.fn_name == withdraw {
-            c.args
-                .get(1)
-                .and_then(|v| u128::try_from_val(env, &v).ok())
-                .ok_or(AccountError::BadArgs)?
-        } else {
-            0
-        };
-        (ad_id, amount)
-    };
+    // Decoded in the call's full shape, the same decode `schedule` runs. Fail closed on anything
+    // that does not decode: an extractive call the account cannot read is one it cannot judge.
+    let (ad_id, amount) = crate::args::decode_ad_call(env, &c.fn_name, &c.args)?;
 
     if !policy::is_guarded(env, &ad_id) {
         // Unguarded: every ad today, and a per-maker choice (design 02 §2.8). Absence means

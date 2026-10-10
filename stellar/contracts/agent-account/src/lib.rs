@@ -20,6 +20,7 @@
 
 #![no_std]
 
+mod args;
 mod auth;
 mod errors;
 mod escrow;
@@ -31,7 +32,7 @@ use soroban_sdk::{
     auth::{Context, CustomAccountInterface},
     contract, contractimpl,
     crypto::Hash,
-    vec, Address, BytesN, ContractExecutable, Env, IntoVal, String, Symbol, Val, Vec,
+    vec, Address, BytesN, ContractExecutable, Env, IntoVal, String, Symbol, TryFromVal, Val, Vec,
 };
 
 use escrow::spend;
@@ -264,7 +265,7 @@ impl AgentAccount {
             (Some(cur), Some(next)) => !policy::is_tightening(cur, next),
         };
         if loosening {
-            let args: Vec<Val> = vec![&env, ad_id.to_val(), guard_rail.into_val(&env)];
+            let args = args::guard_rail_args(&env, &ad_id, &guard_rail);
             spend(
                 &env,
                 &Scope::Ad(ad_id.clone()),
@@ -363,6 +364,11 @@ impl AgentAccount {
     ///     `set_account_limit` / `set_targets` with their own arguments; timed by the longest delay
     ///     and shortest window across every guarded ad (D6).
     ///
+    /// The args must have the call's shape (`BadArgs`) and, on an ad, name that ad
+    /// (`ScopeMismatch`). `set_guard_rail` is committed with its bucket zeroed (live state the
+    /// write re-stamps). The `Scheduled` event carries the args in clear, except `set_policy`'s,
+    /// which can exceed the network event limit and carry the commitment only.
+    ///
     /// One pending row per (scope, action); a new one replaces it.
     pub fn schedule(
         env: Env,
@@ -372,15 +378,31 @@ impl AgentAccount {
     ) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
-        if !policy::actions_for(&env, &scope).contains(&action) {
-            return Err(AccountError::ActionNotAllowed);
-        }
+        // The action must belong to the scope (each decoder refuses any other with
+        // `ActionNotAllowed`), its args must be the call's own shape and, on an ad, name that ad: a
+        // schedule that could never be spent would still publish an event a watcher reads as a
+        // pending call.
+        let mut args = args;
         let (delay, window) = match &scope {
             Scope::Ad(ad_id) => {
+                let (named, _) = args::decode_ad_call(&env, &action, &args)?;
+                if &named != ad_id {
+                    return Err(AccountError::ScopeMismatch);
+                }
+                if action == policy::set_guard_rail(&env) {
+                    let g: Option<GuardRail> = args
+                        .get(1)
+                        .and_then(|v| Option::<GuardRail>::try_from_val(&env, &v).ok())
+                        .ok_or(AccountError::BadArgs)?;
+                    args = args::guard_rail_args(&env, ad_id, &g);
+                }
                 let g = guard_rail_for_schedule(&env, ad_id)?;
                 (g.delay, g.window)
             }
-            Scope::Account => policy::account_timelock(&env)?,
+            Scope::Account => {
+                args::check_account_call(&env, &action, &args)?;
+                policy::account_timelock(&env)?
+            }
         };
         let (ready_at, expires_at) = window_from_now(&env, delay, window)?;
         let commitment = policy::args_commitment(&env, &args);
@@ -394,6 +416,15 @@ impl AgentAccount {
                 expires_at,
             },
         );
+        // A maximal `set_policy`'s args (16 ad ids of 1,024 bytes, 16 token limits) measure 21 KB of
+        // event against the network's 16,384-byte limit, so its event carries the commitment alone;
+        // the policy itself is published by `PolicySet` when it is applied. Every other action's
+        // args are small and ride in clear.
+        let args = if action == policy::act_set_policy(&env) {
+            Vec::new(&env)
+        } else {
+            args
+        };
         events::Scheduled {
             scope,
             action,

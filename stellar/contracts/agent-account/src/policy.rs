@@ -22,8 +22,10 @@ pub const MAX_AD_SCOPE: u32 = 16;
 pub const MAX_GUARDED_ADS: u32 = 16;
 /// Bumped by an `upgrade` whose wasm changes the storage shape; the new wasm's `migrate` writes it,
 /// and migrates or refuses old state deliberately instead of misreading it.
-/// 2 = 2.1d's `ad_scope` / `limits` / `buckets`.
-pub const SCHEMA_VERSION: u32 = 2;
+/// 2 = 2.1d's `ad_scope` / `limits` / `buckets`. 3 = 2.7's single schedule shape: rows written under
+/// the old keys (`Schedule(String, Symbol)`, `LockSchedule`, `AccountSchedule`) are never read by
+/// this code and archive on their TTL; `migrate` cannot enumerate keys and does not try.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Agent id: ed25519 pubkey as-is; secp256k1 agents use their 20-byte EVM
 /// address left-padded to 32 (`proofbridge_core::secp::evm_address_to_bytes32`).

@@ -18,7 +18,8 @@ pub enum AccountError {
     TargetNotAllowed = 6,
     /// `ctx.fn_name` is not in the policy's `allowed_actions`.
     ActionNotAllowed = 7,
-    /// Lock args missing a required key, wrong type, or bad decimals.
+    /// Call args missing a required key, of the wrong type or arity, or with bad decimals (the lock,
+    /// the owner path's escrow calls, and `schedule`'s args for any action).
     BadArgs = 8,
     /// A token in the lock is not on the policy's whitelist.
     TokenNotAllowed = 9,
@@ -52,4 +53,7 @@ pub enum AccountError {
     GuardRailArchived = 21,
     /// `migrate` found a schema version newer than this code knows: a downgrade it cannot read.
     SchemaTooNew = 22,
+    /// `schedule` on an ad scope whose args name a different ad (`args[0]`, or the order's
+    /// `ad_id`): a schedule that could never be spent, and an event that would mislead a watcher.
+    ScopeMismatch = 23,
 }

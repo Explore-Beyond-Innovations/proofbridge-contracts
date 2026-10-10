@@ -48,7 +48,9 @@ pub struct GuardRailSet {
 
 /// A delayed owner call was announced. **This is the point of the delay**: a window nobody can see
 /// start is not a warning, so the call's arguments ride on the event in clear, beside the
-/// commitment the spend will compare.
+/// commitment the spend will compare. `set_policy` is the exception: a maximal policy's args exceed
+/// the network's per-transaction event limit, so its `args` is empty and the policy is published by
+/// `PolicySet` when applied. `set_guard_rail`'s guardrail is shown with its bucket zeroed.
 #[contractevent(topics = ["scheduled"], data_format = "vec")]
 pub struct Scheduled {
     #[topic]
