@@ -904,7 +904,6 @@ fn relayed_error_codes_match_the_shared_definitions() {
     let pairs = [
         (Error::NotEscrow, c::NOT_ESCROW),
         (Error::DisputeExists, c::DISPUTE_EXISTS),
-        (Error::ChallengeClosed, c::CHALLENGE_CLOSED),
         (Error::NotResponder, c::NOT_RESPONDER),
         (Error::NoDisputeParams, c::NO_DISPUTE_PARAMS),
         (Error::WrongEscrow, c::WRONG_ESCROW),

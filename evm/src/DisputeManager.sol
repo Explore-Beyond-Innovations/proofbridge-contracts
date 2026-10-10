@@ -259,7 +259,8 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         if (outcome == Dispute.Outcome.TradeProceeds || outcome == Dispute.Outcome.None) {
             revert DisputeManager__ArbiterCannotSettle();
         }
-        Dispute.Record storage d = _unwindowed(orderHash);
+        Dispute.Record storage d = disputes[orderHash];
+        if (d.initiator == address(0)) revert DisputeManager__NotDisputed(orderHash);
         uint256 until_ = effectiveChallengeDeadline(orderHash);
         if (block.timestamp >= until_) revert DisputeManager__ChallengeClosed(until_);
 
@@ -348,11 +349,6 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         claimable[recipient] = 0;
         i_wNativeToken.safeWithdrawTo(amount, to);
         emit BondClaimed(recipient, to, amount);
-    }
-
-    function _unwindowed(bytes32 orderHash) private view returns (Dispute.Record storage d) {
-        d = disputes[orderHash];
-        if (d.initiator == address(0)) revert DisputeManager__NotDisputed(orderHash);
     }
 
     /// @notice The payout transfer, self-callable only so {_payOrCredit} can catch it.

@@ -154,14 +154,15 @@ pub enum AdManagerError {
     DisputeWindowClosed = 71,
     /// C-31: the dispute module refused or trapped the call.
     DisputeModuleRejected = 72,
-    /// 49S-3: the dispute module's own refusals, relayed 1:1 (codes only ever appended; 73 and 79
-    /// are retired: the module never raised them).
+    /// 49S-3: the dispute module's own refusals, relayed 1:1 (codes only ever appended). Retired,
+    /// never reused: 73 (the module never raised `BondTooSmall`), 79 (`ChallengeOpen`, raised only by
+    /// the deleted no-ruling claim) and 80 (`ChallengeClosed`, raised only by the arbiter's door, which
+    /// no escrow path calls).
     DisputeNoParams = 74,
     DisputeNotEscrow = 75,
     DisputeExists = 76,
     DisputeWrongEscrow = 77,
     DisputeNotResponder = 78,
-    DisputeChallengeClosed = 80,
     /// 49S-3: the dispute module could not move the bond (a token refusal, not a dispute rule).
     DisputeBondTransferFailed = 81,
     /// D5: the module's answer rules, relayed.
@@ -203,7 +204,6 @@ impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
             DisputeExists => AdManagerError::DisputeExists,
             DisputeWrongEscrow => AdManagerError::DisputeWrongEscrow,
             DisputeNotResponder => AdManagerError::DisputeNotResponder,
-            DisputeChallengeClosed => AdManagerError::DisputeChallengeClosed,
             DisputeBondTransferFailed => AdManagerError::DisputeBondTransferFailed,
             DisputeResponseWindowClosed => AdManagerError::DisputeResponseWindowClosed,
             DisputeAlreadyResponded => AdManagerError::DisputeAlreadyResponded,

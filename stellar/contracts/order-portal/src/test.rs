@@ -634,47 +634,54 @@ mod order_hash_parity {
 fn fault_codes_never_move() {
     use crate::errors::OrderPortalError;
     use proofbridge_core::escrow_ops::Fault::{self, *};
-    let table: [(Fault, u32); 38] = [
-        (TokenZeroAddress, 1),
-        (InvalidProof, 23),
-        (MerkleAppendFailed, 40),
-        (DecimalsOutOfRange, 60),
-        (NonExactDownscale, 61),
-        (DecimalOverflow, 62),
-        (InvalidAccountAddress, 70),
-        (ContractPaused, 71),
-        (NotPendingAdmin, 72),
-        (NothingToClaim, 73),
-        (NoRouteTiming, 75),
-        (InvalidTiming, 76),
-        (DeadlineTooSoon, 77),
-        (NotClaimable, 78),
-        (TooEarly, 79),
-        (NotClaimed, 80),
-        (NoRootAnchor, 81),
-        (RootNotAnchored, 82),
-        (SettledRecorded, 83),
-        (NotFilled, 84),
-        (NonCanonicalInput, 89),
-        (DeadlineTooFar, 90),
-        (NoDisputeManager, 92),
-        (NotDisputable, 92),
-        (DisputeNotResolved, 92),
-        (DisputeWindowClosed, 92),
-        (DisputeModuleRejected, 92),
-        (DisputeNoParams, 92),
-        (DisputeNotEscrow, 92),
-        (DisputeExists, 92),
-        (DisputeWrongEscrow, 92),
-        (DisputeNotResponder, 92),
-        (DisputeChallengeClosed, 92),
-        (DisputeBondTransferFailed, 92),
-        (DisputeResponseWindowClosed, 92),
-        (DisputeAlreadyResponded, 92),
-        (DisputeZeroResponse, 92),
-        (DisputeAlreadyRuled, 92),
-    ];
-    for (fault, code) in table {
-        assert_eq!(OrderPortalError::from(fault) as u32, code, "{fault:?}");
+    // Exhaustive, no wildcard: a new `Fault` fails to compile here until it is pinned to a number.
+    fn pinned(f: Fault) -> u32 {
+        match f {
+            TokenZeroAddress => 1,
+            InvalidProof => 23,
+            MerkleAppendFailed => 40,
+            DecimalsOutOfRange => 60,
+            NonExactDownscale => 61,
+            DecimalOverflow => 62,
+            InvalidAccountAddress => 70,
+            ContractPaused => 71,
+            NotPendingAdmin => 72,
+            NothingToClaim => 73,
+            NoRouteTiming => 75,
+            InvalidTiming => 76,
+            DeadlineTooSoon => 77,
+            NotClaimable => 78,
+            TooEarly => 79,
+            NotClaimed => 80,
+            NoRootAnchor => 81,
+            RootNotAnchored => 82,
+            SettledRecorded => 83,
+            NotFilled => 84,
+            NonCanonicalInput => 89,
+            DeadlineTooFar => 90,
+            NoDisputeManager => 92,
+            NotDisputable => 92,
+            DisputeNotResolved => 92,
+            DisputeWindowClosed => 92,
+            DisputeModuleRejected => 92,
+            DisputeNoParams => 92,
+            DisputeNotEscrow => 92,
+            DisputeExists => 92,
+            DisputeWrongEscrow => 92,
+            DisputeNotResponder => 92,
+            DisputeBondTransferFailed => 92,
+            DisputeResponseWindowClosed => 92,
+            DisputeAlreadyResponded => 92,
+            DisputeZeroResponse => 92,
+            DisputeAlreadyRuled => 92,
+        }
+    }
+    // `Fault::ALL` is generated with the enum, so it names every variant.
+    for &fault in Fault::ALL {
+        assert_eq!(
+            OrderPortalError::from(fault) as u32,
+            pinned(fault),
+            "{fault:?}"
+        );
     }
 }

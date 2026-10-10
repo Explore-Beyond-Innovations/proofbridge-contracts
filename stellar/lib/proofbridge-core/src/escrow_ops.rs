@@ -17,9 +17,25 @@ use crate::escrow_events;
 use crate::escrow_storage as storage;
 use crate::types::{ClaimEntry, ClaimRecord, ContractConfig, DisputeOutcome, RouteTiming, Status};
 
-/// Why a shared check refused. Each escrow maps this onto its own error enum.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Fault {
+/// Declares `Fault` and `Fault::ALL` from one list, so `ALL` names every variant by construction.
+/// The escrows' code-table tests iterate `ALL` against an exhaustive `match`: a variant added here
+/// fails to compile there until it is given a number.
+macro_rules! faults {
+    ($($(#[$meta:meta])* $variant:ident,)*) => {
+        /// Why a shared check refused. Each escrow maps this onto its own error enum.
+        #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+        pub enum Fault {
+            $($(#[$meta])* $variant,)*
+        }
+
+        impl Fault {
+            /// Every variant, in declaration order.
+            pub const ALL: &'static [Fault] = &[$(Fault::$variant,)*];
+        }
+    };
+}
+
+faults! {
     ContractPaused,
     NoRouteTiming,
     DeadlineTooSoon,
@@ -51,7 +67,6 @@ pub enum Fault {
     DisputeExists,
     DisputeWrongEscrow,
     DisputeNotResponder,
-    DisputeChallengeClosed,
     /// 49S-3: the module could not move the bond (a token refusal, e.g. no trustline or a shortfall).
     DisputeBondTransferFailed,
     /// D5: the module's answer rules (window closed, already answered, empty answer), relayed.
@@ -434,7 +449,6 @@ pub fn dispute_module_fault(e: Result<soroban_sdk::Error, soroban_sdk::InvokeErr
         Ok(err) if err.is_type(ScErrorType::Contract) => match err.get_code() {
             code::NOT_ESCROW => Fault::DisputeNotEscrow,
             code::DISPUTE_EXISTS => Fault::DisputeExists,
-            code::CHALLENGE_CLOSED => Fault::DisputeChallengeClosed,
             code::NOT_RESPONDER => Fault::DisputeNotResponder,
             code::NO_DISPUTE_PARAMS => Fault::DisputeNoParams,
             code::WRONG_ESCROW => Fault::DisputeWrongEscrow,
@@ -547,12 +561,13 @@ pub fn dispute_filer(env: &Env, order_hash: &BytesN<32>) -> Result<Option<Addres
 
 /// Evidence terminated a disputed order, so the dispute is over whatever the arbiter thought.
 ///
-/// The caller must have found a filer first (`dispute_filer`), which is what makes the record exist:
-/// the call goes straight to `settle_bond`, and a record that is gone comes back as the module's
-/// `NotDisputed`, relayed as `DisputeModuleRejected` — it fails closed. It is a no-op only when no
-/// module was ever recorded for the order. Every path that admits `Disputed` must close the dispute,
-/// or the bond has no exit at all: once the status leaves `Disputed`, `finalize_dispute` can never
-/// run again and the module holds the bond forever.
+/// A no-op when the order has no dispute record (never disputed, or already closed), so every path
+/// that admits `Disputed` can call it unconditionally — and every one of them must, or the bond has
+/// no exit at all: once the status leaves `Disputed`, `finalize_dispute` can never run again and the
+/// module holds the bond forever. The filer is looked up here, not by the caller, so the lookup that
+/// makes `settle_bond` safe cannot be skipped. With only two possible filers (D11), "not the maker"
+/// is "the bridger"; `maker_of` is only called once a record exists, so an undisputed order pays
+/// for no ad read.
 ///
 /// `outcome` is what the path proved, not what anyone ruled: a settle is `TradeProceeds`, a
 /// cancel-refund is `MutualRefund`. Reading the record's ruling here would route the bond by a
@@ -562,13 +577,18 @@ pub fn close_dispute_by_evidence(
     escrow: &Address,
     order_hash: &BytesN<32>,
     outcome: DisputeOutcome,
-    filer_is_bridger: bool,
+    maker_of: impl FnOnce() -> Option<Address>,
 ) -> Result<(), Fault> {
-    let Some(manager) = storage::get_order_dispute_manager(env, order_hash) else {
+    let Some(filer) = dispute_filer(env, order_hash)? else {
         return Ok(());
     };
+    let Some(maker) = maker_of() else {
+        return Ok(());
+    };
+    // `dispute_filer` returned a record, so the order has a module.
+    let manager = order_dispute_manager(env, order_hash)?;
     cross_contract::DisputeManagerClient::new(env, &manager)
-        .try_settle_bond(escrow, order_hash, &outcome, &filer_is_bridger)
+        .try_settle_bond(escrow, order_hash, &outcome, &(filer != maker))
         .map_err(dispute_module_fault)?
         .map_err(|_| Fault::DisputeModuleRejected)
 }

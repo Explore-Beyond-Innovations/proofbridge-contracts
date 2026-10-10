@@ -7631,7 +7631,8 @@ fn test_49s3_a_record_another_escrow_opened_is_wrong_escrow() {
 }
 
 /// Every code the escrows relay, produced by the real module and put through the escrows' relay.
-/// Code 15 comes from the module's arbiter door, which no escrow path calls.
+/// Code 15 (`ChallengeClosed`) comes only from the arbiter's door, which no escrow path calls, so it
+/// is not relayed: it reads as the generic `DisputeModuleRejected`.
 #[test]
 fn test_49s3_every_relayed_code_from_the_real_module() {
     use proofbridge_core::escrow_ops::{dispute_module_fault, Fault};
@@ -7690,7 +7691,7 @@ fn test_49s3_every_relayed_code_from_the_real_module() {
                 .unwrap_err()
                 .unwrap()
         ),
-        Fault::DisputeChallengeClosed
+        Fault::DisputeModuleRejected
     );
 }
 

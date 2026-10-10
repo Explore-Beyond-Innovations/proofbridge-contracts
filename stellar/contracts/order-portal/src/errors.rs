@@ -174,7 +174,6 @@ impl From<proofbridge_core::escrow_ops::Fault> for OrderPortalError {
             | DisputeExists
             | DisputeWrongEscrow
             | DisputeNotResponder
-            | DisputeChallengeClosed
             | DisputeBondTransferFailed
             | DisputeResponseWindowClosed
             | DisputeAlreadyResponded

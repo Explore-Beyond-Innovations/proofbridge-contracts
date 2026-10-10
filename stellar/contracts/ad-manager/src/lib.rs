@@ -1295,13 +1295,6 @@ impl AdManagerContract {
 
     // ---- termination core (2.3e), mirrored by the order-portal ----
 
-    /// The order's two parties, as this chain knows them: whoever it would pay. Filing and
-    /// responding are both restricted to them (D11), and that restriction is what makes
-    /// `filer_is_bridger` provable rather than inferred — with only two possible filers, "not the
-    /// maker" and "is the bridger" are the same statement.
-    ///
-    /// The bridger side is resolved through the same conversion the payout uses, so the set of
-    /// addresses that may file and the set that can be paid cannot drift apart.
     /// Close any dispute this evidence path has just overridden. A no-op when nothing was
     /// disputed — but every path that admits `Disputed` must call it, or the status leaves
     /// `Disputed`, `finalize_dispute` can never run again, and the bond is stranded for good.
@@ -1311,24 +1304,23 @@ impl AdManagerContract {
         outcome: DisputeOutcome,
         params: &OrderParams,
     ) -> Result<(), AdManagerError> {
-        let filer = match ops::dispute_filer(env, order_hash)? {
-            Some(who) => who,
-            None => return Ok(()),
-        };
-        let maker = match storage::get_ad(env, &params.ad_id) {
-            Some(ad) => ad.maker,
-            None => return Ok(()),
-        };
         ops::close_dispute_by_evidence(
             env,
             &env.current_contract_address(),
             order_hash,
             outcome,
-            filer != maker,
+            || storage::get_ad(env, &params.ad_id).map(|ad| ad.maker),
         )?;
         Ok(())
     }
 
+    /// The order's two parties, as this chain knows them: whoever it would pay. Filing and
+    /// responding are both restricted to them (D11), and that restriction is what makes
+    /// `filer_is_bridger` provable rather than inferred — with only two possible filers, "not the
+    /// maker" and "is the bridger" are the same statement.
+    ///
+    /// The bridger side is resolved through the same conversion the payout uses, so the set of
+    /// addresses that may file and the set that can be paid cannot drift apart.
     fn require_party(
         env: &Env,
         filer: &Address,
