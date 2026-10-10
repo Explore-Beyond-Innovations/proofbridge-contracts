@@ -43,7 +43,7 @@ contract Registrar is IRegistrar, EIP712 {
                                  STATE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice The home chain's MMR; the registrar holds its `MANAGER_ROLE`.
+    /// @notice The home chain's MMR; the registrar is one of its managers (`setManager`).
     IMerkleManager public immutable i_merkleManager;
 
     /// @notice The lowest epoch the account's next leaf may carry; each leaf raises it past its own.
@@ -100,7 +100,7 @@ contract Registrar is IRegistrar, EIP712 {
         nextEpoch[account32] = epoch + 1;
 
         subject = RegistrationSubject.subject(dstChainId, dstRegistryId, account32, blsCommitment, epoch);
-        if (!i_merkleManager.appendOrderHash(subject, LeafDomain.REGISTERED)) revert Registrar__AppendFailed();
+        i_merkleManager.appendOrderHash(subject, LeafDomain.REGISTERED);
         emit RegistrationLeaf(account32, blsCommitment, epoch, dstChainId, dstRegistryId, subject);
     }
 

@@ -19,7 +19,6 @@ export {
   EVM_NATIVE_TOKEN_ADDRESS,
   evmAddressToBytes32,
   NonceTracker,
-  MANAGER_ROLE,
   connect,
 } from "./common.js";
 export {

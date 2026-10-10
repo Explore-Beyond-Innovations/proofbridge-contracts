@@ -2,17 +2,16 @@
 pragma solidity ^0.8.34;
 
 import {MMRPoseidon2} from "@solidity-mmr/MMRPoseidon2.sol";
-import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
-import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
-import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {IMerkleManager} from "./interfaces/IMerkleManager.sol";
 
 /**
  * @title MerkleManager
- * @dev Manages all order hashes for ProofBridge protocol per chain
+ * @dev Manages all order hashes for ProofBridge protocol per chain. One admin (`TwoStepAdmin`) keeps
+ *      the list of managers (the escrows and the Registrar) that may append. No pause of its own:
+ *      every escrow path that appends is gated by that escrow.
  */
-contract MerkleManager is IMerkleManager, TwoStepAdmin, AccessControl, Pausable, ReentrancyGuardTransient {
+contract MerkleManager is IMerkleManager, TwoStepAdmin {
     using MMRPoseidon2 for MMRPoseidon2.Tree;
 
     MMRPoseidon2.Tree _tree;
@@ -20,58 +19,35 @@ contract MerkleManager is IMerkleManager, TwoStepAdmin, AccessControl, Pausable,
     // Mapping of width count to roothistory
     mapping(uint256 => bytes32) internal rootHistory;
 
-    /// @notice Roles
-    bytes32 public constant ADMIN_ROLE = DEFAULT_ADMIN_ROLE;
-    bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
+    /// @notice Who may append: the escrows and the Registrar.
+    mapping(address => bool) public isManager;
 
     // Errors
     error MerkleManager__ZeroAddress();
-    /// @notice `DEFAULT_ADMIN_ROLE` moves only with the two-step handover (C-37).
-    error MerkleManager__AdminRoleViaHandover();
+    error MerkleManager__NotManager(address caller);
 
+    event ManagerSet(address indexed account, bool enabled);
     // Self-verifying core; width/size stay readable via the view functions.
     event DepositHashAppended(uint256 indexed index, bytes32 indexed orderHash, uint256 side, bytes32 newRoot);
 
-    // Role definition for admin and setting poseidon2Yul hasher
+    modifier onlyManager() {
+        if (!isManager[msg.sender]) revert MerkleManager__NotManager(msg.sender);
+        _;
+    }
+
     constructor(address admin, address poseidon2Yul) {
         if (admin == address(0) || poseidon2Yul == address(0)) {
             revert MerkleManager__ZeroAddress();
         }
         _initAdmin(admin);
-        _setRoleAdmin(MANAGER_ROLE, ADMIN_ROLE);
         _tree.setHasher(poseidon2Yul);
     }
 
-    function pause() external onlyAdmin {
-        _pause();
-    }
-
-    function unpause() external onlyAdmin {
-        _unpause();
-    }
-
-    /// @dev The only contract here that runs roles: `MANAGER_ROLE` is granted to the escrows, so the
-    ///      admin handover has to carry `DEFAULT_ADMIN_ROLE` (its role admin) with it.
-    function _afterAdminChange(address from, address to) internal override {
-        if (to != address(0)) _grantRole(DEFAULT_ADMIN_ROLE, to);
-        if (from != address(0)) _revokeRole(DEFAULT_ADMIN_ROLE, from);
-    }
-
-    /// @dev C-37: a raw grant would make a second admin the handover never sees; other roles pass.
-    function grantRole(bytes32 role, address account) public override {
-        if (role == DEFAULT_ADMIN_ROLE) revert MerkleManager__AdminRoleViaHandover();
-        super.grantRole(role, account);
-    }
-
-    /// @dev Revoking or renouncing it raw would leave `admin` without the role; same rule.
-    function revokeRole(bytes32 role, address account) public override {
-        if (role == DEFAULT_ADMIN_ROLE) revert MerkleManager__AdminRoleViaHandover();
-        super.revokeRole(role, account);
-    }
-
-    function renounceRole(bytes32 role, address callerConfirmation) public override {
-        if (role == DEFAULT_ADMIN_ROLE) revert MerkleManager__AdminRoleViaHandover();
-        super.renounceRole(role, callerConfirmation);
+    /// @notice Add (`enabled`) or remove an appender. Removing one stops its appends at once.
+    function setManager(address account, bool enabled) external onlyAdmin {
+        if (account == address(0)) revert MerkleManager__ZeroAddress();
+        isManager[account] = enabled;
+        emit ManagerSet(account, enabled);
     }
 
     /**
@@ -79,14 +55,10 @@ contract MerkleManager is IMerkleManager, TwoStepAdmin, AccessControl, Pausable,
      * poseidon2(orderHash, side) (see _encodeLeaf). Updates peaks, root, and mappings. Emits DepositHashAppended.
      * @param orderHash The hash of the order to append.
      * @param side The leaf's `ad_contract` - the side it is unlocked on (1 = ad, 0 = order); set by the caller.
+     * No reentrancy guard: the only external call is the hasher `staticcall`. Restore one if a
+     * non-static external call is ever added to the append path.
      */
-    function appendOrderHash(bytes32 orderHash, uint256 side)
-        external
-        nonReentrant
-        onlyRole(MANAGER_ROLE)
-        whenNotPaused
-        returns (bool)
-    {
+    function appendOrderHash(bytes32 orderHash, uint256 side) external onlyManager {
         uint256 leafIndex = _tree.append(_encodeLeaf(orderHash, side));
         bytes32 newRoot = _tree.getRoot();
         uint256 width = _tree.getWidth();
@@ -94,7 +66,6 @@ contract MerkleManager is IMerkleManager, TwoStepAdmin, AccessControl, Pausable,
         rootHistory[width] = newRoot;
 
         emit DepositHashAppended(leafIndex, orderHash, side, newRoot);
-        return true;
     }
 
     /**
@@ -137,13 +108,15 @@ contract MerkleManager is IMerkleManager, TwoStepAdmin, AccessControl, Pausable,
         return _tree.getSize();
     }
 
+    /// @notice Debugging helper: one stored MMR node. Not a settlement or recovery path.
     function getNode(uint256 index) external view returns (bytes32) {
         return _tree.getNodeHash(index);
     }
 
     /**
-     * @notice Returns peak bag + sibling path for a leaf index.
-     * Used by off-chain relayers and by destination chain to claim.
+     * @notice Debugging helper: peak bag + sibling path for the leaf at MMR position `index`, equal to
+     * `proofbridge-mmr`'s proof for the same leaves. Not a settlement or recovery path: the relayer
+     * builds proofs from its mirror, rebuilt from `DepositHashAppended` events.
      */
     function getMerkleProof(uint256 index)
         external
@@ -154,8 +127,8 @@ contract MerkleManager is IMerkleManager, TwoStepAdmin, AccessControl, Pausable,
     }
 
     /**
-     * @notice Stateless verification helper
-     * This mirrors inclusionProof/verifyInclusion.
+     * @notice Debugging helper: stateless inclusion check (returns true or reverts). Nothing in the
+     * settlement path calls it; real inclusion is checked inside the circuit.
      */
     function verifyInclusionProof(
         bytes32 root_,

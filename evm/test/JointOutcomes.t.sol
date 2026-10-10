@@ -124,8 +124,8 @@ contract JointOutcomesTest is Test {
         orderToken = new ERC20Mock();
 
         vm.startPrank(admin);
-        mmP.grantRole(mmP.MANAGER_ROLE(), address(adManager));
-        mmF.grantRole(mmF.MANAGER_ROLE(), address(portal));
+        mmP.setManager(address(adManager), true);
+        mmF.setManager(address(portal), true);
         adManager.setRootVerifier(block.chainid, address(new MockRootVerifier(true)));
         portal.setRootVerifier(block.chainid, address(new MockRootVerifier(true)));
         adManager.setRouteTiming(block.chainid, RouteTiming.Timing(0, BUFFER, 0, LONG_BACKSTOP, 0));

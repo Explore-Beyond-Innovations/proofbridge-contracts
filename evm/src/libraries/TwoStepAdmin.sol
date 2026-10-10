@@ -5,9 +5,8 @@ pragma solidity ^0.8.34;
  * @title TwoStepAdmin — pending/accept admin handover.
  * @dev One admin address, nominated and then accepted, so a typo cannot orphan a contract. Deliberately
  *      not a role system: every contract here has exactly one privileged party, and the escrows carry
- *      the role machinery's ~800 bytes of code against the EIP-170 limit for nothing. A contract that
- *      genuinely does hold roles (MerkleManager's `MANAGER_ROLE`) inherits `AccessControl` alongside
- *      this and keeps the two in step through {_afterAdminChange}.
+ *      the role machinery's ~800 bytes of code against the EIP-170 limit for nothing. A list of
+ *      callers (MerkleManager's managers) is a plain mapping the admin edits.
  */
 abstract contract TwoStepAdmin {
     address public admin;
@@ -29,7 +28,6 @@ abstract contract TwoStepAdmin {
 
     function _initAdmin(address admin_) internal {
         admin = admin_;
-        _afterAdminChange(address(0), admin_);
     }
 
     /// @notice Nominate the next admin; `address(0)` withdraws a pending nomination (zero can
@@ -45,11 +43,6 @@ abstract contract TwoStepAdmin {
         address old = admin;
         admin = msg.sender;
         pendingAdmin = address(0);
-        _afterAdminChange(old, msg.sender);
         emit AdminTransferred(old, msg.sender);
     }
-
-    /// @dev Runs whenever `admin` changes, including the first assignment (`from == 0`). Empty here;
-    ///      a contract that also runs OZ roles overrides it to move `DEFAULT_ADMIN_ROLE` along.
-    function _afterAdminChange(address from, address to) internal virtual {}
 }

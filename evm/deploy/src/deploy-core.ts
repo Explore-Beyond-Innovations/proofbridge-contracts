@@ -5,7 +5,6 @@ import { ethers } from "ethers";
 import {
   ADMIN_BEARING,
   Acting,
-  MANAGER_ROLE,
   adminBlockFromChain,
   adminsOf,
   connect,
@@ -534,7 +533,7 @@ async function deployCoreRun(
     },
   );
 
-  // The home-chain REGISTERED-leaf appender; needs MANAGER_ROLE on the MerkleManager (granted
+  // The home-chain REGISTERED-leaf appender; must be a MerkleManager manager (set
   // below). The registry's proof path stays switched off (2.1b §7); nothing wires it here.
   const registrarAddr = await deployIfMissing(
     "Registrar",
@@ -548,7 +547,7 @@ async function deployCoreRun(
   );
 
   // The dispute module (2.3g) both escrows share. It holds bonds, never escrow funds, and takes no
-  // MerkleManager role — disputes append no leaf. Escrow ↔ module wiring happens at link time.
+  // MerkleManager manager entry — disputes append no leaf. Escrow ↔ module wiring happens at link time.
   const disputeManagerAddr = await deployIfMissing(
     "DisputeManager",
     existing?.contracts.disputeManager?.address,
@@ -691,20 +690,20 @@ async function deployCoreRun(
     }
   }
 
-  // ── grant MANAGER_ROLE to AdManager + OrderPortal + Registrar ─────
-  // Check-first, like every other wire: a role already held is not granted again, and whether a
-  // grant can be sent at all was decided up front.
+  // ── MerkleManager managers: AdManager + OrderPortal + Registrar ─────
+  // Check-first, like every other wire: a manager already set is not set again, and whether the
+  // call can be sent at all was decided up front.
   const merkleManager = attachContract(merkleManagerAddr, "MerkleManager", "MerkleManager", signer);
   for (const { name, addr } of [
     { name: "AdManager", addr: adManagerAddr },
     { name: "OrderPortal", addr: orderPortalAddr },
     { name: "Registrar", addr: registrarAddr },
   ]) {
-    if (await merkleManager.getFunction("hasRole")(MANAGER_ROLE, addr)) {
-      console.log(`  [skip] MANAGER_ROLE → ${name} already granted`);
+    if (await merkleManager.getFunction("isManager")(addr)) {
+      console.log(`  [skip] MerkleManager.setManager(${name}) already true`);
       continue;
     }
-    await acting.call(merkleManager, "MerkleManager", "grantRole", [MANAGER_ROLE, addr], `MANAGER_ROLE → ${name}`);
+    await acting.call(merkleManager, "MerkleManager", "setManager", [addr, true], `MerkleManager.setManager(${name}, true)`);
   }
 
   const manifest = buildManifest({

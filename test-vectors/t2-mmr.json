@@ -199,5 +199,149 @@
       "siblings": []
     },
     "assertion": "verify(forged.root, forged.width, forged.elementIndex, forged.leaf, forged.peaks, forged.siblings) MUST return true — the proof math cannot reject a forged extension. The defense is isAnchored: forged.root must fail it (never anchored), every honestRoots entry passes once anchored, and an anchor is usable only after ANCHOR_DELAY (T-63)."
+  },
+  "proofParity": {
+    "leaves": [
+      {
+        "orderHash": "0xa4051971fa4ca8e6761659de7f41ac804d32c302d0b009109cc085dc28529d2b",
+        "domain": "ORDER",
+        "side": 0,
+        "leaf": "0x26c5977be2738173f71d28acdbb0114e3a095ca759e1349421cc601c3a64b59f",
+        "elementIndex": 1
+      },
+      {
+        "orderHash": "0x07b83c34816804b636866e9f28ffc10ba0428df1fb462b2068192de6289002c8",
+        "domain": "AD",
+        "side": 1,
+        "leaf": "0x2b657fe8c542a2d63ed51e6d3b40e97b425d1cbbdeae5602f167d72940557d28",
+        "elementIndex": 2
+      },
+      {
+        "orderHash": "0xebccfb190106dbb7be63866b98b70e8000360c4e9a9185a54d243470515ca136",
+        "domain": "CANCEL",
+        "side": 2,
+        "leaf": "0x135cebc01b4b11519b9bf6f7e172d468ebc724519657f366a2e034ff1d683164",
+        "elementIndex": 4
+      },
+      {
+        "orderHash": "0x1a7dd3528ede642a7edffef3e994572dff45458b394a22734fedcfff84ce1a32",
+        "domain": "SETTLED",
+        "side": 3,
+        "leaf": "0x170357001234294aeb49bf238fb4af1cc6e7fe7b70b369cc2eaa6202925b6f08",
+        "elementIndex": 5
+      },
+      {
+        "orderHash": "0x2b72054e06504952c930f94ca703e454003a4f5b2a87d3d9a22ef659c859a8d6",
+        "domain": "REGISTERED",
+        "side": 4,
+        "leaf": "0x2f9d1343dbe2be3a87304c3fa2750b95495f6c6f03dbb71e66c9bc7e27c287f9",
+        "elementIndex": 8
+      },
+      {
+        "orderHash": "0xdaee0ed5b0080913debcbab068f3227cc8fdffd41943144c9b29928f1c75aac2",
+        "domain": "FORFEIT",
+        "side": 5,
+        "leaf": "0x09dfbb28bb181e5e4160fb37e3442e9a606e7268da8522bddbe77bc99bea1a41",
+        "elementIndex": 9
+      },
+      {
+        "orderHash": "0x8766c6039f3659f1392029bef173b5eb314ba9150d8a4abd0d2e2307f612226f",
+        "domain": "ORDER",
+        "side": 0,
+        "leaf": "0x1ecd82babecb32c4774faed4b1fa956e468c937c4a6e4995c0680c3fe78b1a41",
+        "elementIndex": 11
+      }
+    ],
+    "width": 7,
+    "root": "0x00962095bf5648c9db830941dd8f7480a6f9f435af4bb496526144aa4167f1a5",
+    "proofs": [
+      {
+        "elementIndex": 1,
+        "leaf": "0x26c5977be2738173f71d28acdbb0114e3a095ca759e1349421cc601c3a64b59f",
+        "peaks": [
+          "0x2ba377389890130adbe2cf2cf4730fc33d243d2e24fbaa1d758d1df08c9158db",
+          "0x28d0476d700875782d301a5e3b67d0d254667f09efe94a8fdcc6b6193a771e41",
+          "0x016c9a3ecbd862e27ba69ef8169c192cccecc44aa0befb156e16f0ddff3e684b"
+        ],
+        "siblings": [
+          "0x00769fc9fdb8ba70a8cd18de5bc037cfe7297e586233720100825a1da0984304",
+          "0x040d142ab0d127fdb69bedd45230adfafdf8ad8fedd319e6b76e69552804b9a0"
+        ]
+      },
+      {
+        "elementIndex": 2,
+        "leaf": "0x2b657fe8c542a2d63ed51e6d3b40e97b425d1cbbdeae5602f167d72940557d28",
+        "peaks": [
+          "0x2ba377389890130adbe2cf2cf4730fc33d243d2e24fbaa1d758d1df08c9158db",
+          "0x28d0476d700875782d301a5e3b67d0d254667f09efe94a8fdcc6b6193a771e41",
+          "0x016c9a3ecbd862e27ba69ef8169c192cccecc44aa0befb156e16f0ddff3e684b"
+        ],
+        "siblings": [
+          "0x16a0dd4ae74a45e9998774b2bca5fca531ea9580c4ae0b43a7061c56aef9d0d9",
+          "0x040d142ab0d127fdb69bedd45230adfafdf8ad8fedd319e6b76e69552804b9a0"
+        ]
+      },
+      {
+        "elementIndex": 4,
+        "leaf": "0x135cebc01b4b11519b9bf6f7e172d468ebc724519657f366a2e034ff1d683164",
+        "peaks": [
+          "0x2ba377389890130adbe2cf2cf4730fc33d243d2e24fbaa1d758d1df08c9158db",
+          "0x28d0476d700875782d301a5e3b67d0d254667f09efe94a8fdcc6b6193a771e41",
+          "0x016c9a3ecbd862e27ba69ef8169c192cccecc44aa0befb156e16f0ddff3e684b"
+        ],
+        "siblings": [
+          "0x2873955d52bc0a8ef90dab20efe8932a80aca3b8e5497b1e77fa1f20c3d85609",
+          "0x2fd48c27e76e511160f20b16a14138fbe6ac2ec6e44e6489f845e2cb2e3af7d6"
+        ]
+      },
+      {
+        "elementIndex": 5,
+        "leaf": "0x170357001234294aeb49bf238fb4af1cc6e7fe7b70b369cc2eaa6202925b6f08",
+        "peaks": [
+          "0x2ba377389890130adbe2cf2cf4730fc33d243d2e24fbaa1d758d1df08c9158db",
+          "0x28d0476d700875782d301a5e3b67d0d254667f09efe94a8fdcc6b6193a771e41",
+          "0x016c9a3ecbd862e27ba69ef8169c192cccecc44aa0befb156e16f0ddff3e684b"
+        ],
+        "siblings": [
+          "0x12b9edd7a6583a97105010dad0d9e4bb5de728feec86bd438713091239fa7ed8",
+          "0x2fd48c27e76e511160f20b16a14138fbe6ac2ec6e44e6489f845e2cb2e3af7d6"
+        ]
+      },
+      {
+        "elementIndex": 8,
+        "leaf": "0x2f9d1343dbe2be3a87304c3fa2750b95495f6c6f03dbb71e66c9bc7e27c287f9",
+        "peaks": [
+          "0x2ba377389890130adbe2cf2cf4730fc33d243d2e24fbaa1d758d1df08c9158db",
+          "0x28d0476d700875782d301a5e3b67d0d254667f09efe94a8fdcc6b6193a771e41",
+          "0x016c9a3ecbd862e27ba69ef8169c192cccecc44aa0befb156e16f0ddff3e684b"
+        ],
+        "siblings": [
+          "0x1dac33c903bdae8c10a2aef1b5f75a33b1ff37a9b2411c55069b6185df56bc4c"
+        ]
+      },
+      {
+        "elementIndex": 9,
+        "leaf": "0x09dfbb28bb181e5e4160fb37e3442e9a606e7268da8522bddbe77bc99bea1a41",
+        "peaks": [
+          "0x2ba377389890130adbe2cf2cf4730fc33d243d2e24fbaa1d758d1df08c9158db",
+          "0x28d0476d700875782d301a5e3b67d0d254667f09efe94a8fdcc6b6193a771e41",
+          "0x016c9a3ecbd862e27ba69ef8169c192cccecc44aa0befb156e16f0ddff3e684b"
+        ],
+        "siblings": [
+          "0x136a1c1dbb676e175719e61a3cfc96151e99a774c5163550ca0c5f138a147365"
+        ]
+      },
+      {
+        "elementIndex": 11,
+        "leaf": "0x1ecd82babecb32c4774faed4b1fa956e468c937c4a6e4995c0680c3fe78b1a41",
+        "peaks": [
+          "0x2ba377389890130adbe2cf2cf4730fc33d243d2e24fbaa1d758d1df08c9158db",
+          "0x28d0476d700875782d301a5e3b67d0d254667f09efe94a8fdcc6b6193a771e41",
+          "0x016c9a3ecbd862e27ba69ef8169c192cccecc44aa0befb156e16f0ddff3e684b"
+        ],
+        "siblings": []
+      }
+    ],
+    "assertion": "append every leaves[i] (orderHash, side) in order; the chain's root and width equal root/width, its proof view for proofs[j].elementIndex returns (root, width, peaks, siblings) exactly, and its verifier accepts it"
   }
 }

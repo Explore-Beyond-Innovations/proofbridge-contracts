@@ -14,8 +14,6 @@ import {AdManager} from "src/AdManager.sol";
 import {OrderPortal} from "src/OrderPortal.sol";
 import {BLSKeyRegistry} from "src/BLSKeyRegistry.sol";
 import {TwoStepAdmin} from "src/libraries/TwoStepAdmin.sol";
-import {MerkleManager} from "src/MerkleManager.sol";
-import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
 
 contract AdManagerPauseTest is AdManagerTest {
     function test_pause_blocksAllEntryPoints() public {
@@ -183,80 +181,11 @@ contract RegistryPauseTest is Test {
     }
 }
 
-/// MerkleManager is the one contract that still runs OZ roles (`MANAGER_ROLE` for the escrows), so its
-/// admin handover has to carry `DEFAULT_ADMIN_ROLE` along or the next admin cannot grant an escrow.
-contract MerkleManagerAdminRoleTest is Test {
-    MerkleManager internal mm;
-    address internal admin = address(0xA11CE);
-    address internal next = address(0xB0B);
-    address internal escrow = address(0xE5C0);
-
-    function setUp() public {
-        mm = new MerkleManager(admin, address(new Poseidon2Yul()));
-    }
-
-    function test_adminHandoverCarriesTheRoleAdmin() public {
-        // Cached: an argument that is itself a call would eat the prank meant for the next line.
-        bytes32 roleAdmin = mm.DEFAULT_ADMIN_ROLE();
-        bytes32 manager = mm.MANAGER_ROLE();
-        assertTrue(mm.hasRole(roleAdmin, admin));
-
-        vm.prank(admin);
-        mm.transferAdmin(next);
-        vm.prank(next);
-        mm.acceptAdmin();
-
-        assertTrue(mm.hasRole(roleAdmin, next));
-        assertFalse(mm.hasRole(roleAdmin, admin));
-
-        vm.prank(next);
-        mm.grantRole(manager, escrow);
-        assertTrue(mm.hasRole(manager, escrow));
-
-        vm.expectRevert();
-        vm.prank(admin);
-        mm.grantRole(manager, address(0xDEAD));
-    }
-
-    /// C-37: the admin role moves only through the handover; other roles still grant and revoke.
-    function test_c37_rawAdminRoleWritesAreClosed() public {
-        bytes32 roleAdmin = mm.DEFAULT_ADMIN_ROLE();
-        bytes32 manager = mm.MANAGER_ROLE();
-
-        vm.prank(admin);
-        vm.expectRevert(MerkleManager.MerkleManager__AdminRoleViaHandover.selector);
-        mm.grantRole(roleAdmin, next);
-        assertFalse(mm.hasRole(roleAdmin, next), "no second admin");
-
-        vm.prank(admin);
-        vm.expectRevert(MerkleManager.MerkleManager__AdminRoleViaHandover.selector);
-        mm.revokeRole(roleAdmin, admin);
-
-        vm.prank(admin);
-        vm.expectRevert(MerkleManager.MerkleManager__AdminRoleViaHandover.selector);
-        mm.renounceRole(roleAdmin, admin);
-        assertTrue(mm.hasRole(roleAdmin, admin), "admin keeps the role");
-
-        vm.startPrank(admin);
-        mm.grantRole(manager, escrow);
-        assertTrue(mm.hasRole(manager, escrow), "another role still grants");
-        mm.revokeRole(manager, escrow);
-        assertFalse(mm.hasRole(manager, escrow), "and revokes");
-        vm.stopPrank();
-    }
-
-    /// C-37: the BLS key registry refuses a zero admin at construction.
+/// C-37: the BLS key registry refuses a zero admin at construction. (MerkleManager's manager list and
+/// its admin handover are covered in `MerkleManager.t.sol`.)
+contract BLSKeyRegistryZeroAdminTest is Test {
     function test_c37_blsRegistryRefusesZeroAdmin() public {
         vm.expectRevert(IBLSKeyRegistry.ZeroAdmin.selector);
         new BLSKeyRegistry(address(0), "local");
-    }
-
-    function test_pauseIsAdminOnly() public {
-        vm.prank(next);
-        vm.expectRevert(TwoStepAdmin.NotAdmin.selector);
-        mm.pause();
-
-        vm.prank(admin);
-        mm.pause();
     }
 }

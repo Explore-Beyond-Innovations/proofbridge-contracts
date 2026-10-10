@@ -2,10 +2,6 @@ import { ethers } from "ethers";
 import * as path from "path";
 import { fileURLToPath } from "url";
 
-export const MANAGER_ROLE = ethers.keccak256(
-  ethers.toUtf8Bytes("MANAGER_ROLE"),
-);
-
 /** NATIVE_TOKEN_ADDRESS from contracts/evm/src/{OrderPortal,AdManager}.sol — native token sentinel. */
 export const EVM_NATIVE_TOKEN_ADDRESS =
   "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as const;

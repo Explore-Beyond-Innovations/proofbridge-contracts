@@ -14,8 +14,8 @@ Node/ethers CLI for deploying ProofBridge on one EVM chain. Emits a
 ### `deploy`
 
 Deploys (or reuses) Verifier, MerkleManager, wNativeToken, AdManager,
-OrderPortal. Grants `MANAGER_ROLE` on MerkleManager to AdManager +
-OrderPortal. Writes/updates the manifest.
+OrderPortal. Sets AdManager, OrderPortal and Registrar as MerkleManager
+managers (`setManager`). Writes/updates the manifest.
 
 ```bash
 pnpm --filter @proofbridge/evm-deploy cli deploy
