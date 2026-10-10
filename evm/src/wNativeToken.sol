@@ -61,8 +61,9 @@ library SafeNativeToken {
         if (to != address(this)) {
             assembly ("memory-safe") {
                 // solhint-disable-line no-inline-assembly
-                // All remaining gas: a 5,000 cap refuses proxy and smart-account wallets. Every caller
-                // is nonReentrant and settles its own ledger first; the push path runs under a 150k cap.
+                // All remaining gas: a 5,000 cap refuses proxy and smart-account wallets. Callers debit
+                // first (escrows also hold nonReentrant; DisputeManager has no guard, only that ordering);
+                // settlement pushes run in a 150k-gas try that credits `claimable` on failure.
                 if iszero(call(gas(), to, amount, 0, 0, 0, 0)) {
                     let ptr := mload(0x40)
                     returndatacopy(ptr, 0, returndatasize())
