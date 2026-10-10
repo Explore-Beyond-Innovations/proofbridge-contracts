@@ -130,8 +130,8 @@ export async function link(
       );
       const parsed = JSON.parse(out.split("\n").filter(Boolean).pop() ?? "null");
       return (
+        // A stored entry is what makes the peer supported; only its counterpart is compared.
         !!parsed &&
-        parsed.supported === true &&
         String(parsed[peerField]).toLowerCase() === stripHex(want).toLowerCase()
       );
     } catch {
@@ -143,7 +143,7 @@ export async function link(
     console.log(`  [skip] AdManager.set_chain(${peerChainId}) already set`);
   } else {
     if (acting.call(local.contracts.adManager.address, "AdManager", "set_chain",
-      ["--order_chain_id", peerChainId, "--order_portal", stripHex(peer.contracts.orderPortal.addressBytes32), "--supported", "true"],
+      ["--order_chain_id", peerChainId, "--order_portal", stripHex(peer.contracts.orderPortal.addressBytes32)],
       `AdManager.set_chain(${peerChainId}, peerOrderPortal=${peer.contracts.orderPortal.address})`)) chainTxs++;
   }
 
@@ -151,7 +151,7 @@ export async function link(
     console.log(`  [skip] OrderPortal.set_chain(${peerChainId}) already set`);
   } else {
     if (acting.call(local.contracts.orderPortal.address, "OrderPortal", "set_chain",
-      ["--ad_chain_id", peerChainId, "--ad_manager", stripHex(peer.contracts.adManager.addressBytes32), "--supported", "true"],
+      ["--ad_chain_id", peerChainId, "--ad_manager", stripHex(peer.contracts.adManager.addressBytes32)],
       `OrderPortal.set_chain(${peerChainId}, peerAdManager=${peer.contracts.adManager.address})`)) chainTxs++;
   }
 

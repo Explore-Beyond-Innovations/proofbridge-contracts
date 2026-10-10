@@ -143,17 +143,16 @@ impl OrderPortalContract {
         env: Env,
         ad_chain_id: u128,
         ad_manager: BytesN<32>,
-        supported: bool,
     ) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
 
-        if supported && auth::is_zero_bytes32(&ad_manager) {
+        // A stored entry is what makes the chain supported, so it must name a counterpart.
+        if auth::is_zero_bytes32(&ad_manager) {
             return Err(OrderPortalError::ZeroAddress);
         }
 
         let chain_info = ChainInfo {
-            supported,
             ad_manager: ad_manager.clone(),
         };
         storage::set_chain(&env, ad_chain_id, &chain_info);
@@ -161,7 +160,7 @@ impl OrderPortalContract {
         events::ChainSet {
             chain_id: ad_chain_id,
             ad_manager: ad_manager.clone(),
-            supported,
+            supported: true,
         }
         .publish(&env);
 
@@ -251,11 +250,7 @@ impl OrderPortalContract {
             return Err(OrderPortalError::RoutesZeroAddress);
         }
 
-        let chain_info =
-            storage::get_chain(&env, ad_chain_id).ok_or(OrderPortalError::AdChainNotSupported)?;
-        if !chain_info.supported {
-            return Err(OrderPortalError::AdChainNotSupported);
-        }
+        storage::get_chain(&env, ad_chain_id).ok_or(OrderPortalError::AdChainNotSupported)?;
 
         storage::set_token_route(&env, &order_token, ad_chain_id, &ad_token);
 
@@ -390,8 +385,8 @@ impl OrderPortalContract {
         }
         let config = storage::get_config(&env)?;
 
-        // Permissionless (EVM parity): the recipient is hash-bound, so anyone may submit.
-        Self::assert_order_decimals(&env, &params, &config.w_native_token)?;
+        // Permissionless (EVM parity): the recipient is hash-bound, so anyone may submit. Decimals
+        // were checked at create; the payout is the deposited amount.
 
         let order_hash = Self::order_hash(&env, &config, &params);
 
@@ -410,13 +405,8 @@ impl OrderPortalContract {
             return Err(OrderPortalError::OrderExpired);
         }
 
-        let public_inputs = cross_contract::build_public_inputs(
-            &env,
-            &config.merkle_manager,
-            &nullifier_hash,
-            &target_root,
-            &order_hash,
-        )?;
+        let public_inputs =
+            cross_contract::build_public_inputs(&env, &nullifier_hash, &target_root, &order_hash)?;
         // Gate 2 - root authenticity (BLS co-signature). Mandatory: unlock is
         // impossible until the route's verifier module is configured.
         let module = storage::get_root_verifier(&env, params.ad_chain_id)

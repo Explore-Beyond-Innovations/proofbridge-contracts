@@ -18,7 +18,6 @@ pub trait MerkleManagerInterface {
     fn get_root(env: Env) -> BytesN<32>;
     fn get_root_at_index(env: Env, leaf_index: u128) -> BytesN<32>;
     fn get_width(env: Env) -> u128;
-    fn field_mod(env: Env, order_hash: BytesN<32>) -> BytesN<32>;
 }
 
 /// Typed interface for the DisputeManager module (2.3g).
@@ -143,11 +142,6 @@ pub fn get_merkle_width(env: &Env, merkle_manager: &Address) -> u128 {
     MerkleManagerClient::new(env, merkle_manager).get_width()
 }
 
-/// Apply BN254 field modulus to a hash via MerkleManager.
-pub fn get_field_mod(env: &Env, merkle_manager: &Address, order_hash: &BytesN<32>) -> BytesN<32> {
-    MerkleManagerClient::new(env, merkle_manager).field_mod(order_hash)
-}
-
 // =============================================================================
 // Verifier Helper
 // =============================================================================
@@ -182,7 +176,6 @@ pub fn verify_proof(
 /// Total: 128 bytes (4 x 32-byte field elements)
 pub fn build_public_inputs(
     env: &Env,
-    merkle_manager: &Address,
     nullifier_hash: &BytesN<32>,
     target_root: &BytesN<32>,
     order_hash: &BytesN<32>,
@@ -196,7 +189,8 @@ pub fn build_public_inputs(
     if !is_canonical(nullifier_hash) {
         return Err(Fault::NonCanonicalInput);
     }
-    let order_hash_mod = get_field_mod(env, merkle_manager, order_hash);
+    // Reduced here, not by a call to the MerkleManager: both are `Bn254Fr::from_bytes(x).to_bytes()`.
+    let order_hash_mod = field_mod(order_hash);
 
     // Chain flag as bytes32 (big-endian)
     let mut chain_flag = [0u8; 32];

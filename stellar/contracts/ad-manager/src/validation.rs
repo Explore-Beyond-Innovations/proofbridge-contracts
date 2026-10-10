@@ -53,14 +53,9 @@ pub fn validate_order(env: &Env, ad: &Ad, params: &OrderParams) -> Result<(), Ad
 
     let chain_info =
         storage::get_chain(env, params.order_chain_id).ok_or(AdManagerError::ChainNotSupported)?;
-    if !chain_info.supported {
-        return Err(AdManagerError::ChainNotSupported);
-    }
 
-    // Order portal only enforced when configured.
-    if !auth::is_zero_bytes32(&chain_info.order_portal)
-        && chain_info.order_portal != params.src_order_portal
-    {
+    // `set_chain` refuses a zero counterpart, so the stored portal is always the binding.
+    if chain_info.order_portal != params.src_order_portal {
         return Err(AdManagerError::OrderPortalMismatch);
     }
 

@@ -157,7 +157,6 @@ mod validation_tests {
 
     fn setup_chain_and_route(env: &Env, params: &crate::types::OrderParams) {
         let chain_info = ChainInfo {
-            supported: true,
             ad_manager: params.ad_manager.clone(),
         };
         storage::set_chain(env, params.ad_chain_id, &chain_info);
@@ -236,27 +235,11 @@ mod validation_tests {
     }
 
     #[test]
-    fn test_validate_order_chain_disabled() {
-        let env = Env::default();
-        env.as_contract(&env.register(OrderPortalContract, ()), || {
-            let params = valid_params(&env);
-            let chain_info = ChainInfo {
-                supported: false,
-                ad_manager: params.ad_manager.clone(),
-            };
-            storage::set_chain(&env, params.ad_chain_id, &chain_info);
-            let result = validation::validate_order(&env, &params);
-            assert_eq!(result, Err(OrderPortalError::AdChainNotSupported));
-        });
-    }
-
-    #[test]
     fn test_validate_order_ad_manager_mismatch() {
         let env = Env::default();
         env.as_contract(&env.register(OrderPortalContract, ()), || {
             let params = valid_params(&env);
             let chain_info = ChainInfo {
-                supported: true,
                 ad_manager: make_bytes32(&env, 0x11), // Different from params
             };
             storage::set_chain(&env, params.ad_chain_id, &chain_info);
@@ -272,7 +255,6 @@ mod validation_tests {
             let params = valid_params(&env);
             // Set chain but not route
             let chain_info = ChainInfo {
-                supported: true,
                 ad_manager: params.ad_manager.clone(),
             };
             storage::set_chain(&env, params.ad_chain_id, &chain_info);
@@ -287,7 +269,6 @@ mod validation_tests {
         env.as_contract(&env.register(OrderPortalContract, ()), || {
             let params = valid_params(&env);
             let chain_info = ChainInfo {
-                supported: true,
                 ad_manager: params.ad_manager.clone(),
             };
             storage::set_chain(&env, params.ad_chain_id, &chain_info);
@@ -324,13 +305,11 @@ mod storage_tests {
             assert!(storage::get_chain(&env, chain_id).is_none());
 
             let chain_info = ChainInfo {
-                supported: true,
                 ad_manager: BytesN::from_array(&env, &[0xAA; 32]),
             };
             storage::set_chain(&env, chain_id, &chain_info);
 
-            let stored = storage::get_chain(&env, chain_id).unwrap();
-            assert!(stored.supported);
+            assert!(storage::get_chain(&env, chain_id).is_some());
 
             storage::remove_chain(&env, chain_id);
             assert!(storage::get_chain(&env, chain_id).is_none());
@@ -476,30 +455,6 @@ mod order_lifecycle_tests {
             assert_eq!(storage::get_order_status(&env, &order1), Status::Open);
             assert_eq!(storage::get_order_status(&env, &order2), Status::Filled);
             assert_eq!(storage::get_order_status(&env, &order3), Status::Open);
-        });
-    }
-
-    #[test]
-    fn test_chain_configuration_lifecycle() {
-        let env = Env::default();
-        let contract_id = env.register(OrderPortalContract, ());
-
-        env.as_contract(&contract_id, || {
-            assert!(storage::get_chain(&env, 1).is_none());
-
-            let chain_info = crate::types::ChainInfo {
-                supported: true,
-                ad_manager: BytesN::from_array(&env, &[0xAA; 32]),
-            };
-            storage::set_chain(&env, 1, &chain_info);
-            assert!(storage::get_chain(&env, 1).unwrap().supported);
-
-            let disabled = crate::types::ChainInfo {
-                supported: false,
-                ad_manager: chain_info.ad_manager,
-            };
-            storage::set_chain(&env, 1, &disabled);
-            assert!(!storage::get_chain(&env, 1).unwrap().supported);
         });
     }
 
