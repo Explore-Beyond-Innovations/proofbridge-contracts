@@ -5,6 +5,7 @@ import {stdJson} from "forge-std/StdJson.sol";
 import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
 import {BLSKeyRegistryTest} from "./BLSKeyRegistry.t.sol";
 import {BLSKeyRegistry} from "src/BLSKeyRegistry.sol";
+import {TwoStepAdmin} from "src/libraries/TwoStepAdmin.sol";
 import {RootAnchor} from "src/RootAnchor.sol";
 import {IRootAnchor} from "src/interfaces/IRootAnchor.sol";
 import {HonkVerifier, IVerifier} from "src/Verifier.sol";
@@ -113,7 +114,7 @@ contract ProofRegistrationTest is BLSKeyRegistryTest {
 
     function test_setProofRegistration_adminOnly() public {
         vm.prank(makeAddr("stranger"));
-        vm.expectRevert(IBLSKeyRegistry.NotAdmin.selector);
+        vm.expectRevert(TwoStepAdmin.NotAdmin.selector);
         registry.setProofRegistration(IRootAnchor(address(1)), IVerifier(address(1)), _sources(SOURCE_CHAIN), true);
     }
 
