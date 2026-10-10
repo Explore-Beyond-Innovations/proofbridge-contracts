@@ -1072,7 +1072,7 @@ impl AdManagerContract {
         Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
-        ops::record_settled(&env, &config.merkle_manager, &order_hash)
+        ops::record_settled(&env, &config.merkle_manager, &order_hash).map_err(Into::into)
     }
 
     // =========================================================================
@@ -1101,7 +1101,7 @@ impl AdManagerContract {
     /// hostage while one is investigated (2.3h D1, 03 F9).
     pub fn claim(env: Env, recipient: BytesN<32>, token: BytesN<32>) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
-        ops::claim(&env, &config, recipient, token)
+        ops::claim(&env, &config, recipient, token).map_err(Into::into)
     }
 
     pub fn has_open_positions(env: Env, account: BytesN<32>) -> bool {
@@ -1268,7 +1268,7 @@ impl AdManagerContract {
             params.order_decimals,
             params.ad_decimals,
         )
-        .map_err(proofbridge_core::errors::map_decimal_scaling_error::<AdManagerError>)
+        .map_err(|e| AdManagerError::from(ops::Fault::from(e)))
     }
 
     /// Pay the bridger's recipient from the ad, in the units the lock reserved.
@@ -1295,13 +1295,6 @@ impl AdManagerContract {
 
     // ---- termination core (2.3e), mirrored by the order-portal ----
 
-    /// The order's two parties, as this chain knows them: whoever it would pay. Filing and
-    /// responding are both restricted to them (D11), and that restriction is what makes
-    /// `filer_is_bridger` provable rather than inferred — with only two possible filers, "not the
-    /// maker" and "is the bridger" are the same statement.
-    ///
-    /// The bridger side is resolved through the same conversion the payout uses, so the set of
-    /// addresses that may file and the set that can be paid cannot drift apart.
     /// Close any dispute this evidence path has just overridden. A no-op when nothing was
     /// disputed — but every path that admits `Disputed` must call it, or the status leaves
     /// `Disputed`, `finalize_dispute` can never run again, and the bond is stranded for good.
@@ -1311,24 +1304,23 @@ impl AdManagerContract {
         outcome: DisputeOutcome,
         params: &OrderParams,
     ) -> Result<(), AdManagerError> {
-        let filer = match ops::dispute_filer(env, order_hash)? {
-            Some(who) => who,
-            None => return Ok(()),
-        };
-        let maker = match storage::get_ad(env, &params.ad_id) {
-            Some(ad) => ad.maker,
-            None => return Ok(()),
-        };
         ops::close_dispute_by_evidence(
             env,
             &env.current_contract_address(),
             order_hash,
             outcome,
-            filer != maker,
+            || storage::get_ad(env, &params.ad_id).map(|ad| ad.maker),
         )?;
         Ok(())
     }
 
+    /// The order's two parties, as this chain knows them: whoever it would pay. Filing and
+    /// responding are both restricted to them (D11), and that restriction is what makes
+    /// `filer_is_bridger` provable rather than inferred — with only two possible filers, "not the
+    /// maker" and "is the bridger" are the same statement.
+    ///
+    /// The bridger side is resolved through the same conversion the payout uses, so the set of
+    /// addresses that may file and the set that can be paid cannot drift apart.
     fn require_party(
         env: &Env,
         filer: &Address,
@@ -1338,10 +1330,7 @@ impl AdManagerContract {
         if filer == maker {
             return Ok(());
         }
-        let bridger = proofbridge_core::token::bytes32_to_account_address::<AdManagerError>(
-            env,
-            bridger_side,
-        )?;
+        let bridger = proofbridge_core::token::bytes32_to_account_address(env, bridger_side)?;
         if *filer == bridger {
             return Ok(());
         }
@@ -1530,7 +1519,7 @@ impl AdManagerContract {
         params: &OrderParams,
         w_native_addr: &Address,
     ) -> Result<(), AdManagerError> {
-        let on_chain = proofbridge_core::token::token_decimals_bytes32::<AdManagerError>(
+        let on_chain = proofbridge_core::token::token_decimals_bytes32(
             env,
             &params.ad_chain_token,
             w_native_addr,

@@ -16,8 +16,7 @@ pub enum RegistryError {
     InvalidPop = 5,
     /// Owner auth does not resolve to `account`.
     OwnerMismatch = 6,
-    /// Unused since a zero-slot revoke bumps the nonce (2.6 review D2); the number stays reserved.
-    NotRegistered = 7,
+    // 7 (`NotRegistered`) is retired: a zero-slot revoke bumps the nonce (2.6 review D2). Never reused.
     /// Revoke while the account has locked funds / open orders.
     AccountInFlight = 8,
     ContractPaused = 9,

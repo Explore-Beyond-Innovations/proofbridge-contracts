@@ -1441,6 +1441,38 @@ fn test_termination_metering() {
     meter("order_portal.refund_by_cancel");
 }
 
+/// An unlock on a disputed order also closes the dispute in its module: two module calls
+/// (`initiator_of`, `settle_bond`) on top of the plain unlock.
+#[test]
+fn test_disputed_unlock_metering() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let params = locked_ad_order(&s);
+    s.ad_manager
+        .dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+
+    s.env.cost_estimate().budget().reset_unlimited();
+    s.ad_manager.unlock(
+        &params,
+        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+        &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+        &Bytes::new(&s.env),
+    );
+    let b = s.env.cost_estimate().budget();
+    let (cpu, mem) = (b.cpu_instruction_cost(), b.memory_bytes_cost());
+    std::println!(
+        "ad_manager.unlock (disputed): cpu {} insns, mem {} bytes",
+        cpu,
+        mem
+    );
+    assert!(
+        cpu <= SOROBAN_TX_CPU_BUDGET,
+        "disputed unlock would not submit on chain"
+    );
+    assert!(mem <= AD_UNLOCK_MEM_CEILING);
+}
+
 // ---------------------------------------------------------------------------
 // Event claims (2.3d): the same circuit and the same verify_proof as deposits; the contract-built
 // public inputs (proofbridge_core::cross_contract::build_event_public_inputs) keep them apart.
@@ -5976,7 +6008,7 @@ fn test_2_3g_in_flight_clears_on_resolved() {
 const DISPUTE_SCENARIOS_JSON: &str = include_str!("../../test-vectors/dispute-scenarios.json");
 #[allow(dead_code)]
 const DISPUTE_SCENARIOS_SHA256: &str =
-    "832864d8032f9a7f3df6e71d1c833b221bc94d1e7d8f6fb3945e9e90b13bc1cd";
+    "81694f5b2341bf014de61495376c63f977391daa24f85cc4d28967d3fba12de0";
 
 fn t24_wire(
     s: &TestSetup,
@@ -6110,7 +6142,7 @@ fn t24_horizon(filed_at: u64, challenge: u64, deadline: u64, buffer_s: u64) -> u
 }
 
 /// The window a ruling opens: max(ruledAt, orderDeadline) + buffer (D3). With no
-/// ruling the horizon itself is the window — a fallback claim extends nothing.
+/// ruling the horizon itself is the window.
 fn t24_window(horizon: u64, ruled_at: Option<u64>, deadline: u64, buffer_s: u64) -> u64 {
     match ruled_at {
         None => horizon,
@@ -6199,7 +6231,6 @@ fn t24_run_scenario(
                 );
                 s.env.ledger().set_timestamp(want + 1);
             }
-            "claimDispute" => dm.claim_dispute(&order_hash),
             "finalize" => s.ad_manager.finalize_dispute(&params),
             "present" => s
                 .ad_manager
@@ -6268,7 +6299,7 @@ fn t24_run_scenario(
 const JOINT_OUTCOMES_JSON: &str = include_str!("../../test-vectors/joint-outcomes.json");
 #[allow(dead_code)]
 const JOINT_OUTCOMES_SHA256: &str =
-    "c5409fb9a6647b7c052caa4aad6c33845a67749731ba2a492a8b71a741aab459";
+    "8dc63f3fcacaeee13be175e96afb49f21fa61c8a62b302fdd9dc320664476097";
 
 fn t25_wire(
     s: &TestSetup,
@@ -6754,7 +6785,6 @@ fn t25_step(
             );
             warp(s, want + 1);
         }
-        "claimDispute" => dm.claim_dispute(&w.h),
         "finalizeDispute" => {
             if neg {
                 t25_expect_ad_err(
@@ -7449,7 +7479,7 @@ fn wire_dispute_manager_bonded_in(
     bonded
 }
 
-/// A SAC bond the filer holds no trustline for is the transfer fault, never `DisputeBondTooSmall`
+/// A SAC bond the filer holds no trustline for is the transfer fault
 /// (the SAC's own #13, read as the module's number).
 #[test]
 fn test_49s3_a_sac_bond_without_a_trustline_is_the_transfer_fault() {
@@ -7601,11 +7631,10 @@ fn test_49s3_a_record_another_escrow_opened_is_wrong_escrow() {
 }
 
 /// Every code the escrows relay, produced by the real module and put through the escrows' relay.
-/// Codes 14 and 15 come from the module's permissionless / arbiter doors, which no escrow path
-/// calls; 13 is never raised by the Soroban module (the bond is pulled, not sent).
+/// Code 15 (`ChallengeClosed`) comes only from the arbiter's door, which no escrow path calls, so it
+/// is not relayed: it reads as the generic `DisputeModuleRejected`.
 #[test]
 fn test_49s3_every_relayed_code_from_the_real_module() {
-    use dispute_manager_contract::DisputeManagerError as DmErr;
     use proofbridge_core::escrow_ops::{dispute_module_fault, Fault};
     let relay = |e: soroban_sdk::Error| dispute_module_fault(Ok(e));
 
@@ -7639,10 +7668,6 @@ fn test_49s3_every_relayed_code_from_the_real_module() {
     s.ad_manager.dispute(&p, &filer, &ev);
     assert_eq!(relay(open(&esc, &h, chain, &filer)), Fault::DisputeExists);
     assert_eq!(
-        relay(dm.try_claim_dispute(&h).unwrap_err().unwrap()),
-        Fault::DisputeChallengeOpen
-    );
-    assert_eq!(
         relay(
             dm.try_record_response(&esc, &h, &filer, &ev, &0)
                 .unwrap_err()
@@ -7666,12 +7691,7 @@ fn test_49s3_every_relayed_code_from_the_real_module() {
                 .unwrap_err()
                 .unwrap()
         ),
-        Fault::DisputeChallengeClosed
-    );
-    // The one relayed code the Soroban module cannot raise still maps, for parity with EVM.
-    assert_eq!(
-        relay(soroban_sdk::Error::from(DmErr::BondTooSmall)),
-        Fault::DisputeBondTooSmall
+        Fault::DisputeModuleRejected
     );
 }
 

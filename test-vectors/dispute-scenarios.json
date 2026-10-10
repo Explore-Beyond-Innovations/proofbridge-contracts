@@ -108,9 +108,6 @@
           "action": "warpPastChallenge"
         },
         {
-          "action": "claimDispute"
-        },
-        {
           "action": "warpPastWindow"
         },
         {

@@ -318,8 +318,7 @@ impl OrderPortalContract {
             return Err(OrderPortalError::OrderExists);
         }
 
-        let bridger_addr =
-            token::bytes32_to_account_address::<OrderPortalError>(&env, &params.bridger)?;
+        let bridger_addr = token::bytes32_to_account_address(&env, &params.bridger)?;
 
         // Root-level auth for the SAC transfer sub-invocation that will call
         // `from.require_auth()` internally. When the bridger is also the tx
@@ -593,7 +592,7 @@ impl OrderPortalContract {
         Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
-        ops::record_settled(&env, &config.merkle_manager, &order_hash)
+        ops::record_settled(&env, &config.merkle_manager, &order_hash).map_err(Into::into)
     }
 
     // =========================================================================
@@ -627,7 +626,7 @@ impl OrderPortalContract {
         token: BytesN<32>,
     ) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
-        ops::claim(&env, &config, recipient, token)
+        ops::claim(&env, &config, recipient, token).map_err(Into::into)
     }
 
     pub fn has_open_positions(env: Env, account: BytesN<32>) -> bool {
@@ -857,7 +856,7 @@ impl OrderPortalContract {
         params: &OrderParams,
         w_native_addr: &Address,
     ) -> Result<(), OrderPortalError> {
-        let on_chain = proofbridge_core::token::token_decimals_bytes32::<OrderPortalError>(
+        let on_chain = proofbridge_core::token::token_decimals_bytes32(
             env,
             &params.order_chain_token,
             w_native_addr,
