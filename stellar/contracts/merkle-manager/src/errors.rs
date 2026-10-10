@@ -15,14 +15,7 @@ pub enum MerkleError {
     NotManager = 3,
     /// Address cannot be zero
     ZeroAddress = 4,
-    /// Index is out of range
-    IndexOutOfRange = 5,
-    /// Index is not a leaf node
-    NotLeafIndex = 6,
-    /// Peak count mismatch in verification
-    InvalidPeakCount = 7,
-    /// Node not found in storage
-    NodeNotFound = 8,
-    ContractPaused = 9,
+    // 5–9 retired (four never-returned MMR errors and `ContractPaused` with the pause); the
+    // numbers stay unused so no surviving code moves.
     NotPendingAdmin = 10,
 }

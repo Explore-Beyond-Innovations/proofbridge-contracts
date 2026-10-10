@@ -23,16 +23,6 @@ use soroban_sdk::{contract, contractevent, contractimpl, Address, BytesN, Env, V
 // Events
 // =============================================================================
 
-#[contractevent(topics = ["paused"], data_format = "single-value")]
-pub struct Paused {
-    pub admin: Address,
-}
-
-#[contractevent(topics = ["unpaused"], data_format = "single-value")]
-pub struct Unpaused {
-    pub admin: Address,
-}
-
 #[contractevent(topics = ["adm_start"], data_format = "single-value")]
 pub struct AdminTransferStarted {
     #[topic]
@@ -110,27 +100,6 @@ impl ProofBridgeMerkleManagerContract {
     // Admin Functions
     // =========================================================================
 
-    /// Set or unset a manager.
-    ///
-    /// Only the admin can call this function. Managers are authorized
-    /// to append order hashes to the MMR.
-
-    pub fn pause(env: Env) -> Result<(), MerkleError> {
-        let admin = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
-        admin.require_auth();
-        storage::set_paused(&env, true);
-        Paused { admin }.publish(&env);
-        Ok(())
-    }
-
-    pub fn unpause(env: Env) -> Result<(), MerkleError> {
-        let admin = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
-        admin.require_auth();
-        storage::set_paused(&env, false);
-        Unpaused { admin }.publish(&env);
-        Ok(())
-    }
-
     pub fn transfer_admin(env: Env, to: Address) -> Result<(), MerkleError> {
         let admin = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
         admin.require_auth();
@@ -153,6 +122,11 @@ impl ProofBridgeMerkleManagerContract {
         Ok(())
     }
 
+    /// Set or unset a manager.
+    ///
+    /// Only the admin can call this function. Managers are authorized
+    /// to append order hashes to the MMR. No pause of its own: every escrow
+    /// path that appends is gated by that escrow; unsetting a manager stops it.
     pub fn set_manager(env: Env, manager: Address, status: bool) -> Result<(), MerkleError> {
         if !storage::is_initialized(&env) {
             return Err(MerkleError::NotInitialized);
@@ -192,9 +166,6 @@ impl ProofBridgeMerkleManagerContract {
         order_hash: BytesN<32>,
         side: u32,
     ) -> Result<bool, MerkleError> {
-        if storage::is_paused(&env) {
-            return Err(MerkleError::ContractPaused);
-        }
         if !storage::is_initialized(&env) {
             return Err(MerkleError::NotInitialized);
         }
@@ -255,12 +226,12 @@ impl ProofBridgeMerkleManagerContract {
         storage::get_size(&env)
     }
 
-    /// Get a node hash by index.
+    /// Debugging helper: one stored node hash by MMR position. Not a settlement or recovery path.
     pub fn get_node(env: Env, index: u128) -> BytesN<32> {
         storage::get_node_hash(&env, index).unwrap_or(BytesN::from_array(&env, &[0u8; 32]))
     }
 
-    /// Return all current peak hashes (same order as in peak bagging).
+    /// Debugging helper: all current peak hashes (same order as in peak bagging).
     pub fn get_peaks(env: Env) -> Vec<BytesN<32>> {
         mmr::get_peaks(&env)
     }
@@ -276,7 +247,9 @@ impl ProofBridgeMerkleManagerContract {
     // Proof Functions
     // =========================================================================
 
-    /// Build a Merkle inclusion proof for a leaf at `index`.
+    /// Debugging helper: the inclusion proof for the leaf at MMR position `index`, equal to
+    /// `proofbridge-mmr`'s proof for the same leaves. Not a settlement or recovery path: the
+    /// relayer builds proofs from its mirror, rebuilt from `mmr_add` events.
     ///
     /// Returns (root, width, peak_bag, siblings).
     pub fn get_merkle_proof(
@@ -286,7 +259,8 @@ impl ProofBridgeMerkleManagerContract {
         mmr::get_merkle_proof(&env, index)
     }
 
-    /// Stateless inclusion proof verification.
+    /// Debugging helper: stateless inclusion proof verification. Nothing in the settlement path
+    /// calls it; real inclusion is checked inside the circuit.
     ///
     /// Returns true if the proof is valid; panics on invalid proof.
     pub fn verify_inclusion(
