@@ -5,7 +5,7 @@
 use soroban_sdk::Env;
 
 use proofbridge_core::decimal_scaling;
-use proofbridge_core::errors::map_decimal_scaling_error;
+use proofbridge_core::escrow_ops::Fault;
 use proofbridge_core::token;
 
 use crate::auth;
@@ -31,19 +31,14 @@ pub fn validate_order(env: &Env, params: &OrderParams) -> Result<(), OrderPortal
     if auth::is_zero_bytes32(&params.ad_recipient) {
         return Err(OrderPortalError::InvalidAdRecipient);
     }
-    let _ = token::bytes32_to_account_address::<OrderPortalError>(env, &params.ad_recipient)?;
+    let _ = token::bytes32_to_account_address(env, &params.ad_recipient)?;
 
     // Decimal range checks (both sides must be within supported bounds).
-    decimal_scaling::assert_in_range(params.order_decimals)
-        .map_err(map_decimal_scaling_error::<OrderPortalError>)?;
-    decimal_scaling::assert_in_range(params.ad_decimals)
-        .map_err(map_decimal_scaling_error::<OrderPortalError>)?;
+    decimal_scaling::assert_in_range(params.order_decimals).map_err(Fault::from)?;
+    decimal_scaling::assert_in_range(params.ad_decimals).map_err(Fault::from)?;
 
     let chain_info =
         storage::get_chain(env, params.ad_chain_id).ok_or(OrderPortalError::AdChainNotSupported)?;
-    if !chain_info.supported {
-        return Err(OrderPortalError::AdChainNotSupported);
-    }
 
     if chain_info.ad_manager != params.ad_manager {
         return Err(OrderPortalError::AdManagerMismatch);

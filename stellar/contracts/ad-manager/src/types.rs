@@ -7,13 +7,12 @@ pub use proofbridge_core::types::{
     ClaimEntry, ClaimRecord, ContractConfig, DisputeOutcome, OrderRecord, RouteTiming, Status,
 };
 
-/// Source chain configuration
+/// Source chain configuration (present = supported)
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ChainInfo {
-    /// Whether orders from this chain are accepted
-    pub supported: bool,
-    /// Address of the OrderPortal contract on the source chain
+    /// Address of the OrderPortal contract on the source chain. A stored entry is what makes the
+    /// chain supported; `remove_chain` switches it off.
     pub order_portal: BytesN<32>,
 }
 

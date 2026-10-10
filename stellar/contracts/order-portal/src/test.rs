@@ -157,7 +157,6 @@ mod validation_tests {
 
     fn setup_chain_and_route(env: &Env, params: &crate::types::OrderParams) {
         let chain_info = ChainInfo {
-            supported: true,
             ad_manager: params.ad_manager.clone(),
         };
         storage::set_chain(env, params.ad_chain_id, &chain_info);
@@ -199,7 +198,7 @@ mod validation_tests {
         // Direct call into the refactored helper — zero bytes must surface as
         // the typed contract-specific error, not a panic.
         let result: Result<Address, OrderPortalError> =
-            proofbridge_core::token::bytes32_to_account_address(&env, &zero);
+            proofbridge_core::token::bytes32_to_account_address(&env, &zero).map_err(Into::into);
         assert_eq!(result, Err(OrderPortalError::InvalidAccountAddress));
     }
 
@@ -208,7 +207,7 @@ mod validation_tests {
         let env = Env::default();
         let bytes = make_bytes32(&env, 0xAB);
         let result: Result<Address, OrderPortalError> =
-            proofbridge_core::token::bytes32_to_account_address(&env, &bytes);
+            proofbridge_core::token::bytes32_to_account_address(&env, &bytes).map_err(Into::into);
         assert!(result.is_ok(), "any non-zero 32-byte pubkey must decode");
     }
 
@@ -236,27 +235,11 @@ mod validation_tests {
     }
 
     #[test]
-    fn test_validate_order_chain_disabled() {
-        let env = Env::default();
-        env.as_contract(&env.register(OrderPortalContract, ()), || {
-            let params = valid_params(&env);
-            let chain_info = ChainInfo {
-                supported: false,
-                ad_manager: params.ad_manager.clone(),
-            };
-            storage::set_chain(&env, params.ad_chain_id, &chain_info);
-            let result = validation::validate_order(&env, &params);
-            assert_eq!(result, Err(OrderPortalError::AdChainNotSupported));
-        });
-    }
-
-    #[test]
     fn test_validate_order_ad_manager_mismatch() {
         let env = Env::default();
         env.as_contract(&env.register(OrderPortalContract, ()), || {
             let params = valid_params(&env);
             let chain_info = ChainInfo {
-                supported: true,
                 ad_manager: make_bytes32(&env, 0x11), // Different from params
             };
             storage::set_chain(&env, params.ad_chain_id, &chain_info);
@@ -272,7 +255,6 @@ mod validation_tests {
             let params = valid_params(&env);
             // Set chain but not route
             let chain_info = ChainInfo {
-                supported: true,
                 ad_manager: params.ad_manager.clone(),
             };
             storage::set_chain(&env, params.ad_chain_id, &chain_info);
@@ -287,7 +269,6 @@ mod validation_tests {
         env.as_contract(&env.register(OrderPortalContract, ()), || {
             let params = valid_params(&env);
             let chain_info = ChainInfo {
-                supported: true,
                 ad_manager: params.ad_manager.clone(),
             };
             storage::set_chain(&env, params.ad_chain_id, &chain_info);
@@ -324,13 +305,11 @@ mod storage_tests {
             assert!(storage::get_chain(&env, chain_id).is_none());
 
             let chain_info = ChainInfo {
-                supported: true,
                 ad_manager: BytesN::from_array(&env, &[0xAA; 32]),
             };
             storage::set_chain(&env, chain_id, &chain_info);
 
-            let stored = storage::get_chain(&env, chain_id).unwrap();
-            assert!(stored.supported);
+            assert!(storage::get_chain(&env, chain_id).is_some());
 
             storage::remove_chain(&env, chain_id);
             assert!(storage::get_chain(&env, chain_id).is_none());
@@ -480,30 +459,6 @@ mod order_lifecycle_tests {
     }
 
     #[test]
-    fn test_chain_configuration_lifecycle() {
-        let env = Env::default();
-        let contract_id = env.register(OrderPortalContract, ());
-
-        env.as_contract(&contract_id, || {
-            assert!(storage::get_chain(&env, 1).is_none());
-
-            let chain_info = crate::types::ChainInfo {
-                supported: true,
-                ad_manager: BytesN::from_array(&env, &[0xAA; 32]),
-            };
-            storage::set_chain(&env, 1, &chain_info);
-            assert!(storage::get_chain(&env, 1).unwrap().supported);
-
-            let disabled = crate::types::ChainInfo {
-                supported: false,
-                ad_manager: chain_info.ad_manager,
-            };
-            storage::set_chain(&env, 1, &disabled);
-            assert!(!storage::get_chain(&env, 1).unwrap().supported);
-        });
-    }
-
-    #[test]
     fn test_get_dest_token() {
         let env = Env::default();
         env.mock_all_auths();
@@ -620,5 +575,68 @@ mod order_hash_parity {
         assert!(r[0]["value"].as_str().unwrap().parse::<u128>().is_err());
         assert_eq!(r[1]["field"], "deadline");
         assert!(r[1]["value"].as_str().unwrap().parse::<u64>().is_err());
+    }
+}
+
+// =============================================================================
+// Error codes are ABI
+// =============================================================================
+
+/// Every shared `Fault` lands on the number this contract has always used for it, and every dispute
+/// fault collapses to `DisputeModuleRejected` (92): the follower never calls the dispute module. A
+/// renumbered variant or a wrong `From` arm turns this red.
+#[test]
+fn fault_codes_never_move() {
+    use crate::errors::OrderPortalError;
+    use proofbridge_core::escrow_ops::Fault::{self, *};
+    // Exhaustive, no wildcard: a new `Fault` fails to compile here until it is pinned to a number.
+    fn pinned(f: Fault) -> u32 {
+        match f {
+            TokenZeroAddress => 1,
+            InvalidProof => 23,
+            MerkleAppendFailed => 40,
+            DecimalsOutOfRange => 60,
+            NonExactDownscale => 61,
+            DecimalOverflow => 62,
+            InvalidAccountAddress => 70,
+            ContractPaused => 71,
+            NotPendingAdmin => 72,
+            NothingToClaim => 73,
+            NoRouteTiming => 75,
+            InvalidTiming => 76,
+            DeadlineTooSoon => 77,
+            NotClaimable => 78,
+            TooEarly => 79,
+            NotClaimed => 80,
+            NoRootAnchor => 81,
+            RootNotAnchored => 82,
+            SettledRecorded => 83,
+            NotFilled => 84,
+            NonCanonicalInput => 89,
+            DeadlineTooFar => 90,
+            NoDisputeManager => 92,
+            NotDisputable => 92,
+            DisputeNotResolved => 92,
+            DisputeWindowClosed => 92,
+            DisputeModuleRejected => 92,
+            DisputeNoParams => 92,
+            DisputeNotEscrow => 92,
+            DisputeExists => 92,
+            DisputeWrongEscrow => 92,
+            DisputeNotResponder => 92,
+            DisputeBondTransferFailed => 92,
+            DisputeResponseWindowClosed => 92,
+            DisputeAlreadyResponded => 92,
+            DisputeZeroResponse => 92,
+            DisputeAlreadyRuled => 92,
+        }
+    }
+    // `Fault::ALL` is generated with the enum, so it names every variant.
+    for &fault in Fault::ALL {
+        assert_eq!(
+            OrderPortalError::from(fault) as u32,
+            pinned(fault),
+            "{fault:?}"
+        );
     }
 }

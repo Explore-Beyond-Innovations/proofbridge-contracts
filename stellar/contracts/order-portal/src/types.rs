@@ -15,9 +15,8 @@ pub use proofbridge_core::types::{
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ChainInfo {
-    /// Whether the destination chain is supported
-    pub supported: bool,
-    /// AdManager contract address on the destination chain
+    /// AdManager contract address on the destination chain. A stored entry is what makes the chain
+    /// supported; `remove_chain` switches it off.
     pub ad_manager: BytesN<32>,
 }
 

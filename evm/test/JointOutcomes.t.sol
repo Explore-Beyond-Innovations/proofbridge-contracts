@@ -45,7 +45,7 @@ import {MockKeyRegistry} from "./mocks/MockKeyRegistry.sol";
 /// scenario's negatives are proof-semantic (wrong domain, foreign order),
 /// mock elsewhere (deposit-proof unlocks stay mock territory).
 contract JointOutcomesTest is Test {
-    string internal constant FIXTURE_SHA256 = "c5409fb9a6647b7c052caa4aad6c33845a67749731ba2a492a8b71a741aab459";
+    string internal constant FIXTURE_SHA256 = "8dc63f3fcacaeee13be175e96afb49f21fa61c8a62b302fdd9dc320664476097";
 
     bytes32 private constant LEAF_TOPIC = keccak256("DepositHashAppended(uint256,bytes32,uint256,bytes32)");
 
@@ -341,7 +341,7 @@ contract JointOutcomesTest is Test {
             vm.warp(uint256(w.horizon) + 1);
         } else if (_eq(action, "warpPastWindow")) {
             // the window a ruling opened, max(ruledAt, deadline) + buffer; with no
-            // ruling the horizon itself is the window (a fallback claim extends nothing)
+            // ruling the horizon itself is the window
             require(w.horizon != 0, "warpPastWindow before any dispute");
             uint64 want = w.horizon;
             if (w.ruledAt != 0) {
@@ -350,8 +350,6 @@ contract JointOutcomesTest is Test {
             }
             assertEq(dm.effectiveChallengeDeadline(w.h), want, string.concat(w.name, ": opened window"));
             vm.warp(uint256(want) + 1);
-        } else if (_eq(action, "claimDispute")) {
-            dm.claimDispute(w.h);
         } else if (_eq(action, "finalizeDispute")) {
             if (neg) _expectNamedRevert(reason, w);
             adManager.finalizeDispute(w.pP);
