@@ -2358,8 +2358,9 @@ fn test_2_3h_settlement_bearing_entries_get_their_ttl_extended() {
 
 /// T-57, the per-contract writers the shared-storage sweep did not reach. `set_chain` and `set_ad`
 /// live in each escrow's own storage module rather than in `escrow_storage.rs`, which is why an
-/// audit of that one file missed them. A missing chain row reads as unsupported; the ad row is also
-/// the ad-id guard (2.7), so a missing one would read as an unused id.
+/// audit of that one file missed them. Both are settlement-bearing: the chain row is what makes a peer
+/// supported, and the ad row holds the maker's liquidity and is the ad-id guard (2.7). An archived
+/// entry cannot be read without a restore.
 #[test]
 fn test_2_3h_per_contract_config_entries_get_their_ttl_extended() {
     use proofbridge_core::ttl::PERSISTENT_LIFETIME_THRESHOLD;

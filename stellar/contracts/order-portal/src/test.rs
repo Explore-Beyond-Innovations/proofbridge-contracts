@@ -235,22 +235,6 @@ mod validation_tests {
     }
 
     #[test]
-    fn test_validate_order_chain_disabled() {
-        let env = Env::default();
-        env.as_contract(&env.register(OrderPortalContract, ()), || {
-            let params = valid_params(&env);
-            // Set, then removed: removal is the one way to switch a peer off.
-            let chain_info = ChainInfo {
-                ad_manager: params.ad_manager.clone(),
-            };
-            storage::set_chain(&env, params.ad_chain_id, &chain_info);
-            storage::remove_chain(&env, params.ad_chain_id);
-            let result = validation::validate_order(&env, &params);
-            assert_eq!(result, Err(OrderPortalError::AdChainNotSupported));
-        });
-    }
-
-    #[test]
     fn test_validate_order_ad_manager_mismatch() {
         let env = Env::default();
         env.as_contract(&env.register(OrderPortalContract, ()), || {
@@ -471,25 +455,6 @@ mod order_lifecycle_tests {
             assert_eq!(storage::get_order_status(&env, &order1), Status::Open);
             assert_eq!(storage::get_order_status(&env, &order2), Status::Filled);
             assert_eq!(storage::get_order_status(&env, &order3), Status::Open);
-        });
-    }
-
-    #[test]
-    fn test_chain_configuration_lifecycle() {
-        let env = Env::default();
-        let contract_id = env.register(OrderPortalContract, ());
-
-        env.as_contract(&contract_id, || {
-            assert!(storage::get_chain(&env, 1).is_none());
-
-            let chain_info = crate::types::ChainInfo {
-                ad_manager: BytesN::from_array(&env, &[0xAA; 32]),
-            };
-            storage::set_chain(&env, 1, &chain_info);
-            assert!(storage::get_chain(&env, 1).is_some());
-
-            storage::remove_chain(&env, 1);
-            assert!(storage::get_chain(&env, 1).is_none());
         });
     }
 

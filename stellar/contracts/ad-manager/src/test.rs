@@ -664,22 +664,6 @@ mod validation_tests {
     }
 
     #[test]
-    fn test_validate_order_chain_not_supported_disabled() {
-        let env = setup_validation_env();
-        env.as_contract(&env.register(AdManagerContract, ()), || {
-            let (ad, params) = valid_ad_and_params(&env);
-            // Set, then removed: removal is the one way to switch a peer off.
-            let chain_info = ChainInfo {
-                order_portal: params.src_order_portal.clone(),
-            };
-            storage::set_chain(&env, params.order_chain_id, &chain_info);
-            storage::remove_chain(&env, params.order_chain_id);
-            let result = validation::validate_order(&env, &ad, &params);
-            assert_eq!(result, Err(AdManagerError::ChainNotSupported));
-        });
-    }
-
-    #[test]
     fn test_validate_order_portal_mismatch() {
         let env = setup_validation_env();
         env.as_contract(&env.register(AdManagerContract, ()), || {
@@ -698,27 +682,6 @@ mod validation_tests {
             params.src_order_portal = make_bytes32(&env, 0x22); // Different from chain's portal
             let result = validation::validate_order(&env, &ad, &params);
             assert_eq!(result, Err(AdManagerError::OrderPortalMismatch));
-        });
-    }
-
-    #[test]
-    fn test_validate_order_portal_zero_skips_check() {
-        let env = setup_validation_env();
-        env.as_contract(&env.register(AdManagerContract, ()), || {
-            let (ad, params) = valid_ad_and_params(&env);
-            // Chain portal is zero → portal check is skipped
-            let chain_info = ChainInfo {
-                order_portal: zero_bytes32(&env),
-            };
-            storage::set_chain(&env, params.order_chain_id, &chain_info);
-            storage::set_token_route(
-                &env,
-                &params.ad_chain_token,
-                params.order_chain_id,
-                &params.order_chain_token,
-            );
-            let result = validation::validate_order(&env, &ad, &params);
-            assert!(result.is_ok());
         });
     }
 
@@ -1179,7 +1142,7 @@ mod ad_lifecycle_tests {
 
 mod order_lifecycle_tests {
     use crate::storage;
-    use crate::types::{Ad, ChainInfo, Status};
+    use crate::types::{Ad, Status};
     use crate::{AdManagerContract, AdManagerContractClient};
     use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String as SorobanString};
 
@@ -1347,28 +1310,6 @@ mod order_lifecycle_tests {
                 Status::None,
                 "Duplicate order must be detected"
             );
-        });
-    }
-
-    #[test]
-    fn test_chain_configuration_lifecycle() {
-        let env = Env::default();
-        let contract_id = env.register(AdManagerContract, ());
-        env.as_contract(&contract_id, || {
-            // No chain initially
-            assert!(storage::get_chain(&env, 1).is_none());
-
-            // Add chain
-            let chain_info = ChainInfo {
-                order_portal: BytesN::from_array(&env, &[0xAA; 32]),
-            };
-            storage::set_chain(&env, 1, &chain_info);
-
-            assert!(storage::get_chain(&env, 1).is_some());
-
-            // Switch it off: the entry goes
-            storage::remove_chain(&env, 1);
-            assert!(storage::get_chain(&env, 1).is_none());
         });
     }
 

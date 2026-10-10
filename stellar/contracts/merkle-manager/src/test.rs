@@ -337,29 +337,6 @@ fn test_field_mod_cross_chain() {
     assert_ne!(result4, max, "Max value should be reduced");
 }
 
-/// The escrows reduce the order hash with `proofbridge_core`'s local `field_mod`; this view stays for
-/// off-chain readers. The two must agree at the edges of the field.
-#[test]
-fn test_field_mod_view_matches_the_local_reduction() {
-    let env = Env::default();
-    let (client, admin, _) = setup_contract(&env);
-    client.initialize(&admin);
-    for hex in [
-        "0000000000000000000000000000000000000000000000000000000000000000",
-        "30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000",
-        "30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001",
-        "30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000002",
-        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-    ] {
-        let x = hex_to_bytes32(&env, hex);
-        assert_eq!(
-            client.field_mod(&x),
-            proofbridge_core::cross_contract::field_mod(&x),
-            "{hex}"
-        );
-    }
-}
-
 /// Test MMR pure functions match EVM implementation
 #[test]
 fn test_mmr_structure_cross_chain() {

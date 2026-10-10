@@ -3,7 +3,7 @@
 //! Everything both escrows keep the same way lives once in `proofbridge_core::escrow_storage` and is re-exported
 //! here, so call sites and tests read exactly as before. What stays is what is genuinely ad-side: the chain record
 //! (its field is named for the *other* leg, so the two escrows encode different maps and must not be unified), the
-//! ad itself, ad-id reuse, and the key registry.
+//! ad itself (whose row is also the ad-id guard), and the key registry.
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol};
 
