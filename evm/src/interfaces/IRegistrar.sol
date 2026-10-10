@@ -22,7 +22,6 @@ interface IRegistrar {
     error Registrar__NotAccount();
     error Registrar__BadAuth();
     error Registrar__StaleEpoch(uint64 nextEpoch, uint64 given);
-    error Registrar__AppendFailed();
 
     function registerLeaf(
         bytes32 account32,

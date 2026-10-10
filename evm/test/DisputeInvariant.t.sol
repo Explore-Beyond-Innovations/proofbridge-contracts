@@ -118,7 +118,7 @@ contract DisputeInvariantTest is Test {
         anchor.anchor(orderChainId, EVIDENCE_ROOT, 1);
 
         vm.startPrank(admin);
-        merkleManager.grantRole(merkleManager.MANAGER_ROLE(), address(adManager));
+        merkleManager.setManager(address(adManager), true);
         adManager.setRootVerifier(orderChainId, address(new MockRootVerifier(true)));
         adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
         adManager.setKeyRegistry(keyRegistry);

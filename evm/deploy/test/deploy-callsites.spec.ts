@@ -125,3 +125,38 @@ function withImmutableChanged(code: string): string {
   const b = parseInt(code.slice(at, at + 2), 16) ^ 1;
   return code.slice(0, at) + b.toString(16).padStart(2, "0") + code.slice(at + 2);
 }
+
+// The escrows are MerkleManager managers from deploy; the Registrar waits for the T3 flip.
+test("deploy makes the escrows MerkleManager managers and not the Registrar", async () => {
+  await withEnv({ ...CLEAN, EVENT_VK: vkFile }, async () => {
+    const r = await deploy(local, "local", "managers.json");
+    const mm = new ethers.Contract(r.contracts.merkleManager, ["function isManager(address) view returns (bool)"], local.provider);
+    assert.equal(await mm.isManager(r.contracts.adManager), true, "AdManager");
+    assert.equal(await mm.isManager(r.contracts.orderPortal), true, "OrderPortal");
+    assert.equal(await mm.isManager(r.contracts.registrar), false, "Registrar is not a manager in T2");
+  });
+});
+
+// A manifest written before the manager list: the rerun stops up front, not mid-run.
+test("a reused MerkleManager without isManager is refused before anything is sent", async () => {
+  await withEnv({ ...CLEAN, EVENT_VK: vkFile }, async () => {
+    const r = await deploy(local, "local", "old-mm.json");
+    // Bytecode with no `isManager` at the recorded address stands in for a pre-manager-list MerkleManager.
+    await local.provider.send("anvil_setCode", [r.contracts.merkleManager, await local.provider.getCode(r.contracts.wNativeToken)]);
+    await refusesWithNoTx(local, () => deploy(local, "local", "old-mm.json"), /this manifest's MerkleManager predates the manager list; deploy fresh/);
+  });
+});
+
+// A mixed manifest: the escrows and the Registrar are bound to their own MerkleManager.
+test("a manifest whose escrows are bound to another MerkleManager is refused before anything is sent", async () => {
+  await withEnv({ ...CLEAN, EVENT_VK: vkFile }, async () => {
+    await deploy(local, "local", "mixed-a.json");
+    const b = await deploy(local, "local", "mixed-b.json");
+    const file = path.join(tmp, "mixed-a.json");
+    const m = JSON.parse(fs.readFileSync(file, "utf8"));
+    m.contracts.merkleManager.address = b.contracts.merkleManager;
+    m.contracts.merkleManager.addressBytes32 = ethers.zeroPadValue(b.contracts.merkleManager.toLowerCase(), 32);
+    fs.writeFileSync(file, JSON.stringify(m, null, 2));
+    await refusesWithNoTx(local, () => deploy(local, "local", "mixed-a.json"), /AdManager at 0x[0-9a-fA-F]{40} is bound to MerkleManager .*deploy fresh rather than mixing/);
+  });
+});

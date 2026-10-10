@@ -6,7 +6,7 @@ For shared architecture, contract descriptions, and protocol details, see the [c
 
 ## EVM-Specific Details
 
-* **Access Control**: OpenZeppelin `AccessControl` with `MANAGER_ROLE` for MerkleManager
+* **Access Control**: one two-step admin per contract (`TwoStepAdmin`); MerkleManager keeps a plain manager list (`isManager` / `setManager`) of who may append
 * **Reentrancy Protection**: OpenZeppelin `ReentrancyGuard` on all state-changing functions
 * **Native Token Handling**: `wNativeToken` wraps the native EVM token automatically on deposit and unwraps on withdrawal
 * **Address Format**: 32-byte `bytes32` across all cross-chain fields so the same order hash shape covers both 20-byte EVM addresses (zero-padded) and 32-byte Stellar strkeys
@@ -95,6 +95,6 @@ setTokenRoute(adToken, orderChainId, orderToken); // the same argument order on 
 **On MerkleManager (both chains):**
 
 ```solidity
-grantRole(MANAGER_ROLE, adManagerAddress);
-grantRole(MANAGER_ROLE, orderPortalAddress);
+setManager(adManagerAddress, true);
+setManager(orderPortalAddress, true);
 ```

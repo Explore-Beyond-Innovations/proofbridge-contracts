@@ -5,7 +5,6 @@ import { ethers } from "ethers";
 import {
   ADMIN_BEARING,
   Acting,
-  MANAGER_ROLE,
   adminBlockFromChain,
   adminsOf,
   connect,
@@ -238,6 +237,10 @@ async function deployCoreRun(
         `${outPath} names ${codeless.length} of ${entries.length} contract(s) with no code on chain ${chainId}:\n    ${codeless.join("\n    ")}\n  ${advice}`,
       );
     }
+
+    // A reused MerkleManager must have the manager list, and every reused appender must be bound
+    // (immutably) to it: an older escrow expects an append return the newer MerkleManager no longer gives.
+    await assertMerkleManagerReusable(existing.contracts, signer);
 
     // Who holds admin on what is reused. After a handover the deployer is not the admin, and every
     // admin-only wiring call below is described for the admin instead of sent (#424).
@@ -534,8 +537,8 @@ async function deployCoreRun(
     },
   );
 
-  // The home-chain REGISTERED-leaf appender; needs MANAGER_ROLE on the MerkleManager (granted
-  // below). The registry's proof path stays switched off (2.1b §7); nothing wires it here.
+  // The home-chain REGISTERED-leaf appender. Deployed now, made a MerkleManager manager only at
+  // proof registration's T3 flip. The registry's proof path stays switched off (2.1b §7); nothing wires it here.
   const registrarAddr = await deployIfMissing(
     "Registrar",
     existing?.contracts.registrar?.address,
@@ -548,7 +551,7 @@ async function deployCoreRun(
   );
 
   // The dispute module (2.3g) both escrows share. It holds bonds, never escrow funds, and takes no
-  // MerkleManager role — disputes append no leaf. Escrow ↔ module wiring happens at link time.
+  // MerkleManager manager entry — disputes append no leaf. Escrow ↔ module wiring happens at link time.
   const disputeManagerAddr = await deployIfMissing(
     "DisputeManager",
     existing?.contracts.disputeManager?.address,
@@ -691,20 +694,20 @@ async function deployCoreRun(
     }
   }
 
-  // ── grant MANAGER_ROLE to AdManager + OrderPortal + Registrar ─────
-  // Check-first, like every other wire: a role already held is not granted again, and whether a
-  // grant can be sent at all was decided up front.
+  // ── MerkleManager managers: AdManager + OrderPortal ─────
+  // Check-first, like every other wire: a manager already set is not set again, and whether the
+  // call can be sent at all was decided up front. The Registrar is deployed but not a manager until
+  // proof registration's T3 flip (`setManager(registrar, true)`): until then nothing reads its leaves.
   const merkleManager = attachContract(merkleManagerAddr, "MerkleManager", "MerkleManager", signer);
-  for (const { name, addr } of [
-    { name: "AdManager", addr: adManagerAddr },
-    { name: "OrderPortal", addr: orderPortalAddr },
-    { name: "Registrar", addr: registrarAddr },
-  ]) {
-    if (await merkleManager.getFunction("hasRole")(MANAGER_ROLE, addr)) {
-      console.log(`  [skip] MANAGER_ROLE → ${name} already granted`);
+  for (const { name, addr } of appendersAtDeploy({ adManager: adManagerAddr, orderPortal: orderPortalAddr, registrar: registrarAddr })) {
+    if (await merkleManager.getFunction("isManager")(addr)) {
+      console.log(`  [skip] MerkleManager.setManager(${name}) already true`);
       continue;
     }
-    await acting.call(merkleManager, "MerkleManager", "grantRole", [MANAGER_ROLE, addr], `MANAGER_ROLE → ${name}`);
+    await acting.call(merkleManager, "MerkleManager", "setManager", [addr, true], `MerkleManager.setManager(${name}, true)`);
+  }
+  if (await merkleManager.getFunction("isManager")(registrarAddr)) {
+    console.warn(`  [note] the Registrar ${registrarAddr} is a MerkleManager manager; T2 keeps it off until the T3 flip (setManager(registrar, false))`);
   }
 
   const manifest = buildManifest({
@@ -783,6 +786,49 @@ async function deployCoreRun(
   };
 }
 
+
+/// Who the deploy makes a MerkleManager manager: the escrows. The Registrar waits for the T3 flip.
+export function appendersAtDeploy(c: { adManager: string; orderPortal: string; registrar: string }): { name: string; addr: string }[] {
+  return [
+    { name: "AdManager", addr: c.adManager },
+    { name: "OrderPortal", addr: c.orderPortal },
+  ];
+}
+
+/// Refuse, before anything is sent, a MerkleManager this CLI cannot wire (no manager list) and a
+/// manifest whose escrows or Registrar are bound to another MerkleManager.
+export async function assertMerkleManagerReusable(
+  contracts: { merkleManager?: { address: string }; adManager?: { address: string }; orderPortal?: { address: string }; registrar?: { address: string } },
+  signer: ethers.Wallet,
+): Promise<void> {
+  const mm = contracts.merkleManager?.address;
+  if (mm) {
+    try {
+      await attachContract(mm, "MerkleManager", "MerkleManager", signer).getFunction("isManager").staticCall(ethers.ZeroAddress);
+    } catch {
+      throw new Error(
+        `this manifest's MerkleManager predates the manager list; deploy fresh (MerkleManager at ${mm} has no isManager; start a new manifest, e.g. deploy-contracts.sh --fresh). ` +
+          `Its escrows expect an append return the current MerkleManager does not give, so reusing either half cannot work.`,
+      );
+    }
+  }
+  for (const [key, artifact] of [["adManager", "AdManager"], ["orderPortal", "OrderPortal"], ["registrar", "Registrar"]] as const) {
+    const at = contracts[key]?.address;
+    if (!at) continue;
+    let bound: string;
+    try {
+      bound = String(await attachContract(at, artifact, artifact, signer).getFunction("i_merkleManager")());
+    } catch (err) {
+      throw new Error(`${artifact} at ${at} does not answer i_merkleManager(): ${err}`);
+    }
+    if (!mm || bound.toLowerCase() !== mm.toLowerCase()) {
+      throw new Error(
+        `${artifact} at ${at} is bound to MerkleManager ${bound}, not the manifest's ${mm ?? "(none: a new one would be deployed)"}. ` +
+          `It appends only there, and an older escrow cannot append to a newer MerkleManager; deploy fresh rather than mixing.`,
+      );
+    }
+  }
+}
 
 /// Does this address answer as the agent policy module: validator and hook, and not an executor?
 async function isAgentPolicyModule(address: string, signer: ethers.Wallet): Promise<boolean> {

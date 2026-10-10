@@ -1041,6 +1041,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "proofbridge-core",
+ "serde_json",
  "soroban-poseidon",
  "soroban-sdk",
 ]

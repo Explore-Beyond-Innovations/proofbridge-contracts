@@ -5,7 +5,7 @@ import * as os from "os";
 import * as path from "path";
 import { randomBytes } from "crypto";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
-import { deployCore } from "../src/deploy-core.js";
+import { appendersAtDeploy, deployCore } from "../src/deploy-core.js";
 import { link } from "../src/link.js";
 import { buildManifest } from "../src/manifest.js";
 import { NETWORK_PASSPHRASES } from "../src/stellar-cli.js";
@@ -223,4 +223,11 @@ test("A-5: no DisputeManager on either side links on the clocks alone; a mixed r
   const fullPeer = manifest("d-p1.json", 11155111n, "testnet");
   await withFake(TESTNET, () => assert.rejects(linkT(fullLocal, barePeer, peerEnv("testnet")), /only this chain has a DisputeManager/));
   await withFake(TESTNET, () => assert.rejects(linkT(bareLocal, fullPeer, peerEnv("testnet")), /only the peer has a DisputeManager/));
+});
+
+test("deploy makes the escrows MerkleManager managers and not the Registrar", async () => {
+  const c = { adManager: contractId(), orderPortal: contractId(), registrar: contractId() };
+  const managers = appendersAtDeploy(c);
+  assert.deepEqual(managers, [c.adManager, c.orderPortal]);
+  assert.ok(!managers.includes(c.registrar), "the Registrar waits for the T3 flip");
 });

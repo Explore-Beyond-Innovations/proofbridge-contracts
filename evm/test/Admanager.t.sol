@@ -85,7 +85,7 @@ contract AdManagerTest is Test {
         );
 
         vm.startPrank(admin);
-        merkleManager.grantRole(merkleManager.MANAGER_ROLE(), address(adManager));
+        merkleManager.setManager(address(adManager), true);
         adManager.setRootVerifier(orderChainId, address(new MockRootVerifier(true)));
         // 2.3e: timing is fail-closed; the suite's clocks (buffer 30 min, no window bound, no stagger).
         adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));

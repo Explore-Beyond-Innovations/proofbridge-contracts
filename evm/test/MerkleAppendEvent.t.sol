@@ -12,7 +12,7 @@ contract LeafAppendedTest is Test {
 
     function setUp() public {
         mm = new MerkleManager(address(this), address(new Poseidon2Yul()));
-        mm.grantRole(mm.MANAGER_ROLE(), address(this));
+        mm.setManager(address(this), true);
     }
 
     function test_eventCarriesTheCoreAndMatchesTheTree() public {

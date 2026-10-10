@@ -161,7 +161,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
             IwNativeToken(address(_wNativeToken))
         );
         vm.startPrank(admin);
-        merkleManager.grantRole(merkleManager.MANAGER_ROLE(), address(bare));
+        merkleManager.setManager(address(bare), true);
         bare.setPeerEscrow(orderChainId, _b32(orderPortal));
         bare.setTokenRoute(address(adToken), orderChainId, _b32(orderToken));
         bare.setKeyRegistry(keyRegistry);
