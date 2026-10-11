@@ -875,6 +875,40 @@ fn register_at_cap_no_guard_wired_keeps_a_dead_slot_until_the_grace() {
     assert_eq!(client.lookup(&account, &2), None);
 }
 
+/// The grace boundary second: a dead slot is kept at exactly expiry + GRACE_PERIOD and pruned one
+/// second later. The kill lands at grace_ts - 30 d so the boundary falls on grace_ts, the clock the
+/// `registerLate` vectors are signed for (D2).
+#[test]
+fn register_at_cap_grace_boundary_kept_at_expiry_plus_grace_pruned_the_second_after() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    for i in 0..5 {
+        register_slot(&env, &client, &v, MAKER, i);
+    }
+    let g = grace_ts(&v);
+    env.ledger().set_timestamp(g - GRACE_PERIOD);
+    set_valid_until(&env, &client, &v, MAKER, 2, true); // expiry recorded at the kill: grace_ts - 30 d
+
+    env.ledger().set_timestamp(g); // expiry + GRACE_PERIOD exactly: still kept
+    let r = slot_reg(&v, MAKER, 5);
+    assert_eq!(
+        client.try_register(
+            &account,
+            &signed(&env, &oa(&v, MAKER)["registerLate"][5]),
+            &bn::<96>(&env, &r["pkNative"]),
+            &bn::<192>(&env, &r["pop"]),
+            &5,
+            &LATE_DEADLINE,
+        ),
+        Err(Ok(RegistryError::RegistryFull))
+    );
+    assert!(client.lookup(&account, &2).is_some());
+
+    env.ledger().set_timestamp(g + 1); // one second past the grace: pruned
+    assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
+    assert_eq!(client.lookup(&account, &2), None);
+}
+
 /// #422 D14b: a shorten on a slot that already died cannot move its death later — a re-kill after
 /// an order's window must not erase an expiry inside it.
 #[test]

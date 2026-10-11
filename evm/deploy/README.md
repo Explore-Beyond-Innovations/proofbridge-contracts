@@ -22,6 +22,12 @@ Writes/updates the manifest.
 A rerun refuses, before sending anything, a manifest whose MerkleManager
 predates the manager list (no `isManager`), or whose AdManager, OrderPortal
 or Registrar is bound to a different MerkleManager. Deploy fresh instead.
+It also refuses (as does `link`) an AdManager and DisputeManager that do not
+agree with this build on `settleBond`: the escrow calls the module by that
+selector, and it changed when the bond-return flag was added, so the two must
+come from one build. The check reads both contracts' code for the bundle's
+selector (`PUSH4`); redeploy the one that differs, or run the bundle both came
+from.
 
 ```bash
 pnpm --filter @proofbridge/evm-deploy cli deploy

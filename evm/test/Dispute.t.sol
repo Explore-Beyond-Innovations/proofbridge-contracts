@@ -498,6 +498,25 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, 0, "the fee pool took nothing");
     }
 
+    /// A verifier unset after the lock and wired again before the proof lands: the gap it opened is
+    /// stamped (`_rootVerifierChangedAt`), so the rule is still read as denied at close time and the
+    /// bridger's bond comes back although the verifier is in place again. Without the stamp, the
+    /// rewire would erase the denial and the fee pool would take the bond.
+    function test_evidenceClose_bridgerFiled_verifierRewiredSinceTheLock_bondBackToTheBridger() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(33);
+        address verifier = address(adManager.rootVerifier(orderChainId));
+        uint256 bond = _file(p, filer);
+        vm.warp(block.timestamp + 10);
+        vm.startPrank(admin);
+        adManager.setRootVerifier(orderChainId, address(0));
+        adManager.setRootVerifier(orderChainId, verifier);
+        vm.stopPrank();
+        assertEq(address(adManager.rootVerifier(orderChainId)), verifier, "the verifier is wired again");
+        _presentSettledOn(p, h);
+        assertEq(filer.balance + _wNativeToken.balanceOf(filer), bond, "the bridger's bond is back");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, 0, "the fee pool took nothing");
+    }
+
     /// The third denial lever: a slot of the signer expiring between the lock and the presentation
     /// cutoff (a kill, a shorten) denied the payout, so a bridger filer gets its bond back. The expiry
     /// sits strictly after the lock, so a close that reads only the lock's second misses it.

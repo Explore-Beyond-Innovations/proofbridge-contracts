@@ -26,3 +26,4 @@ export {
   contractFactory,
   getAbi,
 } from "./artifacts.js";
+export { assertSettleBondPair, assertSettleBondPairOnChain, carriesSelector, settleBondSelector } from "./settle-bond-pair.js";
