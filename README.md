@@ -68,7 +68,7 @@ The destination chain contract where liquidity providers (makers) manage their a
 * **fundAd**: Deposits tokens into an existing ad to increase available liquidity
 * **withdrawFromAd**: Withdraws unused tokens from an ad
 * **closeAd**: Permanently closes an ad and withdraws all remaining funds
-* **lockForOrder**: Reserves liquidity for a specific EIP-712 order hash, appends to MMR
+* **lockForOrder**: Reserves liquidity for a specific EIP-712 order hash, pins the settlement signer's co-signing slot (`signerSlot`, which must be usable), appends to MMR
 * **unlock**: Verifies ZK proof, consumes nullifier, transfers ad token to the **orderRecipient**
 * **setPeerEscrow** / **setTokenRoute**: Admin configuration for cross-chain routing (`setPeerEscrow(chainId, peer)`, zero removes; `setTokenRoute(localToken, peerChainId, peerToken)`)
 
@@ -214,6 +214,9 @@ The verifier accepts only if:
 * the auth names this order and the version is 4;
 * the escrow's `side` picks the leg — side 1 (AdManager) needs the order chain, its root and
   `adLegNullifier`; side 0 (OrderPortal) the ad chain, its root and `orderLegNullifier`;
+* on the ad leg, the maker's slot is the one the lock pinned (`pinnedSlot`; the settlement signer can
+  move it with a signed `RepinOrder` consent applied by `repinOrder` while the order is open); the
+  order leg sends an unpinned sentinel;
 * both keys sit in live registry slots of the settlement signer and the bridger, the maker key is
   the one the auth names, and the aggregate signature verifies over the preimage.
 

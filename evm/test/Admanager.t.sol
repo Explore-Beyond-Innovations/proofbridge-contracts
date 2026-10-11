@@ -454,7 +454,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__ChainNotSupported.selector, p.orderChainId));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -480,7 +480,7 @@ contract AdManagerTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IAdManager.AdManager__OrderChainMismatch.selector, orderChainId, p.orderChainId)
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -500,7 +500,7 @@ contract AdManagerTest is Test {
                 IAdManager.AdManager__OrderPortalMismatch.selector, _b32(orderPortal), p.srcOrderPortal
             )
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -521,7 +521,7 @@ contract AdManagerTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IEscrow.Escrow__MissingRoute.selector, p.orderChainToken, p.orderChainId)
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -546,7 +546,7 @@ contract AdManagerTest is Test {
                 p.orderChainToken // provided in params
             )
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -562,7 +562,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(IAdManager.AdManager__NotMaker.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -588,7 +588,7 @@ contract AdManagerTest is Test {
                 IAdManager.AdManager__AdTokenMismatch.selector, _b32(address(adToken)), _b32(address(otherAdToken))
             )
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -609,7 +609,7 @@ contract AdManagerTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IAdManager.AdManager__AdRecipientMismatch.selector, expected, p.adRecipient)
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -625,7 +625,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(IAdManager.AdManager__BridgerZero.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -641,7 +641,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(IAdManager.AdManager__RecipientZero.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -663,7 +663,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(AddressCast.AddressCast__NotEvmAddress.selector, dirty));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -679,7 +679,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(IEscrow.Escrow__ZeroAmount.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -695,7 +695,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(IEscrow.Escrow__InsufficientLiquidity.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -716,7 +716,7 @@ contract AdManagerTest is Test {
         emit IAdManager.OrderLocked(adId, expectedHash, adMaker, token, p.amount, p.bridger, p.orderRecipient);
 
         vm.prank(maker);
-        bytes32 orderHash = adManager.lockForOrder(p);
+        bytes32 orderHash = adManager.lockForOrder(p, 0);
         assertEq(orderHash, expectedHash, "order hash mismatch");
 
         (,,,,,,,, uint256 lockedAfter) = adManager.ads(adId);
@@ -738,11 +738,11 @@ contract AdManagerTest is Test {
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
         vm.prank(maker);
-        bytes32 h1 = adManager.lockForOrder(p);
+        bytes32 h1 = adManager.lockForOrder(p, 0);
 
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExists.selector, h1));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -849,7 +849,7 @@ contract AdManagerTest is Test {
         vm.startPrank(maker);
 
         // Lock succeeds -> increases ad.locked
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
 
         vm.expectRevert(IAdManager.AdManager__ActiveLocks.selector);
         adManager.closeAd(adId, recipient);
@@ -937,7 +937,7 @@ contract AdManagerTest is Test {
         bytes32 orderHashExpected = adManager.hashOrderPublic(p);
 
         vm.prank(maker);
-        orderHash = adManager.lockForOrder(p);
+        orderHash = adManager.lockForOrder(p, 0);
     }
 
     /*//////////////////////////////////////////////////////////////

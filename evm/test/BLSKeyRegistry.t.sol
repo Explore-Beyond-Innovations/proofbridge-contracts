@@ -1039,6 +1039,74 @@ contract BLSKeyRegistryTest is Test {
         return v.readBytes32(string.concat(oaPath(who, "approveMaker[0]"), ".account"));
     }
 
+    // ---- plan 12 C: the re-pin consent and the per-slot expiry ----
+
+    /// Files `ownerAuth.<who>.repin[n]` (a RepinOrder entry) for the actor's account.
+    function fileRepin(string memory who, uint256 n) internal {
+        string memory path = oaPath(who, idx("repin", n));
+        registry.approveRepin(
+            v.readBytes32(string.concat(path, ".account")),
+            v.readBytes32(string.concat(path, ".orderHash")),
+            uint32(vm.parseUint(v.readString(string.concat(path, ".fromSlot")))),
+            uint32(vm.parseUint(v.readString(string.concat(path, ".toSlot")))),
+            oa(who, idx("repin", n)),
+            OwnerAuthVectors.legs(v, path)[0].nonce
+        );
+    }
+
+    /// Both owner schemes consent to 0 -> 1, then 1 -> 2, at the (account, order) pair's own nonce; a
+    /// replay of the first is refused.
+    function test_approveRepin_bothSchemes_inOrder_noReplay() public {
+        bytes32 order = v.readBytes32(".ownerAuth._meta.repinOrder");
+        string[2] memory actors = ["makerOnSepolia", "bridgerOnSepolia"];
+        for (uint256 i = 0; i < 2; i++) {
+            bytes32 account = actorAccount(actors[i]);
+            (,, uint64 none) = registry.repinApproval(account, order);
+            assertEq(none, 0, "nothing approved yet");
+            vm.expectEmit(true, true, false, true, address(registry));
+            emit IBLSKeyRegistry.RepinApproved(account, order, 0, 1, 0);
+            fileRepin(actors[i], 0);
+            (uint32 f, uint32 t, uint64 n) = registry.repinApproval(account, order);
+            assertEq(f, 0);
+            assertEq(t, 1);
+            assertEq(n, 1);
+            fileRepin(actors[i], 1);
+            (f, t, n) = registry.repinApproval(account, order);
+            assertEq(f, 1);
+            assertEq(t, 2);
+            assertEq(n, 2);
+            vm.expectRevert(IBLSKeyRegistry.BadNonce.selector);
+            fileRepin(actors[i], 0);
+            assertEq(registry.nonceOf(account), 0, "the account nonce is untouched");
+        }
+    }
+
+    /// One account's signed consent filed for another account is refused.
+    function test_approveRepin_wrongOwner_isRefused() public {
+        string memory path = oaPath("makerOnSepolia", "repin[0]");
+        bytes32 other = actorAccount("bridgerOnSepolia");
+        vm.expectRevert();
+        registry.approveRepin(
+            other, v.readBytes32(string.concat(path, ".orderHash")), 0, 1, oa("makerOnSepolia", "repin[0]"), 0
+        );
+        (,, uint64 n) = registry.repinApproval(other, v.readBytes32(string.concat(path, ".orderHash")));
+        assertEq(n, 0);
+    }
+
+    /// `expiredAt` reads the recorded expiry: a kill names `1` but is stamped at the kill.
+    function test_expiredAt_isTheKillStamp_notTheNamedDate() public {
+        bytes32 account = v.readBytes32(".slots.bridgerOnSepolia.account");
+        registerSlot("bridgerOnSepolia", 0);
+        registerSlot("bridgerOnSepolia", 1);
+        assertEq(registry.expiredAt(account, 0), 0, "unbounded");
+        vm.warp(block.timestamp + 100);
+        uint256 killedAt = block.timestamp;
+        setValidUntil("bridgerOnSepolia", 0, true);
+        assertEq(registry.lookup(account, 0).validUntil, 1, "the kill names 1");
+        assertEq(registry.expiredAt(account, 0), killedAt, "but expired at the kill");
+        assertEq(registry.expiredAt(account, 1), 0, "the other slot is untouched");
+    }
+
     function test_approveMaker_approveWithdrawReapprove_bothSchemes() public {
         string[2] memory actors = ["makerOnSepolia", "bridgerOnSepolia"];
         for (uint256 i = 0; i < 2; i++) {

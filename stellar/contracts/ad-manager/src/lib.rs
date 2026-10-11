@@ -620,7 +620,14 @@ impl AdManagerContract {
     // =========================================================================
 
     /// Lock liquidity for an order.
-    pub fn lock_for_order(env: Env, params: OrderParams) -> Result<BytesN<32>, AdManagerError> {
+    /// Lock the ad's liquidity for an order, pinning `signer_slot`: the settlement signer's co-signing
+    /// slot in the registry the order records (plan 12 D7). The slot must exist and be usable now;
+    /// the ad chain's co-signed unlock then accepts only that slot's key.
+    pub fn lock_for_order(
+        env: Env,
+        params: OrderParams,
+        signer_slot: u32,
+    ) -> Result<BytesN<32>, AdManagerError> {
         if storage::is_paused(&env) {
             return Err(AdManagerError::ContractPaused);
         }
@@ -632,6 +639,18 @@ impl AdManagerContract {
         // A key retired after the ad was pointed at it (set_valid_until, a watchtower retirement)
         // must not take new locks: the bridger's deposit could never be unlocked (2.3c D2).
         validation::require_registered(&env, &ad.settlement_signer, &ad.maker)?;
+        // Plan 12 C: the slot the lock pins is the signer's and usable now, in the registry the
+        // order records (the current one; require_registered refused none being wired).
+        if let Some(registry) = storage::get_key_registry(&env) {
+            if !proofbridge_core::cross_contract::slot_usable(
+                &env,
+                &registry,
+                &ad.settlement_signer,
+                signer_slot,
+            ) {
+                return Err(AdManagerError::SlotNotUsable);
+            }
+        }
         Self::assert_ad_decimals(&env, &params, &config.w_native_token)?;
         // 2.3e D5: the window bound that makes cancel_never_locked's "no lock can follow the
         // deadline" hold.
@@ -679,6 +698,7 @@ impl AdManagerContract {
             timing_version,
             storage::get_registry_epoch(&env),
             u32::try_from(anchor_delay).unwrap_or(u32::MAX),
+            signer_slot,
         );
         // 2.3c D1: count the settlement identity this escrow's unlock will verify — the ad's
         // signer, asserted equal to `params.ad_settlement_signer` in validate_order (and owned by
@@ -768,7 +788,7 @@ impl AdManagerContract {
             &params.ad_settlement_signer,
             &params.bridger,
             &order_hash,
-            0,
+            storage::get_order(&env, &order_hash).pinned_slot, // plan 12 C: the one slot accepted
             &nullifier_hash,
             proofbridge_core::cross_contract::ENVELOPE_SIDE_AD,
             &cosig_data,
@@ -1025,6 +1045,43 @@ impl AdManagerContract {
         events::OrderCancelled {
             order_hash,
             by_evidence: false,
+        }
+        .publish(&env);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Apply the settlement signer's re-pin consent (`approve_repin` on the order's registry): move
+    /// an `Open` order's pin to another usable slot of the same signer, not past
+    /// `deadline - claim_stagger` (plan 12 D12, Q2). Permissionless; the consent names the order and
+    /// both slots.
+    pub fn repin_order(env: Env, params: OrderParams) -> Result<(), AdManagerError> {
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        let order = storage::get_order(&env, &order_hash);
+        if order.status != Status::Open {
+            return Err(AdManagerError::OrderNotOpen);
+        }
+        let t = Self::order_timing(&env, &order_hash, params.order_chain_id)?;
+        if env.ledger().timestamp() > params.deadline.saturating_sub(t.claim_stagger) {
+            return Err(AdManagerError::OrderExpired);
+        }
+        let registry = storage::get_registry_at(&env, order.registry_epoch)
+            .ok_or(AdManagerError::NoKeyRegistry)?;
+        let signer = &params.ad_settlement_signer;
+        let (from, to, nonce) =
+            proofbridge_core::cross_contract::repin_approval(&env, &registry, signer, &order_hash);
+        if nonce == 0 || from != order.pinned_slot {
+            return Err(AdManagerError::NoRepin);
+        }
+        if !proofbridge_core::cross_contract::slot_usable(&env, &registry, signer, to) {
+            return Err(AdManagerError::SlotNotUsable);
+        }
+        storage::set_pinned_slot(&env, &order_hash, to);
+        events::OrderRepinned {
+            order_hash,
+            from_slot: from,
+            to_slot: to,
         }
         .publish(&env);
         storage::extend_instance_ttl(&env);
@@ -1427,15 +1484,18 @@ impl AdManagerContract {
         if Self::registry_split(env, params.order_chain_id, Some(&registry)) {
             return true;
         }
-        let signer = &params.ad_settlement_signer;
-        let locked_at = order.locked_at;
         // D16: the order's life as a payout ends at the payout's own cutoff — the presentation
-        // cutoff for a cancel, the challenge deadline for a dispute — which the caller passes in.
-        // An expiry past it denied nothing; the bound is plain time. #461: no "no usable slot" term — the lock required one, so losing it
-        // by the cutoff is an expiry in the interval already.
-        proofbridge_core::cross_contract::any_slot_expired_within(
-            env, &registry, signer, locked_at, until,
-        )
+        // cutoff for a cancel, the challenge deadline for a dispute — which the caller passes in;
+        // the bound is plain time. Plan 12 C: only the pinned slot can co-sign the ad leg, and the
+        // lock refused a dead one, so its own expiry is the one that counts; a rotation of any
+        // other slot denies nothing.
+        let e = proofbridge_core::cross_contract::expired_at(
+            env,
+            &registry,
+            &params.ad_settlement_signer,
+            order.pinned_slot,
+        );
+        e != 0 && e <= until
     }
 
     /// The one cancel clock `finalize_cancel` waits on and `cancel_finalizes_at` reports: the claim

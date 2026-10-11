@@ -195,7 +195,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         bare.createAd("bare", address(adToken), initAmt, orderChainId, _b32(adRecipient), _b32(maker));
         IAdManager.OrderParams memory p = _defaultParams("bare");
         vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__NotSet.selector, orderChainId));
-        bare.lockForOrder(p);
+        bare.lockForOrder(p, 0);
         vm.stopPrank();
 
         vm.warp(p.deadline);
@@ -223,11 +223,11 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.expectRevert(
             abi.encodeWithSelector(IEscrow.Escrow__DeadlineTooSoon.selector, p.deadline, block.timestamp + 1 hours)
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
 
         p.deadline = block.timestamp + 1 hours;
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /// #453: a lock accepts a deadline at most `MAX_ORDER_WINDOW` out, to the second.
@@ -238,11 +238,11 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         p.deadline = maxAllowed + 1;
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DeadlineTooFar.selector, p.deadline, maxAllowed));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
 
         p.deadline = maxAllowed;
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /// #453: the buffer and the minimum window have ceilings; each cap itself is accepted.
@@ -285,7 +285,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         _cancelNeverLocked(p);
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExists.selector, h));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function test_T45_cancelNeverLocked_unsupportedChain_reverts() public {
@@ -675,13 +675,13 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.expectRevert(Pausable.EnforcedPause.selector);
         adManager.fundAd(lastAdId, 1 ether);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
         vm.stopPrank();
 
         vm.prank(admin);
         adManager.unpause();
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /// Every exit works while paused, the maker's free liquidity included.
@@ -786,7 +786,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
     function test_retiming_movesNoLockedOrder() public {
         _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 5 minutes, 30 minutes));
         (IAdManager.OrderParams memory p, bytes32 h) = _lock(40);
-        (, uint32 v) = adManager.orders(h);
+        (, uint32 v,,) = adManager.orders(h);
         assertEq(v, adManager.timingVersion(orderChainId), "the lock keeps the current version");
         _setTiming(RouteTiming.Timing(1 hours, 2 hours, 1 hours, 50 minutes));
 
@@ -803,7 +803,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         // A lock after the retiming reads the new version: a 2-hour window, a 1-hour margin.
         (IAdManager.OrderParams memory q, bytes32 hq) =
             _openOrder(lastAdId, address(adToken), 60 ether, 41, bridger, recipient);
-        (, uint32 vq) = adManager.orders(hq);
+        (, uint32 vq,,) = adManager.orders(hq);
         assertEq(vq, v + 1);
         uint256 cutoffQ = q.deadline + 2 hours - 1 hours;
         vm.warp(cutoffQ);
@@ -1083,7 +1083,7 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
     function test_retiming_movesNoCreatedOrder() public {
         _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 0, 30 minutes));
         (IOrderPortal.OrderParams memory p, bytes32 h) = _create(10);
-        (, uint32 v) = portal.orders(h);
+        (, uint32 v,,) = portal.orders(h);
         assertEq(v, portal.timingVersion(adChainId));
         _setTiming(RouteTiming.Timing(2 hours, 2 hours, 1 hours, 90 minutes));
 
@@ -1094,7 +1094,7 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
 
         // An order created after the retiming reads the new stagger.
         (IOrderPortal.OrderParams memory q, bytes32 hq) = _create(15);
-        (, uint32 vq) = portal.orders(hq);
+        (, uint32 vq,,) = portal.orders(hq);
         assertEq(vq, v + 1);
         uint256 cutoffQ = q.deadline - 90 minutes;
         vm.warp(cutoffQ + 1);

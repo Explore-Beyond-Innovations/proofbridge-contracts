@@ -23,4 +23,16 @@ interface IKeyRegistry {
     ///         re-kill after it all count; a rotation whose old slot outlives the cutoff does not.
     ///         A dead slot is forgotten once the account has no open positions, or 30 days on.
     function anySlotExpiredWithin(bytes32 account, uint64 from, uint64 to) external view returns (bool);
+    /// @notice The slot's commitment iff it exists and is usable now; reverts otherwise. The lock and a
+    ///         re-pin ask it of the slot they pin.
+    function commitmentAt(bytes32 account, uint32 slotId) external view returns (bytes32);
+    /// @notice When the slot stopped being usable: 0 while unbounded, else the recorded expiry (a kill
+    ///         records the moment of the kill). The denial rule reads it for the order's pinned slot.
+    function expiredAt(bytes32 account, uint32 slotId) external view returns (uint64);
+    /// @notice The settlement signer's consent to move `orderHash`'s pin (`fromSlot` → `toSlot`);
+    ///         `nonce` 0 means none was ever given.
+    function repinApproval(bytes32 account, bytes32 orderHash)
+        external
+        view
+        returns (uint32 fromSlot, uint32 toSlot, uint64 nonce);
 }

@@ -626,7 +626,8 @@
         "revokeKeys": "RevokeKeys(bytes32 account,KeyLeg[] legs)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)",
         "cancelPending": "CancelPending(bytes32 account,KeyLeg[] legs)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)",
         "retireKey": "RetireKey(bytes32 account,bytes32 keyCommitment,uint64 validUntil)",
-        "approveMaker": "ApproveMaker(bytes32 account,bytes32 maker,bool approved,KeyLeg[] legs,uint64 deadline)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)"
+        "approveMaker": "ApproveMaker(bytes32 account,bytes32 maker,bool approved,KeyLeg[] legs,uint64 deadline)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)",
+        "repinOrder": "RepinOrder(bytes32 account,bytes32 orderHash,uint32 fromSlot,uint32 toSlot,KeyLeg[] legs)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)"
       },
       "typehashes": {
         "keyLeg": "0xfa75af9d4f7f233233f7046e929ef40cd6d17ee3c0f579aeae91b2c8697b9599",
@@ -634,14 +635,16 @@
         "revokeKeys": "0xd2cc9644d4c5bccccd706cafc58d84449d6f6d113297aa878f49d24ac672a825",
         "cancelPending": "0x3528ec7f948a36baeb9610767aa9f05922e7e14d2eabe51142e58c743778d12f",
         "retireKey": "0x1abc6df038c182ce0998121f306e7bd9a9f4b4a010fc40d909308c8e77cb90fd",
-        "approveMaker": "0x1acb1f6ffc960ff061d0ad70e584831841b1fa26815ced608b798b3b50d0ab72"
+        "approveMaker": "0x1acb1f6ffc960ff061d0ad70e584831841b1fa26815ced608b798b3b50d0ab72",
+        "repinOrder": "0xf41df3e8e10a8c2c5347b10a398ea576045b4b3f01c43233858369db38d512c5"
       },
+      "repinOrder": "0x17764f59e0fbd081c3584af9b35126bc3736446e019c5b9562d74fa84de6956f",
       "makers": {
         "approved": "0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65",
         "other": "0x00000000000000000000000014a4c421c7a8513686a0b291fc6077e7d9f0f68d"
       },
       "text": "lines joined by \\n, no trailing newline; SEP-53 payload = sha256(\"Stellar Signed Message:\\n\" || text)",
-      "layout": "register[i]: slots key i at nonce i on both legs (one signature, both registries), deadline _meta.deadline.register; registerLate[i]: the same with deadline _meta.deadline.registerLate; revoke[n] / cancel[n]: both legs at nonce n; retire[i*2 + (validUntil==1 ? 0 : 1)]: key i, validUntil 1 or slots.graceTs; approveMaker[n]: makers.approved at pair nonce n on both legs (approved, withdrawn, approved), deadline _meta.deadline.register; approveOtherMaker: makers.other at nonce 0",
+      "layout": "register[i]: slots key i at nonce i on both legs (one signature, both registries), deadline _meta.deadline.register; registerLate[i]: the same with deadline _meta.deadline.registerLate; revoke[n] / cancel[n]: both legs at nonce n; retire[i*2 + (validUntil==1 ? 0 : 1)]: key i, validUntil 1 or slots.graceTs; approveMaker[n]: makers.approved at pair nonce n on both legs (approved, withdrawn, approved), deadline _meta.deadline.register; approveOtherMaker: makers.other at nonce 0; repin[n]: repinOrder at pair nonce n on both legs (slot 0 -> 1, then 1 -> 2)",
       "sigs": "secp256k1: sig = r||s||v (65 B) on both registries. sep53: sig = the bare 64 B (Soroban), evmSig = abi.encode(r, s, edX, edY) (EVM)"
     },
     "maker": {
@@ -1627,6 +1630,62 @@
         "sig": "0xc98450a185f60a3d7900b8913b6ebdb7ded85ed0a461fd1d7918efcc4a1977ee22097feb1d755733683a8095a0a1d2b9300bf01766c5cd544fb924ba2ac25c02",
         "evmSig": "0xc98450a185f60a3d7900b8913b6ebdb7ded85ed0a461fd1d7918efcc4a1977ee22097feb1d755733683a8095a0a1d2b9300bf01766c5cd544fb924ba2ac25c02615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
       },
+      "repin": [
+        {
+          "kind": "repin",
+          "env": "testnet",
+          "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+          "orderHash": "0x17764f59e0fbd081c3584af9b35126bc3736446e019c5b9562d74fa84de6956f",
+          "fromSlot": "0",
+          "toSlot": "1",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "0"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "0"
+            }
+          ],
+          "structHash": "0xfd63df324103cbed589cc89fc75f4315a8864b7a5e5e628ae27bf8b51c5078c4",
+          "digest": "0x67b6d6f89b2595df5bfe59b169e398220651b27385c66850f39555836bd18765",
+          "text": "ProofBridge: move an order's settlement key to another slot\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nOrder: 0x17764f59e0fbd081c3584af9b35126bc3736446e019c5b9562d74fa84de6956f\nFrom slot: 0\nTo slot: 1\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+          "sep53Payload": "0x92d3102d2b8cf9c037bc4956e0b04e359219970db1c17377101db5edf4e8e3ae",
+          "scheme": "sep53",
+          "sig": "0x096b2ad032f8563376881123b577aff11333fa2120adcc6ea2ed8b1a28afee86b93bffe724c25ead798e258de16bdd6864ab1875fe35b1208f2663625d179a00",
+          "evmSig": "0x096b2ad032f8563376881123b577aff11333fa2120adcc6ea2ed8b1a28afee86b93bffe724c25ead798e258de16bdd6864ab1875fe35b1208f2663625d179a00615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        },
+        {
+          "kind": "repin",
+          "env": "testnet",
+          "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+          "orderHash": "0x17764f59e0fbd081c3584af9b35126bc3736446e019c5b9562d74fa84de6956f",
+          "fromSlot": "1",
+          "toSlot": "2",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "1"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "1"
+            }
+          ],
+          "structHash": "0xcb53c964a497188382f13ce6bf3a1c30e4e34880dd4ddeb166c2637392aa1aea",
+          "digest": "0x7ddcdbe3af2359fa0ad873cf5b1e06e522a16d6f984619e40e8ca113db3268b0",
+          "text": "ProofBridge: move an order's settlement key to another slot\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nOrder: 0x17764f59e0fbd081c3584af9b35126bc3736446e019c5b9562d74fa84de6956f\nFrom slot: 1\nTo slot: 2\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+          "sep53Payload": "0x32dc705e357538a4d9fded48d83555a2eace9c5c4204fd649c7f3b5fb3680530",
+          "scheme": "sep53",
+          "sig": "0xfc5e6ffaa95c9731983d265209f2ec3ac23ff420bdebc24e0f5719b15b498668a475627bb72dadc133f5e2529d9f60a388a01a15b2c05aa3103c5618713e4509",
+          "evmSig": "0xfc5e6ffaa95c9731983d265209f2ec3ac23ff420bdebc24e0f5719b15b498668a475627bb72dadc133f5e2529d9f60a388a01a15b2c05aa3103c5618713e4509615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        }
+      ],
       "reuseKey0AtNonce1": {
         "kind": "register",
         "env": "testnet",
@@ -2801,6 +2860,60 @@
         "scheme": "secp256k1",
         "sig": "0x18b7b6f33792a0e3e230d8bf2c818ddf8224b18b133c80a7a64a6db0e05b2d6f2d256b964796e111ec3ed44acde2716b21e898b51c97118d7df408581a7581ea1c"
       },
+      "repin": [
+        {
+          "kind": "repin",
+          "env": "testnet",
+          "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+          "orderHash": "0x17764f59e0fbd081c3584af9b35126bc3736446e019c5b9562d74fa84de6956f",
+          "fromSlot": "0",
+          "toSlot": "1",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "0"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "0"
+            }
+          ],
+          "structHash": "0x3855c2a92e5b146fecc0d2ee929f0ac170983c615a6248739e677528c7f5882a",
+          "digest": "0xf7fde603dbd890ba94fe96c9dcd6dbdca6b94c6862e4d43883be3aeed8e3104f",
+          "text": "ProofBridge: move an order's settlement key to another slot\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nOrder: 0x17764f59e0fbd081c3584af9b35126bc3736446e019c5b9562d74fa84de6956f\nFrom slot: 0\nTo slot: 1\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+          "sep53Payload": "0xf64b9574ecda015904b1ab65b672907f2ac347b398d382db332fce357c73d5f6",
+          "scheme": "secp256k1",
+          "sig": "0x16fa85240e1f4d2af8ace0487cfc788f2b99050a0aeadb43c5ea5453ff86145b2fc125d6e193aba84bb501e841d725c1fec49a30d4f918a5778abeb3e5228eb21b"
+        },
+        {
+          "kind": "repin",
+          "env": "testnet",
+          "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+          "orderHash": "0x17764f59e0fbd081c3584af9b35126bc3736446e019c5b9562d74fa84de6956f",
+          "fromSlot": "1",
+          "toSlot": "2",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "1"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "1"
+            }
+          ],
+          "structHash": "0xf7af707b2126cece0f8e0c2e100cfb7c27735e6b70f9336f2cb7ca2fd02e3505",
+          "digest": "0x372bbddc2ef45d30d39fb8fb710bd9c4be0f4f45153a6b9ab2e75532347c44c6",
+          "text": "ProofBridge: move an order's settlement key to another slot\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nOrder: 0x17764f59e0fbd081c3584af9b35126bc3736446e019c5b9562d74fa84de6956f\nFrom slot: 1\nTo slot: 2\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+          "sep53Payload": "0x8f84bf35b0b978905a23199b4e54b1260877f9ce6b2825f15bc5d0aedacaded8",
+          "scheme": "secp256k1",
+          "sig": "0x2cbc246403f2b5b618326a4303c7907c5d735480943ffe042bfe463eeade2aef0b8fd4481b91c48f08baa8e0656977c3a02539c0bc6879b80125f3edbcd3245b1b"
+        }
+      ],
       "reuseKey0AtNonce1": {
         "kind": "register",
         "env": "testnet",

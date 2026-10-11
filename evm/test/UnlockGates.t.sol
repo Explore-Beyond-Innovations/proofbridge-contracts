@@ -137,7 +137,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         p.salt = 4244;
         p.adSettlementSigner = signer;
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
 
         assertTrue(adManager.hasOpenPositions(signer));
         assertFalse(adManager.hasOpenPositions(_b32(maker)), "custody is not counted");
@@ -173,8 +173,8 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         y.adSettlementSigner = signer;
         y.bridger = x.bridger;
         vm.startPrank(maker);
-        adManager.lockForOrder(x);
-        adManager.lockForOrder(y);
+        adManager.lockForOrder(x, 0);
+        adManager.lockForOrder(y, 0);
         vm.stopPrank();
         // After the locks, as in `_prepareUnlock` (#464).
         vm.prank(admin);

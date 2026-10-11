@@ -135,7 +135,7 @@ contract AdManagerErrorCoverageTest is AdManagerTest {
         IAdManager.OrderParams memory p = _defaultParams("no-such-ad");
         vm.prank(maker);
         vm.expectRevert(IAdManager.AdManager__AdNotFound.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function test_c19_aReusedAdIdIsUsedAdId() public {
@@ -176,7 +176,7 @@ contract AdManagerErrorCoverageTest is AdManagerTest {
         p.adDecimals = 6;
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(DecimalScaling.DecimalScaling__DecimalsMismatch.selector, 18, 6));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /// A token without `decimals()` cannot be locked against: the escrow cannot check the scaling.
@@ -196,7 +196,7 @@ contract AdManagerErrorCoverageTest is AdManagerTest {
         vm.expectRevert(
             abi.encodeWithSelector(DecimalScaling.DecimalScaling__DecimalsUnavailable.selector, address(bare))
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
         vm.stopPrank();
     }
 
@@ -208,7 +208,7 @@ contract AdManagerErrorCoverageTest is AdManagerTest {
         merkleManager.setManager(address(adManager), false);
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(MerkleManager.MerkleManager__NotManager.selector, address(adManager)));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 }
 

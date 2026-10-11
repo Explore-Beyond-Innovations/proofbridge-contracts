@@ -448,9 +448,9 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IEscrow
-    function orders(bytes32 orderHash) external view returns (Status, uint32) {
+    function orders(bytes32 orderHash) external view returns (Status, uint32, uint32, uint32) {
         Order storage o = _orders[orderHash];
-        return (o.status, o.timingVersion);
+        return (o.status, o.timingVersion, o.registryEpoch, o.pinnedSlot);
     }
 
     /// @inheritdoc IEscrow

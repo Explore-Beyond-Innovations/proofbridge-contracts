@@ -288,7 +288,7 @@ contract JointOutcomesTest is Test {
         portal.createOrder(w.pF);
         vm.stopPrank();
         vm.prank(maker);
-        adManager.lockForOrder(w.pP);
+        adManager.lockForOrder(w.pP, 0);
     }
 
     // ── the step interpreter ─────────────────────────────────────────────

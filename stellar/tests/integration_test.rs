@@ -638,7 +638,7 @@ fn test_ad_manager_lock_for_order() {
     let s = setup();
     let params = ad_manager_order_params(&s.env, &s.tp);
 
-    let order_hash = s.ad_manager.lock_for_order(&params);
+    let order_hash = s.ad_manager.lock_for_order(&params, &0);
 
     // Verify the order hash matches fixture
     assert_eq!(
@@ -668,7 +668,7 @@ fn test_ad_manager_unlock_with_bridger_proof() {
     let params = ad_manager_order_params(&s.env, &s.tp);
 
     // Lock first
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &0);
 
     // Bridger proves inclusion in the counterparty (order-chain) root.
     s.ad_manager.unlock(
@@ -768,7 +768,7 @@ fn test_ad_manager_unlock_is_permissionless() {
     let s = setup();
     let params = ad_manager_order_params(&s.env, &s.tp);
 
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &0);
 
     s.ad_manager.unlock(
         &params,
@@ -796,7 +796,7 @@ fn test_full_cross_chain_flow() {
     // ----- AD CHAIN: lock order -----
     let ad_params = ad_manager_order_params(&s.env, &s.tp);
 
-    let ad_order_hash = s.ad_manager.lock_for_order(&ad_params);
+    let ad_order_hash = s.ad_manager.lock_for_order(&ad_params, &0);
 
     // ----- ORDER CHAIN: create order -----
     let bridger_addr = {
@@ -856,7 +856,7 @@ fn test_nullifier_prevents_double_unlock() {
     let params = ad_manager_order_params(&s.env, &s.tp);
 
     // Lock
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &0);
 
     // First unlock succeeds (bridger proves the order-chain root)
     s.ad_manager.unlock(
@@ -921,7 +921,7 @@ impl MockRootVerifier {
 
 fn locked_ad_order(s: &TestSetup) -> ad_manager_contract::OrderParams {
     let params = ad_manager_order_params(&s.env, &s.tp);
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &0);
     params
 }
 
@@ -1088,13 +1088,13 @@ fn test_pause_blocks_the_lock_never_the_unlock() {
 
     let params = ad_manager_order_params(&s.env, &s.tp);
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&params),
+        s.ad_manager.try_lock_for_order(&params, &0),
         Err(Ok(ad_manager_contract::AdManagerError::ContractPaused)),
         "lock must fail while paused"
     );
 
     s.ad_manager.unpause();
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &0);
 
     s.ad_manager.pause();
     let empty = Bytes::new(&s.env);
@@ -1390,7 +1390,7 @@ fn test_unlock_metering() {
     {
         let s = setup();
         let params = ad_manager_order_params(&s.env, &s.tp);
-        s.ad_manager.lock_for_order(&params);
+        s.ad_manager.lock_for_order(&params, &0);
 
         s.env.cost_estimate().budget().reset_unlimited();
         s.ad_manager.unlock(
@@ -2011,8 +2011,78 @@ impl MockKeyRegistry {
             .unwrap_or(false)
     }
 
-    /// A (fake) slot of `account` expiring at `valid_until`, for `any_slot_expired_within`.
+    /// Plan 12 C: another (fake) slot's expiry, not the pinned one (0): a rotation of a slot the
+    /// order never co-signed under. Slots `0..=slot` then exist.
+    pub fn set_slot_expiry(env: Env, account: BytesN<32>, slot: u32, valid_until: u64) {
+        env.storage().instance().set(
+            &(soroban_sdk::symbol_short!("slotexp"), account.clone(), slot),
+            &valid_until,
+        );
+        let key = (soroban_sdk::symbol_short!("extra"), account.clone());
+        let extra: u32 = env.storage().instance().get(&key).unwrap_or(0);
+        if slot > extra {
+            env.storage().instance().set(&key, &slot);
+        }
+        // and in the account-wide list `any_slot_expired_within` reads, as a real registry would
+        let key = (soroban_sdk::symbol_short!("expiry"), account);
+        let mut v: soroban_sdk::Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        v.push_back(valid_until);
+        env.storage().instance().set(&key, &v);
+    }
+
+    pub fn expired_at(env: Env, account: BytesN<32>, slot: u32) -> u64 {
+        env.storage()
+            .instance()
+            .get(&(soroban_sdk::symbol_short!("slotexp"), account, slot))
+            .unwrap_or(0)
+    }
+
+    /// As the registry's: answers for a usable account's existing, unexpired slot, else traps.
+    pub fn commitment_at(env: Env, account: BytesN<32>, slot: u32) -> BytesN<32> {
+        let usable: bool = env
+            .storage()
+            .instance()
+            .get(&(soroban_sdk::symbol_short!("usable"), account.clone()))
+            .unwrap_or(false);
+        let extra: u32 = env
+            .storage()
+            .instance()
+            .get(&(soroban_sdk::symbol_short!("extra"), account.clone()))
+            .unwrap_or(0);
+        let e = Self::expired_at(env.clone(), account.clone(), slot);
+        if !usable || slot > extra || (e != 0 && env.ledger().timestamp() >= e) {
+            panic!("no usable slot");
+        }
+        account
+    }
+
+    pub fn set_repin(env: Env, account: BytesN<32>, order_hash: BytesN<32>, from: u32, to: u32) {
+        let key = (soroban_sdk::symbol_short!("repin"), account, order_hash);
+        let prev: (u32, u32, u64) = env.storage().instance().get(&key).unwrap_or((0, 0, 0));
+        env.storage().instance().set(&key, &(from, to, prev.2 + 1));
+    }
+
+    pub fn repin_approval(
+        env: Env,
+        account: BytesN<32>,
+        order_hash: BytesN<32>,
+    ) -> (u32, u32, u64) {
+        env.storage()
+            .instance()
+            .get(&(soroban_sdk::symbol_short!("repin"), account, order_hash))
+            .unwrap_or((0, 0, 0))
+    }
+
+    /// The pinned slot (0) expiring at `valid_until`: what the #422 cases mean by "the signer's key".
     pub fn add_slot_expiry(env: Env, account: BytesN<32>, valid_until: u64) {
+        env.storage().instance().set(
+            &(soroban_sdk::symbol_short!("slotexp"), account.clone(), 0u32),
+            &valid_until,
+        );
         let key = (soroban_sdk::symbol_short!("expiry"), account);
         let mut v: soroban_sdk::Vec<u64> = env
             .storage()
@@ -2077,7 +2147,7 @@ fn test_t12_lock_naming_third_party_bridger_leaves_their_counter_at_zero() {
     let mut params = ad_manager_order_params(&s.env, &s.tp);
     let stranger = other_account(&s.env, 0x33);
     params.bridger = stranger.clone();
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &0);
     assert!(!s.ad_manager.has_open_positions(&stranger));
     assert!(s
         .ad_manager
@@ -2097,7 +2167,7 @@ fn test_c0_split_case_lock_guards_the_settlement_signers_revoke() {
     s.ad_manager.set_settlement_signer(&ad_id, &account);
     let mut params = ad_manager_order_params(&s.env, &s.tp);
     params.ad_settlement_signer = account.clone();
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &0);
 
     assert!(s.ad_manager.has_open_positions(&account));
     assert!(!s.ad_manager.has_open_positions(&params.ad_creator));
@@ -2337,7 +2407,7 @@ fn test_t14_set_settlement_signer_while_paused_succeeds() {
 fn test_2_3h_claim_succeeds_while_paused() {
     let s = setup();
     let params = ad_manager_order_params(&s.env, &s.tp);
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &0);
 
     // Park a credit the way one really arises: the payout push fails, so the escrow credits instead.
     let token_client = TokenContractClient::new(&s.env, &s.ad_token_addr);
@@ -2374,7 +2444,7 @@ fn test_2_3h_a_credited_balance_gets_its_ttl_extended() {
 
     let s = setup();
     let params = ad_manager_order_params(&s.env, &s.tp);
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &0);
 
     // Park a credit the way one really arises: the payout push fails, so the escrow credits instead.
     let token_client = TokenContractClient::new(&s.env, &s.ad_token_addr);
@@ -2444,7 +2514,7 @@ fn test_2_3h_settlement_bearing_entries_get_their_ttl_extended() {
 
     let s = setup();
     let params = ad_manager_order_params(&s.env, &s.tp);
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &0);
     let empty = Bytes::new(&s.env);
     assert!(
         ad_unlock(&s, &params, &empty),
@@ -2528,7 +2598,7 @@ fn test_2_3h_per_contract_config_entries_get_their_ttl_extended() {
     // The in-flight counter: an account with an open lock must keep its row, because a missing row
     // reads as zero open positions and so lifts the cap.
     let params = ad_manager_order_params(&s.env, &s.tp);
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &0);
     let inflight_key: soroban_sdk::Val = s.env.as_contract(&s.ad_manager.address, || {
         use soroban_sdk::IntoVal;
         (
@@ -2566,7 +2636,7 @@ fn test_2_3h_per_contract_config_entries_get_their_ttl_extended() {
 fn test_2_3h_a_drained_credit_is_removed_not_kept_at_zero() {
     let s = setup();
     let params = ad_manager_order_params(&s.env, &s.tp);
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &0);
 
     // Park a credit the way one really arises, then let the recipient take it.
     let token_client = TokenContractClient::new(&s.env, &s.ad_token_addr);
@@ -2609,7 +2679,7 @@ fn test_pause_refuses_every_entry_and_no_liquidity_exit() {
     let to = Address::generate(&s.env);
     s.ad_manager.pause();
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&params),
+        s.ad_manager.try_lock_for_order(&params, &0),
         Err(Ok(ad_manager_contract::AdManagerError::ContractPaused))
     );
     assert_eq!(
@@ -2641,7 +2711,7 @@ fn test_t14_lock_after_key_retired_errors() {
     let params = ad_manager_order_params(&s.env, &s.tp);
     MockKeyRegistryClient::new(&s.env, &s.key_registry).set(&params.ad_settlement_signer, &false);
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&params),
+        s.ad_manager.try_lock_for_order(&params, &0),
         Err(Ok(ad_manager_contract::AdManagerError::SignerNotRegistered))
     );
 
@@ -2652,7 +2722,7 @@ fn test_t14_lock_after_key_retired_errors() {
         .set_settlement_signer(&SorobanString::from_str(&s.env, &s.tp.ad_id), &next);
     let mut params = params;
     params.ad_settlement_signer = next.clone();
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &0);
     assert!(s.ad_manager.has_open_positions(&next));
 }
 
@@ -2664,7 +2734,7 @@ fn test_t14_lock_with_undeclared_signer_errors() {
     let mut params = ad_manager_order_params(&s.env, &s.tp);
     params.ad_settlement_signer = other_account(&s.env, 0x88);
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&params),
+        s.ad_manager.try_lock_for_order(&params, &0),
         Err(Ok(
             ad_manager_contract::AdManagerError::SettlementSignerMismatch
         ))
@@ -2678,7 +2748,7 @@ fn test_t14_lock_naming_another_maker_errors() {
     let mut params = ad_manager_order_params(&s.env, &s.tp);
     params.ad_creator = other_account(&s.env, 0x99);
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&params),
+        s.ad_manager.try_lock_for_order(&params, &0),
         Err(Ok(ad_manager_contract::AdManagerError::NotMaker))
     );
 }
@@ -2693,13 +2763,13 @@ fn test_t14_lock_after_repoint_requires_the_new_signer() {
 
     let mut params = ad_manager_order_params(&s.env, &s.tp);
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&params),
+        s.ad_manager.try_lock_for_order(&params, &0),
         Err(Ok(
             ad_manager_contract::AdManagerError::SettlementSignerMismatch
         ))
     );
     params.ad_settlement_signer = next;
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &0);
 }
 
 // --- T-14 against the real registry: the client shape is right ---------------
@@ -2785,7 +2855,7 @@ fn test_consent_every_gate_needs_the_signers_approval() {
     q.salt = soroban_sdk::U256::from_u32(&s.env, 11);
     q.deadline = s.env.ledger().timestamp() + 86_400;
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&q),
+        s.ad_manager.try_lock_for_order(&q, &0),
         Err(Ok(AdErr::SignerNotApproved)),
         "a withdrawn approval refuses the next lock"
     );
@@ -2850,7 +2920,7 @@ fn test_consent_agent_account_maker_with_key_account_signer() {
     p.ad_id = SorobanString::from_str(&s.env, "agent-ad");
     p.ad_creator = address_to_bytes32(&s.env, &account);
     p.ad_settlement_signer = m.clone();
-    s.ad_manager.lock_for_order(&p);
+    s.ad_manager.lock_for_order(&p, &0);
     assert!(s.ad_manager.has_open_positions(&m));
 }
 
@@ -3787,11 +3857,11 @@ fn test_t45_lock_refuses_deadline_inside_min_window() {
     let p = ad_manager_order_params(&s.env, &s.tp);
     warp(&s, p.deadline - 100);
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&p),
+        s.ad_manager.try_lock_for_order(&p, &0),
         Err(Ok(AdErr::DeadlineTooSoon))
     );
     warp(&s, p.deadline - 3_600);
-    s.ad_manager.lock_for_order(&p);
+    s.ad_manager.lock_for_order(&p, &0);
 }
 
 #[test]
@@ -3831,7 +3901,7 @@ fn test_t45_cancel_never_locked_only_none_at_deadline_appends_leaf() {
     // Single-shot, and a lock can never follow it.
     assert_eq!(try_never_locked(&s, &p), Err(AdErr::NotClaimable));
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&p),
+        s.ad_manager.try_lock_for_order(&p, &0),
         Err(Ok(AdErr::OrderExists))
     );
 }
@@ -3846,6 +3916,146 @@ fn test_t45_cancel_never_locked_refuses_open_and_unsupported_chain() {
     let mut q = ad_manager_order_params(&s.env, &s.tp);
     q.order_chain_id = 999;
     assert_eq!(try_never_locked(&s, &q), Err(AdErr::ChainNotSupported));
+}
+
+// --- plan 12 C: the lock pins the co-signing slot ---------------------------------------------------
+
+fn pin_signer(s: &TestSetup) -> BytesN<32> {
+    bytes32_to_bytesn(&s.env, &s.tp.ad_settlement_signer)
+}
+
+fn lock_pinned(s: &TestSetup, slot: u32) -> ad_manager_contract::OrderParams {
+    let p = ad_manager_order_params(&s.env, &s.tp);
+    s.ad_manager.lock_for_order(&p, &slot);
+    p
+}
+
+#[test]
+fn test_slot_pin_lock_records_the_slot_and_the_epoch() {
+    let s = setup();
+    MockKeyRegistryClient::new(&s.env, &s.key_registry).set_slot_expiry(&pin_signer(&s), &2, &0);
+    let p = lock_pinned(&s, 2);
+    let rec = s.ad_manager.get_order(&s.ad_manager.hash_order(&p));
+    assert_eq!(rec.pinned_slot, 2);
+    assert_eq!(rec.registry_epoch, s.ad_manager.registry_epoch());
+}
+
+#[test]
+fn test_slot_pin_lock_refuses_a_missing_dead_or_foreign_slot() {
+    let s = setup();
+    let keys = MockKeyRegistryClient::new(&s.env, &s.key_registry);
+    let p = ad_manager_order_params(&s.env, &s.tp);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p, &5),
+        Err(Ok(AdErr::SlotNotUsable)),
+        "a slot the signer does not have"
+    );
+    keys.set_slot_expiry(&pin_signer(&s), &1, &s.env.ledger().timestamp());
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p, &1),
+        Err(Ok(AdErr::SlotNotUsable)),
+        "a dead slot"
+    );
+    let other = other_account(&s.env, 0x5A);
+    keys.set(&other, &true);
+    keys.set_slot_expiry(&other, &3, &0);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p, &3),
+        Err(Ok(AdErr::SlotNotUsable)),
+        "another account's slot id"
+    );
+    s.ad_manager.lock_for_order(&p, &0);
+}
+
+/// Only the pinned slot counts in the denial rule: another slot dying inside the window denies
+/// nothing.
+#[test]
+fn test_slot_pin_another_slot_expiring_inside_the_window_ordinary_timing() {
+    let s = setup();
+    let p = lock_pinned(&s, 0);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry).set_slot_expiry(
+        &pin_signer(&s),
+        &1,
+        &(p.deadline - 600),
+    );
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+#[test]
+fn test_slot_pin_repin_moves_the_pin_with_consent_from_the_current_pin() {
+    let s = setup();
+    let keys = MockKeyRegistryClient::new(&s.env, &s.key_registry);
+    keys.set_slot_expiry(&pin_signer(&s), &2, &0);
+    let p = lock_pinned(&s, 0);
+    let h = s.ad_manager.hash_order(&p);
+    assert_eq!(s.ad_manager.try_repin_order(&p), Err(Ok(AdErr::NoRepin)));
+    keys.set_repin(&pin_signer(&s), &h, &1, &2); // from a slot the order is not pinned to
+    assert_eq!(s.ad_manager.try_repin_order(&p), Err(Ok(AdErr::NoRepin)));
+    keys.set_repin(&pin_signer(&s), &h, &0, &2);
+    s.ad_manager.repin_order(&p);
+    assert_eq!(s.ad_manager.get_order(&h).pinned_slot, 2);
+}
+
+#[test]
+fn test_slot_pin_repin_refuses_an_unusable_target_and_a_non_open_order() {
+    let s = setup();
+    let keys = MockKeyRegistryClient::new(&s.env, &s.key_registry);
+    keys.set_slot_expiry(&pin_signer(&s), &1, &s.env.ledger().timestamp());
+    let p = lock_pinned(&s, 0);
+    let h = s.ad_manager.hash_order(&p);
+    keys.set_repin(&pin_signer(&s), &h, &0, &1);
+    assert_eq!(
+        s.ad_manager.try_repin_order(&p),
+        Err(Ok(AdErr::SlotNotUsable))
+    );
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.try_repin_order(&p),
+        Err(Ok(AdErr::OrderNotOpen))
+    );
+}
+
+/// Q2: the re-pin closes at `deadline - claim_stagger`.
+#[test]
+fn test_slot_pin_repin_closes_at_the_claim_stagger() {
+    let s = setup();
+    s.ad_manager
+        .set_route_timing(&s.tp.order_chain_id, &ad_timing(3_600, 1_800, 0, 600));
+    let keys = MockKeyRegistryClient::new(&s.env, &s.key_registry);
+    keys.set_slot_expiry(&pin_signer(&s), &1, &0);
+    let p = lock_pinned(&s, 0);
+    let h = s.ad_manager.hash_order(&p);
+    keys.set_repin(&pin_signer(&s), &h, &0, &1);
+    warp(&s, p.deadline - 600 + 1);
+    assert_eq!(
+        s.ad_manager.try_repin_order(&p),
+        Err(Ok(AdErr::OrderExpired))
+    );
+    warp(&s, p.deadline - 600);
+    s.ad_manager.repin_order(&p);
+    assert_eq!(s.ad_manager.get_order(&h).pinned_slot, 1);
+}
+
+/// End to end with the real verifier: an order pinned to slot 1 is refused under a co-signature
+/// from slot 0, though keys, roots, nullifiers and signature all hold; pinned to 0 it settles.
+#[test]
+fn test_slot_pin_the_ad_unlock_accepts_only_the_pinned_slot() {
+    let s = setup();
+    let cosig = wire_real_verifier_for_fixture(&s); // slot ids 0 in the co-signature
+    let p = lock_pinned(&s, 1);
+    assert!(
+        !ad_unlock(&s, &p, &cosig),
+        "slot 0's co-signature on a slot-1 pin"
+    );
+
+    let t = setup();
+    let cosig = wire_real_verifier_for_fixture(&t);
+    let q = lock_pinned(&t, 0);
+    assert!(ad_unlock(&t, &q, &cosig), "the pinned slot settles");
 }
 
 // --- the never-locked cancel needs the deposit ------------------------------------------------------
@@ -4421,11 +4631,11 @@ fn test_422_finalize_cancel_unreadable_anchor_refuses() {
     s.ad_manager.set_root_anchor(&s.key_registry);
     let p = ad_manager_order_params(&s.env, &s.tp);
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&p),
+        s.ad_manager.try_lock_for_order(&p, &0),
         Err(Ok(AdErr::AnchorDelayUnreadable))
     );
     wire_anchor(&s);
-    s.ad_manager.lock_for_order(&p);
+    s.ad_manager.lock_for_order(&p, &0);
     s.ad_manager.set_root_anchor(&s.key_registry);
     s.ad_manager.halt_settlement(&maker_addr(&s));
     warp(&s, p.deadline);
@@ -4540,9 +4750,18 @@ fn maker_fp(env: &Env, i: usize) -> BytesN<32> {
 }
 
 fn lock_signed_by(s: &TestSetup, account: &BytesN<32>) -> ad_manager_contract::OrderParams {
+    lock_signed_by_pinned(s, account, 0)
+}
+
+/// Plan 12 C: the same lock, pinning `slot` of the signer.
+fn lock_signed_by_pinned(
+    s: &TestSetup,
+    account: &BytesN<32>,
+    slot: u32,
+) -> ad_manager_contract::OrderParams {
     let mut params = ad_manager_order_params(&s.env, &s.tp);
     params.ad_settlement_signer = account.clone();
-    s.ad_manager.lock_for_order(&params);
+    s.ad_manager.lock_for_order(&params, &slot);
     params
 }
 
@@ -4570,15 +4789,38 @@ fn test_422_real_registry_kill_after_the_lock_waits_the_grace() {
     s.ad_manager.finalize_cancel(&p);
 }
 
-/// A kill before the lock is history: the order was co-signed under the other slot.
+/// Plan 12 C: a slot killed before the lock cannot be pinned; an order pinned to the live slot runs
+/// ordinary timing, the dead slot being history.
 #[test]
-fn test_422_real_registry_kill_before_the_lock_ordinary_timing() {
+fn test_422_real_registry_kill_before_the_lock_cannot_be_pinned_the_live_slot_runs_ordinary() {
     let s = setup();
     let (client, account, auth) = real_registry_signer(&s);
     warp(&s, s.env.ledger().timestamp() + 10);
     client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     warp(&s, s.env.ledger().timestamp() + 10);
-    let p = lock_signed_by(&s, &account);
+    // Plan 12 C: the dead slot cannot be pinned; the live one (1) can, and the kill is history.
+    let mut dead = ad_manager_order_params(&s.env, &s.tp);
+    dead.ad_settlement_signer = account.clone();
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&dead, &0),
+        Err(Ok(AdErr::SlotNotUsable))
+    );
+    let p = lock_signed_by_pinned(&s, &account, 1);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// Plan 12 C (#436): a kill of a slot the order is not pinned to denies nothing, even inside the
+/// window: no other slot can co-sign the ad leg.
+#[test]
+fn test_422_real_registry_kill_of_another_slot_inside_the_window_ordinary_timing() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account); // pinned to slot 0
+    warp(&s, s.env.ledger().timestamp() + 10);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 1), &1);
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER);
@@ -4745,7 +4987,16 @@ fn test_422_real_registry_same_second_kill_prune_and_lock_still_waits_the_grace(
         Err(Ok(bls_key_registry_contract::RegistryError::RegistryFull)),
         "not prunable in the kill's own second"
     );
-    let p = lock_signed_by(&s, &account);
+    // Plan 12 C: the killed slot is dead in its own second and cannot be pinned; a kill of the slot
+    // the order is pinned to, in the lock's own second after the lock, still waits the grace.
+    let mut dead = ad_manager_order_params(&s.env, &s.tp);
+    dead.ad_settlement_signer = account.clone();
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&dead, &0),
+        Err(Ok(AdErr::SlotNotUsable))
+    );
+    let p = lock_signed_by_pinned(&s, &account, 1);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 1), &1);
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER);
@@ -4867,7 +5118,7 @@ fn test_464_split_refuses_the_lock() {
     let mut params = ad_manager_order_params(&s.env, &s.tp);
     params.ad_settlement_signer = account.clone();
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&params),
+        s.ad_manager.try_lock_for_order(&params, &0),
         Err(Ok(AdErr::RegistrySplit))
     );
 }
@@ -5003,13 +5254,13 @@ fn test_464_full_migration_new_orders_lock_old_order_waits() {
     q.ad_settlement_signer = account.clone();
     q.salt = soroban_sdk::U256::from_u32(&s.env, 464);
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&q),
+        s.ad_manager.try_lock_for_order(&q, &0),
         Err(Ok(AdErr::SignerNotApproved)),
         "an approval on the old registry does not carry over"
     );
     keys.approve(&account, &address_to_bytes32(&s.env, &s.maker_addr), &true);
     q.deadline = s.env.ledger().timestamp() + 86_400;
-    let r = s.ad_manager.try_lock_for_order(&q);
+    let r = s.ad_manager.try_lock_for_order(&q, &0);
     assert!(r.is_ok(), "a new lock is taken on the new pair: {r:?}");
     let hq = s.ad_manager.hash_order(&q);
     assert_eq!(
@@ -5909,11 +6160,11 @@ fn test_453_lock_refuses_a_deadline_past_the_order_window() {
     let p = ad_manager_order_params(&s.env, &s.tp);
     warp(&s, p.deadline - MAX_ORDER_WINDOW - 1);
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&p),
+        s.ad_manager.try_lock_for_order(&p, &0),
         Err(Ok(AdErr::DeadlineTooFar))
     );
     warp(&s, p.deadline - MAX_ORDER_WINDOW);
-    s.ad_manager.lock_for_order(&p);
+    s.ad_manager.lock_for_order(&p, &0);
 }
 
 /// #453: the order chain caps the same way, so a bridger cannot create an order the maker can
@@ -6024,7 +6275,7 @@ fn test_timing_unset_fails_closed_on_every_timed_path() {
     assert_eq!(s.order_portal.timing_version(&s.tp.ad_chain_id), 0);
     let p = ad_manager_order_params(&s.env, &s.tp);
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&p),
+        s.ad_manager.try_lock_for_order(&p, &0),
         Err(Ok(AdErr::NoRouteTiming))
     );
     warp(&s, p.deadline);
@@ -6198,7 +6449,7 @@ fn test_bond_is_the_floor_for_any_amount_and_decimals() {
             ad_units / 10u128.pow(s.tp.ad_decimals - dec)
         };
         p.salt = soroban_sdk::U256::from_u128(&s.env, 9_000 + i as u128);
-        s.ad_manager.lock_for_order(&p);
+        s.ad_manager.lock_for_order(&p, &0);
 
         assert_eq!(dm.bond_for(&s.tp.order_chain_id), DISPUTE_BOND_FLOOR);
         let before = token.balance(&filer);
@@ -7514,6 +7765,19 @@ impl AccountKeyRegistry {
         env.storage().instance().get(&account).unwrap()
     }
 
+    /// Every key unbounded, no re-pin consent: the pin is not what these tests check.
+    pub fn expired_at(_env: Env, _account: BytesN<32>, _slot_id: u32) -> u64 {
+        0
+    }
+
+    pub fn repin_approval(
+        _env: Env,
+        _account: BytesN<32>,
+        _order_hash: BytesN<32>,
+    ) -> (u32, u32, u64) {
+        (0, 0, 0)
+    }
+
     // #464: the escrow reads the same registry as the verifier, so it answers the escrow's two views.
     pub fn has_usable_slot(env: Env, account: BytesN<32>) -> bool {
         env.storage().instance().has(&account)
@@ -7795,7 +8059,7 @@ fn test_433_ad_manager_cosig_for_one_order_does_not_unlock_another() {
         .fund_ad(&SorobanString::from_str(&s.env, &s.tp.ad_id), &s.tp.amount);
     let mut y = ad_manager_order_params(&s.env, &s.tp);
     y.salt = soroban_sdk::U256::from_u128(&s.env, s.tp.salt + 1);
-    s.ad_manager.lock_for_order(&y);
+    s.ad_manager.lock_for_order(&y, &0);
 
     assert_eq!(
         s.ad_manager.try_unlock(
@@ -7924,7 +8188,7 @@ fn second_locked_order(s: &TestSetup) -> ad_manager_contract::OrderParams {
     let mut q = ad_manager_order_params(&s.env, &s.tp);
     q.salt = soroban_sdk::U256::from_u32(&s.env, 1011);
     q.deadline = s.env.ledger().timestamp() + 86_400;
-    s.ad_manager.lock_for_order(&q);
+    s.ad_manager.lock_for_order(&q, &0);
     q
 }
 
@@ -8509,7 +8773,7 @@ fn second_fixture_lock(s: &TestSetup) -> ad_manager_contract::OrderParams {
     s.ad_manager.fund_ad(&ad_id(s), &s.tp.amount);
     let mut y = ad_manager_order_params(&s.env, &s.tp);
     y.salt = soroban_sdk::U256::from_u128(&s.env, s.tp.salt + 1);
-    s.ad_manager.lock_for_order(&y);
+    s.ad_manager.lock_for_order(&y, &0);
     y
 }
 
@@ -8730,7 +8994,7 @@ fn test_a_removed_peer_refuses_locks_orders_and_routes() {
 
     let lock = ad_manager_order_params(&s.env, &s.tp);
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&lock),
+        s.ad_manager.try_lock_for_order(&lock, &0),
         Err(Ok(AdErr::ChainNotSupported))
     );
     let ad_token = bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token);
@@ -8761,7 +9025,7 @@ fn test_a_removed_peer_refuses_locks_orders_and_routes() {
         &s.tp.ad_chain_id,
         &bytes32_to_bytesn(&s.env, &s.tp.ad_manager_id),
     );
-    s.ad_manager.lock_for_order(&lock);
+    s.ad_manager.lock_for_order(&lock, &0);
     s.order_portal.create_order(&order);
 }
 
@@ -8776,7 +9040,7 @@ fn test_c19_an_unknown_ad_is_ad_not_found() {
     let mut p = ad_manager_order_params(&s.env, &s.tp);
     p.ad_id = nope;
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&p),
+        s.ad_manager.try_lock_for_order(&p, &0),
         Err(Ok(AdErr::AdNotFound))
     );
 }
@@ -8795,7 +9059,7 @@ fn test_c19_more_than_the_free_liquidity_is_insufficient_liquidity() {
     let mut y = ad_manager_order_params(&s.env, &s.tp);
     y.salt = soroban_sdk::U256::from_u128(&s.env, s.tp.salt + 1);
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&y),
+        s.ad_manager.try_lock_for_order(&y, &0),
         Err(Ok(AdErr::InsufficientLiquidity))
     );
     assert_eq!(
@@ -8836,7 +9100,7 @@ fn test_c19_a_revoked_merkle_manager_is_merkle_append_failed() {
         .set_manager(&s.ad_manager.address, &false);
     let p = ad_manager_order_params(&s.env, &s.tp);
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&p),
+        s.ad_manager.try_lock_for_order(&p, &0),
         Err(Ok(AdErr::MerkleAppendFailed))
     );
     assert_eq!(ad_locked(&s), 0, "nothing was reserved");
@@ -8919,14 +9183,14 @@ fn test_c19_lock_decimal_errors_are_named() {
     let mut p = base.clone();
     p.order_decimals = 31;
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&p),
+        s.ad_manager.try_lock_for_order(&p, &0),
         Err(Ok(AdErr::DecimalsOutOfRange))
     );
 
     let mut p = base.clone();
     p.ad_decimals = s.tp.ad_decimals + 1;
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&p),
+        s.ad_manager.try_lock_for_order(&p, &0),
         Err(Ok(AdErr::AdDecimalsMismatch))
     );
 
@@ -8935,7 +9199,7 @@ fn test_c19_lock_decimal_errors_are_named() {
     p.order_decimals = s.tp.ad_decimals + 1;
     p.amount = 12_345;
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&p),
+        s.ad_manager.try_lock_for_order(&p, &0),
         Err(Ok(AdErr::NonExactDownscale))
     );
 
@@ -8944,7 +9208,7 @@ fn test_c19_lock_decimal_errors_are_named() {
     p.order_decimals = 0;
     p.amount = u128::MAX;
     assert_eq!(
-        s.ad_manager.try_lock_for_order(&p),
+        s.ad_manager.try_lock_for_order(&p, &0),
         Err(Ok(AdErr::DecimalOverflow))
     );
 }
@@ -9051,7 +9315,7 @@ fn test_c19_dispute_on_a_settled_or_absent_order_is_not_disputable() {
         Err(Ok(AdErr::NotDisputable)),
         "never locked"
     );
-    s.ad_manager.lock_for_order(&p);
+    s.ad_manager.lock_for_order(&p, &0);
     assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
     assert_eq!(
         s.ad_manager.try_dispute(&p, &filer, &evidence(&s, 0xEE)),
@@ -9440,7 +9704,7 @@ const fn ceil(cpu: i64, mem: i64, reads: u32, writes: u32, write_bytes: u32, eve
     }
 }
 
-const LOCK_FOR_ORDER: Ceil = ceil(14_000_000, 3_450_000, 26, 8, 1_787, 564);
+const LOCK_FOR_ORDER: Ceil = ceil(15_800_000, 3_810_000, 30, 8, 1_787, 564);
 const AD_UNLOCK_REAL: Ceil = ceil(141_800_000, 6_820_000, 29, 8, 1_369, 542);
 const AD_RECORD_SETTLED: Ceil = ceil(14_500_000, 3_240_000, 13, 6, 955, 335);
 const AD_PRESENT_SETTLED: Ceil = ceil(105_900_000, 6_190_000, 17, 7, 1_224, 317);
@@ -9461,7 +9725,7 @@ fn test_c28_meter_ad_manager_lock_unlock_record_settled() {
     let cosig = wire_real_stack(&s);
     let p = ad_manager_order_params(&s.env, &s.tp);
 
-    s.ad_manager.lock_for_order(&p);
+    s.ad_manager.lock_for_order(&p, &0);
     meter_door(&s, "ad_manager.lock_for_order", LOCK_FOR_ORDER);
 
     // The real gate is live: no co-signature, no unlock.

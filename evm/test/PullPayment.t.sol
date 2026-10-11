@@ -94,7 +94,7 @@ contract PayoutFallbackTest is AdManagerTest {
         adManager.pause();
 
         vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /// Escrow solvency across both payout paths: wrapped-native holdings always

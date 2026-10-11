@@ -39,7 +39,7 @@ contract AdManagerPauseTest is AdManagerTest {
         IAdManager.OrderParams memory p = _defaultParams(adId);
         vm.prank(maker);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function test_unpause_restores() public {

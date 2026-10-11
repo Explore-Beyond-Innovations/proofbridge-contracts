@@ -87,7 +87,7 @@ contract AgentPolicyRealEscrowTest is AgentPolicyBase {
     /// order leaf is appended, and the module debits the agent.
     function test_c26_anAgentLockPassesTheRealAdManager() public {
         IAdManager.OrderParams memory p = _realOrder(100_000, 1);
-        _realOp(abi.encodeCall(IAdManager.lockForOrder, (p))).execUserOps();
+        _realOp(abi.encodeCall(IAdManager.lockForOrder, (p, uint32(0)))).execUserOps();
 
         assertEq(
             uint8(statusOf(address(adManager), _hashOf(p))),
@@ -116,7 +116,8 @@ contract AgentPolicyRealEscrowTest is AgentPolicyBase {
 
     /// Over the per-order cap on the real escrow: refused by the module, the escrow never sees it.
     function test_c26_overTheCapIsRefusedBeforeTheRealAdManager() public {
-        UserOpData memory op = _realOp(abi.encodeCall(IAdManager.lockForOrder, (_realOrder(MAX_PER_ORDER + 1, 2))));
+        UserOpData memory op =
+            _realOp(abi.encodeCall(IAdManager.lockForOrder, (_realOrder(MAX_PER_ORDER + 1, 2), uint32(0))));
         instance.expect4337Revert();
         op.execUserOps();
         assertEq(adManager.availableLiquidity(REAL_AD), AD_FUNDS);

@@ -2851,3 +2851,80 @@ fn revoke_drops_every_approval() {
     try_file_approval(&env, &client, &a["approveMaker"][2]).unwrap();
     assert!(client.is_approved_maker(&account, &maker));
 }
+
+// ---- 2.7 plan 12 C: the re-pin consent and the per-slot expiry ----
+
+fn try_file_repin(
+    env: &Env,
+    client: &BlsKeyRegistryClient,
+    e: &serde_json::Value,
+) -> Result<(), RegistryError> {
+    let legs = legs_of(env, e);
+    let nonce = legs.get(0).unwrap().nonce;
+    let slot = |k: &str| e[k].as_str().unwrap().parse::<u32>().unwrap();
+    match client.try_approve_repin(
+        &bn::<32>(env, &e["account"]),
+        &bn::<32>(env, &e["orderHash"]),
+        &slot("fromSlot"),
+        &slot("toSlot"),
+        &signed(env, e),
+        &nonce,
+    ) {
+        Ok(Ok(())) => Ok(()),
+        Err(Ok(err)) => Err(err),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// Both owner schemes consent to 0 -> 1, then 1 -> 2, at the (account, order) pair's own nonce; the
+/// text and the EIP-712 digest are the generator's byte for byte; a replay is refused.
+#[test]
+fn approve_repin_both_schemes_in_order_no_replay() {
+    let (env, client, v) = setup();
+    let order = bn::<32>(&env, &v["ownerAuth"]["_meta"]["repinOrder"]);
+    for who in [MAKER, BRIDGER] {
+        let a = oa(&v, who);
+        let account = bn::<32>(&env, &a["account"]);
+        assert_eq!(client.repin_approval(&account, &order), (0, 0, 0));
+        try_file_repin(&env, &client, &a["repin"][0]).unwrap();
+        assert_eq!(client.repin_approval(&account, &order), (0, 1, 1));
+        try_file_repin(&env, &client, &a["repin"][1]).unwrap();
+        assert_eq!(client.repin_approval(&account, &order), (1, 2, 2));
+        assert_eq!(
+            try_file_repin(&env, &client, &a["repin"][0]),
+            Err(RegistryError::BadNonce)
+        );
+        assert_eq!(
+            client.nonce_of(&account),
+            0,
+            "the account nonce is untouched"
+        );
+    }
+}
+
+/// `expired_at` reads the recorded expiry: a kill names 1 but is stamped at the kill.
+#[test]
+fn expired_at_is_the_kill_stamp_not_the_named_date() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    register_slot(&env, &client, &v, MAKER, 1);
+    assert_eq!(client.expired_at(&account, &0), 0, "unbounded");
+    let killed_at = env.ledger().timestamp();
+    set_valid_until(&env, &client, &v, MAKER, 0, true);
+    assert_eq!(
+        client.lookup(&account, &0).unwrap().valid_until,
+        1,
+        "the kill names 1"
+    );
+    assert_eq!(
+        client.expired_at(&account, &0),
+        killed_at,
+        "but expired at the kill"
+    );
+    assert_eq!(
+        client.expired_at(&account, &1),
+        0,
+        "the other slot is untouched"
+    );
+}

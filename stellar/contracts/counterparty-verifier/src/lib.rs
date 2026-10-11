@@ -45,6 +45,8 @@ const VERSION_OFFSET: u32 = 133;
 /// The escrow's leg: the ad manager consumes the AD leaf (1), the order portal the ORDER leaf (0).
 const SIDE_ORDER: u8 = 0;
 const SIDE_AD: u8 = 1;
+/// The order leg's envelope pin: no slot pinned (the auth's named maker key binds it).
+const UNPINNED: u32 = u32::MAX;
 
 const KEY_INIT: Symbol = symbol_short!("init");
 const KEY_REGISTRY: Symbol = symbol_short!("registry");
@@ -97,6 +99,11 @@ impl CounterpartyVerifier {
         if source_chain_id != leg_chain || root != *leg_root || m.nullifier_hash != *leg_nullifier {
             return false;
         }
+        // Plan 12 C: on the ad leg the lock pinned the maker's co-signing slot; only that slot's key
+        // settles there. The order leg sends the unpinned sentinel and is bound by the named key.
+        if m.pinned_slot != UNPINNED && m.signer_slot_id != m.pinned_slot {
+            return false;
+        }
 
         // One commitment per key (keccak of the EIP-2537 form): the registry stores it and the
         // signed auth names it, so the maker's key is hashed once for both checks.
@@ -138,6 +145,7 @@ struct Metadata {
     settlement_signer: BytesN<32>,
     bridger: BytesN<32>,
     envelope_order_hash: BytesN<32>,
+    pinned_slot: u32,
     nullifier_hash: BytesN<32>,
     side: u8,
     signer_slot_id: u32,
@@ -158,6 +166,7 @@ impl Metadata {
             settlement_signer: BytesN::from_array(env, &arr::<32>(b, 0)),
             bridger: BytesN::from_array(env, &arr::<32>(b, 32)),
             envelope_order_hash: BytesN::from_array(env, &arr::<32>(b, 64)),
+            pinned_slot: u32::from_be_bytes(arr::<4>(b, 96)),
             nullifier_hash: BytesN::from_array(env, &arr::<32>(b, 100)),
             side: b.get(132).unwrap_or(u8::MAX),
             order_chain_id: u128::from_be_bytes(arr::<16>(b, 134)),

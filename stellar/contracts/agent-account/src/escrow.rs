@@ -64,9 +64,13 @@ pub fn check_contract_call(
         return Err(AccountError::ActionNotAllowed);
     }
 
-    if c.args.len() != 1 {
+    // Plan 12 D13: `lock_for_order(params, signer_slot)`. The slot is the maker's own key choice and
+    // is not judged, only required to be a u32, so an older or padded shape is refused.
+    if c.args.len() != 2 {
         return Err(AccountError::BadArgs);
     }
+    let slot = c.args.get(1).ok_or(AccountError::BadArgs)?;
+    u32::try_from_val(env, &slot).map_err(|_| AccountError::BadArgs)?;
     let raw = c.args.get(0).ok_or(AccountError::BadArgs)?;
     let lock: Map<Symbol, Val> = Map::try_from_val(env, &raw).map_err(|_| AccountError::BadArgs)?;
 

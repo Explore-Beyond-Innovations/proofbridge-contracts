@@ -94,6 +94,9 @@ pub trait KeyRegistryInterface {
     fn has_usable_slot(env: Env, account: BytesN<32>) -> bool;
     fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool;
     fn is_approved_maker(env: Env, account: BytesN<32>, maker: BytesN<32>) -> bool;
+    fn commitment_at(env: Env, account: BytesN<32>, slot_id: u32) -> BytesN<32>;
+    fn expired_at(env: Env, account: BytesN<32>, slot_id: u32) -> u64;
+    fn repin_approval(env: Env, account: BytesN<32>, order_hash: BytesN<32>) -> (u32, u32, u64);
 }
 
 // =============================================================================
@@ -309,6 +312,8 @@ pub fn registration_subject(
 /// nullifier, the ad manager the AD leaf's.
 pub const ENVELOPE_SIDE_ORDER: u8 = 0;
 pub const ENVELOPE_SIDE_AD: u8 = 1;
+/// The order leg's envelope pin: no slot pinned there, the auth's named maker key binds it.
+pub const UNPINNED: u32 = u32::MAX;
 
 /// The root verifier's envelope: `settlement_signer(32) || bridger(32) || order_hash(32) ||
 /// pinned_slot(4) || nullifier_hash(32) || side(1) || cosig_data`, what the escrow vouches for.
@@ -316,7 +321,7 @@ pub const ENVELOPE_SIDE_AD: u8 = 1;
 /// `ad_settlement_signer`); `order_hash` is the order being unlocked, which the co-signed auth must
 /// name (#433); `nullifier_hash` and `side` are the nullifier the escrow is about to consume and
 /// its leg, which the auth must have signed for that leg. `pinned_slot` is the maker's co-signing
-/// slot the order recorded (0 where none is recorded).
+/// slot the ad-chain order pinned at lock; the order leg passes `UNPINNED`.
 #[allow(clippy::too_many_arguments)]
 pub fn is_root_valid(
     env: &Env,
@@ -412,6 +417,31 @@ pub fn any_slot_expired_within(
     to: u64,
 ) -> bool {
     KeyRegistryClient::new(env, registry).any_slot_expired_within(account, &from, &to)
+}
+
+/// Does `slot_id` exist, belong to `account` and stand usable now (`commitment_at` answers)? A
+/// failed call is a typed `false`, so the lock and a re-pin fail closed (2.7 plan 12 D7).
+pub fn slot_usable(env: &Env, registry: &Address, account: &BytesN<32>, slot_id: u32) -> bool {
+    matches!(
+        KeyRegistryClient::new(env, registry).try_commitment_at(account, &slot_id),
+        Ok(Ok(_))
+    )
+}
+
+/// When `account`'s slot stopped being usable: 0 while unbounded, else its recorded expiry. The
+/// denial rule reads it for the order's pinned slot (plan 12 D9/D10).
+pub fn expired_at(env: &Env, registry: &Address, account: &BytesN<32>, slot_id: u32) -> u64 {
+    KeyRegistryClient::new(env, registry).expired_at(account, &slot_id)
+}
+
+/// The settlement signer's latest re-pin consent for an order: `(from_slot, to_slot, nonce)`.
+pub fn repin_approval(
+    env: &Env,
+    registry: &Address,
+    account: &BytesN<32>,
+    order_hash: &BytesN<32>,
+) -> (u32, u32, u64) {
+    KeyRegistryClient::new(env, registry).repin_approval(account, order_hash)
 }
 
 /// The dispute's challenge deadline (#422: the cancel grace counts from it).

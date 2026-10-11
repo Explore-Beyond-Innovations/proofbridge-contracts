@@ -56,7 +56,9 @@ pub fn decode_ad_call(
         arg::<Address>(env, args, 1)?;
         Ok((arg(env, args, 0)?, 0))
     } else if *action == policy::lock_for_order(env) {
-        arity(args, 1)?;
+        // `(params, signer_slot)` (plan 12 D13): the slot is the maker's key choice, only typed here.
+        arity(args, 2)?;
+        arg::<u32>(env, args, 1)?;
         let m: Map<Symbol, Val> = arg(env, args, 0)?;
         let amount: u128 = field(env, &m, "amount")?;
         let order_decimals: u32 = field(env, &m, "order_decimals")?;

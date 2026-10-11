@@ -175,6 +175,10 @@ pub enum AdManagerError {
     SignerNotApproved = 86,
     /// A token pull credited the escrow less than the amount (fee-on-transfer or rebasing token).
     TransferShort = 87,
+    /// Plan 12 C: the slot to pin does not exist, is not usable now, or is not the signer's.
+    SlotNotUsable = 88,
+    /// Plan 12 C: no re-pin consent for this order from its current pin.
+    NoRepin = 89,
 }
 
 /// The shared escrow code reports an opaque reason; this is where it becomes this contract's own

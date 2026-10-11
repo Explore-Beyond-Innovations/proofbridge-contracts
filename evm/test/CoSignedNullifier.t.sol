@@ -52,7 +52,7 @@ contract CoSignedNullifierRulingTest is DisputeTest {
         p.adSettlementSigner = signer;
         p.bridger = vjson.readBytes32(".registration.bridgerOnSepolia.account");
         vm.prank(maker);
-        h = adManager.lockForOrder(p);
+        h = adManager.lockForOrder(p, 0);
     }
 
     /// A dispute ruled for the maker's forfeit, then an ad-leg unlock under the parties' real

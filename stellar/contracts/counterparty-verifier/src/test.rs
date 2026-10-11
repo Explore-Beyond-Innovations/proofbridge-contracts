@@ -767,3 +767,28 @@ fn the_slot_commitment_is_the_auths_maker_key() {
         bn::<32>(&s.env, &s.v["settlement"]["auth"]["makerKeyCommitment"])
     );
 }
+
+// ---- plan 12 C: the ad leg accepts only the pinned slot ----
+
+/// The co-signature's maker slot hint is 0. Pinned to 0 it settles; pinned to another slot it does
+/// not, though every other check holds; the unpinned sentinel leaves the named key as the bind.
+#[test]
+fn ad_leg_only_the_pinned_slot_settles() {
+    let s = setup();
+    let mut raw = [0u8; METADATA_LEN];
+    s.metadata().copy_into_slice(&mut raw);
+    let with_pin = |pin: u32| {
+        let mut r = raw;
+        r[96..100].copy_from_slice(&pin.to_be_bytes());
+        Bytes::from_slice(&s.env, &r)
+    };
+    assert!(s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &with_pin(0)));
+    assert!(!s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &with_pin(1)));
+    assert!(s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &with_pin(u32::MAX)));
+}

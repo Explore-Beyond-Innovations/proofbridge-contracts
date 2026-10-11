@@ -142,7 +142,7 @@ abstract contract AgentPolicyBase is RhinestoneModuleKit, Test {
     }
 
     function lockCall(uint256 amount) internal view returns (bytes memory) {
-        return abi.encodeCall(IAdManager.lockForOrder, (orderParams(amount)));
+        return abi.encodeCall(IAdManager.lockForOrder, (orderParams(amount), uint32(0)));
     }
 
     /// @dev A distinct order: the module queues one identical operation per transaction, as the
@@ -150,7 +150,7 @@ abstract contract AgentPolicyBase is RhinestoneModuleKit, Test {
     function lockCall(uint256 amount, uint256 salt) internal view returns (bytes memory) {
         IAdManager.OrderParams memory p = orderParams(amount);
         p.salt = salt;
-        return abi.encodeCall(IAdManager.lockForOrder, (p));
+        return abi.encodeCall(IAdManager.lockForOrder, (p, uint32(0)));
     }
 
     /*//////////////////////////////////////////////////////////////

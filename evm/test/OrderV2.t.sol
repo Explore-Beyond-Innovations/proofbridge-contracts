@@ -38,7 +38,7 @@ contract AdManagerOrderV2Test is AdManagerTest {
         p.orderRecipient = _b32(recipient);
         p.adSettlementSigner = signer;
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function _module(bytes32 expected) internal {
@@ -89,7 +89,7 @@ contract AdManagerOrderV2Test is AdManagerTest {
         p.amount = uint256(type(uint128).max) + 1;
         vm.prank(maker);
         vm.expectRevert(OrderHash.OrderHash__AmountTooWide.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 }
 

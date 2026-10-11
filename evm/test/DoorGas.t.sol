@@ -168,7 +168,7 @@ contract EscrowDoorGas is Test {
         _prepare(adMmr);
         vm.prank(maker);
         uint256 g0 = gasleft();
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
         _check("AdManager.lockForOrder", g0 - gasleft(), LOCK_FOR_ORDER_CEILING);
     }
 
@@ -425,7 +425,7 @@ contract EscrowDoorGas is Test {
     function _lock(uint256 salt) internal returns (IAdManager.OrderParams memory p) {
         p = _adParams(salt);
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function _create(uint256 salt) internal returns (IOrderPortal.OrderParams memory p) {

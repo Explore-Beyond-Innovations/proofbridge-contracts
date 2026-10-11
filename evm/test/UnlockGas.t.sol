@@ -215,7 +215,7 @@ contract AdManagerUnlockGas is AdManagerGateTest {
         p.bridger = bridgerAcct;
         p.adSettlementSigner = makerAcct;
         vm.prank(maker);
-        bytes32 orderHash = adManager.lockForOrder(p);
+        bytes32 orderHash = adManager.lockForOrder(p, 0);
         // Wired after the lock, as `_prepareUnlock` does: the real module reads REGISTRY (#464).
         vm.prank(admin);
         adManager.setRootVerifier(orderChainId, address(cVerifier));

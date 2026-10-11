@@ -70,6 +70,8 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
     mapping(bytes32 => mapping(bytes32 => MakerApproval)) public makerApprovals;
     /// Bumped by `revoke`, so an account that leaves and comes back starts with no approvals.
     mapping(bytes32 => uint64) public approvalGeneration;
+    /// account => orderHash => the latest re-pin consent (2.7 plan 12 D12).
+    mapping(bytes32 => mapping(bytes32 => RepinApproval)) private _repins;
 
     /// 2.1b — proof-carried registration (design 03 §3.6). Ships flagged OFF: turning it on is a
     /// configuration call, gated in T3 on the anchor writer being the 3.5 quorum, a
@@ -290,6 +292,28 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         emit MakerApprovalSet(account, maker, approved, nonce);
     }
 
+    /// The settlement signer consents to move `orderHash`'s co-signing pin from `fromSlot` to `toSlot`;
+    /// anyone may then apply it on the AdManager (`repinOrder`), which checks the order is still open
+    /// and `toSlot` usable. The (account, order) pair's own nonce, so a signature applies once. Not
+    /// pausable: it moves a pin off a leaked key, which only protects the order.
+    function approveRepin(
+        bytes32 account,
+        bytes32 orderHash,
+        uint32 fromSlot,
+        uint32 toSlot,
+        OwnerAuth calldata owner,
+        uint256 nonce
+    ) external {
+        RepinApproval storage r = _repins[account][orderHash];
+        if (nonce != r.nonce) revert BadNonce();
+        _requireOwnLeg(owner.legs, nonce);
+        _checkOwner(account, owner, KeyMessages.Kind.Repin, orderHash, (uint64(fromSlot) << 32) | toSlot, false);
+        r.fromSlot = fromSlot;
+        r.toSlot = toSlot;
+        r.nonce = uint64(nonce + 1);
+        emit RepinApproved(account, orderHash, fromSlot, toSlot, nonce);
+    }
+
     function _addSlot(bytes32 account, bytes32 commitment) private returns (uint32 slotId) {
         if (usedCommitment[account][commitment]) revert KeyPreviouslyUsed();
         RegistryEntry storage e = entries[account];
@@ -383,6 +407,21 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
     function isApprovedMaker(bytes32 account, bytes32 maker) external view returns (bool) {
         MakerApproval storage a = makerApprovals[account][maker];
         return a.approved && a.generation == approvalGeneration[account];
+    }
+
+    function repinApproval(bytes32 account, bytes32 orderHash)
+        external
+        view
+        returns (uint32 fromSlot, uint32 toSlot, uint64 nonce)
+    {
+        RepinApproval storage r = _repins[account][orderHash];
+        return (r.fromSlot, r.toSlot, r.nonce);
+    }
+
+    /// @notice When the slot stopped being usable (`IKeyRegistry`): 0 while unbounded, else the
+    ///         recorded expiry — the kill's moment, not the `1` a kill names.
+    function expiredAt(bytes32 account, uint32 slotId) external view returns (uint64) {
+        return _expiredAt(account, slotId);
     }
 
     function lookup(bytes32 account, uint32 slotId) external view returns (KeySlot memory slot) {

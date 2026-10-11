@@ -25,7 +25,7 @@ use proofbridge_core::cross_contract::{
     self, key_commitment, VerifierClient, LEAF_DOMAIN_REGISTERED,
 };
 use proofbridge_core::eip712::contract_address_to_bytes32;
-pub use storage::{KeySlot, MakerApproval};
+pub use storage::{KeySlot, MakerApproval, RepinApproval};
 
 /// RFC 9380 / IETF BLS proof-of-possession DST.
 pub const DST_POP: &str = "BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
@@ -480,7 +480,73 @@ impl BlsKeyRegistry {
         Ok(())
     }
 
+    /// The settlement signer consents to move `order_hash`'s co-signing pin from `from_slot` to
+    /// `to_slot`; anyone may then apply it on the ad-manager (`repin_order`), which checks the order is
+    /// still open and `to_slot` usable. The (account, order) pair's own nonce, so a signature applies
+    /// once. Not pausable: it moves a pin off a leaked key, which only protects the order.
+    pub fn approve_repin(
+        env: Env,
+        account: BytesN<32>,
+        order_hash: BytesN<32>,
+        from_slot: u32,
+        to_slot: u32,
+        owner: OwnerAuth,
+        nonce: u64,
+    ) -> Result<(), RegistryError> {
+        if !storage::is_initialized(&env) {
+            return Err(RegistryError::NotInitialized);
+        }
+        let mut r = storage::get_repin(&env, &account, &order_hash);
+        if nonce != r.nonce {
+            return Err(RegistryError::BadNonce);
+        }
+        check_owner(
+            &env,
+            &account,
+            owner,
+            KeyMessage::Repin {
+                order_hash: order_hash.clone(),
+                from_slot,
+                to_slot,
+                nonce,
+            },
+        )?;
+        r.from_slot = from_slot;
+        r.to_slot = to_slot;
+        r.nonce = nonce + 1;
+        storage::set_repin(&env, &account, &order_hash, &r);
+        proofbridge_core::ttl::extend_instance(&env);
+        events::RepinApproved {
+            account,
+            order_hash,
+            from_slot,
+            to_slot,
+            nonce,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     // ---- views ----
+
+    /// The latest re-pin consent for (`account`, `order_hash`), as `(from_slot, to_slot, nonce)`;
+    /// nonce 0 means none was ever given.
+    pub fn repin_approval(
+        env: Env,
+        account: BytesN<32>,
+        order_hash: BytesN<32>,
+    ) -> (u32, u32, u64) {
+        proofbridge_core::ttl::extend_instance(&env);
+        let r = storage::get_repin(&env, &account, &order_hash);
+        (r.from_slot, r.to_slot, r.nonce)
+    }
+
+    /// When the slot stopped being usable: 0 while unbounded, else the recorded expiry (a kill is
+    /// stamped at the kill, not at the `1` it names). The denial rule reads it for the pinned slot.
+    pub fn expired_at(env: Env, account: BytesN<32>, slot_id: u32) -> u64 {
+        proofbridge_core::ttl::extend_instance(&env);
+        expired_at(&env, &account, slot_id)
+    }
 
     /// True iff `account` approved `maker` since its last `revoke` and has not withdrawn it.
     pub fn is_approved_maker(env: Env, account: BytesN<32>, maker: BytesN<32>) -> bool {

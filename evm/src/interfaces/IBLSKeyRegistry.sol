@@ -43,6 +43,14 @@ interface IBLSKeyRegistry is IKeyRegistry {
         uint64 registeredAt;
     }
 
+    /// The settlement signer's consent to move one order's co-signing pin (`fromSlot` → `toSlot`); `nonce`
+    /// is the (account, order) pair's next nonce, 0 while nothing was ever approved.
+    struct RepinApproval {
+        uint32 fromSlot;
+        uint32 toSlot;
+        uint64 nonce;
+    }
+
     /// One (account, maker) approval: its flag, the pair's next nonce, the account generation it was set at.
     struct MakerApproval {
         bool approved;
@@ -63,6 +71,10 @@ interface IBLSKeyRegistry is IKeyRegistry {
     event PositionGuardsSet(address[] guards);
     /// The account allowed (`approved`) or stopped `maker` naming it as settlement signer, at the pair's `nonce`.
     event MakerApprovalSet(bytes32 indexed account, bytes32 indexed maker, bool approved, uint256 nonce);
+    /// The account consented to move `orderHash`'s pin from `fromSlot` to `toSlot`, at the pair's `nonce`.
+    event RepinApproved(
+        bytes32 indexed account, bytes32 indexed orderHash, uint32 fromSlot, uint32 toSlot, uint256 nonce
+    );
 
     error BadNonce();
     error IdentityKey();
@@ -129,7 +141,23 @@ interface IBLSKeyRegistry is IKeyRegistry {
         uint64 deadline
     ) external;
 
+    /// The settlement signer consents to move an open order's pin; the AdManager's `repinOrder` applies it.
+    function approveRepin(
+        bytes32 account,
+        bytes32 orderHash,
+        uint32 fromSlot,
+        uint32 toSlot,
+        OwnerAuth calldata owner,
+        uint256 nonce
+    ) external;
+
     // views
+    function repinApproval(bytes32 account, bytes32 orderHash)
+        external
+        view
+        returns (uint32 fromSlot, uint32 toSlot, uint64 nonce);
+    /// When the slot stopped being usable: 0 while unbounded, else its recorded expiry.
+    function expiredAt(bytes32 account, uint32 slotId) external view returns (uint64);
     function nonceOf(bytes32 account) external view returns (uint256);
     function usedCommitment(bytes32 account, bytes32 commitment) external view returns (bool);
     function makerApprovals(bytes32 account, bytes32 maker)

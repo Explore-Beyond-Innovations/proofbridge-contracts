@@ -104,6 +104,9 @@ interface IAdManager is IEscrow {
 
     /// @notice `DecimalScaling.scale` (via the linked `ProofBridgeUtils`) reverts with this; only AdManager scales. See IEscrow.
     error DecimalScaling__NonExactDownscale(uint256 amount, uint8 fromDec, uint8 toDec);
+    /// @notice The order's co-signing pin moved (`repinOrder`).
+    event OrderRepinned(bytes32 indexed orderHash, uint32 fromSlot, uint32 toSlot);
+
     error AdManager__TokenZeroAddress();
     error AdManager__AdNotFound();
     error AdManager__NotMaker();
@@ -128,6 +131,10 @@ interface IAdManager is IEscrow {
     error AdManager__NotHalted();
     /// @notice #464: the order chain's verifier checks co-signatures against a different registry.
     error AdManager__RegistrySplit(uint256 chainId, address escrowRegistry, address verifierRegistry);
+    /// @notice The slot to pin does not exist, is not usable now, or is not the signer's.
+    error AdManager__SlotNotUsable(bytes32 signer, uint32 slotId);
+    /// @notice No re-pin consent for this order from its current pin.
+    error AdManager__NoRepin(bytes32 orderHash);
 
     /*//////////////////////////////////////////////////////////////
                                  FUNCTIONS
@@ -169,7 +176,14 @@ interface IAdManager is IEscrow {
     function fundAd(string calldata adId, uint256 amount) external payable;
     function withdrawFromAd(string calldata adId, uint256 amount, address to) external;
     function closeAd(string calldata adId, address to) external;
-    function lockForOrder(OrderParams calldata params) external returns (bytes32 orderHash);
+    /// @notice Lock the ad's liquidity for an order, pinning `signerSlot`: the settlement signer's
+    ///         co-signing slot in the registry the order records. The slot must exist and be usable
+    ///         now; the ad chain's co-signed unlock then accepts only that slot's key.
+    function lockForOrder(OrderParams calldata params, uint32 signerSlot) external returns (bytes32 orderHash);
+    /// @notice Apply the settlement signer's re-pin consent (`approveRepin` on the order's registry):
+    ///         move an `Open` order's pin to another usable slot of the same signer, before
+    ///         `deadline - claimStagger`. Permissionless; the consent names the order and both slots.
+    function repinOrder(OrderParams calldata params) external;
     function unlock(
         OrderParams calldata params,
         bytes32 nullifierHash,

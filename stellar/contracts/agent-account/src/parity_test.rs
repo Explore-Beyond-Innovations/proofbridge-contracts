@@ -221,7 +221,7 @@ fn context(r: &Rig, lock: &Value) -> Context {
         "other" => Symbol::new(env, "withdraw_from_ad"),
         other => panic!("action: {other}"),
     };
-    let args: Vec<Val> = vec![env, params.into_val(env)];
+    let args: Vec<Val> = vec![env, params.into_val(env), 0u32.into_val(env)];
     Context::Contract(ContractContext {
         contract: target,
         fn_name,

@@ -216,17 +216,33 @@ contract AgentPolicyEnforcementTest is AgentPolicyBase {
         assertEq(escrow.locks(), 0, "the escrow was never called");
     }
 
+    /// Plan 12 D13: the lock is `(OrderParams, uint32 signerSlot)`. The policy reads the order, not
+    /// the slot (the maker's own key choice), and refuses a lock in the old one-argument shape.
+    function test_aLockWithoutTheSlotArgumentIsRefused() public {
+        bytes memory oldShape = abi.encodeWithSelector(IAdManager.lockForOrder.selector, orderParams(1));
+        UserOpData memory op = _agentOp(oldShape);
+        instance.expect4337Revert();
+        op.execUserOps();
+        assertEq(escrow.locks(), 0, "the escrow was never called");
+        // any slot the maker names passes the policy
+        _agentOp(abi.encodeCall(IAdManager.lockForOrder, (orderParams(1), uint32(7)))).execUserOps();
+        assertEq(escrow.locks(), 1);
+    }
+
     function test_aTokenOffTheWhitelistIsRefused() public {
         bytes32 foreign = bytes32(uint256(0xdead));
-        bytes memory call =
-            abi.encodeCall(IAdManager.lockForOrder, (orderParams(1, foreign, ORDER_TOKEN, AD_ID, settlementSigner)));
+        bytes memory call = abi.encodeCall(
+            IAdManager.lockForOrder, (orderParams(1, foreign, ORDER_TOKEN, AD_ID, settlementSigner), uint32(0))
+        );
         UserOpData memory op = _agentOp(call);
         instance.expect4337Revert();
         op.execUserOps();
         assertEq(escrow.locks(), 0);
 
         // ...and the order-side token is checked too, not just the one the cap is written against.
-        call = abi.encodeCall(IAdManager.lockForOrder, (orderParams(1, AD_TOKEN, foreign, AD_ID, settlementSigner)));
+        call = abi.encodeCall(
+            IAdManager.lockForOrder, (orderParams(1, AD_TOKEN, foreign, AD_ID, settlementSigner), uint32(0))
+        );
         op = _agentOp(call);
         instance.expect4337Revert();
         op.execUserOps();
@@ -243,7 +259,7 @@ contract AgentPolicyEnforcementTest is AgentPolicyBase {
         assertEq(escrow.locks(), 1);
 
         bytes memory call = abi.encodeCall(
-            IAdManager.lockForOrder, (orderParams(1, AD_TOKEN, ORDER_TOKEN, "ad-other", settlementSigner))
+            IAdManager.lockForOrder, (orderParams(1, AD_TOKEN, ORDER_TOKEN, "ad-other", settlementSigner), uint32(0))
         );
         UserOpData memory op = _agentOp(call);
         instance.expect4337Revert();
@@ -253,7 +269,7 @@ contract AgentPolicyEnforcementTest is AgentPolicyBase {
 
     function test_aForeignSettlementSignerIsRefused() public {
         bytes memory call = abi.encodeCall(
-            IAdManager.lockForOrder, (orderParams(1, AD_TOKEN, ORDER_TOKEN, AD_ID, bytes32(uint256(0xfeed))))
+            IAdManager.lockForOrder, (orderParams(1, AD_TOKEN, ORDER_TOKEN, AD_ID, bytes32(uint256(0xfeed))), uint32(0))
         );
         UserOpData memory op = _agentOp(call);
         instance.expect4337Revert();

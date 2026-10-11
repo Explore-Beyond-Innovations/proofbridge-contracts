@@ -29,6 +29,8 @@ const KEY_USED: Symbol = symbol_short!("used");
 const KEY_KEYSLOT: Symbol = symbol_short!("keyslot");
 /// (KEY_APPROVAL, account, maker) -> MakerApproval: may `maker` name `account` as settlement signer.
 const KEY_APPROVAL: Symbol = symbol_short!("approval");
+/// (KEY_REPIN, account, order_hash) -> RepinApproval: the latest re-pin consent (2.7 plan 12 D12).
+const KEY_REPIN: Symbol = symbol_short!("repin");
 /// (KEY_APPRGEN, account) -> u64: bumped by `revoke`; an approval counts only at the current one.
 const KEY_APPRGEN: Symbol = symbol_short!("apprgen");
 /// 2.1b proof-carried registration wiring (instance); absent = disabled.
@@ -218,6 +220,29 @@ pub fn get_approval(env: &Env, account: &BytesN<32>, maker: &BytesN<32>) -> Make
 pub fn set_approval(env: &Env, account: &BytesN<32>, maker: &BytesN<32>, a: &MakerApproval) {
     let key = (KEY_APPROVAL, account.clone(), maker.clone());
     env.storage().persistent().set(&key, a);
+    bump(env, &key);
+}
+
+/// The settlement signer's consent to move one order's co-signing pin; `nonce` is the (account,
+/// order) pair's next nonce, 0 while nothing was ever approved.
+#[contracttype]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepinApproval {
+    pub from_slot: u32,
+    pub to_slot: u32,
+    pub nonce: u64,
+}
+
+pub fn get_repin(env: &Env, account: &BytesN<32>, order_hash: &BytesN<32>) -> RepinApproval {
+    env.storage()
+        .persistent()
+        .get(&(KEY_REPIN, account.clone(), order_hash.clone()))
+        .unwrap_or_default()
+}
+
+pub fn set_repin(env: &Env, account: &BytesN<32>, order_hash: &BytesN<32>, r: &RepinApproval) {
+    let key = (KEY_REPIN, account.clone(), order_hash.clone());
+    env.storage().persistent().set(&key, r);
     bump(env, &key);
 }
 

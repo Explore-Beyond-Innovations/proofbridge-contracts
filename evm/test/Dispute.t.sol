@@ -195,7 +195,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
             p.amount = amounts[i];
             p.salt = 9_000 + i;
             vm.prank(maker);
-            bytes32 h = adManager.lockForOrder(p);
+            bytes32 h = adManager.lockForOrder(p, 0);
 
             assertEq(dm.bondFor(orderChainId), BOND_FLOOR, "the quote is the floor");
             vm.deal(filer, BOND_FLOOR + 1);

@@ -206,12 +206,18 @@ contract AdManager is EscrowBase, IAdManager {
     }
 
     /// @inheritdoc IAdManager
-    function lockForOrder(OrderParams calldata params) external nonReentrant whenNotPaused returns (bytes32 orderHash) {
+    function lockForOrder(OrderParams calldata params, uint32 signerSlot)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (bytes32 orderHash)
+    {
         Ad storage ad = _getAdOwned(params.adId, msg.sender);
-        orderHash = _validateOrder(ad, params);
+        orderHash = _validateOrder(ad, params, signerSlot);
         uint32 version = _requireMinWindow(params.orderChainId, params.deadline);
         // #464: no new order while the order chain's verifier reads another key registry.
-        (bool split, address verifierRegistry) = _registrySplit(params.orderChainId, address(keyRegistry));
+        (bool split, address verifierRegistry) =
+            ProofBridgeUtils.registrySplit(address(rootVerifier[params.orderChainId]), address(keyRegistry));
         if (split) revert AdManager__RegistrySplit(params.orderChainId, address(keyRegistry), verifierRegistry);
 
         // The signed amount is in order-chain units; the pool accounts in ad-chain units.
@@ -221,6 +227,8 @@ contract AdManager is EscrowBase, IAdManager {
         Order storage o = _openOrder(orderHash, version);
         // #465: the registry this order is judged against, whatever is wired later.
         o.registryEpoch = registryEpoch;
+        // Plan 12 C: the one slot the ad chain's co-signed unlock accepts, checked usable above.
+        o.pinnedSlot = signerSlot;
         // The denied grace reads the larger of this and the live delay: a raise lengthens it, a cut never shortens it.
         o.anchorDelay = uint32(_anchorDelayNow(params.orderChainId));
         ad.locked += adAmount;
@@ -267,7 +275,7 @@ contract AdManager is EscrowBase, IAdManager {
                 params.adSettlementSigner,
                 params.bridger,
                 orderHash,
-                0,
+                _orders[orderHash].pinnedSlot, // plan 12 C: the one slot the ad leg accepts
                 nullifierHash,
                 uint8(_PUBLIC_INPUT_SIDE_AD),
                 cosigData
@@ -516,6 +524,21 @@ contract AdManager is EscrowBase, IAdManager {
     }
 
     /// @inheritdoc IAdManager
+    /// @dev No `nonReentrant`: its only outside calls are registry views (STATICCALL), and it moves no funds.
+    function repinOrder(OrderParams calldata params) external {
+        bytes32 orderHash = _orderHash(params);
+        // Q2: before the order leg's last co-signed unlock time; after it no new maker payout lands.
+        ProofBridgeUtils.repin(
+            _orders[orderHash],
+            registryAt,
+            _orderTiming(orderHash, params.orderChainId),
+            params.adSettlementSigner,
+            orderHash,
+            params.deadline
+        );
+    }
+
+    /// @inheritdoc IAdManager
     function recordSettled(OrderParams calldata params) external nonReentrant {
         _recordSettled(_orderHash(params));
     }
@@ -621,44 +644,31 @@ contract AdManager is EscrowBase, IAdManager {
 
     /// @dev Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force
     ///      now or at any point since the lock (a resume stamp at or after `lockedAt`), the order
-    ///      chain's root verifier unset (`unlock` reverts `NoRootVerifier`), any
-    ///      of the signer's registry slots expiring during the order's life (`anySlotExpiredWithin`,
-    ///      D12: a kill, a near-future shorten and a pre-lock shorten naming a date in the window all
-    ///      count; a rotation whose old slot outlives the cancel does not). Every reference is one
-    ///      the chain stamped (the lock) or the caller derives from the signed deadline, never one
-    ///      the maker can choose later. No registry wired means no lever 2 to read. #461: no "no usable slot" term —
-    ///      the lock required one, so losing it by the cutoff is an expiry in the interval already.
+    ///      chain's root verifier unset (`unlock` reverts `NoRootVerifier`), a registry split, or the
+    ///      order's pinned slot expiring at or before the payout's cutoff (`expiredAt`, plan 12 C: a
+    ///      kill or a shorten of that slot counts; a rotation of any other slot does not, since no
+    ///      other slot can co-sign the ad leg). The lock refused a dead slot, so any expiry seen is
+    ///      after the lock. Every reference is one the chain stamped or the caller derives from the
+    ///      signed deadline, never one the maker can choose later. No registry wired means no lever 2.
     function _coSignDenied(OrderParams calldata p, bytes32 orderHash, uint256 until) private view returns (bool) {
         address maker = _adOf(p).maker;
         if (halted[maker] || lastResumedAt[maker] >= _lockedAt(orderHash)) return true;
         // An unwired verifier refuses every co-signed unlock, whoever unwired it: deny.
         if (address(rootVerifier[p.orderChainId]) == address(0)) return true;
-        // #465: the registry the order was locked under, not the live one: a migration mid-order
-        // would otherwise read a registry that never saw the kill.
-        IKeyRegistry registry = registryAt[_orders[orderHash].registryEpoch];
-        if (address(registry) == address(0)) return false;
-        // #464: a verifier on another registry co-signs against keys this one never sees: deny.
-        (bool split,) = _registrySplit(p.orderChainId, address(registry));
-        if (split) return true;
-        // D16: the order's life as a payout ends at the payout's own cutoff — the presentation cutoff
-        // for a cancel, the challenge deadline for a dispute — which the caller passes in, in plain
-        // time. An expiry past it denied nothing.
-        return registry.anySlotExpiredWithin(p.adSettlementSigner, _lockedAt(orderHash), uint64(until));
-    }
-
-    /// @dev #464: does `rootVerifier[chainId]` verify against a registry other than `expected`?
-    ///      A verifier that does not answer `registry()` is not a BLS co-signature verifier: no split.
-    function _registrySplit(uint256 chainId, address expected)
-        private
-        view
-        returns (bool split, address verifierRegistry)
-    {
-        address verifier = address(rootVerifier[chainId]);
-        if (verifier == address(0)) return (false, address(0));
-        (bool ok, bytes memory ret) = verifier.staticcall(abi.encodeWithSignature("registry()"));
-        if (!ok || ret.length != 32) return (false, address(0));
-        verifierRegistry = abi.decode(ret, (address));
-        split = verifierRegistry != expected;
+        // #465: the registry the order was locked under, not the live one: a migration mid-order would
+        // otherwise read a registry that never saw the kill. #464: a verifier on another registry
+        // co-signs against keys this one never sees: deny. D16: the payout's own cutoff (the
+        // presentation cutoff for a cancel, the challenge deadline for a dispute) bounds the life.
+        // Plan 12 C: only the pinned slot can co-sign the ad leg, and the lock refused a dead one, so
+        // its own expiry is the one that counts. The body lives in the linked `ProofBridgeUtils`.
+        Order storage o = _orders[orderHash];
+        return ProofBridgeUtils.registryDenies(
+            registryAt[o.registryEpoch],
+            address(rootVerifier[p.orderChainId]),
+            p.adSettlementSigner,
+            o.pinnedSlot,
+            until
+        );
     }
 
     /// @inheritdoc IAdManager
@@ -741,7 +751,11 @@ contract AdManager is EscrowBase, IAdManager {
     }
 
     /// @dev Every lock-time rule, cheapest first; the cross-contract registry read last.
-    function _validateOrder(Ad storage ad, OrderParams calldata params) private view returns (bytes32 orderHash) {
+    function _validateOrder(Ad storage ad, OrderParams calldata params, uint32 signerSlot)
+        private
+        view
+        returns (bytes32 orderHash)
+    {
         if (!ad.open) revert AdManager__AdClosed();
         if (params.amount == 0) revert Escrow__ZeroAmount();
         if (params.bridger == bytes32(0)) revert AdManager__BridgerZero();
@@ -782,8 +796,9 @@ contract AdManager is EscrowBase, IAdManager {
         ProofBridgeUtils.checkWidths(params.amount, params.orderChainId, block.chainid, params.deadline);
 
         // A key retired after the ad was pointed at it (setValidUntil, a watchtower retirement) must
-        // not take new locks: the bridger's deposit could never be unlocked (2.3c D2).
-        _requireRegistered(ad.settlementSigner, ad.maker);
+        // not take new locks: the bridger's deposit could never be unlocked (2.3c D2). Plan 12 C: the
+        // slot the lock pins must be the signer's and usable now, in the registry the order records.
+        ProofBridgeUtils.requireLockSigner(keyRegistry, ad.settlementSigner, ad.maker.toBytes32(), signerSlot);
 
         orderHash = _orderHash(params);
     }

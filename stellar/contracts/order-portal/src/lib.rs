@@ -335,7 +335,7 @@ impl OrderPortalContract {
             LEAF_DOMAIN_AD,
         )?;
 
-        storage::open_order(&env, &order_hash, timing_version, 0, 0);
+        storage::open_order(&env, &order_hash, timing_version, 0, 0, 0);
         // 2.3c D1: count only the party this escrow authenticated (the bridger). The maker is
         // counted by the ad-manager that authenticated them.
         storage::set_in_flight(
@@ -413,7 +413,7 @@ impl OrderPortalContract {
             &params.ad_settlement_signer,
             &params.bridger,
             &order_hash,
-            0,
+            proofbridge_core::cross_contract::UNPINNED,
             &nullifier_hash,
             proofbridge_core::cross_contract::ENVELOPE_SIDE_ORDER,
             &cosig_data,

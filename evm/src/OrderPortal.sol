@@ -104,7 +104,7 @@ contract OrderPortal is EscrowBase, IOrderPortal {
                 params.adSettlementSigner,
                 params.bridger,
                 orderHash,
-                0,
+                RequestAuth.UNPINNED, // the order leg names the key the auth binds, not a slot (plan 12 D11)
                 nullifierHash,
                 uint8(_PUBLIC_INPUT_SIDE_ORDER),
                 cosigData

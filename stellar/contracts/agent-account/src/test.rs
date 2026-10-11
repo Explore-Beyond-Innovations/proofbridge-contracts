@@ -551,7 +551,11 @@ fn upgrade_is_owner_only() {
 fn in_policy_lock_authorizes() {
     let f = fixture();
     let p = params(&f);
-    let ctxs = lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]);
+    let ctxs = lock_ctx(
+        &f.env,
+        &f.target,
+        vec![&f.env, p.into_val(&f.env), 0u32.into_val(&f.env)],
+    );
     agent_check(&f, &ctxs).unwrap();
 }
 
@@ -564,7 +568,11 @@ fn cap_exceeded_rejected_in_ad_units() {
     expect_err(
         agent_check(
             &f,
-            &lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]),
+            &lock_ctx(
+                &f.env,
+                &f.target,
+                vec![&f.env, p.into_val(&f.env), 0u32.into_val(&f.env)],
+            ),
         ),
         AccountError::CapExceeded,
     );
@@ -576,7 +584,11 @@ fn cap_exceeded_rejected_in_ad_units() {
     p.order_decimals = 9;
     agent_check(
         &f,
-        &lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]),
+        &lock_ctx(
+            &f.env,
+            &f.target,
+            vec![&f.env, p.into_val(&f.env), 0u32.into_val(&f.env)],
+        ),
     )
     .unwrap();
     let mut p = params(&f);
@@ -585,7 +597,11 @@ fn cap_exceeded_rejected_in_ad_units() {
     expect_err(
         agent_check(
             &f,
-            &lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]),
+            &lock_ctx(
+                &f.env,
+                &f.target,
+                vec![&f.env, p.into_val(&f.env), 0u32.into_val(&f.env)],
+            ),
         ),
         AccountError::CapExceeded,
     );
@@ -595,7 +611,11 @@ fn cap_exceeded_rejected_in_ad_units() {
     p.amount = 1_000_000;
     agent_check(
         &f,
-        &lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]),
+        &lock_ctx(
+            &f.env,
+            &f.target,
+            vec![&f.env, p.into_val(&f.env), 0u32.into_val(&f.env)],
+        ),
     )
     .unwrap();
 }
@@ -608,7 +628,11 @@ fn token_not_whitelisted_rejected_on_either_side() {
     expect_err(
         agent_check(
             &f,
-            &lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]),
+            &lock_ctx(
+                &f.env,
+                &f.target,
+                vec![&f.env, p.into_val(&f.env), 0u32.into_val(&f.env)],
+            ),
         ),
         AccountError::TokenNotAllowed,
     );
@@ -617,7 +641,11 @@ fn token_not_whitelisted_rejected_on_either_side() {
     expect_err(
         agent_check(
             &f,
-            &lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]),
+            &lock_ctx(
+                &f.env,
+                &f.target,
+                vec![&f.env, p.into_val(&f.env), 0u32.into_val(&f.env)],
+            ),
         ),
         AccountError::TokenNotAllowed,
     );
@@ -639,7 +667,11 @@ fn expired_policy_rejected_at_boundary() {
             &vec![&f.env, f.ad_token.clone(), f.order_token.clone()],
         ),
     );
-    let ctxs = lock_ctx(&f.env, &f.target, vec![&f.env, params(&f).into_val(&f.env)]);
+    let ctxs = lock_ctx(
+        &f.env,
+        &f.target,
+        vec![&f.env, params(&f).into_val(&f.env), 0u32.into_val(&f.env)],
+    );
 
     f.env.ledger().set_timestamp(T0 + 99);
     agent_check(&f, &ctxs).unwrap();
@@ -664,7 +696,11 @@ fn expired_policy_rejected_at_boundary() {
 fn revoke_stops_new_locks_but_not_settlement_of_co_signed_orders() {
     let f = fixture();
     let id = f.agent.id(&f.env);
-    let ctxs = lock_ctx(&f.env, &f.target, vec![&f.env, params(&f).into_val(&f.env)]);
+    let ctxs = lock_ctx(
+        &f.env,
+        &f.target,
+        vec![&f.env, params(&f).into_val(&f.env), 0u32.into_val(&f.env)],
+    );
     agent_check(&f, &ctxs).unwrap();
 
     f.client.revoke_agent(&id);
@@ -729,7 +765,13 @@ fn d9_an_owner_named_settlement_signer_installs_and_settles() {
 
     let mut p = params(&f);
     p.ad_settlement_signer = m.clone();
-    let lock = |p: &OrderParams| lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]);
+    let lock = |p: &OrderParams| {
+        lock_ctx(
+            &f.env,
+            &f.target,
+            vec![&f.env, p.into_val(&f.env), 0u32.into_val(&f.env)],
+        )
+    };
     assert_eq!(agent_check(&f, &lock(&p)), Ok(()));
     // the lock still names this account as the ad's maker
     p.ad_creator = m.clone();
@@ -789,7 +831,11 @@ fn settlement_signer_mismatch_rejected_ad_creator_until_2_3b() {
     expect_err(
         agent_check(
             &f,
-            &lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]),
+            &lock_ctx(
+                &f.env,
+                &f.target,
+                vec![&f.env, p.into_val(&f.env), 0u32.into_val(&f.env)],
+            ),
         ),
         AccountError::SettlementSignerMismatch,
     );
@@ -802,7 +848,11 @@ fn wrong_target_rejected() {
     expect_err(
         agent_check(
             &f,
-            &lock_ctx(&f.env, &other, vec![&f.env, params(&f).into_val(&f.env)]),
+            &lock_ctx(
+                &f.env,
+                &other,
+                vec![&f.env, params(&f).into_val(&f.env), 0u32.into_val(&f.env)],
+            ),
         ),
         AccountError::TargetNotAllowed,
     );
@@ -847,15 +897,41 @@ fn bad_args_fail_closed() {
         agent_check(&f, &lock_ctx(&f.env, &f.target, vec![&f.env])),
         AccountError::BadArgs,
     );
-    // two args
+    // plan 12 D13: the old one-argument shape, and three arguments
     let p = params(&f);
+    let old_shape: Vec<Val> = vec![&f.env, p.clone().into_val(&f.env)];
+    expect_err(
+        agent_check(&f, &lock_ctx(&f.env, &f.target, old_shape)),
+        AccountError::BadArgs,
+    );
     expect_err(
         agent_check(
             &f,
             &lock_ctx(
                 &f.env,
                 &f.target,
-                vec![&f.env, p.clone().into_val(&f.env), 1u32.into_val(&f.env)],
+                vec![
+                    &f.env,
+                    p.clone().into_val(&f.env),
+                    1u32.into_val(&f.env),
+                    2u32.into_val(&f.env),
+                ],
+            ),
+        ),
+        AccountError::BadArgs,
+    );
+    // the slot not a u32
+    expect_err(
+        agent_check(
+            &f,
+            &lock_ctx(
+                &f.env,
+                &f.target,
+                vec![
+                    &f.env,
+                    p.clone().into_val(&f.env),
+                    p.clone().into_val(&f.env),
+                ],
             ),
         ),
         AccountError::BadArgs,
@@ -864,7 +940,11 @@ fn bad_args_fail_closed() {
     expect_err(
         agent_check(
             &f,
-            &lock_ctx(&f.env, &f.target, vec![&f.env, 7u32.into_val(&f.env)]),
+            &lock_ctx(
+                &f.env,
+                &f.target,
+                vec![&f.env, 7u32.into_val(&f.env), 0u32.into_val(&f.env)],
+            ),
         ),
         AccountError::BadArgs,
     );
@@ -874,7 +954,11 @@ fn bad_args_fail_closed() {
     expect_err(
         agent_check(
             &f,
-            &lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]),
+            &lock_ctx(
+                &f.env,
+                &f.target,
+                vec![&f.env, p.into_val(&f.env), 0u32.into_val(&f.env)],
+            ),
         ),
         AccountError::BadArgs,
     );
@@ -884,7 +968,11 @@ fn bad_args_fail_closed() {
     expect_err(
         agent_check(
             &f,
-            &lock_ctx(&f.env, &f.target, vec![&f.env, m.into_val(&f.env)]),
+            &lock_ctx(
+                &f.env,
+                &f.target,
+                vec![&f.env, m.into_val(&f.env), 0u32.into_val(&f.env)],
+            ),
         ),
         AccountError::BadArgs,
     );
@@ -894,7 +982,11 @@ fn bad_args_fail_closed() {
     expect_err(
         agent_check(
             &f,
-            &lock_ctx(&f.env, &f.target, vec![&f.env, m.into_val(&f.env)]),
+            &lock_ctx(
+                &f.env,
+                &f.target,
+                vec![&f.env, m.into_val(&f.env), 0u32.into_val(&f.env)],
+            ),
         ),
         AccountError::BadArgs,
     );
@@ -912,7 +1004,11 @@ fn wider_order_shape_decodes() {
     assert_eq!(m.len(), 17);
     agent_check(
         &f,
-        &lock_ctx(&f.env, &f.target, vec![&f.env, m.into_val(&f.env)]),
+        &lock_ctx(
+            &f.env,
+            &f.target,
+            vec![&f.env, m.into_val(&f.env), 0u32.into_val(&f.env)],
+        ),
     )
     .unwrap();
 }
@@ -979,12 +1075,12 @@ fn every_context_must_pass() {
         Context::Contract(ContractContext {
             contract: f.target.clone(),
             fn_name: lock_for_order(&f.env),
-            args: vec![&f.env, good.into_val(&f.env)],
+            args: vec![&f.env, good.into_val(&f.env), 0u32.into_val(&f.env)],
         }),
         Context::Contract(ContractContext {
             contract: f.target.clone(),
             fn_name: lock_for_order(&f.env),
-            args: vec![&f.env, bad.into_val(&f.env)],
+            args: vec![&f.env, bad.into_val(&f.env), 0u32.into_val(&f.env)],
         }),
     ];
     expect_err(agent_check(&f, &ctxs), AccountError::CapExceeded);
@@ -993,7 +1089,11 @@ fn every_context_must_pass() {
 #[test]
 fn unknown_agent_and_bad_signature_rejected() {
     let f = fixture();
-    let ctxs = lock_ctx(&f.env, &f.target, vec![&f.env, params(&f).into_val(&f.env)]);
+    let ctxs = lock_ctx(
+        &f.env,
+        &f.target,
+        vec![&f.env, params(&f).into_val(&f.env), 0u32.into_val(&f.env)],
+    );
     // Signed by a key with no policy.
     let stranger = Agent::new(9);
     let payload = b32(&f.env, 0x01);
@@ -1073,7 +1173,11 @@ fn secp256k1_agent_authorizes_and_wrong_signer_has_no_policy() {
             &vec![&f.env, f.ad_token.clone(), f.order_token.clone()],
         ),
     );
-    let ctxs = lock_ctx(&f.env, &f.target, vec![&f.env, params(&f).into_val(&f.env)]);
+    let ctxs = lock_ctx(
+        &f.env,
+        &f.target,
+        vec![&f.env, params(&f).into_val(&f.env), 0u32.into_val(&f.env)],
+    );
     let payload = b32(&f.env, 0x01);
     f.env
         .try_invoke_contract_check_auth::<AccountError>(
@@ -1406,7 +1510,7 @@ fn agent_lock_e2e(creds: Creds) {
     let inv = invocation(
         &e.ad_manager,
         "lock_for_order",
-        std::vec![sc_val(&e.env, p_val)],
+        std::vec![sc_val(&e.env, p_val), sc_val(&e.env, 0u32.into_val(&e.env))],
     );
     let payload = payload_hash(&e.env, &e.account, &inv, 1, exp, creds);
     let sig = sc_val(&e.env, e.agent.sign(&e.env, &payload).into_val(&e.env));
@@ -1415,7 +1519,7 @@ fn agent_lock_e2e(creds: Creds) {
     let _hash: BytesN<32> = e.env.invoke_contract(
         &e.ad_manager,
         &Symbol::new(&e.env, "lock_for_order"),
-        vec![&e.env, p_val],
+        vec![&e.env, p_val, 0u32.into_val(&e.env)],
     );
     assert_eq!(liquidity(&e), 4_600_000);
 
@@ -1426,7 +1530,7 @@ fn agent_lock_e2e(creds: Creds) {
     let inv = invocation(
         &e.ad_manager,
         "lock_for_order",
-        std::vec![sc_val(&e.env, p_val)],
+        std::vec![sc_val(&e.env, p_val), sc_val(&e.env, 0u32.into_val(&e.env))],
     );
     let payload = payload_hash(&e.env, &e.account, &inv, 2, exp, creds);
     let sig = sc_val(&e.env, e.agent.sign(&e.env, &payload).into_val(&e.env));
@@ -1435,7 +1539,7 @@ fn agent_lock_e2e(creds: Creds) {
     let r = e.env.try_invoke_contract::<BytesN<32>, soroban_sdk::Error>(
         &e.ad_manager,
         &Symbol::new(&e.env, "lock_for_order"),
-        vec![&e.env, p_val],
+        vec![&e.env, p_val, 0u32.into_val(&e.env)],
     );
     // The policy's CapExceeded fails the account's __check_auth; the host
     // surfaces that as a context error on the escrow call, not a panic.
@@ -1563,7 +1667,7 @@ fn e2e_credential_type_and_preimage_must_match() {
     let inv = invocation(
         &e.ad_manager,
         "lock_for_order",
-        std::vec![sc_val(&e.env, p_val)],
+        std::vec![sc_val(&e.env, p_val), sc_val(&e.env, 0u32.into_val(&e.env))],
     );
     // signed over the V1 preimage, submitted as AddressV2
     let payload = payload_hash(&e.env, &e.account, &inv, 1, exp, Creds::V1);
@@ -1573,7 +1677,7 @@ fn e2e_credential_type_and_preimage_must_match() {
     let r = e.env.try_invoke_contract::<BytesN<32>, soroban_sdk::Error>(
         &e.ad_manager,
         &Symbol::new(&e.env, "lock_for_order"),
-        vec![&e.env, p_val],
+        vec![&e.env, p_val, 0u32.into_val(&e.env)],
     );
     assert!(r.is_err());
     assert_eq!(liquidity(&e), 5_000_000);
@@ -1597,6 +1701,18 @@ impl MockKeyRegistry {
             .instance()
             .get(&(soroban_sdk::symbol_short!("usable"), account))
             .unwrap_or(false)
+    }
+
+    /// Plan 12 C: every slot of a usable account answers; the pin is not what these tests check.
+    pub fn commitment_at(env: Env, account: BytesN<32>, _slot_id: u32) -> BytesN<32> {
+        if !Self::has_usable_slot(env, account.clone()) {
+            panic!("no usable slot");
+        }
+        account
+    }
+
+    pub fn expired_at(_env: Env, _account: BytesN<32>, _slot_id: u32) -> u64 {
+        0
     }
 }
 
@@ -1635,7 +1751,11 @@ fn lock_of(f: &Fixture, amount: u128, ad_id: &str) -> Vec<Context> {
     let mut p = params(f);
     p.amount = amount;
     p.ad_id = String::from_str(&f.env, ad_id);
-    lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)])
+    lock_ctx(
+        &f.env,
+        &f.target,
+        vec![&f.env, p.into_val(&f.env), 0u32.into_val(&f.env)],
+    )
 }
 
 /// T-07, the boundary half. A fixed window passes this at 2×: spend the cap just before the
@@ -1778,12 +1898,12 @@ fn two_locks_in_one_auth_entry_are_both_charged() {
         Context::Contract(ContractContext {
             contract: f.target.clone(),
             fn_name: lock_for_order(&f.env),
-            args: vec![&f.env, a.into_val(&f.env)],
+            args: vec![&f.env, a.into_val(&f.env), 0u32.into_val(&f.env)],
         }),
         Context::Contract(ContractContext {
             contract: f.target.clone(),
             fn_name: lock_for_order(&f.env),
-            args: vec![&f.env, b.into_val(&f.env)],
+            args: vec![&f.env, b.into_val(&f.env), 0u32.into_val(&f.env)],
         }),
     ];
     expect_err(agent_check(&f, &both), AccountError::VolumeExceeded);
@@ -2051,7 +2171,11 @@ fn each_token_carries_its_own_per_order_cap() {
     let mut p = params(&f);
     p.amount = 101;
     p.salt = soroban_sdk::U256::from_u128(&f.env, 44);
-    let ctxs = lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]);
+    let ctxs = lock_ctx(
+        &f.env,
+        &f.target,
+        vec![&f.env, p.into_val(&f.env), 0u32.into_val(&f.env)],
+    );
     expect_err(agent_check(&f, &ctxs), AccountError::CapExceeded);
 }
 
@@ -2495,7 +2619,11 @@ fn t52_the_owner_path_bounds_lock_for_order_too() {
     let f = fixture();
     guard_rate(&f, u128::MAX, 3_600, 86_400, 600_000, 1);
 
-    let ctxs = lock_ctx(&f.env, &f.target, vec![&f.env, params(&f).into_val(&f.env)]);
+    let ctxs = lock_ctx(
+        &f.env,
+        &f.target,
+        vec![&f.env, params(&f).into_val(&f.env), 0u32.into_val(&f.env)],
+    );
     owner_check(&f, &ctxs).expect("500_000 fits");
     expect_err(owner_check(&f, &ctxs), AccountError::VolumeExceeded);
 }
@@ -2762,7 +2890,7 @@ fn schedule_one_of_each(f: &Fixture) -> (Symbol, BytesN<32>) {
     f.client.schedule(
         &ad_scope(&f.env),
         &lock_for_order(&f.env),
-        &vec![&f.env, params(f).into_val(&f.env)],
+        &vec![&f.env, params(f).into_val(&f.env), 0u32.into_val(&f.env)],
     );
     schedule_guard(f, &None);
     (up, hash)
@@ -3407,7 +3535,11 @@ fn c32_an_above_threshold_owner_lock_can_be_scheduled_for_one_order() {
     let f = fixture();
     guard(&f, 100, 3_600, 86_400);
     let order = params(&f);
-    let args: Vec<Val> = vec![&f.env, order.clone().into_val(&f.env)];
+    let args: Vec<Val> = vec![
+        &f.env,
+        order.clone().into_val(&f.env),
+        0u32.into_val(&f.env),
+    ];
     let ctxs = lock_ctx(&f.env, &f.target, args.clone());
 
     expect_err(owner_check(&f, &ctxs), AccountError::NotScheduled);
@@ -3420,7 +3552,11 @@ fn c32_an_above_threshold_owner_lock_can_be_scheduled_for_one_order() {
     // Same amount, a different order: refused.
     let mut other = params(&f);
     other.salt = soroban_sdk::U256::from_u128(&f.env, 43);
-    let other_ctx = lock_ctx(&f.env, &f.target, vec![&f.env, other.into_val(&f.env)]);
+    let other_ctx = lock_ctx(
+        &f.env,
+        &f.target,
+        vec![&f.env, other.into_val(&f.env), 0u32.into_val(&f.env)],
+    );
     expect_err(owner_check(&f, &other_ctx), AccountError::NotScheduled);
 
     owner_check(&f, &ctxs).expect("the announced order");
@@ -3839,7 +3975,7 @@ fn test_agent_lock_metering() {
     let inv = invocation(
         &ad_manager,
         "lock_for_order",
-        std::vec![sc_val(&env, p_val)],
+        std::vec![sc_val(&env, p_val), sc_val(&env, 0u32.into_val(&env))],
     );
     let payload = payload_hash(&env, &account, &inv, 1, exp, Creds::V2);
     let sig = sc_val(&env, e.agent.sign(&env, &payload).into_val(&env));
@@ -3848,7 +3984,7 @@ fn test_agent_lock_metering() {
     let _: BytesN<32> = env.invoke_contract(
         &ad_manager,
         &Symbol::new(&env, "lock_for_order"),
-        vec![&env, p_val],
+        vec![&env, p_val, 0u32.into_val(&env)],
     );
     let r = env.cost_estimate().resources();
     std::println!(
@@ -4235,7 +4371,7 @@ fn a_lock_schedule_on_the_longest_schedulable_ad_id_fits_the_event_limit() {
     f.client.schedule(
         &Scope::Ad(ad_id),
         &lock_for_order(&f.env),
-        &vec![&f.env, order.into_val(&f.env)],
+        &vec![&f.env, order.into_val(&f.env), 0u32.into_val(&f.env)],
     );
     let r = f.env.cost_estimate().resources();
     std::println!(
@@ -4279,7 +4415,7 @@ fn every_spend_is_single_use() {
     let f = fixture();
     let to = Address::generate(&f.env);
     guard(&f, 0, 3_600, 86_400);
-    let order_args: Vec<Val> = vec![&f.env, params(&f).into_val(&f.env)];
+    let order_args: Vec<Val> = vec![&f.env, params(&f).into_val(&f.env), 0u32.into_val(&f.env)];
     let lock = lock_ctx(&f.env, &f.target, order_args.clone());
     let hash = f.env.deployer().upload_contract_wasm(ACCOUNT_WASM);
     schedule_withdraw(&f, 7, &to);
@@ -4337,7 +4473,10 @@ fn schedule_checks_each_actions_args() {
             vec![e, other.to_val(), 1_u128.into_val(e), to.to_val()],
         ),
         ("close_ad", vec![e, other.to_val(), to.to_val()]),
-        ("lock_for_order", vec![e, other_order.into_val(e)]),
+        (
+            "lock_for_order",
+            vec![e, other_order.into_val(e), 0u32.into_val(e)],
+        ),
         (
             "set_guard_rail",
             vec![e, other.to_val(), Option::<GuardRail>::None.into_val(e)],

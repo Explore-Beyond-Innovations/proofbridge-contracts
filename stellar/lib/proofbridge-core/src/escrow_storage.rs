@@ -97,6 +97,7 @@ pub fn get_order(env: &Env, order_hash: &BytesN<32>) -> OrderRecord {
             registry_epoch: 0,
             timing_version: 0,
             anchor_delay: 0,
+            pinned_slot: 0,
         })
 }
 
@@ -112,6 +113,7 @@ pub fn open_order(
     timing_version: u32,
     registry_epoch: u32,
     anchor_delay: u32,
+    pinned_slot: u32,
 ) {
     set_order(
         env,
@@ -122,6 +124,7 @@ pub fn open_order(
             registry_epoch,
             timing_version,
             anchor_delay,
+            pinned_slot,
         },
     );
 }
@@ -131,6 +134,13 @@ pub fn open_order(
 pub fn set_order_status(env: &Env, order_hash: &BytesN<32>, status: Status) {
     let mut rec = get_order(env, order_hash);
     rec.status = status;
+    set_order(env, order_hash, &rec);
+}
+
+/// Move an open order's co-signing pin (the ad-manager's `repin_order`, plan 12 D12).
+pub fn set_pinned_slot(env: &Env, order_hash: &BytesN<32>, slot: u32) {
+    let mut rec = get_order(env, order_hash);
+    rec.pinned_slot = slot;
     set_order(env, order_hash, &rec);
 }
 

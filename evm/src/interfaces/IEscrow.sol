@@ -48,6 +48,9 @@ interface IEscrow {
         uint32 registryEpoch;
         uint32 timingVersion;
         uint32 anchorDelay;
+        /// On the AdManager, the settlement signer's co-signing slot the lock pinned (2.7 plan 12 C);
+        /// unused on the OrderPortal.
+        uint32 pinnedSlot;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -179,8 +182,14 @@ interface IEscrow {
     function i_wNativeToken() external view returns (IwNativeToken);
     function peerEscrow(uint256 chainId) external view returns (bytes32);
     function tokenRoute(address localToken, uint256 peerChainId) external view returns (bytes32);
-    /// @notice The leg's status and the route-timing version its windows read (0 for no leg).
-    function orders(bytes32 orderHash) external view returns (Status status, uint32 timingVersion);
+    /// @notice The leg's status, the route-timing version its windows read, and on the AdManager the
+    ///         key-registry epoch it was locked under (`registryAt` of it is the registry every key
+    ///         check of the order reads) and the co-signing slot it pinned (2.7 plan 12 C). All 0 for
+    ///         no leg; the last two 0 on the OrderPortal.
+    function orders(bytes32 orderHash)
+        external
+        view
+        returns (Status status, uint32 timingVersion, uint32 registryEpoch, uint32 pinnedSlot);
     function nullifierUsed(bytes32 nullifierHash) external view returns (bool);
     function inFlightOf(bytes32 account) external view returns (uint256);
     function claimable(address recipient, address token) external view returns (uint256);

@@ -16,6 +16,10 @@ import {FieldElement} from "./FieldElement.sol";
  *         message, enforced via the root-verifier gate.
  */
 library RequestAuth {
+    /// @notice The envelope's pin on the order leg: no slot is pinned there, the verifier checks the
+    ///         maker key the co-signed auth names instead (2.7 plan 12 D11).
+    uint32 internal constant UNPINNED = type(uint32).max;
+
     /**
      * @notice Assemble the 4-element public-input vector for the zk verifier.
      * @dev Pure, like {buildEventInputs}: the reduction is the MMR library's own, the same one the
@@ -55,7 +59,8 @@ library RequestAuth {
      *         (`params.adSettlementSigner`, never `adCreator`); `orderHash` is the order the escrow is
      *         unlocking, which the co-signed auth must name (#433); `nullifierHash` is the nullifier the
      *         escrow is about to consume and `side` its leg, which the auth must have signed for that leg.
-     *         `pinnedSlot` is the maker's co-signing slot the order recorded (0 where none is recorded).
+     *         `pinnedSlot` is the maker's co-signing slot the ad-chain order pinned at lock; the order leg
+     *         passes `UNPINNED`.
      */
     function rootEnvelope(
         bytes32 settlementSigner,

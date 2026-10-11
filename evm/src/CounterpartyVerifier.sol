@@ -35,6 +35,8 @@ contract CounterpartyVerifier is IRootVerifier {
     /// The escrow's leg: `AdManager` consumes the AD leaf (side 1), `OrderPortal` the ORDER leaf (side 0).
     uint8 private constant SIDE_ORDER = 0;
     uint8 private constant SIDE_AD = 1;
+    /// The order leg's envelope pin: no slot pinned (the auth's named maker key binds it).
+    uint32 private constant UNPINNED = type(uint32).max;
 
     bytes32 private constant SETTLE_TAG = keccak256("ProofBridge.Settlement.v1");
     string public constant DST_SIG = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
@@ -75,6 +77,9 @@ contract CounterpartyVerifier is IRootVerifier {
         // parties, under the same roots, is not consent to this one.
         if (auth.orderHash != e.orderHash) return false;
         if (!legMatches(auth, sourceChainId, root, e.side, e.nullifierHash)) return false;
+        // Plan 12 C: on the ad leg the lock pinned the maker's co-signing slot; only that slot's key
+        // settles there. The order leg sends the unpinned sentinel and is bound by the named key below.
+        if (e.pinnedSlot != UNPINNED && signerSlotId != e.pinnedSlot) return false;
 
         if (
             !commitmentMatches(e.settlementSigner, signerSlotId, pkSigner)

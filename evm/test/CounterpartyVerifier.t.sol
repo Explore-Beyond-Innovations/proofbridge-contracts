@@ -420,4 +420,40 @@ contract CounterpartyVerifierTest is Test {
         // Control: the same parties' v4 co-signature over this order verifies.
         assertTrue(verifier.isRootValid(orderChainId, orderChainRoot, metadata()));
     }
+
+    // ---- plan 12 C: the ad leg accepts only the pinned slot ----
+
+    function envelopePinned(uint8 side, bytes32 nullifier, uint32 pin, bytes memory moduleData)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return abi.encode(maker, bridger, signedOrderHash(), pin, nullifier, side, moduleData);
+    }
+
+    /// The co-signature names the maker key in slot 0. Pinned to 0 it settles; pinned to another live
+    /// slot of the same signer it does not, though every other check holds; the unpinned sentinel
+    /// leaves the named key as the only bind.
+    function test_adLeg_onlyThePinnedSlotSettles() public {
+        uint32 other = registerMakerSlot(1);
+        bytes memory moduleData = vectorModuleData(); // maker slot hint 0
+        assertTrue(verifier.isRootValid(orderChainId, orderChainRoot, envelopePinned(SIDE_AD, adLeg(), 0, moduleData)));
+        assertFalse(
+            verifier.isRootValid(orderChainId, orderChainRoot, envelopePinned(SIDE_AD, adLeg(), other, moduleData))
+        );
+        assertTrue(
+            verifier.isRootValid(
+                orderChainId, orderChainRoot, envelopePinned(SIDE_AD, adLeg(), type(uint32).max, moduleData)
+            )
+        );
+    }
+
+    /// The order leg sends the sentinel and settles under the key the auth names.
+    function test_orderLeg_unpinnedSentinelSettles() public view {
+        assertTrue(
+            verifier.isRootValid(
+                adChainId, adChainRoot, envelopePinned(SIDE_ORDER, orderLeg(), type(uint32).max, vectorModuleData())
+            )
+        );
+    }
 }

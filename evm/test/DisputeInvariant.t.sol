@@ -178,7 +178,7 @@ contract DisputeInvariantTest is Test {
         IAdManager.OrderParams memory p = _params(nonce++, block.timestamp + 1 hours + seed % 6 days);
         // The maker locks its own ad's liquidity; the suite pranks for the same reason.
         vm.prank(maker);
-        bytes32 h = adManager.lockForOrder(p);
+        bytes32 h = adManager.lockForOrder(p, 0);
         orders.push(p);
         hashes.push(h);
         i = orders.length - 1;

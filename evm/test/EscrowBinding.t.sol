@@ -52,7 +52,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         p.salt = salt;
         p.adSettlementSigner = other32;
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -226,7 +226,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         vm.expectRevert(
             abi.encodeWithSelector(IAdManager.AdManager__SettlementSignerMismatch.selector, _b32(maker), other32)
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function test_lock_afterKeyRetired_reverts() public {
@@ -239,7 +239,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         p.salt = 8;
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__SignerNotRegistered.selector, _b32(maker)));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
 
         // Re-pointing at a usable key re-opens the ad.
         keyRegistry.set(other32, true);
@@ -248,7 +248,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         adManager.setSettlementSigner(lastAdId, other32);
         p.adSettlementSigner = other32;
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function test_lock_afterRepoint_requiresTheNewSigner() public {
@@ -264,11 +264,11 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         vm.expectRevert(
             abi.encodeWithSelector(IAdManager.AdManager__SettlementSignerMismatch.selector, other32, _b32(maker))
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
 
         p.adSettlementSigner = other32;
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 }
 

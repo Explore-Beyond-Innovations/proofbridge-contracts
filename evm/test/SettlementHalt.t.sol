@@ -296,6 +296,16 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
+    /// Plan 12 C: another slot of the signer dying inside the order's life denies nothing; only the
+    /// pinned slot (0) counts.
+    function test_finalizeCancel_anotherSlotExpiringInside_ordinaryTiming() public {
+        (IAdManager.OrderParams memory p,) = _lock(22);
+        keyRegistry.setSlotExpiry(p.adSettlementSigner, 1, uint64(p.deadline - 10 minutes));
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        adManager.finalizeCancel(p);
+    }
+
     /// A rotation whose old slot outlives the deadline puts no expiry in the order's life: ordinary.
     function test_finalizeCancel_rotationOutlivingTheCancel_ordinaryTiming() public {
         (IAdManager.OrderParams memory p,) = _lock(20);
@@ -323,7 +333,7 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         q.deadline = block.timestamp + 1 days;
         vm.prank(maker);
         vm.expectRevert(bytes(""));
-        adManager.lockForOrder(q);
+        adManager.lockForOrder(q, 0);
     }
 
     /// The view the relayer's janitor asks: 0 before a claim, the window end after, plus the grace
@@ -726,7 +736,7 @@ abstract contract RealRegistryFixture is AdManagerTest {
     function _lockAsUntil(uint256 salt, uint256 deadline) internal returns (IAdManager.OrderParams memory p) {
         p = _orderAs(salt, deadline);
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /// The ad and the order params of `_lockAsUntil`, without the lock.
@@ -771,13 +781,31 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         adManager.finalizeCancel(p);
     }
 
-    /// A kill before the lock is history: the order was co-signed under the other slot.
-    function test_realRegistry_killBeforeTheLock_ordinaryTiming() public {
+    /// Plan 12 C: a slot killed before the lock cannot be pinned; an order pinned to the live slot
+    /// runs ordinary timing, the dead slot being history.
+    function test_realRegistry_killBeforeTheLock_cannotBePinned_theLiveSlotRunsOrdinary() public {
         _realRegistry();
         vm.warp(block.timestamp + 10);
         _setValidUntil(0, true);
         vm.warp(block.timestamp + 10);
-        IAdManager.OrderParams memory p = _lockAs(2);
+        IAdManager.OrderParams memory p = _orderAs(2, 0);
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__SlotNotUsable.selector, account, uint32(0)));
+        adManager.lockForOrder(p, 0);
+        vm.prank(maker);
+        adManager.lockForOrder(p, 1);
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        adManager.finalizeCancel(p);
+    }
+
+    /// Plan 12 C (#436): a rotation of a slot the order is not pinned to denies nothing, even inside
+    /// the window: no other slot can co-sign the ad leg.
+    function test_realRegistry_killOfAnotherSlotInsideTheWindow_ordinaryTiming() public {
+        _realRegistry();
+        IAdManager.OrderParams memory p = _lockAs(21); // pinned to slot 0
+        vm.warp(block.timestamp + 10);
+        _setValidUntil(1, true);
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
         adManager.finalizeCancel(p);
@@ -876,9 +904,10 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         adManager.finalizeCancel(p);
     }
 
-    /// D17a: a kill, an at-cap registration and a lock in the same second. The prune must not run
-    /// in the expiry's own second, or the lock's-second kill the design counts is forgotten.
-    function test_realRegistry_sameSecondKillPruneAndLock_stillWaitsTheGrace() public {
+    /// D17a, after plan 12 C: a kill, an at-cap registration and a lock in the same second. The
+    /// killed slot is dead in its own second, so the lock cannot pin it; a kill of the slot the order
+    /// is pinned to, in the lock's own second after the lock, still waits the grace.
+    function test_realRegistry_sameSecondKillPruneAndLock_deadSlotUnpinnable_pinnedKillWaits() public {
         _realRegistry();
         for (uint256 i = 2; i < 5; i++) {
             _registerSlot(i);
@@ -889,7 +918,13 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         _setValidUntil(0, true);
         vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
         _registerSlot(5);
-        IAdManager.OrderParams memory p = _lockAs(13);
+        IAdManager.OrderParams memory p = _orderAs(13, 0);
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__SlotNotUsable.selector, account, uint32(0)));
+        adManager.lockForOrder(p, 0);
+        vm.prank(maker);
+        adManager.lockForOrder(p, 1);
+        _setValidUntil(1, true); // the pinned slot, in the lock's own second
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
@@ -1012,7 +1047,7 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
             )
         );
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /// #465: an escrow-only swap after the lock leaves the order on the registry it locked under,
@@ -1102,7 +1137,7 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         keyRegistry.approve(account, _b32(maker), true);
         IAdManager.OrderParams memory q = _orderAs(23, 0);
         vm.prank(maker);
-        adManager.lockForOrder(q); // the new order locks on the new pair
+        adManager.lockForOrder(q, 0); // the new order locks on the new pair
     }
 }
 

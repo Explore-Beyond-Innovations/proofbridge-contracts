@@ -113,6 +113,9 @@ pub struct OrderRecord {
     /// On the ad chain, the order chain's anchor delay at the lock; the evidence grace reads
     /// `max(this, current)`. 0 on the order portal and with no anchor wired.
     pub anchor_delay: u32,
+    /// On the ad chain, the settlement signer's co-signing slot the lock pinned (2.7 plan 12 C): the
+    /// one slot the co-signed unlock accepts and the denial rule reads. 0 on the order portal.
+    pub pinned_slot: u32,
 }
 
 /// The open presentation window on an order (`Claimed` ⇔ a record exists).

@@ -158,7 +158,8 @@ contract AgentPolicyPreflightTest is AgentPolicyBase {
     /// healthy bucket, call 1 is the first request against the drained one.
     function test_theHookNamesTheCallItRefused() public {
         bytes memory drainedTokenLock = abi.encodeCall(
-            IAdManager.lockForOrder, (orderParams(MAX_PER_ORDER, ORDER_TOKEN, AD_TOKEN, AD_ID, settlementSigner))
+            IAdManager.lockForOrder,
+            (orderParams(MAX_PER_ORDER, ORDER_TOKEN, AD_TOKEN, AD_ID, settlementSigner), uint32(0))
         );
         for (uint256 i = 0; i < CAPACITY / MAX_PER_ORDER; ++i) {
             _agentOp(drainedTokenLock).execUserOps();

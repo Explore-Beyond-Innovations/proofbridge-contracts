@@ -170,7 +170,7 @@ contract EscrowConservationInvariantTest is Test {
         }
         IAdManager.OrderParams memory p = _params(salt);
         vm.prank(maker);
-        h = adManager.lockForOrder(p);
+        h = adManager.lockForOrder(p, 0);
         if (!everSeen[salt]) {
             everSeen[salt] = true;
             seen.push(salt);

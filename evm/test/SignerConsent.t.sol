@@ -68,7 +68,7 @@ contract SignerConsentTest is AdManagerTest {
         p.salt = salt;
         p.adSettlementSigner = SIGNER;
         vm.prank(maker);
-        h = adManager.lockForOrder(p);
+        h = adManager.lockForOrder(p, 0);
         assertEq(adManager.inFlightOf(SIGNER), 1, "the signer is counted");
     }
 
@@ -115,7 +115,7 @@ contract SignerConsentTest is AdManagerTest {
         p.salt = 3;
         vm.prank(maker);
         vm.expectRevert(_notApproved(SIGNER, maker));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function test_withdrawal_lockedOrderStillSettles() public {
@@ -193,7 +193,7 @@ contract SignerConsentTest is AdManagerTest {
         p.adSettlementSigner = SIGNER;
         p.amount = 60 ether;
         vm.prank(account);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
         assertEq(adManager.inFlightOf(SIGNER), 1);
     }
 }
@@ -322,7 +322,7 @@ contract SignerConsentRealRegistryTest is Test {
         _createNamingSigner("y");
         IAdManager.OrderParams memory p = _params("y");
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
 
         IBLSKeyRegistry.OwnerAuth memory anyAuth;
         vm.expectRevert(IBLSKeyRegistry.AccountInFlight.selector);
@@ -332,7 +332,7 @@ contract SignerConsentRealRegistryTest is Test {
         p.salt = 77;
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__SignerNotApproved.selector, signer, _b32(maker)));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
         assertEq(adManager.inFlightOf(signer), 1, "the open lock is untouched");
     }
 }
