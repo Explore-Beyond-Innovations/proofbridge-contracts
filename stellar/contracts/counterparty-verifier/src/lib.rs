@@ -35,11 +35,16 @@ const SETTLE_TAG: [u8; 32] = [
     0x90, 0x91, 0x51, 0x65, 0xc3, 0x07, 0x5b, 0x0d, 0x77, 0x65, 0xff, 0x24, 0x7a, 0x04, 0x6d, 0xf5,
 ];
 
-const METADATA_VERSION: u8 = 3;
-/// settlement_signer(32) || bridger(32) || order_hash(32) (#433) || moduleData: version(1) ||
-/// chainIds(2*16) || orderHash/roots(3*32) || makerKeyCommitment(32) (#469) || slotIds(2*4) ||
-/// pks(2*96) || aggSig(192) = 649
-const METADATA_LEN: u32 = 649;
+const METADATA_VERSION: u8 = 4;
+/// The envelope: settlement_signer(32) || bridger(32) || order_hash(32) (#433) || pinned_slot(4) ||
+/// nullifier_hash(32) || side(1) = 133, then moduleData: version(1) || chainIds(2*16) ||
+/// orderHash/roots(3*32) || makerKeyCommitment(32) (#469) || adLegNullifier(32) ||
+/// orderLegNullifier(32) || slotIds(2*4) || pks(2*96) || aggSig(192) = 617. 750 in all.
+const METADATA_LEN: u32 = 750;
+const VERSION_OFFSET: u32 = 133;
+/// The escrow's leg: the ad manager consumes the AD leaf (1), the order portal the ORDER leaf (0).
+const SIDE_ORDER: u8 = 0;
+const SIDE_AD: u8 = 1;
 
 const KEY_INIT: Symbol = symbol_short!("init");
 const KEY_REGISTRY: Symbol = symbol_short!("registry");
@@ -71,7 +76,8 @@ impl CounterpartyVerifier {
     ) -> bool {
         // C-13: the registry address lives in instance storage and every unlock reads it.
         proofbridge_core::ttl::extend_instance(&env);
-        if metadata.len() != METADATA_LEN || metadata.get(96) != Some(METADATA_VERSION) {
+        if metadata.len() != METADATA_LEN || metadata.get(VERSION_OFFSET) != Some(METADATA_VERSION)
+        {
             return false;
         }
         let m = Metadata::decode(&env, &metadata);
@@ -81,16 +87,14 @@ impl CounterpartyVerifier {
             return false;
         }
 
-        // The relevant root: the source chain's root inside the signed auth.
-        if source_chain_id == m.order_chain_id {
-            if root != m.order_chain_root {
-                return false;
-            }
-        } else if source_chain_id == m.ad_chain_id {
-            if root != m.ad_chain_root {
-                return false;
-            }
-        } else {
+        // The escrow's side picks the leg: its source chain, its root and the nullifier the parties
+        // signed for it. A side that disagrees with the root it names, or any other nullifier, fails.
+        let (leg_chain, leg_root, leg_nullifier) = match m.side {
+            SIDE_AD => (m.order_chain_id, &m.order_chain_root, &m.ad_leg_nullifier),
+            SIDE_ORDER => (m.ad_chain_id, &m.ad_chain_root, &m.order_leg_nullifier),
+            _ => return false,
+        };
+        if source_chain_id != leg_chain || root != *leg_root || m.nullifier_hash != *leg_nullifier {
             return false;
         }
 
@@ -129,9 +133,13 @@ struct Metadata {
     order_chain_root: BytesN<32>,
     ad_chain_root: BytesN<32>,
     maker_key_commitment: BytesN<32>,
+    ad_leg_nullifier: BytesN<32>,
+    order_leg_nullifier: BytesN<32>,
     settlement_signer: BytesN<32>,
     bridger: BytesN<32>,
     envelope_order_hash: BytesN<32>,
+    nullifier_hash: BytesN<32>,
+    side: u8,
     signer_slot_id: u32,
     bridger_slot_id: u32,
     pk_signer: BytesN<96>,
@@ -140,26 +148,31 @@ struct Metadata {
 }
 
 impl Metadata {
-    /// Envelope: settlement_signer(0) || bridger(32) || order_hash(64) (#433), then the module data:
-    /// version(96) || orderChainId(97) || adChainId(113) || orderHash(129) || orderChainRoot(161) ||
-    /// adChainRoot(193) || makerKeyCommitment(225) (#469) || signerSlotId(257) || bridgerSlotId(261) ||
-    /// pkSigner(265) || pkBridger(361) || aggSig(457)
+    /// Envelope: settlement_signer(0) || bridger(32) || order_hash(64) (#433) || pinned_slot(96) ||
+    /// nullifier_hash(100) || side(132), then the module data: version(133) || orderChainId(134) ||
+    /// adChainId(150) || orderHash(166) || orderChainRoot(198) || adChainRoot(230) ||
+    /// makerKeyCommitment(262) (#469) || adLegNullifier(294) || orderLegNullifier(326) ||
+    /// signerSlotId(358) || bridgerSlotId(362) || pkSigner(366) || pkBridger(462) || aggSig(558)
     fn decode(env: &Env, b: &Bytes) -> Metadata {
         Metadata {
             settlement_signer: BytesN::from_array(env, &arr::<32>(b, 0)),
             bridger: BytesN::from_array(env, &arr::<32>(b, 32)),
             envelope_order_hash: BytesN::from_array(env, &arr::<32>(b, 64)),
-            order_chain_id: u128::from_be_bytes(arr::<16>(b, 97)),
-            ad_chain_id: u128::from_be_bytes(arr::<16>(b, 113)),
-            order_hash: BytesN::from_array(env, &arr::<32>(b, 129)),
-            order_chain_root: BytesN::from_array(env, &arr::<32>(b, 161)),
-            ad_chain_root: BytesN::from_array(env, &arr::<32>(b, 193)),
-            maker_key_commitment: BytesN::from_array(env, &arr::<32>(b, 225)),
-            signer_slot_id: u32::from_be_bytes(arr::<4>(b, 257)),
-            bridger_slot_id: u32::from_be_bytes(arr::<4>(b, 261)),
-            pk_signer: BytesN::from_array(env, &arr::<96>(b, 265)),
-            pk_bridger: BytesN::from_array(env, &arr::<96>(b, 361)),
-            agg_sig: BytesN::from_array(env, &arr::<192>(b, 457)),
+            nullifier_hash: BytesN::from_array(env, &arr::<32>(b, 100)),
+            side: b.get(132).unwrap_or(u8::MAX),
+            order_chain_id: u128::from_be_bytes(arr::<16>(b, 134)),
+            ad_chain_id: u128::from_be_bytes(arr::<16>(b, 150)),
+            order_hash: BytesN::from_array(env, &arr::<32>(b, 166)),
+            order_chain_root: BytesN::from_array(env, &arr::<32>(b, 198)),
+            ad_chain_root: BytesN::from_array(env, &arr::<32>(b, 230)),
+            maker_key_commitment: BytesN::from_array(env, &arr::<32>(b, 262)),
+            ad_leg_nullifier: BytesN::from_array(env, &arr::<32>(b, 294)),
+            order_leg_nullifier: BytesN::from_array(env, &arr::<32>(b, 326)),
+            signer_slot_id: u32::from_be_bytes(arr::<4>(b, 358)),
+            bridger_slot_id: u32::from_be_bytes(arr::<4>(b, 362)),
+            pk_signer: BytesN::from_array(env, &arr::<96>(b, 366)),
+            pk_bridger: BytesN::from_array(env, &arr::<96>(b, 462)),
+            agg_sig: BytesN::from_array(env, &arr::<192>(b, 558)),
         }
     }
 }
@@ -196,7 +209,8 @@ fn verify_aggregate(env: &Env, m: &Metadata) -> bool {
     );
     let agg_sig = G2Affine::from_bytes(m.agg_sig.clone());
 
-    // SETTLE_TAG || orderChainId(32) || adChainId(32) || orderHash || roots || makerKeyCommitment — 224 B
+    // SETTLE_TAG || orderChainId(32) || adChainId(32) || orderHash || roots || makerKeyCommitment ||
+    // adLegNullifier || orderLegNullifier — 288 B
     let mut preimage = Bytes::from_slice(env, &SETTLE_TAG);
     preimage.extend_from_slice(&pad32_u128(m.order_chain_id));
     preimage.extend_from_slice(&pad32_u128(m.ad_chain_id));
@@ -204,6 +218,8 @@ fn verify_aggregate(env: &Env, m: &Metadata) -> bool {
     preimage.extend_from_slice(&m.order_chain_root.to_array());
     preimage.extend_from_slice(&m.ad_chain_root.to_array());
     preimage.extend_from_slice(&m.maker_key_commitment.to_array());
+    preimage.extend_from_slice(&m.ad_leg_nullifier.to_array());
+    preimage.extend_from_slice(&m.order_leg_nullifier.to_array());
 
     let dst = Bytes::from_slice(env, DST_SIG.as_bytes());
     let msg_g2 = bls.hash_to_g2(&preimage, &dst);

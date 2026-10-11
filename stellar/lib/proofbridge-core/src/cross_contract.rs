@@ -305,10 +305,18 @@ pub fn registration_subject(
 // RootVerifier Helpers
 // =============================================================================
 
+/// The escrow's leg in the root verifier's envelope: the order portal consumes the ORDER leaf's
+/// nullifier, the ad manager the AD leaf's.
+pub const ENVELOPE_SIDE_ORDER: u8 = 0;
+pub const ENVELOPE_SIDE_AD: u8 = 1;
+
 /// The root verifier's envelope: `settlement_signer(32) || bridger(32) || order_hash(32) ||
-/// cosig_data`, what the escrow vouches for. Slot 0 is the account whose settlement key the verifier
-/// resolves (the order's `ad_settlement_signer`); `order_hash` is the order being unlocked, which the
-/// co-signed auth must name (#433).
+/// pinned_slot(4) || nullifier_hash(32) || side(1) || cosig_data`, what the escrow vouches for.
+/// Slot 0 is the account whose settlement key the verifier resolves (the order's
+/// `ad_settlement_signer`); `order_hash` is the order being unlocked, which the co-signed auth must
+/// name (#433); `nullifier_hash` and `side` are the nullifier the escrow is about to consume and
+/// its leg, which the auth must have signed for that leg. `pinned_slot` is the maker's co-signing
+/// slot the order recorded (0 where none is recorded).
 #[allow(clippy::too_many_arguments)]
 pub fn is_root_valid(
     env: &Env,
@@ -318,11 +326,17 @@ pub fn is_root_valid(
     settlement_signer: &BytesN<32>,
     bridger: &BytesN<32>,
     order_hash: &BytesN<32>,
+    pinned_slot: u32,
+    nullifier_hash: &BytesN<32>,
+    side: u8,
     cosig_data: &Bytes,
 ) -> bool {
     let mut metadata = Bytes::from_slice(env, &settlement_signer.to_array());
     metadata.extend_from_slice(&bridger.to_array());
     metadata.extend_from_slice(&order_hash.to_array());
+    metadata.extend_from_slice(&pinned_slot.to_be_bytes());
+    metadata.extend_from_slice(&nullifier_hash.to_array());
+    metadata.push_back(side);
     metadata.append(cosig_data);
     RootVerifierClient::new(env, module).is_root_valid(&source_chain_id, root, &metadata)
 }

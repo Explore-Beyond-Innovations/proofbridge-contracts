@@ -7431,6 +7431,9 @@ struct CoSignAuth {
     order_hash: [u8; 32],
     order_chain_root: [u8; 32],
     ad_chain_root: [u8; 32],
+    /// v4: the nullifier each leg's unlock consumes, co-signed.
+    ad_leg_nullifier: [u8; 32],
+    order_leg_nullifier: [u8; 32],
 }
 
 fn vector_json() -> serde_json::Value {
@@ -7457,7 +7460,7 @@ fn maker_key_commitment() -> [u8; 32] {
 }
 
 /// SETTLE_TAG ‖ pad32(orderChainId) ‖ pad32(adChainId) ‖ orderHash ‖ orderChainRoot ‖ adChainRoot ‖
-/// makerKeyCommitment (#469).
+/// makerKeyCommitment (#469) ‖ adLegNullifier ‖ orderLegNullifier (v4).
 fn settlement_preimage(env: &Env, a: &CoSignAuth) -> Bytes {
     let tag = env
         .crypto()
@@ -7470,6 +7473,8 @@ fn settlement_preimage(env: &Env, a: &CoSignAuth) -> Bytes {
     p.extend_from_slice(&a.order_chain_root);
     p.extend_from_slice(&a.ad_chain_root);
     p.extend_from_slice(&maker_key_commitment());
+    p.extend_from_slice(&a.ad_leg_nullifier);
+    p.extend_from_slice(&a.order_leg_nullifier);
     p
 }
 
@@ -7491,22 +7496,24 @@ fn cosign_aggregate(env: &Env, a: &CoSignAuth) -> [u8; 192] {
     bls.g2_add(&sig_m, &sig_b).to_bytes().to_array()
 }
 
-/// The module data (553 bytes, v3) the relayer would hand an escrow for `a`.
+/// The module data (617 bytes, v4) the relayer would hand an escrow for `a`.
 fn cosign(env: &Env, a: &CoSignAuth) -> Bytes {
     let v = vector_json();
-    let mut c = std::vec![3u8];
+    let mut c = std::vec![4u8];
     c.extend_from_slice(&a.order_chain_id.to_be_bytes());
     c.extend_from_slice(&a.ad_chain_id.to_be_bytes());
     c.extend_from_slice(&a.order_hash);
     c.extend_from_slice(&a.order_chain_root);
     c.extend_from_slice(&a.ad_chain_root);
     c.extend_from_slice(&maker_key_commitment());
+    c.extend_from_slice(&a.ad_leg_nullifier);
+    c.extend_from_slice(&a.order_leg_nullifier);
     c.extend_from_slice(&0u32.to_be_bytes());
     c.extend_from_slice(&0u32.to_be_bytes());
     c.extend_from_slice(&vhex(&v["keys"]["makerBls"]["pk"]["uncompressed"]));
     c.extend_from_slice(&vhex(&v["keys"]["bridgerBls"]["pk"]["uncompressed"]));
     c.extend_from_slice(&cosign_aggregate(env, a));
-    assert_eq!(c.len(), 553);
+    assert_eq!(c.len(), 617);
     Bytes::from_slice(env, &c)
 }
 
@@ -7521,8 +7528,10 @@ fn test_433_cosign_helper_reproduces_the_vector_aggregate() {
         order_hash: vhex(&auth["orderHash"]).try_into().unwrap(),
         order_chain_root: vhex(&auth["orderChainRoot"]).try_into().unwrap(),
         ad_chain_root: vhex(&auth["adChainRoot"]).try_into().unwrap(),
+        ad_leg_nullifier: vhex(&auth["adLegNullifier"]).try_into().unwrap(),
+        order_leg_nullifier: vhex(&auth["orderLegNullifier"]).try_into().unwrap(),
     };
-    let mut pre = [0u8; 224]; // #469: the preimage names the maker key
+    let mut pre = [0u8; 288]; // v4: the preimage names the maker key and both leg nullifiers
     settlement_preimage(&env, &a).copy_into_slice(&mut pre);
     assert_eq!(
         pre.to_vec(),
@@ -7572,8 +7581,100 @@ fn wire_real_verifier_for_fixture(s: &TestSetup) -> Bytes {
             order_hash: s.tp.order_hash,
             order_chain_root: s.tp.order_root,
             ad_chain_root: s.tp.ad_root,
+            // the fixture proofs' own nullifiers: domain 1 (the bridger's) and domain 0 (the maker's)
+            ad_leg_nullifier: s.tp.bridger_nullifier,
+            order_leg_nullifier: s.tp.ad_creator_nullifier,
         },
     )
+}
+
+/// Each leg settles only with the nullifier both parties signed for it: the order leg's nullifier
+/// on the ad manager, and the ad leg's on the order portal, are refused at the root check; each leg's
+/// own settles.
+#[test]
+fn test_cosigned_nullifier_each_leg_only_its_own() {
+    let s = setup();
+    let cosig = wire_real_verifier_for_fixture(&s);
+    let p = locked_ad_order(&s);
+    let bridger_addr = account_addr(&s, &s.tp.bridger);
+    TokenContractClient::new(&s.env, &s.order_token_addr)
+        .mint(&bridger_addr, &(s.tp.amount as i128));
+    let q = order_portal_order_params(&s.env, &s.tp);
+    s.order_portal.create_order(&q);
+    let ad_leg = bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier);
+    let order_leg = bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier);
+    let order_root = bytes32_to_bytesn(&s.env, &s.tp.order_root);
+    let ad_root = bytes32_to_bytesn(&s.env, &s.tp.ad_root);
+
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &p,
+            &order_leg,
+            &order_root,
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &cosig,
+        ),
+        Err(Ok(AdErr::RootNotValid))
+    );
+    assert_eq!(
+        s.order_portal.try_unlock(
+            &q,
+            &ad_leg,
+            &ad_root,
+            &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
+            &cosig,
+        ),
+        Err(Ok(OpErr::RootNotValid))
+    );
+    assert!(
+        ad_unlock(&s, &p, &cosig),
+        "the ad leg's own nullifier settles it"
+    );
+    s.order_portal.unlock(
+        &q,
+        &order_leg,
+        &ad_root,
+        &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
+        &cosig,
+    );
+    assert_eq!(portal_status(&s), order_portal_contract::Status::Filled);
+}
+
+/// The co-signed nullifier against a ruling: under the parties' real co-signature, an ad-leg unlock
+/// consuming a nullifier they did not sign is refused at the root check, so a forfeit ruling cannot
+/// be turned into a plain trade; the dispute stays open and the ruling finalizes the order.
+#[test]
+fn test_cosigned_nullifier_forfeit_ruling_survives_an_invented_nullifier() {
+    let s = setup();
+    let cosig = wire_real_verifier_for_fixture(&s);
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    s.ad_manager
+        .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    dm.resolve_dispute(&h, &dispute_manager_contract::DisputeOutcome::MakerForfeit);
+
+    let invented = bytes32_to_bytesn(&s.env, &[0x07; 32]);
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &p,
+            &invented,
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &cosig,
+        ),
+        Err(Ok(AdErr::RootNotValid))
+    );
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Disputed);
+    assert!(!s.ad_manager.nullifier_used(&invented));
+
+    warp_past_dispute_window(&s, &dm, &h);
+    s.ad_manager.finalize_dispute(&p);
+    assert_eq!(
+        ad_status(&s),
+        ad_manager_contract::Status::Resolved,
+        "the ruling, not a trade"
+    );
 }
 
 /// #433 on the primary: a co-signature over order X does not unlock order Y between the same
@@ -7595,7 +7696,7 @@ fn test_433_ad_manager_cosig_for_one_order_does_not_unlock_another() {
     assert_eq!(
         s.ad_manager.try_unlock(
             &y,
-            &bytes32_to_bytesn(&s.env, &[0x07; 32]),
+            &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier), // the co-signed one: only the order differs
             &bytes32_to_bytesn(&s.env, &s.tp.order_root),
             &Bytes::from_slice(&s.env, PROOF_BRIDGER),
             &cosig_x,
@@ -7627,7 +7728,7 @@ fn test_433_order_portal_cosig_for_one_order_does_not_unlock_another() {
     assert_eq!(
         s.order_portal.try_unlock(
             &y,
-            &bytes32_to_bytesn(&s.env, &[0x07; 32]),
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier), // the co-signed one: only the order differs
             &bytes32_to_bytesn(&s.env, &s.tp.ad_root),
             &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
             &cosig_x,
@@ -9216,6 +9317,9 @@ fn wire_real_stack(s: &TestSetup) -> Bytes {
             order_hash: s.tp.order_hash,
             order_chain_root: s.tp.order_root,
             ad_chain_root: s.tp.ad_root,
+            // the fixture proofs' own nullifiers: domain 1 (the bridger's) and domain 0 (the maker's)
+            ad_leg_nullifier: s.tp.bridger_nullifier,
+            order_leg_nullifier: s.tp.ad_creator_nullifier,
         },
     )
 }

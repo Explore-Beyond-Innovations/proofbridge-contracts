@@ -768,6 +768,9 @@ impl AdManagerContract {
             &params.ad_settlement_signer,
             &params.bridger,
             &order_hash,
+            0,
+            &nullifier_hash,
+            proofbridge_core::cross_contract::ENVELOPE_SIDE_AD,
             &cosig_data,
         ) {
             return Err(AdManagerError::RootNotValid);

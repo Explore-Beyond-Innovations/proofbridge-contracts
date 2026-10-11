@@ -97,7 +97,15 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         _requireRootValid(
             params.adChainId,
             targetRoot,
-            RequestAuth.rootEnvelope(params.adSettlementSigner, params.bridger, orderHash, cosigData)
+            RequestAuth.rootEnvelope(
+                params.adSettlementSigner,
+                params.bridger,
+                orderHash,
+                0,
+                nullifierHash,
+                uint8(_PUBLIC_INPUT_SIDE_ORDER),
+                cosigData
+            )
         );
         _requireDepositProof(orderHash, nullifierHash, targetRoot, proof, _PUBLIC_INPUT_SIDE_ORDER);
 

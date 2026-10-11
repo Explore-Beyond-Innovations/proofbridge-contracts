@@ -250,8 +250,10 @@ contract AdManager is EscrowBase, IAdManager {
         bytes32 orderHash = _orderHash(params);
         // D2: the co-signed unlock is the presentation — valid before the window's end minus the
         // margin. Strict, so it never shares a second with `finalizeCancel` (which needs the end reached).
-        uint256 cutoff = _presentationCutoff(orderHash, params);
-        if (block.timestamp >= cutoff) revert Escrow__OrderExpired(cutoff);
+        {
+            uint256 cutoff = _presentationCutoff(orderHash, params);
+            if (block.timestamp >= cutoff) revert Escrow__OrderExpired(cutoff);
+        }
         _requireSettleable(orderHash, nullifierHash);
         // #422: the maker's halt refuses the co-signed payout; evidence (`presentSettled`) still pays.
         // One cold read of the maker's flag on the metered path (~2.4k; UnlockGas re-baselined).
@@ -261,7 +263,15 @@ contract AdManager is EscrowBase, IAdManager {
         _requireRootValid(
             params.orderChainId,
             targetRoot,
-            RequestAuth.rootEnvelope(params.adSettlementSigner, params.bridger, orderHash, cosigData)
+            RequestAuth.rootEnvelope(
+                params.adSettlementSigner,
+                params.bridger,
+                orderHash,
+                0,
+                nullifierHash,
+                uint8(_PUBLIC_INPUT_SIDE_AD),
+                cosigData
+            )
         );
         _requireDepositProof(orderHash, nullifierHash, targetRoot, proof, _PUBLIC_INPUT_SIDE_AD);
 

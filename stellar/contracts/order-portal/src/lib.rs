@@ -413,6 +413,9 @@ impl OrderPortalContract {
             &params.ad_settlement_signer,
             &params.bridger,
             &order_hash,
+            0,
+            &nullifier_hash,
+            proofbridge_core::cross_contract::ENVELOPE_SIDE_ORDER,
             &cosig_data,
         ) {
             return Err(OrderPortalError::RootNotValid);

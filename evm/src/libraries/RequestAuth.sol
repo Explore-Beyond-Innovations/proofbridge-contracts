@@ -39,9 +39,11 @@ library RequestAuth {
         //
         // The nullifier and only the nullifier. The root is validated *before* this runs on every
         // path — `_requireRootValid` against the co-signed root, `_requireAnchored` against the
-        // notary's — and both compare against known-good stored data. The nullifier has no such
-        // comparison: it is a *write* key, which is why it is the one worth guarding. The order hash
-        // is reduced below; the side flag is a contract constant.
+        // notary's — and both compare against known-good stored data. On the co-signed unlock the
+        // root verifier also compares the nullifier with the one the parties signed for this leg;
+        // the never-locked cancel consumes none. It is a *write* key on the unlock, which is why its
+        // form is worth guarding here. The order hash is reduced below; the side flag is a contract
+        // constant.
         FieldElement.requireCanonical(nullifierHash);
 
         inputs = new bytes32[](4);
@@ -52,17 +54,24 @@ library RequestAuth {
     }
 
     /**
-     * @notice The root verifier's envelope: `(settlementSigner, bridger, orderHash, cosigData)`: what the
+     * @notice The root verifier's envelope:
+     *         `(settlementSigner, bridger, orderHash, pinnedSlot, nullifierHash, side, cosigData)`: what the
      *         escrow vouches for. Slot 0 is the account whose settlement key the verifier resolves
      *         (`params.adSettlementSigner`, never `adCreator`); `orderHash` is the order the escrow is
-     *         unlocking, which the co-signed auth must name (#433).
+     *         unlocking, which the co-signed auth must name (#433); `nullifierHash` is the nullifier the
+     *         escrow is about to consume and `side` its leg, which the auth must have signed for that leg.
+     *         `pinnedSlot` is the maker's co-signing slot the order recorded (0 where none is recorded).
      */
-    function rootEnvelope(bytes32 settlementSigner, bytes32 bridger, bytes32 orderHash, bytes memory cosigData)
-        internal
-        pure
-        returns (bytes memory)
-    {
-        return abi.encode(settlementSigner, bridger, orderHash, cosigData);
+    function rootEnvelope(
+        bytes32 settlementSigner,
+        bytes32 bridger,
+        bytes32 orderHash,
+        uint32 pinnedSlot,
+        bytes32 nullifierHash,
+        uint8 side,
+        bytes memory cosigData
+    ) internal pure returns (bytes memory) {
+        return abi.encode(settlementSigner, bridger, orderHash, pinnedSlot, nullifierHash, side, cosigData);
     }
 
     /**

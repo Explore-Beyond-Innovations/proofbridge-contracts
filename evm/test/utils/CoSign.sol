@@ -22,7 +22,9 @@ library CoSign {
             a.orderHash,
             a.orderChainRoot,
             a.adChainRoot,
-            a.makerKeyCommitment
+            a.makerKeyCommitment,
+            a.adLegNullifier,
+            a.orderLegNullifier
         );
         return BLS.hashToG2(preimage, bytes(DST_SIG));
     }
@@ -53,8 +55,8 @@ library CoSign {
         );
     }
 
-    /// The vector's auth with `orderHash` swapped in: same chains, same roots.
-    function authFor(string memory vjson, bytes32 orderHash)
+    /// The vector's auth with `orderHash` and both leg nullifiers swapped in: same chains, same roots.
+    function authFor(string memory vjson, bytes32 orderHash, bytes32 adLegNullifier, bytes32 orderLegNullifier)
         internal
         pure
         returns (CounterpartyVerifier.SettlementAuth memory)
@@ -65,15 +67,30 @@ library CoSign {
             orderHash: orderHash,
             orderChainRoot: stdJson.readBytes32(vjson, ".settlement.auth.orderChainRoot"),
             adChainRoot: stdJson.readBytes32(vjson, ".settlement.auth.adChainRoot"),
-            makerKeyCommitment: stdJson.readBytes32(vjson, ".settlement.auth.makerKeyCommitment")
+            makerKeyCommitment: stdJson.readBytes32(vjson, ".settlement.auth.makerKeyCommitment"),
+            adLegNullifier: adLegNullifier,
+            orderLegNullifier: orderLegNullifier
         });
     }
 
-    /// Module data v3, both settlement keys in slot 0, co-signed over `orderHash`.
-    function moduleDataFor(string memory vjson, bytes32 orderHash) internal view returns (bytes memory) {
-        CounterpartyVerifier.SettlementAuth memory a = authFor(vjson, orderHash);
+    /// The vector's own auth (its order and nullifiers).
+    function vectorAuth(string memory vjson) internal pure returns (CounterpartyVerifier.SettlementAuth memory) {
+        return authFor(
+            vjson,
+            stdJson.readBytes32(vjson, ".settlement.auth.orderHash"),
+            stdJson.readBytes32(vjson, ".settlement.auth.adLegNullifier"),
+            stdJson.readBytes32(vjson, ".settlement.auth.orderLegNullifier")
+        );
+    }
+
+    /// Module data v4 for `a`, both settlement keys in slot 0, co-signed over `a`.
+    function moduleData(string memory vjson, CounterpartyVerifier.SettlementAuth memory a)
+        internal
+        view
+        returns (bytes memory)
+    {
         return abi.encode(
-            uint8(3),
+            uint8(4),
             a,
             uint32(0),
             uint32(0),
@@ -81,5 +98,14 @@ library CoSign {
             stdJson.readBytes(vjson, ".keys.bridgerBls.pk.eip2537"),
             aggregate(vjson, a)
         );
+    }
+
+    /// Module data v4 co-signed over `orderHash` and the two leg nullifiers.
+    function moduleDataFor(string memory vjson, bytes32 orderHash, bytes32 adLegNullifier, bytes32 orderLegNullifier)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return moduleData(vjson, authFor(vjson, orderHash, adLegNullifier, orderLegNullifier));
     }
 }
