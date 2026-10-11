@@ -455,7 +455,8 @@ function routeTimingFromEnv(env: string, vars: Record<string, string | undefined
     margin: read("ROUTE_MARGIN_S", "0"),
     claimStagger: read("ROUTE_CLAIM_STAGGER_S", "0"),
   };
-  // The contract's margin cap (field 2): refused here, before anything is sent.
+  // Mirror of `RouteTiming.validate` / `timing::validate` field 2 (`margin <= buffer / 2`): refused
+  // here, before anything is sent. The contract stays the authority; a change to the cap touches both.
   if (BigInt(timing.margin) > BigInt(timing.buffer) / 2n) {
     throw new Error(
       `link: ROUTE_MARGIN_S=${timing.margin} exceeds half of ROUTE_BUFFER_S=${timing.buffer}; the escrows refuse a margin above half the buffer`,

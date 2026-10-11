@@ -1354,7 +1354,10 @@ impl AdManagerContract {
     /// Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force now
     /// or at any point at or after the order's deadline (a resume stamp at or after it), any of the
     /// signer's registry slots expiring during the order's life as a payout, `[locked_at, until]`
-    /// with `until` the payout's own cutoff (`any_slot_expired_within`, D12/D14/D14b/D16: a kill, a
+    /// with `until` the payout's own cutoff, inclusive. For the cancel path that is the presentation
+    /// cutoff, the first second the unlock is refused, so a slot expiring exactly there still counts:
+    /// one second conservative, which only lengthens the maker's own refund, never moves a payout
+    /// (`any_slot_expired_within`, D12/D14/D14b/D16: a kill, a
     /// near-future shorten, a pre-lock shorten naming a date in the window and a re-kill after it
     /// all count; a rotation whose old slot outlives the cutoff does not). Every reference is one the maker signed (the deadline) or the chain stamped (the
     /// lock), never one the maker can choose later. No registry wired means no lever 2 to read.
