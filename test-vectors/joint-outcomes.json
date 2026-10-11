@@ -11,13 +11,13 @@
     "orderAmountUnits": "1000000",
     "challengePeriodS": 7200,
     "bufferS": 1800,
-    "longBackstopS": 86400,
+    "farPastDeadlineS": 604801,
     "bondFloorUnits": "10000",
     "bondUnits": "10000",
     "filerIsBridger": false
   },
   "counts": {
-    "scenarios": 14
+    "scenarios": 13
   },
   "scenarios": [
     {
@@ -520,8 +520,8 @@
       }
     },
     {
-      "name": "backstop-vs-late-anchor",
-      "note": "the follower's ONLY timer is the far backstop; a late anchor + presentation beats the finalize, and the purged claim makes the late finalize revert (r2's pinned negative)",
+      "name": "follower-waits-for-the-leader",
+      "note": "the follower has no clock of its own: long after the deadline nothing on it can refund, and a late anchor + presentation still settles it",
       "steps": [
         {
           "leg": "primary",
@@ -533,11 +533,7 @@
         },
         {
           "leg": "follower",
-          "action": "warpPastLongBackstop"
-        },
-        {
-          "leg": "follower",
-          "action": "claimBackstop"
+          "action": "warpFarPastDeadline"
         },
         {
           "action": "anchorPrimaryLeaf"
@@ -545,56 +541,11 @@
         {
           "leg": "follower",
           "action": "presentSettled"
-        },
-        {
-          "leg": "follower",
-          "action": "finalizeBackstop",
-          "expectRevert": "notClaimed"
         }
       ],
       "expect": {
         "primaryStatus": "Filled",
         "followerStatus": "Filled",
-        "primaryLeafDomain": "3",
-        "followerLeafDomain": "none",
-        "primaryUnlockNullifierConsumed": true,
-        "followerUnlockNullifierConsumed": false,
-        "bondToFilerUnits": "0",
-        "bondToPoolUnits": "0"
-      }
-    },
-    {
-      "name": "backstop-silent",
-      "note": "TIER-1 STATED BOUNDARY (8.3, backstop bypass): refund executes only if every evidence holder — the victim included — stays silent through longBackstop + the window",
-      "steps": [
-        {
-          "leg": "primary",
-          "action": "unlock"
-        },
-        {
-          "leg": "primary",
-          "action": "recordSettled"
-        },
-        {
-          "leg": "follower",
-          "action": "warpPastLongBackstop"
-        },
-        {
-          "leg": "follower",
-          "action": "claimBackstop"
-        },
-        {
-          "leg": "follower",
-          "action": "warpPastBackstopWindow"
-        },
-        {
-          "leg": "follower",
-          "action": "finalizeBackstop"
-        }
-      ],
-      "expect": {
-        "primaryStatus": "Filled",
-        "followerStatus": "Cancelled",
         "primaryLeafDomain": "3",
         "followerLeafDomain": "none",
         "primaryUnlockNullifierConsumed": true,

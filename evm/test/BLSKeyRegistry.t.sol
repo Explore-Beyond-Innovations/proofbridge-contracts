@@ -266,11 +266,15 @@ contract BLSKeyRegistryTest is Test {
         assertEq(registry.nextSlotId(account), 6);
     }
 
-    /// #422 D17: while a guard reports positions a dead slot keeps its place for the grace — an open
-    /// order's cancel may still ask about it — and leaves once the grace is over regardless.
-    function test_registerAtCap_deadSlotKeptWhileInFlight_prunedAfterTheGrace() public {
+    /// #422 D17: while a guard reports positions a dead slot keeps its place, past the grace if need
+    /// be (an open order's cancel may still ask about it), and leaves once the positions close.
+    function test_registerAtCap_deadSlotKeptWhileInFlight_prunedOnceClosed() public {
         bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
-        busyGuard();
+        ToggleGuard guard = new ToggleGuard();
+        address[] memory guards = new address[](1);
+        guards[0] = address(guard);
+        registry.setPositionGuards(guards);
+        guard.setBusy(true);
         for (uint256 i = 0; i < 5; i++) {
             registerSlot("makerOnSepolia", i);
         }
@@ -280,6 +284,11 @@ contract BLSKeyRegistryTest is Test {
         registerSlot("makerOnSepolia", 5);
 
         vm.warp(graceTs()); // well past the grace; register deadlines are signed for this clock (D2)
+        vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
+        registerSlot("makerOnSepolia", 5);
+        registry.lookup(account, 2);
+
+        guard.setBusy(false);
         assertEq(registerSlot("makerOnSepolia", 5), 5);
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.lookup(account, 2);

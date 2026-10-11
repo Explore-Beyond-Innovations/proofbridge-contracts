@@ -312,18 +312,19 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         return at == 0 ? vu : at;
     }
 
-    /// Drops every dead slot the escrows can no longer need: past its expiry + GRACE_PERIOD, or at
-    /// once when the guards are wired and none reports open positions for the account (#422 D17 —
-    /// no order's cancel can still ask about its history; D17b — with no guard to ask, never at
-    /// once). Not in the expiry's own second (D17a): a lock in that second still counts the kill.
-    /// Swap-remove; order is not meaningful.
+    /// Drops every dead slot the escrows can no longer need. With guards wired, a dead slot stays for
+    /// as long as any guard reports open positions for the account, however long that is (an open
+    /// order's cancel may still ask about its history), and goes at once when none does (#422 D17).
+    /// With no guard to ask, it goes after its expiry + GRACE_PERIOD (D17b). Not in the expiry's own
+    /// second (D17a): a lock in that second still counts the kill. Swap-remove; order is not meaningful.
     function _prune(bytes32 account, RegistryEntry storage e) private {
-        bool free = positionGuards.length != 0 && !_hasOpenPositions(account);
+        bool guarded = positionGuards.length != 0;
+        if (guarded && _hasOpenPositions(account)) return;
         uint256 i = 0;
         while (i < e.liveSlots.length) {
             uint32 id = e.liveSlots[i];
             uint64 vu = _expiredAt(account, id);
-            if (vu != 0 && (block.timestamp > uint256(vu) + GRACE_PERIOD || (free && block.timestamp > vu))) {
+            if (vu != 0 && block.timestamp > uint256(vu) + (guarded ? 0 : GRACE_PERIOD)) {
                 delete e.slots[id];
                 delete expiries[account][id];
                 e.liveSlots[i] = e.liveSlots[e.liveSlots.length - 1];

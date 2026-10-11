@@ -87,19 +87,14 @@ contract PayoutFallbackTest is AdManagerTest {
         assertEq(address(receiver).balance, p.amount, "a credit stays reachable while paused");
     }
 
-    /// ...and the pause still holds for everything else, so the exception is exactly one call wide.
-    function test_2_3h_thePauseStillHoldsForEverythingElse() public {
-        // Params need only be well-formed: the pause gate fires before any of them is read.
+    /// ...and the pause still holds for the entries: a new lock is refused before any param is read.
+    function test_2_3h_thePauseStillHoldsForTheEntries() public {
         IAdManager.OrderParams memory p;
         vm.prank(admin);
         adManager.pause();
 
         vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
         adManager.lockForOrder(p);
-        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        adManager.claimCancel(p);
-        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        adManager.finalizeCancel(p);
     }
 
     /// Escrow solvency across both payout paths: wrapped-native holdings always

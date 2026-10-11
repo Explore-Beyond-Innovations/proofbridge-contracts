@@ -16,7 +16,6 @@ import {ProofBridgeUtils} from "./libraries/ProofBridgeUtils.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
 import {RouteTiming} from "./libraries/RouteTiming.sol";
 import {Dispute} from "./libraries/Dispute.sol";
-import {Termination} from "./libraries/Termination.sol";
 
 /**
  * @title AdManager (Proofbridge)
@@ -34,6 +33,7 @@ import {Termination} from "./libraries/Termination.sol";
 contract AdManager is EscrowBase, IAdManager {
     using AddressCast for address;
     using AddressCast for bytes32;
+    using RouteTiming for mapping(uint256 => uint32);
 
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
@@ -160,7 +160,7 @@ contract AdManager is EscrowBase, IAdManager {
     }
 
     /// @inheritdoc IAdManager
-    function withdrawFromAd(string calldata adId, uint256 amount, address to) external nonReentrant whenNotPaused {
+    function withdrawFromAd(string calldata adId, uint256 amount, address to) external nonReentrant {
         Ad storage ad = _getAdOwned(adId, msg.sender);
         if (to == address(0)) revert AdManager__RecipientZero();
         if (amount == 0) revert Escrow__ZeroAmount();
@@ -191,7 +191,7 @@ contract AdManager is EscrowBase, IAdManager {
     }
 
     /// @inheritdoc IAdManager
-    function closeAd(string calldata adId, address to) external nonReentrant whenNotPaused {
+    function closeAd(string calldata adId, address to) external nonReentrant {
         Ad storage ad = _getAdOwned(adId, msg.sender);
         if (ad.locked != 0) revert AdManager__ActiveLocks();
         if (to == address(0)) revert AdManager__RecipientZero();
@@ -208,7 +208,7 @@ contract AdManager is EscrowBase, IAdManager {
     function lockForOrder(OrderParams calldata params) external nonReentrant whenNotPaused returns (bytes32 orderHash) {
         Ad storage ad = _getAdOwned(params.adId, msg.sender);
         orderHash = _validateOrder(ad, params);
-        _requireMinWindow(params.orderChainId, params.deadline);
+        uint32 version = _requireMinWindow(params.orderChainId, params.deadline);
         // #464: no new order while the order chain's verifier reads another key registry.
         (bool split, address verifierRegistry) = _registrySplit(params.orderChainId, address(keyRegistry));
         if (split) revert AdManager__RegistrySplit(params.orderChainId, address(keyRegistry), verifierRegistry);
@@ -217,9 +217,11 @@ contract AdManager is EscrowBase, IAdManager {
         uint256 adAmount = _adAmount(params);
         if (adAmount > ad.balance - ad.locked) revert Escrow__InsufficientLiquidity();
 
-        _openOrder(orderHash);
+        Order storage o = _openOrder(orderHash, version);
         // #465: the registry this order is judged against, whatever is wired later.
-        _orders[orderHash].registryEpoch = registryEpoch;
+        o.registryEpoch = registryEpoch;
+        // The denied grace reads the larger of this and the live delay: a raise lengthens it, a cut never shortens it.
+        o.anchorDelay = uint32(_anchorDelayNow(params.orderChainId));
         ad.locked += adAmount;
         // 2.3c D1: count the settlement identity this escrow's unlock will verify — the ad's signer,
         // asserted equal to `params.adSettlementSigner` in `_validateOrder` (and owned by the maker
@@ -243,7 +245,7 @@ contract AdManager is EscrowBase, IAdManager {
         bytes32 targetRoot,
         bytes calldata proof,
         bytes calldata cosigData
-    ) external nonReentrant whenNotPaused {
+    ) external nonReentrant {
         bytes32 orderHash = _orderHash(params);
         // D2: the co-signed unlock is the presentation — valid through the window, minus the margin.
         _requireNotPast(_presentationCutoff(orderHash, params));
@@ -274,21 +276,16 @@ contract AdManager is EscrowBase, IAdManager {
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IAdManager
-    function claimCancel(OrderParams calldata params) external nonReentrant whenNotPaused {
+    function claimCancel(OrderParams calldata params) external nonReentrant {
         bytes32 orderHash = _orderHash(params);
         _requireStatus(orderHash, Status.Open);
         _requireReached(params.deadline);
-        // Deadline-anchored (D1): a late claim cannot shorten the window the fast unlock relies on;
-        // a pause that fell inside the window already extended it (`_windowEnd`).
-        _openClaim(
-            orderHash,
-            Termination.ClaimEntry.Deadline,
-            _windowEnd(orderHash, params.deadline, _timing(params.orderChainId).buffer)
-        );
+        // Deadline-anchored (D1): a late claim cannot shorten the window the fast unlock relies on.
+        _openClaim(orderHash, params.deadline + _orderTiming(orderHash, params.orderChainId).buffer);
     }
 
     /// @inheritdoc IAdManager
-    function finalizeCancel(OrderParams calldata params) external nonReentrant whenNotPaused {
+    function finalizeCancel(OrderParams calldata params) external nonReentrant {
         bytes32 orderHash = _orderHash(params);
         _requireFinalizable(orderHash);
         // #422 rule 3: when the co-signed payout was denied, the cancel waits for the order chain's
@@ -310,7 +307,7 @@ contract AdManager is EscrowBase, IAdManager {
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IAdManager
-    function dispute(OrderParams calldata params, bytes32 evidence) external payable nonReentrant whenNotPaused {
+    function dispute(OrderParams calldata params, bytes32 evidence) external payable nonReentrant {
         bytes32 orderHash = _orderHash(params);
         // Only the order's two parties may file. Without this any address could dispute any live
         // order and, one short challenge period later, cancel it out from under both of them.
@@ -318,12 +315,16 @@ contract AdManager is EscrowBase, IAdManager {
         // The deadline is validated by the hash the caller had to reproduce, which is why filing
         // starts here and not on the module: only this contract can vouch for it.
         _openDispute(
-            orderHash, params.orderChainId, evidence, uint64(params.deadline), _timing(params.orderChainId).buffer
+            orderHash,
+            params.orderChainId,
+            evidence,
+            uint64(params.deadline),
+            _orderTiming(orderHash, params.orderChainId).buffer
         );
     }
 
     /// @inheritdoc IAdManager
-    function respondToDispute(OrderParams calldata params, bytes32 evidence) external nonReentrant whenNotPaused {
+    function respondToDispute(OrderParams calldata params, bytes32 evidence) external nonReentrant {
         bytes32 orderHash = _orderHash(params);
         _requireStatus(orderHash, Status.Disputed);
         // Either party may call; the module refuses the filer, so only the other one gets through.
@@ -332,7 +333,7 @@ contract AdManager is EscrowBase, IAdManager {
     }
 
     /// @inheritdoc IAdManager
-    function finalizeDispute(OrderParams calldata params) external nonReentrant whenNotPaused {
+    function finalizeDispute(OrderParams calldata params) external nonReentrant {
         bytes32 orderHash = _orderHash(params);
         _requireStatus(orderHash, Status.Disputed);
         // D5: the module the order was filed under, whatever is wired now.
@@ -403,8 +404,7 @@ contract AdManager is EscrowBase, IAdManager {
      *      Note the direction: the escrow calls the module and the module never calls back. An
      *      earlier draft gave the module a permissioned write so it could mark the status itself;
      *      it does not need one, because filing has to start here anyway — only this contract can
-     *      hash an order and vouch for its deadline, since a leg stores `{status, pausedAtOpen}`
-     *      and nothing else. So the trust edge runs one way and carries no callback.
+     *      hash an order and vouch for its deadline, which the leg does not store. So the trust edge runs one way and carries no callback.
      */
     function _openDispute(bytes32 orderHash, uint256 peerChainId, bytes32 evidence, uint64 deadline, uint64 buffer)
         internal
@@ -422,12 +422,9 @@ contract AdManager is EscrowBase, IAdManager {
         // would instead leave it `Disputed` with no record, which is an order nobody can finalize.
         // The invariant "Disputed here implies a record there" is what `Dispute.t.sol` asserts over
         // arbitrary call sequences; this ordering is what makes the bad direction unreachable.
-        // c41-J: the module adds every second paused past this snapshot, so passing the order's own
-        // (from the lock, not the filing) makes its floor the primary's `_windowEnd` to the second —
-        // a pause between lock and filing extends the unlock and the dispute alike.
         IDisputeManager m = disputeManager;
         if (address(m) == address(0)) revert Escrow__NoDisputeManager();
-        m.openDispute{value: msg.value}(orderHash, peerChainId, msg.sender, evidence, deadline, buffer, o.pausedAtOpen);
+        m.openDispute{value: msg.value}(orderHash, peerChainId, msg.sender, evidence, deadline, buffer);
         disputeModuleOf[orderHash] = m;
         o.status = Status.Disputed;
     }
@@ -473,13 +470,13 @@ contract AdManager is EscrowBase, IAdManager {
     }
 
     /// @inheritdoc IAdManager
-    function cancelNeverLocked(OrderParams calldata params) external nonReentrant whenNotPaused {
+    function cancelNeverLocked(OrderParams calldata params) external nonReentrant {
         bytes32 orderHash = _orderHash(params);
         _requireStatus(orderHash, Status.None);
         _requireReached(params.deadline);
         // D5: a lock needs `deadline ≥ now + minWindow`, so past the deadline none can follow this.
         if (peerEscrow[params.orderChainId] == bytes32(0)) revert Escrow__ChainNotSupported(params.orderChainId);
-        _timing(params.orderChainId);
+        timingVersion.current(params.orderChainId);
 
         _orders[orderHash].status = Status.Cancelled;
         _appendLeaf(orderHash, LeafDomain.CANCEL);
@@ -487,7 +484,7 @@ contract AdManager is EscrowBase, IAdManager {
     }
 
     /// @inheritdoc IAdManager
-    function recordSettled(OrderParams calldata params) external nonReentrant whenNotPaused {
+    function recordSettled(OrderParams calldata params) external nonReentrant {
         _recordSettled(_orderHash(params));
     }
 
@@ -495,7 +492,6 @@ contract AdManager is EscrowBase, IAdManager {
     function presentSettled(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof)
         external
         nonReentrant
-        whenNotPaused
     {
         bytes32 orderHash = _orderHash(params);
         _requirePresentable(orderHash);
@@ -576,11 +572,10 @@ contract AdManager is EscrowBase, IAdManager {
         _payOrCredit(p.orderRecipient.toAddressChecked(), ad.token, adAmount);
     }
 
-    /// @dev The last second the co-signed unlock is accepted (D2): the window's end minus the margin.
-    ///      Once claimed the end is the claim's frozen `finalizeAt`, so an admin retiming cannot move
-    ///      the cutoff across it.
+    /// @dev The last second the co-signed unlock is accepted (D2): the window's end minus the margin,
+    ///      both from the order's own timing version, so an admin retiming cannot move it.
     function _presentationCutoff(bytes32 orderHash, OrderParams calldata p) private view returns (uint256) {
-        RouteTiming.Timing storage t = _timing(p.orderChainId);
+        RouteTiming.Timing storage t = _orderTiming(orderHash, p.orderChainId);
         return _windowEnd(orderHash, p.deadline, t.buffer) - t.margin;
     }
 
@@ -611,8 +606,8 @@ contract AdManager is EscrowBase, IAdManager {
         (bool split,) = _registrySplit(p.orderChainId, address(registry));
         if (split) return true;
         // D16: the order's life as a payout ends at the payout's own cutoff — the presentation cutoff
-        // for a cancel, the challenge deadline for a dispute — which the caller passes in. An expiry
-        // past it denied nothing; the bound moves only with a pause, which delays finalize as much.
+        // for a cancel, the challenge deadline for a dispute — which the caller passes in, in plain
+        // time. An expiry past it denied nothing.
         return registry.anySlotExpiredWithin(p.adSettlementSigner, _lockedAt(orderHash), uint64(until));
     }
 
@@ -651,9 +646,9 @@ contract AdManager is EscrowBase, IAdManager {
     {
         if (_statusOf(orderHash) != status) return 0;
         if (status == Status.Claimed) {
-            end = _claimedWindowEnd(orderHash);
+            end = claims[orderHash].finalizeAt;
             if (_coSignDenied(params, orderHash, _presentationCutoff(orderHash, params))) {
-                end += _evidenceGrace(params.orderChainId);
+                end += _evidenceGrace(orderHash, params.orderChainId);
             }
         } else {
             (IDisputeManager m, Dispute.Outcome outcome,,) = _disputeOf(orderHash);
@@ -671,27 +666,36 @@ contract AdManager is EscrowBase, IAdManager {
     {
         end = m.effectiveChallengeDeadline(orderHash);
         if (outcome == Dispute.Outcome.MakerForfeit) return end;
-        if (_coSignDenied(params, orderHash, end)) end += _evidenceGrace(params.orderChainId);
+        if (_coSignDenied(params, orderHash, end)) end += _evidenceGrace(orderHash, params.orderChainId);
     }
 
-    /// @dev The module the order was filed under (D5) and its verdict, read at this escrow's pause clock.
+    /// @dev The module the order was filed under (D5) and its verdict.
     function _disputeOf(bytes32 orderHash)
         private
         view
         returns (IDisputeManager m, Dispute.Outcome outcome, bool windowOver, address initiator)
     {
         m = disputeModuleOf[orderHash];
-        (outcome, windowOver, initiator) = m.outcomeOf(orderHash, pausedSeconds);
+        (outcome, windowOver, initiator) = m.outcomeOf(orderHash);
     }
 
     /// @dev How long a denied order's cancel waits past its window: the order chain's anchor delay
-    ///      (the floor before a SETTLED root from there is usable here) plus the route's buffer (the
-    ///      allowance the route already gives a presenter for anchor cadence and submission). With no
-    ///      anchor wired there is no evidence path either; the buffer alone then bounds the wait.
-    function _evidenceGrace(uint256 orderChainId) private view returns (uint256) {
+    ///      (the floor before a SETTLED root from there is usable here) plus the order's buffer (the
+    ///      allowance the route gave a presenter for anchor cadence and submission). The delay is the
+    ///      larger of the one at the lock and the live one: raising it is the response to a suspected
+    ///      forged anchor or an anchoring outage, so it lengthens every pending grace, and lowering it
+    ///      shortens none. With no anchor wired the delay term is 0 and the buffer alone bounds the wait.
+    function _evidenceGrace(bytes32 orderHash, uint256 orderChainId) private view returns (uint256) {
+        uint256 delay = _anchorDelayNow(orderChainId);
+        uint256 atLock = _orders[orderHash].anchorDelay;
+        if (atLock > delay) delay = atLock;
+        return delay + _orderTiming(orderHash, orderChainId).buffer;
+    }
+
+    /// @dev The order chain's live anchor delay; 0 with no anchor wired.
+    function _anchorDelayNow(uint256 orderChainId) private view returns (uint256) {
         IRootAnchor anchor = rootAnchor;
-        uint256 delay = address(anchor) == address(0) ? 0 : anchor.anchorDelay(orderChainId);
-        return delay + _timing(orderChainId).buffer;
+        return address(anchor) == address(0) ? 0 : anchor.anchorDelay(orderChainId);
     }
 
     /// @dev Load an ad and assert `maker` owns it.

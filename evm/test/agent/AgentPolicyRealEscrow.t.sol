@@ -19,6 +19,7 @@ import {MockVerifier} from "../mocks/MockVerifier.sol";
 import {MockKeyRegistry} from "../mocks/MockKeyRegistry.sol";
 import {MockRootVerifier} from "../mocks/MockRootVerifier.sol";
 import {AgentPolicyBase} from "./AgentPolicyBase.t.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 /// C-26: the agent module against the real `AdManager`, not the stand-in. The account is the ad's
 /// maker, the agent's UserOp passes the module and then every check the escrow makes of a lock.
@@ -55,7 +56,7 @@ contract AgentPolicyRealEscrowTest is AgentPolicyBase {
         merkleManager.setManager(address(adManager), true);
         adManager.setKeyRegistry(keys);
         adManager.setRootVerifier(ORDER_CHAIN_ID, address(new MockRootVerifier(true)));
-        adManager.setRouteTiming(ORDER_CHAIN_ID, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        adManager.setRouteTiming(ORDER_CHAIN_ID, RouteTiming.Timing(0, 30 minutes, 0, 0));
         adManager.setPeerEscrow(ORDER_CHAIN_ID, _b32(orderPortal));
         adToken = new ERC20Mock();
         adManager.setTokenRoute(address(adToken), ORDER_CHAIN_ID, _b32(orderToken));
@@ -88,7 +89,11 @@ contract AgentPolicyRealEscrowTest is AgentPolicyBase {
         IAdManager.OrderParams memory p = _realOrder(100_000, 1);
         _realOp(abi.encodeCall(IAdManager.lockForOrder, (p))).execUserOps();
 
-        assertEq(uint8(adManager.orders(_hashOf(p))), uint8(IEscrow.Status.Open), "the order is open on the escrow");
+        assertEq(
+            uint8(statusOf(address(adManager), _hashOf(p))),
+            uint8(IEscrow.Status.Open),
+            "the order is open on the escrow"
+        );
         assertEq(adManager.availableLiquidity(REAL_AD), AD_FUNDS - 100_000, "the ad's liquidity is locked");
         assertEq(merkleManager.getWidth(), 1, "the lock appended its leaf");
         assertEq(

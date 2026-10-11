@@ -21,6 +21,7 @@ import {MockKeyRegistry} from "./mocks/MockKeyRegistry.sol";
 import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 /*//////////////////////////////////////////////////////////////
        2.3g — the escrow/module correspondence, over sequences
@@ -119,7 +120,7 @@ contract DisputeInvariantTest is Test {
         vm.startPrank(admin);
         merkleManager.setManager(address(adManager), true);
         adManager.setRootVerifier(orderChainId, address(new MockRootVerifier(true)));
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 0));
         adManager.setKeyRegistry(keyRegistry);
         adManager.setPeerEscrow(orderChainId, bytes32(uint256(uint160(orderPortal))));
         adManager.setDisputeManager(IDisputeManager(address(dm)));
@@ -255,7 +256,7 @@ contract DisputeInvariantTest is Test {
         DisputeManager m = _moduleOf(i);
         onOldModule = address(m) != address(adManager.disputeManager());
         _warpTo(m.effectiveChallengeDeadline(hashes[i]));
-        (Dispute.Outcome o,,) = m.outcomeOf(hashes[i], adManager.pausedSeconds());
+        (Dispute.Outcome o,,) = m.outcomeOf(hashes[i]);
         adManager.finalizeDispute(orders[i]);
         outcome = uint8(o == Dispute.Outcome.None ? Dispute.Outcome.MutualRefund : o);
     }
@@ -325,7 +326,7 @@ contract DisputeInvariantTest is Test {
     /// Evidence: the order chain's SETTLED leaf. Beats any dispute, at any time.
     function handlerPresent(uint256 pick) external returns (bool wasDisputed) {
         uint256 i = _pick(pick, _live());
-        wasDisputed = adManager.orders(hashes[i]) == IEscrow.Status.Disputed;
+        wasDisputed = statusOf(address(adManager), hashes[i]) == IEscrow.Status.Disputed;
         adManager.presentSettled(orders[i], EVIDENCE_ROOT, hex"");
     }
 
@@ -337,7 +338,7 @@ contract DisputeInvariantTest is Test {
         if (i == type(uint256).max) {
             i = orders.length < MAX_ORDERS ? _lockOrder(pick) : _lockTargeted(pick, SLOT_UNLOCK);
         }
-        wasDisputed = adManager.orders(hashes[i]) == IEscrow.Status.Disputed;
+        wasDisputed = statusOf(address(adManager), hashes[i]) == IEscrow.Status.Disputed;
         vm.prank(bridger);
         adManager.unlock(orders[i], _nullifier(hashes[i]), bytes32(uint256(1)), hex"", hex"");
     }
@@ -357,7 +358,7 @@ contract DisputeInvariantTest is Test {
     }
 
     /// Pause, let time pass, unpause. One step, so a campaign is never left frozen for the rest of
-    /// its run, and every window after it has to absorb the paused seconds.
+    /// its run. A pause stops entries only, so every window must hold through it unchanged.
     function handlerPauseFor(uint32 secs) external {
         vm.prank(admin);
         adManager.pause();
@@ -387,7 +388,7 @@ contract DisputeInvariantTest is Test {
         require(n > 0, "none");
         for (uint256 k = 0; k < n; k++) {
             uint256 i = (pick % n + k) % n;
-            if (mask & _mask(adManager.orders(hashes[i])) != 0) return i;
+            if (mask & _mask(statusOf(address(adManager), hashes[i])) != 0) return i;
         }
         revert("no order in that state");
     }
@@ -397,7 +398,7 @@ contract DisputeInvariantTest is Test {
         uint256 n = orders.length;
         for (uint256 k = 0; k < n; k++) {
             uint256 i = (pick % n + k) % n;
-            if (_live() & _mask(adManager.orders(hashes[i])) == 0) continue;
+            if (_live() & _mask(statusOf(address(adManager), hashes[i])) == 0) continue;
             if (block.timestamp <= orders[i].deadline + 30 minutes) return i;
         }
         return type(uint256).max;
@@ -405,7 +406,7 @@ contract DisputeInvariantTest is Test {
 
     function _hasAny(uint256 mask) internal view returns (bool) {
         for (uint256 i = 0; i < hashes.length; i++) {
-            if (mask & _mask(adManager.orders(hashes[i])) != 0) return true;
+            if (mask & _mask(statusOf(address(adManager), hashes[i])) != 0) return true;
         }
         return false;
     }
@@ -467,7 +468,7 @@ contract DisputeInvariantTest is Test {
     function invariant_disputedIffModuleHasARecord() public view {
         for (uint256 i = 0; i < hashes.length; i++) {
             bytes32 h = hashes[i];
-            bool disputed = adManager.orders(h) == IEscrow.Status.Disputed;
+            bool disputed = statusOf(address(adManager), h) == IEscrow.Status.Disputed;
             assertEq(disputed, _anyRecord(h), "escrow and modules disagree");
             // C-11: and the record is on the module the order was filed under, whatever is wired now.
             if (disputed) assertTrue(_moduleOf(i).isDisputed(h), "the record is not on the order's own module");
@@ -482,7 +483,7 @@ contract DisputeInvariantTest is Test {
             DisputeManager m = modules[k];
             uint256 owed = m.claimable(maker) + m.claimable(recipient) + m.claimable(feePool);
             for (uint256 i = 0; i < hashes.length; i++) {
-                (, uint128 bond,,,,,,,) = m.disputes(hashes[i]);
+                (, uint128 bond,,,,,,) = m.disputes(hashes[i]);
                 owed += bond;
             }
             assertEq(wNative.balanceOf(address(m)), owed, "a module holds other than its bonds and credits");
@@ -502,7 +503,7 @@ contract DisputeInvariantTest is Test {
     function invariant_noTerminalOrderKeepsItsDispute() public view {
         for (uint256 i = 0; i < hashes.length; i++) {
             bytes32 h = hashes[i];
-            IEscrow.Status st = adManager.orders(h);
+            IEscrow.Status st = statusOf(address(adManager), h);
             bool terminal =
                 st == IEscrow.Status.Filled || st == IEscrow.Status.Cancelled || st == IEscrow.Status.Resolved;
             if (terminal) assertFalse(_anyRecord(h), "terminal order still holds a dispute");
@@ -515,9 +516,9 @@ contract DisputeInvariantTest is Test {
     function invariant_noDisputeFinalizesBeforeTheDeadline() public view {
         for (uint256 i = 0; i < hashes.length; i++) {
             bytes32 h = hashes[i];
-            if (adManager.orders(h) != IEscrow.Status.Disputed) continue;
+            if (statusOf(address(adManager), h) != IEscrow.Status.Disputed) continue;
             DisputeManager m = _moduleOf(i);
-            (,,,,,,, uint64 orderDeadline, uint64 buffer) = m.disputes(h);
+            (,,,,,, uint64 orderDeadline, uint64 buffer) = m.disputes(h);
             assertGe(
                 m.effectiveChallengeDeadline(h),
                 uint256(orderDeadline) + buffer,
@@ -531,7 +532,7 @@ contract DisputeInvariantTest is Test {
     function invariant_onlyLiveOrdersHoldTheirLock() public view {
         uint256 live;
         for (uint256 i = 0; i < hashes.length; i++) {
-            if (_live() & _mask(adManager.orders(hashes[i])) != 0) live++;
+            if (_live() & _mask(statusOf(address(adManager), hashes[i])) != 0) live++;
         }
         (,,,,,,,, uint256 locked) = adManager.ads("inv");
         assertEq(locked, live * LOCK, "locked liquidity does not match the live orders");

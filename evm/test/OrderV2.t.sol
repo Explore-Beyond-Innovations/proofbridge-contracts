@@ -13,6 +13,7 @@ import {OrderPortal} from "src/OrderPortal.sol";
 import {OrderHash} from "src/libraries/OrderHash.sol";
 import {RootVerifierRegistry} from "src/libraries/RootVerifierRegistry.sol";
 import {Slot0RootVerifier} from "./mocks/Slot0RootVerifier.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 // 2.3b on the AdManager unlock path: the envelope's slot 0 is adSettlementSigner (the split case,
 // custody != settlement identity, is the only shape where a wrong slot shows), deadline, widths.
@@ -51,7 +52,7 @@ contract AdManagerOrderV2Test is AdManagerTest {
         assertTrue(p.adSettlementSigner != p.adCreator);
         _module(SIGNER);
         adManager.unlock(p, TestField.fe("S1"), ROOT, hex"", hex"");
-        assertEq(uint256(adManager.orders(adManager.hashOrderPublic(p))), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(adManager), adManager.hashOrderPublic(p))), uint256(IEscrow.Status.Filled));
     }
 
     function test_splitCase_slot0IsNotTheCustodyAddress() public {
@@ -119,7 +120,7 @@ contract OrderPortalOrderV2Test is OrderPortalTest {
         assertTrue(p.adSettlementSigner != p.adCreator);
         _module(SIGNER);
         portal.unlock(p, TestField.fe("S1"), ROOT, hex"", hex"");
-        assertEq(uint256(portal.orders(portal.hashOrderPublic(p))), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(portal), portal.hashOrderPublic(p))), uint256(IEscrow.Status.Filled));
     }
 
     function test_splitCase_slot0IsNotTheCustodyAddress() public {

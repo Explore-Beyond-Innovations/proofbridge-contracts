@@ -7,6 +7,7 @@ import {Dispute} from "../src/libraries/Dispute.sol";
 import {IEscrow} from "../src/interfaces/IEscrow.sol";
 import {IAdManager} from "../src/interfaces/IAdManager.sol";
 import {RouteTiming} from "../src/libraries/RouteTiming.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 /// T-24 (2.3j): the EVM half of the differential harness. Interprets the
 /// shared scenario fixture — the SAME steps the Soroban driver interprets —
@@ -63,7 +64,7 @@ contract DisputeDifferentialTest is DisputeTest {
         // computed here before any warp relies on it.
         bufferS = uint64(vm.parseJsonUint(v, ".header.bufferS"));
         vm.prank(admin);
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, bufferS, 0, 1 days, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, bufferS, 0, 0));
 
         uint256 n = vm.parseJsonUint(v, ".counts.scenarios");
         for (uint256 i = 0; i < n; i++) {
@@ -180,7 +181,7 @@ contract DisputeDifferentialTest is DisputeTest {
             string.concat(r.name, ": disputed")
         );
         assertEq(
-            uint8(adManager.orders(r.h)),
+            uint8(statusOf(address(adManager), r.h)),
             _status(vm.parseJsonString(v, string.concat(r.at, ".expect.escrowStatus"))),
             string.concat(r.name, ": escrow status")
         );

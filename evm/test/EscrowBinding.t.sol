@@ -139,7 +139,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         vm.startPrank(admin);
         bare.setPeerEscrow(orderChainId, _b32(orderPortal));
         bare.setTokenRoute(address(adToken), orderChainId, _b32(orderToken));
-        bare.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        bare.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 0));
         vm.stopPrank();
 
         vm.startPrank(maker);

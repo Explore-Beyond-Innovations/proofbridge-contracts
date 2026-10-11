@@ -133,7 +133,7 @@ contract EscrowDoorGas is Test {
         adManager.setPeerEscrow(ORDER_CHAIN, _b32(address(portal)));
         adManager.setTokenRoute(address(adToken), ORDER_CHAIN, _b32(address(orderToken)));
         adManager.setRootVerifier(ORDER_CHAIN, address(new MockRootVerifier(true)));
-        adManager.setRouteTiming(ORDER_CHAIN, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        adManager.setRouteTiming(ORDER_CHAIN, RouteTiming.Timing(0, 30 minutes, 0, 0));
         adManager.setRootAnchor(IRootAnchor(address(anchor)));
         adManager.setDisputeManager(IDisputeManager(address(dm)));
         dm.setEscrow(address(adManager), true);
@@ -144,7 +144,7 @@ contract EscrowDoorGas is Test {
         portal.setPeerEscrow(AD_CHAIN, _b32(address(adManager)));
         portal.setTokenRoute(address(orderToken), AD_CHAIN, _b32(address(adToken)));
         portal.setRootVerifier(AD_CHAIN, address(new MockRootVerifier(true)));
-        portal.setRouteTiming(AD_CHAIN, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        portal.setRouteTiming(AD_CHAIN, RouteTiming.Timing(0, 30 minutes, 0, 0));
         portal.setRootAnchor(IRootAnchor(address(anchor)));
         vm.stopPrank();
 

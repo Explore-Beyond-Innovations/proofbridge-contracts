@@ -9,6 +9,7 @@ import {IDisputeManager} from "src/interfaces/IDisputeManager.sol";
 import {Dispute} from "src/libraries/Dispute.sol";
 import {TestField} from "test/utils/TestField.sol";
 import {DisputeTest} from "./Dispute.t.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 /// The logic behind a proxy wallet: receiving costs a delegatecall plus storage writes.
 contract WalletImpl {
@@ -107,7 +108,7 @@ contract StateProbe {
 
     receive() external payable {
         hooked = true;
-        statusSeen = uint8(escrow.orders(orderHash));
+        statusSeen = uint8(statusOf(address(escrow), orderHash));
         disputedSeen = dm.isDisputed(orderHash);
     }
 }

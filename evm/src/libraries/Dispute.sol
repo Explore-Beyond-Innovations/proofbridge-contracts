@@ -37,10 +37,10 @@ library Dispute {
     }
 
     /// @notice Per-peer-chain dispute parameters, admin-set and validated at the write.
-    /// @dev Separate from `RouteTiming` on purpose (D1): that five-tuple is read by the deploy CLI,
+    /// @dev Separate from `RouteTiming` on purpose (D1): that timing tuple is read by the deploy CLI,
     ///      the relayer and the manifest, and widening it would ripple through all three.
     struct Params {
-        /// @dev How long after filing the arbiter may still rule. Pause-aware at read time.
+        /// @dev How long after filing the arbiter may still rule.
         uint64 challengePeriod;
         /// @dev The route's flat bond, in wrapped native. The same for every order on the route.
         uint128 bondFloor;
@@ -50,15 +50,8 @@ library Dispute {
     struct Record {
         address initiator;
         uint128 bond;
-        /// @dev Unadjusted. Every read goes through `effectiveChallengeDeadline`, which applies the
-        ///      escrow's paused seconds once; storing an already-adjusted value here would let a
-        ///      later read adjust it twice.
+        /// @dev The one deadline, in plain time: the filing's, replaced by the ruling's when ruled.
         uint64 challengeDeadline;
-        /// @dev The *escrow's* paused-seconds counter as of the order's lock (D10, c41-J: the
-        ///      filing carries the order's own snapshot, so the deadline counts every pause the
-        ///      unlock's cutoff counts). The escrow's, not this contract's: a pause is what stops
-        ///      someone presenting, and it is the escrow that gates presentation.
-        uint64 pausedAtOpen;
         bytes32 initiatorEvidence;
         bytes32 responderEvidence;
         Outcome ruling;
@@ -77,7 +70,7 @@ library Dispute {
     /// @notice A challenge period shorter than this leaves no room to gather evidence.
     uint64 internal constant MIN_CHALLENGE_PERIOD = 1 hours;
 
-    /// @notice C-36: a longer challenge period would let a dispute outlive the follower's backstop.
+    /// @notice C-36: bounds how long a dispute can delay the other party's exit.
     uint64 internal constant MAX_CHALLENGE_PERIOD = 7 days;
 
     /*//////////////////////////////////////////////////////////////

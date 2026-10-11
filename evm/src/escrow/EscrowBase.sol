@@ -40,10 +40,10 @@ import {TwoStepAdmin} from "../libraries/TwoStepAdmin.sol";
  *          └──cancelNeverLocked (primary only)──▶ Cancelled (+ CANCEL leaf)
  *
  *      `Filled` and `Cancelled` are terminal. Nothing terminal happens on a clock alone: a clock only
- *      opens a window, and evidence inside the window always wins over the refund after it — a pause
- *      included: a pause stops the clocks (`pausedSeconds`, measured from the leg's lock/create or
- *      from a backstop claim), so a window ends later by exactly the pause, and a window that had
- *      already closed stays closed. The
+ *      opens a window, and evidence inside the window always wins over the refund after it. A pause
+ *      stops entries only (`createAd`, `fundAd`, `lockForOrder`, `createOrder`); every exit stays
+ *      open, so no window ever needs stretching and every clock is plain time. Each order keeps the
+ *      route-timing version it opened under, so a retiming never moves a live order. The
  *      SETTLED leaf is its own transaction on both chains so the relayer batches one shape,
  *      permissionless and single-shot. (Historically this said Soroban's per-tx budget forced it
  *      there; that was measured against the SDK harness default of 100M, not the network's 400M.
@@ -54,7 +54,7 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     using SafeNativeToken for IwNativeToken;
     using AddressCast for address;
     using AddressCast for bytes32;
-    using RouteTiming for mapping(uint256 => RouteTiming.Timing);
+    using RouteTiming for mapping(uint256 => uint32);
 
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
@@ -80,7 +80,7 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     /// @notice Token routes: local token → peer chain id → the peer chain's token id.
     mapping(address localToken => mapping(uint256 peerChainId => bytes32 peerToken)) public tokenRoute;
 
-    /// @notice The order's leg by EIP-712 hash: status + the pause counter when it opened.
+    /// @notice The order's leg by EIP-712 hash: status, open time, and the versions it is judged by.
     mapping(bytes32 orderHash => Order) internal _orders;
 
     /// @notice Consumed nullifiers; one settlement proof per nullifier, protocol-wide.
@@ -92,8 +92,11 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     /// @notice Payouts awaiting `claim`: recipient → token → amount.
     mapping(address recipient => mapping(address token => uint256)) public claimable;
 
-    /// @notice Termination clocks per peer chain (2.3e D6). Unset (`buffer == 0`) fails closed.
-    mapping(uint256 chainId => RouteTiming.Timing) public routeTiming;
+    /// @inheritdoc IEscrow
+    mapping(uint256 chainId => uint32) public timingVersion;
+
+    /// @inheritdoc IEscrow
+    mapping(uint256 chainId => mapping(uint32 version => RouteTiming.Timing)) public routeTimingAt;
 
     /// @notice The notary the evidence paths read (2.3e D7). Unset fails closed; settlement never reads it.
     IRootAnchor public rootAnchor;
@@ -103,13 +106,6 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
 
     /// @notice Whether the order's SETTLED leaf is in the MMR (`recordSettled`, once per fill).
     mapping(bytes32 orderHash => bool) public settledRecorded;
-
-    /// @notice The pause clock: a pause freezes evidence, so it must not run the windows. Every
-    ///         presentation window is measured in unpaused seconds — `pausedSeconds` accumulates at
-    ///         each unpause, each leg snapshots it when it opens, and a window's real end moves by
-    ///         exactly the pause time since that snapshot.
-    uint64 public pausedSeconds;
-    uint64 private _pausedAt;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -130,14 +126,13 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
                                  ADMIN
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Stops entries only; every exit stays open (see the contract header).
     function pause() external onlyAdmin {
         _pause();
-        _pausedAt = uint64(block.timestamp);
     }
 
     function unpause() external onlyAdmin {
         _unpause();
-        pausedSeconds += uint64(block.timestamp) - _pausedAt;
     }
 
     /// @inheritdoc IEscrow
@@ -168,8 +163,10 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     /// @inheritdoc IEscrow
     function setRouteTiming(uint256 chainId, RouteTiming.Timing calldata timing) external onlyAdmin {
         RouteTiming.validate(timing);
-        routeTiming[chainId] = timing;
-        emit RouteTimingSet(chainId, timing);
+        uint32 v = timingVersion[chainId] + 1;
+        timingVersion[chainId] = v;
+        routeTimingAt[chainId][v] = timing;
+        emit RouteTimingSet(chainId, v, timing);
     }
 
     /// @inheritdoc IEscrow
@@ -185,12 +182,8 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
 
     /**
      * @inheritdoc IEscrow
-     * @dev Deliberately not `whenNotPaused`, and the only entry point here that is not.
-     *
-     *      A pause is the mass-incident brake: it stops orders moving while something is wrong. This
-     *      call moves no order state and creates no credit — it hands an already-credited balance to
-     *      the account that already owns it. Freezing it does not contain an incident, it only holds
-     *      honest users' money hostage while one is investigated (2.3h D1, 03 F9).
+     * @dev Not `whenNotPaused`, like every exit: it hands an already-credited balance to the
+     *      account that already owns it, so freezing it would contain nothing (2.3h D1).
      *
      *      `nonReentrant` stays, because this one does move funds.
      */
@@ -254,11 +247,14 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
                               ORDER LEDGER
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev `None → Open`, stamping the pause counter the leg's window is measured from; a second
-    ///      lock/create of the same hash reverts.
-    function _openOrder(bytes32 orderHash) internal {
-        if (_orders[orderHash].status != Status.None) revert Escrow__OrderExists(orderHash);
-        _orders[orderHash] = Order(Status.Open, pausedSeconds, uint64(block.timestamp), 0);
+    /// @dev `None → Open`, stamping the open time and the route-timing version every later window
+    ///      of this leg reads; a second lock/create of the same hash reverts.
+    function _openOrder(bytes32 orderHash, uint32 version) internal returns (Order storage o) {
+        o = _orders[orderHash];
+        if (o.status != Status.None) revert Escrow__OrderExists(orderHash);
+        o.status = Status.Open;
+        o.lockedAt = uint64(block.timestamp);
+        o.timingVersion = version;
     }
 
     /// @dev Append this leg's leaf to the chain's MMR under `domain` (a `LeafDomain` constant).
@@ -279,16 +275,18 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
         inFlightOf[account]--;
     }
 
-    /// @dev The route's clocks, or `RouteTiming__NotSet` (the `NoRootVerifier` posture).
-    function _timing(uint256 chainId) internal view returns (RouteTiming.Timing storage) {
-        return routeTiming.load(chainId);
+    /// @dev The order's own clocks: the version it opened under, never the live one.
+    function _orderTiming(bytes32 orderHash, uint256 chainId) internal view returns (RouteTiming.Timing storage) {
+        return routeTimingAt[chainId][_orders[orderHash].timingVersion];
     }
 
-    /// @dev `now + minWindow ≤ deadline ≤ now + MAX_ORDER_WINDOW` at every lock/create. The floor
-    ///      (2.3e D5) makes `cancelNeverLocked`'s "no lock can follow the deadline" hold; the ceiling
-    ///      (#453) keeps the order inside the key registry's memory of a dead slot.
-    function _requireMinWindow(uint256 chainId, uint256 deadline) internal view {
-        uint256 minAllowed = block.timestamp + _timing(chainId).minWindow;
+    /// @dev `now + minWindow ≤ deadline ≤ now + MAX_ORDER_WINDOW` at every lock/create, against the
+    ///      route's current version, which it returns for the new leg to keep. Fails closed when the
+    ///      route has no timing. The floor (2.3e D5) makes `cancelNeverLocked`'s "no lock can follow
+    ///      the deadline" hold; the ceiling (#453) bounds an order's life.
+    function _requireMinWindow(uint256 chainId, uint256 deadline) internal view returns (uint32 v) {
+        v = timingVersion.current(chainId);
+        uint256 minAllowed = block.timestamp + routeTimingAt[chainId][v].minWindow;
         if (deadline < minAllowed) revert Escrow__DeadlineTooSoon(deadline, minAllowed);
         uint256 maxAllowed = block.timestamp + RouteTiming.MAX_ORDER_WINDOW;
         if (deadline > maxAllowed) revert Escrow__DeadlineTooFar(deadline, maxAllowed);
@@ -401,27 +399,19 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     }
 
     /// @dev Open a presentation window on an `Open` leg; only a `finalize*` or evidence closes it.
-    function _openClaim(bytes32 orderHash, Termination.ClaimEntry entry, uint256 finalizeAt) internal {
-        claims[orderHash] = Termination.Claim(uint64(block.timestamp), uint64(finalizeAt), pausedSeconds, entry);
+    function _openClaim(bytes32 orderHash, uint256 finalizeAt) internal {
+        claims[orderHash] = Termination.Claim(uint64(block.timestamp), uint64(finalizeAt));
         _orders[orderHash].status = Status.Claimed;
-        emit ClaimOpened(orderHash, entry, uint64(finalizeAt));
+        emit ClaimOpened(orderHash, uint64(finalizeAt));
     }
 
-    /**
-     * @dev When the leg's presentation window ends, in real time. Once claimed: the claim's
-     *      `finalizeAt` plus every second the escrow has been paused since the claim opened (the
-     *      record's counter snapshot makes this exact across any number of pauses). Before a claim,
-     *      the primary's deadline-anchored `deadline + buffer` plus every second paused since the leg
-     *      was locked (its own snapshot; a pause before the deadline counts too — it froze both
-     *      unlocks, and more time for evidence is the safe direction). A pause stops the clocks and
-     *      never reopens a closed window: a pause after the end adds its length, but the clock moved
-     *      on by the same length. One number serves both sides of the race: the unlock/presentation
-     *      cutoff is this minus the margin, the finalize needs this reached.
-     */
+    /// @dev When the leg's presentation window ends, in plain time: the claim's `finalizeAt` once
+    ///      claimed, else the deadline-anchored `deadline + buffer` (the order's own buffer). One
+    ///      number serves both sides of the race: the unlock cutoff is this minus the margin, the
+    ///      finalize needs this reached.
     function _windowEnd(bytes32 orderHash, uint256 deadline, uint64 buffer) internal view returns (uint256) {
-        Order storage o = _orders[orderHash];
-        if (o.status == Status.Claimed) return _claimedWindowEnd(orderHash);
-        return deadline + buffer + (pausedSeconds - o.pausedAtOpen);
+        if (_orders[orderHash].status == Status.Claimed) return claims[orderHash].finalizeAt;
+        return deadline + buffer;
     }
 
     /// @dev When the leg opened on this chain (0 for a leg that never did).
@@ -434,18 +424,10 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
         return _orders[orderHash].status;
     }
 
-    /// @dev The claimed arm of {_windowEnd}, for callers that have already asserted `Claimed`.
-    function _claimedWindowEnd(bytes32 orderHash) internal view returns (uint256) {
-        Termination.Claim storage c = claims[orderHash];
-        return uint256(c.finalizeAt) + (pausedSeconds - c.pausedAtOpen);
-    }
-
     /// @dev The leg must be `Claimed` and its window over; returns nothing, the caller then `_cancel`s.
-    ///      No route read: `validate` rejects a zero buffer and nothing ever clears `routeTiming`, so a
-    ///      claim record is itself proof the route's clocks were set.
     function _requireFinalizable(bytes32 orderHash) internal view {
         if (_orders[orderHash].status != Status.Claimed) revert Escrow__NotClaimed(orderHash);
-        _requireReached(_claimedWindowEnd(orderHash));
+        _requireReached(claims[orderHash].finalizeAt);
     }
 
     /// @dev `→ Cancelled`: close the window, count out. The leaf and the funds are the caller's.
@@ -461,13 +443,9 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IEscrow
-    function orders(bytes32 orderHash) external view returns (Status) {
-        return _orders[orderHash].status;
-    }
-
-    /// @inheritdoc IEscrow
-    function orderPausedAtOpen(bytes32 orderHash) external view returns (uint64) {
-        return _orders[orderHash].pausedAtOpen;
+    function orders(bytes32 orderHash) external view returns (Status, uint32) {
+        Order storage o = _orders[orderHash];
+        return (o.status, o.timingVersion);
     }
 
     /// @inheritdoc IEscrow

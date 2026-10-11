@@ -7,7 +7,6 @@ import {IwNativeToken} from "../wNativeToken.sol";
 import {IRootAnchor} from "./IRootAnchor.sol";
 import {IDisputeManager} from "./IDisputeManager.sol";
 import {RouteTiming} from "../libraries/RouteTiming.sol";
-import {Termination} from "../libraries/Termination.sol";
 
 /**
  * @title IEscrow — what both escrows (AdManager, OrderPortal) share.
@@ -36,16 +35,19 @@ interface IEscrow {
         Resolved
     }
 
-    /// @notice The order's leg on this chain, one slot: its status, the escrow's paused-seconds
-    ///         counter when the leg opened (a pause stops the window's clock, see `pausedSeconds`),
-    ///         when it opened (#422: a registry kill since then is a denied payout), and on the ad
-    ///         chain the key-registry epoch it was locked under (#465: the denied rule reads that
-    ///         registry, so a later migration cannot erase a kill; 0 on the order portal).
+    /// @notice The order's leg on this chain, one slot: its status; when it opened (#422: a registry
+    ///         kill since then is a denied payout); on the ad chain the key-registry epoch it was
+    ///         locked under (#465: the denied rule reads that registry, so a later migration cannot
+    ///         erase a kill; 0 on the order portal); the route-timing version every window of the leg
+    ///         reads (a retiming moves no live order); and on the ad chain the order chain's anchor
+    ///         delay at the lock (the denied grace reads the larger of it and the live delay; 0 on the
+    ///         order portal).
     struct Order {
         Status status;
-        uint64 pausedAtOpen;
         uint64 lockedAt;
         uint32 registryEpoch;
+        uint32 timingVersion;
+        uint32 anchorDelay;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -65,11 +67,12 @@ interface IEscrow {
     /// @notice The leg's SETTLED leaf was appended (`recordSettled`).
     event SettledRecorded(bytes32 indexed orderHash);
     /// @notice A presentation window opened on this leg; it may be finalized at `finalizeAt`.
-    event ClaimOpened(bytes32 indexed orderHash, Termination.ClaimEntry entry, uint64 finalizeAt);
+    event ClaimOpened(bytes32 indexed orderHash, uint64 finalizeAt);
     /// @notice The leg reached `Cancelled`; `byEvidence` is true for the follower's `refundByCancel`
     ///         (a proof of the primary's cancel leaf), false for every clock-driven finalize.
     event OrderCancelled(bytes32 indexed orderHash, bool byEvidence);
-    event RouteTimingSet(uint256 indexed chainId, RouteTiming.Timing timing);
+    /// @notice Route timing version `version` was written for `chainId`; new legs read it from now on.
+    event RouteTimingSet(uint256 indexed chainId, uint32 indexed version, RouteTiming.Timing timing);
     event RootAnchorSet(address indexed rootAnchor);
     /// @notice A payout could not be pushed and was credited for `claim`.
     event PayoutCredited(address indexed recipient, address indexed token, uint256 amount);
@@ -128,7 +131,7 @@ interface IEscrow {
     error Escrow__NoDisputeManager();
     /// @notice The dispute has not reached a terminal state yet.
     error Escrow__DisputeNotResolved(bytes32 orderHash);
-    /// @notice Filing after the primary's window closed (C-10): a dispute must not outlive the backstop.
+    /// @notice Filing after the primary's window closed (C-10).
     error Escrow__DisputeWindowClosed(bytes32 orderHash, uint256 windowEnd);
     /// @notice Native value must equal the amount exactly (C-17).
     error Escrow__NativeAmountMismatch(uint256 sent, uint256 expected);
@@ -139,6 +142,7 @@ interface IEscrow {
                                  ADMIN
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Stop entries (lock and create, ad funding). Exits never pause.
     function pause() external;
     function unpause() external;
     /// @notice Set the peer escrow for a chain (the OrderPortal for an AdManager, and vice versa);
@@ -147,7 +151,8 @@ interface IEscrow {
     function setRootVerifier(uint256 chainId, address verifier) external;
     function setTokenRoute(address localToken, uint256 peerChainId, bytes32 peerToken) external;
     function removeTokenRoute(address localToken, uint256 peerChainId) external;
-    /// @notice Set the termination clocks for a peer chain (validated; 2.3e D6).
+    /// @notice Write a new version of the termination clocks for a peer chain (validated; 2.3e D6).
+    ///         Orders already open keep the version they opened under.
     function setRouteTiming(uint256 chainId, RouteTiming.Timing calldata timing) external;
     /// @notice Set the notary the evidence paths (`presentSettled`, `refundByCancel`) read (2.3e D7).
     function setRootAnchor(IRootAnchor anchor) external;
@@ -171,26 +176,22 @@ interface IEscrow {
     function i_wNativeToken() external view returns (IwNativeToken);
     function peerEscrow(uint256 chainId) external view returns (bytes32);
     function tokenRoute(address localToken, uint256 peerChainId) external view returns (bytes32);
-    function orders(bytes32 orderHash) external view returns (Status);
-    /// @notice The paused-seconds counter when the leg opened; the window's clock starts there.
-    function orderPausedAtOpen(bytes32 orderHash) external view returns (uint64);
+    /// @notice The leg's status and the route-timing version its windows read (0 for no leg).
+    function orders(bytes32 orderHash) external view returns (Status status, uint32 timingVersion);
     function nullifierUsed(bytes32 nullifierHash) external view returns (bool);
     function inFlightOf(bytes32 account) external view returns (uint256);
     function claimable(address recipient, address token) external view returns (uint256);
-    function routeTiming(uint256 chainId)
+    /// @notice The route's current timing version (0 = never set, every timed path fails closed).
+    function timingVersion(uint256 chainId) external view returns (uint32);
+    /// @notice One version of a route's timing; an order's own is `routeTimingAt(chain, orders(h).timingVersion)`.
+    function routeTimingAt(uint256 chainId, uint32 version)
         external
         view
-        returns (uint64 minWindow, uint64 buffer, uint64 margin, uint64 longBackstop, uint64 claimStagger);
+        returns (uint64 minWindow, uint64 buffer, uint64 margin, uint64 claimStagger);
     function rootAnchor() external view returns (IRootAnchor);
-    function claims(bytes32 orderHash)
-        external
-        view
-        returns (uint64 openedAt, uint64 finalizeAt, uint64 pausedAtOpen, Termination.ClaimEntry entry);
+    function claims(bytes32 orderHash) external view returns (uint64 openedAt, uint64 finalizeAt);
     /// @notice Whether the order's SETTLED leaf is in the MMR.
     function settledRecorded(bytes32 orderHash) external view returns (bool);
-    /// @notice The pause clock: seconds the escrow has spent paused. A window's real end moves by
-    ///         the pause time since its leg opened (or since its claim, for a backstop).
-    function pausedSeconds() external view returns (uint64);
     /// @notice BLSKeyRegistry revoke guard: true while the account has a leg open on this escrow.
     function hasOpenPositions(bytes32 account) external view returns (bool);
     function getHistoricalRoot(uint256 index) external view returns (bytes32);

@@ -18,6 +18,7 @@ import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Posei
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 /*//////////////////////////////////////////////////////////////
        C-19 — errors no other test named, each triggered here
@@ -155,7 +156,7 @@ contract AdManagerErrorCoverageTest is AdManagerTest {
         vm.prank(maker);
         vm.expectRevert(IEscrow.Escrow__NoDisputeManager.selector);
         adManager.dispute(p, bytes32("evidence"));
-        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Open));
+        assertEq(uint8(statusOf(address(adManager), h)), uint8(IEscrow.Status.Open));
     }
 
     /// The signed ad-side decimals must match the token's own.

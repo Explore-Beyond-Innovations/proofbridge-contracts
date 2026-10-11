@@ -11,8 +11,6 @@ import {LeafDomain} from "./libraries/LeafDomain.sol";
 import {OrderHash} from "./libraries/OrderHash.sol";
 import {ProofBridgeUtils} from "./libraries/ProofBridgeUtils.sol";
 import {RequestAuth} from "./libraries/RequestAuth.sol";
-import {RouteTiming} from "./libraries/RouteTiming.sol";
-import {Termination} from "./libraries/Termination.sol";
 
 /**
  * @title OrderPortal (Proofbridge)
@@ -20,13 +18,13 @@ import {Termination} from "./libraries/Termination.sol";
  * @custom:security-contact security@proofbridge.xyz
  * @notice The bridger's leg. Bridgers deposit `orderChainToken` against a maker's ad; the maker
  *         unlocks the deposit on this chain with a proof of their lock on the ad chain. This leg is
- *         the termination follower (2.3e): it refunds only against a proof of the ad leg's CANCEL
- *         leaf under an anchored root, never on a clock; the maker's co-signed `unlock` stops
- *         `claimStagger` before the deadline, in every state, so a cancel claim always leaves time
- *         to land it — the package proves the lock, not the outcome; and a far backstop
- *         (`deadline + longBackstop`) opens a window in which only outcome evidence counts (a
- *         settled-leaf proof pays the maker, a cancel-leaf proof refunds the bridger, silence
- *         refunds the bridger), never a bare refund;
+ *         the termination follower (2.3e): it only follows the AdManager. The maker's co-signed
+ *         `unlock` stops `claimStagger` before the deadline, so a cancel claim always leaves time to
+ *         land it — the package proves the lock, not the outcome. After that the leg ends only on an
+ *         anchored proof of one of the ad leg's leaves: SETTLED pays the maker (`presentSettled`),
+ *         CANCEL refunds the bridger (`refundByCancel`), FORFEIT pays the maker
+ *         (`payMakerByForfeit`). Nothing here runs on a clock after the deadline, so nothing can beat
+ *         the leader's decision; while no root is anchored, refunds wait.
  *         `recordSettled` appends the SETTLED leaf after a fill. Everything not specific to
  *         deposits lives in {EscrowBase}.
  */
@@ -54,8 +52,7 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         returns (bytes32 orderHash)
     {
         orderHash = _validateOrder(params);
-        _requireMinWindow(params.adChainId, params.deadline);
-        _openOrder(orderHash);
+        _openOrder(orderHash, _requireMinWindow(params.adChainId, params.deadline));
         _pullFunds(params.orderChainToken.toAddressChecked(), params.amount);
         // The deposit is consumed on the ad side: its leaf carries the AD domain.
         _appendLeaf(orderHash, LeafDomain.AD);
@@ -88,15 +85,14 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         bytes32 targetRoot,
         bytes calldata proof,
         bytes calldata cosigData
-    ) external nonReentrant whenNotPaused {
+    ) external nonReentrant {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
-        // `Open` only: after the deadline the co-signed package says nothing about the ad leg's
-        // outcome, so a backstop window (`Claimed`) never reopens it.
+        // `Open` only: after the deadline the co-signed package says nothing about the ad leg's outcome.
         if (nullifierUsed[nullifierHash]) revert Escrow__NullifierUsed(nullifierHash);
         if (_orders[orderHash].status != Status.Open) revert Escrow__OrderNotOpen(orderHash);
-        // D2: stop `claimStagger` before the deadline so the maker's cancel claim on the ad chain
-        // always leaves the watchtower time to land this leg.
-        _requireNotPast(params.deadline - _timing(params.adChainId).claimStagger);
+        // D2: stop `claimStagger` (the order's own version) before the deadline so the maker's cancel
+        // claim on the ad chain always leaves the watchtower time to land this leg.
+        _requireNotPast(params.deadline - _orderTiming(orderHash, params.adChainId).claimStagger);
         // Gate 2 — root authenticity (the co-signed root); mandatory, reverts NoRootVerifier when unwired.
         _requireRootValid(
             params.adChainId,
@@ -119,7 +115,6 @@ contract OrderPortal is EscrowBase, IOrderPortal {
     function refundByCancel(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof)
         external
         nonReentrant
-        whenNotPaused
     {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
         _requirePresentable(orderHash);
@@ -148,7 +143,6 @@ contract OrderPortal is EscrowBase, IOrderPortal {
     function payMakerByForfeit(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof)
         external
         nonReentrant
-        whenNotPaused
     {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
         _requirePresentable(orderHash);
@@ -162,7 +156,7 @@ contract OrderPortal is EscrowBase, IOrderPortal {
     }
 
     /// @inheritdoc IOrderPortal
-    function recordSettled(OrderParams calldata params) external nonReentrant whenNotPaused {
+    function recordSettled(OrderParams calldata params) external nonReentrant {
         _recordSettled(_hashOrder(params, block.chainid, address(this)));
     }
 
@@ -170,7 +164,6 @@ contract OrderPortal is EscrowBase, IOrderPortal {
     function presentSettled(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof)
         external
         nonReentrant
-        whenNotPaused
     {
         bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
         _requirePresentable(orderHash);
@@ -179,24 +172,6 @@ contract OrderPortal is EscrowBase, IOrderPortal {
 
         _fill(orderHash, params.bridger, true);
         _payMaker(params);
-    }
-
-    /// @inheritdoc IOrderPortal
-    function claimBackstop(OrderParams calldata params) external nonReentrant whenNotPaused {
-        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
-        _requireStatus(orderHash, Status.Open);
-        RouteTiming.Timing storage t = _timing(params.adChainId);
-        _requireReached(params.deadline + t.longBackstop);
-        // Claim-anchored (D1): this clock starts days late; no evidence race straddles it.
-        _openClaim(orderHash, Termination.ClaimEntry.Backstop, block.timestamp + t.buffer);
-    }
-
-    /// @inheritdoc IOrderPortal
-    function finalizeBackstop(OrderParams calldata params) external nonReentrant whenNotPaused {
-        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
-        _requireFinalizable(orderHash);
-        _cancel(orderHash, params.bridger, false);
-        _refundBridger(orderHash, params);
     }
 
     /*//////////////////////////////////////////////////////////////

@@ -110,7 +110,7 @@ contract EscrowConservationInvariantTest is Test {
         vm.startPrank(admin);
         merkleManager.setManager(address(adManager), true);
         adManager.setRootVerifier(orderChainId, address(new MockRootVerifier(true)));
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 0));
         adManager.setKeyRegistry(keyRegistry);
         adManager.setPeerEscrow(orderChainId, bytes32(uint256(uint160(orderPortal))));
         adManager.setDisputeManager(IDisputeManager(address(dm)));
@@ -564,7 +564,7 @@ library OrderHashReader {
 //////////////////////////////////////////////////////////////*/
 
 /// The order chain's escrow over arbitrary sequences: create (ERC20 and native), the maker's unlock,
-/// the three evidence doors (cancel refund, forfeit payout, settled payout), the backstop, claims,
+/// the three evidence doors (cancel refund, forfeit payout, settled payout), claims,
 /// refusing recipients and pauses. What it holds must equal what it owes, exactly: the live orders'
 /// deposits plus every credit. Nothing else ever pays it.
 contract OrderPortalConservationInvariantTest is Test {
@@ -616,7 +616,7 @@ contract OrderPortalConservationInvariantTest is Test {
         vm.startPrank(admin);
         merkleManager.setManager(address(portal), true);
         portal.setRootVerifier(adChainId, address(new MockRootVerifier(true)));
-        portal.setRouteTiming(adChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        portal.setRouteTiming(adChainId, RouteTiming.Timing(0, 30 minutes, 0, 0));
         portal.setPeerEscrow(adChainId, bytes32(uint256(uint160(adManager))));
         portal.setTokenRoute(address(orderToken), adChainId, adToken);
         portal.setTokenRoute(NATIVE, adChainId, adToken);
@@ -680,17 +680,6 @@ contract OrderPortalConservationInvariantTest is Test {
         live[salt] = false;
     }
 
-    /// Nothing arrived: the long backstop refunds the bridger.
-    function handlerBackstop(uint256 pick) external {
-        uint256 salt = _pickLive(pick, false);
-        IOrderPortal.OrderParams memory p = _params(salt);
-        if (block.timestamp < p.deadline + 1 days) vm.warp(p.deadline + 1 days);
-        portal.claimBackstop(p);
-        vm.warp(block.timestamp + 30 minutes);
-        portal.finalizeBackstop(p);
-        live[salt] = false;
-    }
-
     function handlerClaim(bool native, bool toMaker) external {
         address who = toMaker ? address(adRecipient) : bridger;
         portal.claim(who, native ? NATIVE : address(orderToken));
@@ -706,7 +695,7 @@ contract OrderPortalConservationInvariantTest is Test {
     /// refuse before a payout). Leaves the refusing flag as it found it.
     function handlerEveryDoor(bool native) external {
         uint256 base = native ? RESERVED_NATIVE : RESERVED_ERC20;
-        for (uint256 k = 0; k < 5; k++) {
+        for (uint256 k = 0; k < 4; k++) {
             _create(base + k);
         }
         bool wasRefusing = orderToken.refusing();
@@ -719,12 +708,7 @@ contract OrderPortalConservationInvariantTest is Test {
         portal.refundByCancel(_params(base + 1), EVIDENCE_ROOT, hex"");
         portal.payMakerByForfeit(_params(base + 2), EVIDENCE_ROOT, hex"");
         portal.presentSettled(_params(base + 3), EVIDENCE_ROOT, hex"");
-        IOrderPortal.OrderParams memory p = _params(base + 4);
-        if (block.timestamp < p.deadline + 1 days) vm.warp(p.deadline + 1 days);
-        portal.claimBackstop(p);
-        vm.warp(block.timestamp + 30 minutes);
-        portal.finalizeBackstop(p);
-        for (uint256 k = 0; k < 5; k++) {
+        for (uint256 k = 0; k < 4; k++) {
             live[base + k] = false;
         }
     }
@@ -817,7 +801,6 @@ contract OrderPortalConservationInvariantTest is Test {
         assertGt(handler.refunds(), 0, "no cancel refund landed");
         assertGt(handler.forfeits(), 0, "no forfeit payout landed");
         assertGt(handler.presents(), 0, "presentSettled never landed");
-        assertGt(handler.backstops(), 0, "the backstop never refunded");
         assertGt(handler.nativeCreates(), 0, "no native order was created");
         assertGt(handler.credits(), 0, "no payout was ever credited");
     }
@@ -835,12 +818,10 @@ contract OrderPortalConservationInvariantTest is Test {
         handler.setRefusing(false);
         handler.refundByCancel(1);
         handler.present(2);
-        handler.backstop(NATIVE_FROM + 1);
         assertEq(handler.unlocks(), 1);
         assertEq(handler.forfeits(), 1);
         assertEq(handler.refunds(), 1);
         assertEq(handler.presents(), 1);
-        assertEq(handler.backstops(), 1);
         assertEq(handler.nativeCreates(), 2);
         assertEq(handler.credits(), 2, "both refused payouts were credited");
         handler.claim(false, true);
@@ -859,7 +840,6 @@ contract OrderPortalConservationInvariantTest is Test {
         assertEq(handler.refunds(), 1);
         assertEq(handler.forfeits(), 1);
         assertEq(handler.presents(), 1);
-        assertEq(handler.backstops(), 1);
         assertEq(handler.credits(), 1);
         assertEq(portal.claimable(address(adRecipient), address(orderToken)), AMOUNT, "the ERC20 payout was credited");
         this.handlerEveryDoor(true); // the step's own logic, on the native token
@@ -1041,7 +1021,6 @@ contract PortalHandler {
     uint256 public refunds;
     uint256 public forfeits;
     uint256 public presents;
-    uint256 public backstops;
     uint256 public nativeCreates;
     uint256 public credits;
 
@@ -1085,12 +1064,6 @@ contract PortalHandler {
         } catch {}
     }
 
-    function backstop(uint256 pick) external {
-        try t.handlerBackstop(pick) {
-            backstops++;
-        } catch {}
-    }
-
     /// Lands once per run, then returns at once, as the escrow handler's targeted steps do.
     bool internal everyDoorLanded;
 
@@ -1102,7 +1075,6 @@ contract PortalHandler {
             refunds++;
             forfeits++;
             presents++;
-            backstops++;
             credits++;
             if (native) nativeCreates += 5;
         } catch {}

@@ -25,6 +25,7 @@ import {BLSKeyRegistry} from "src/BLSKeyRegistry.sol";
 import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
 import {IKeyRegistry} from "src/interfaces/IKeyRegistry.sol";
 import {OwnerAuthVectors} from "test/utils/OwnerAuthVectors.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 /// A settlement signer other than the maker must have approved the maker in the key registry:
 /// checked at `createAd`, `setSettlementSigner` and every lock. Naming yourself needs no approval.
@@ -123,7 +124,7 @@ contract SignerConsentTest is AdManagerTest {
 
         vm.prank(bridger);
         adManager.unlock(p, TestField.fe("SC4"), bytes32(uint256(3)), hex"", hex"");
-        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Filled));
+        assertEq(uint8(statusOf(address(adManager), h)), uint8(IEscrow.Status.Filled));
         assertEq(adManager.inFlightOf(SIGNER), 0);
     }
 
@@ -135,7 +136,7 @@ contract SignerConsentTest is AdManagerTest {
         adManager.claimCancel(p);
         vm.warp(p.deadline + 30 minutes);
         adManager.finalizeCancel(p);
-        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Cancelled));
+        assertEq(uint8(statusOf(address(adManager), h)), uint8(IEscrow.Status.Cancelled));
         assertEq(adManager.inFlightOf(SIGNER), 0);
     }
 
@@ -161,7 +162,7 @@ contract SignerConsentTest is AdManagerTest {
         dm.resolveDispute(h, Dispute.Outcome.MutualRefund);
         vm.warp(dm.effectiveChallengeDeadline(h) + 1);
         adManager.finalizeDispute(p);
-        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Resolved));
+        assertEq(uint8(statusOf(address(adManager), h)), uint8(IEscrow.Status.Resolved));
         assertEq(adManager.inFlightOf(SIGNER), 0);
     }
 
@@ -253,7 +254,7 @@ contract SignerConsentRealRegistryTest is Test {
         vm.startPrank(admin);
         mm.setManager(address(adManager), true);
         adManager.setRootVerifier(ORDER_CHAIN_ID, address(new MockRootVerifier(true)));
-        adManager.setRouteTiming(ORDER_CHAIN_ID, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        adManager.setRouteTiming(ORDER_CHAIN_ID, RouteTiming.Timing(0, 30 minutes, 0, 0));
         adManager.setKeyRegistry(IKeyRegistry(REGISTRY));
         adManager.setPeerEscrow(ORDER_CHAIN_ID, _b32(makeAddr("orderPortal")));
         adManager.setTokenRoute(address(adToken), ORDER_CHAIN_ID, _b32(makeAddr("orderToken")));
