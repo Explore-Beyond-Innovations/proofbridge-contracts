@@ -505,7 +505,7 @@ pub fn settle_bond(
 ) -> Result<(), Fault> {
     let manager = order_dispute_manager(env, order_hash)?;
     cross_contract::DisputeManagerClient::new(env, &manager)
-        .try_settle_bond(escrow, order_hash, &outcome, &filer_is_bridger)
+        .try_settle_bond(escrow, order_hash, &outcome, &filer_is_bridger, &false)
         .map_err(dispute_module_fault)?
         .map_err(|_| Fault::DisputeModuleRejected)
 }
@@ -550,13 +550,16 @@ pub fn dispute_filer(env: &Env, order_hash: &BytesN<32>) -> Result<Option<Addres
 ///
 /// `outcome` is what the path proved, not what anyone ruled: a settle is `TradeProceeds`, a
 /// cancel-refund is `MutualRefund`. Reading the record's ruling here would route the bond by a
-/// finding this evidence has just overturned.
+/// finding this evidence has just overturned. One exception, decided by the caller: a bridger who
+/// filed while the maker denied the co-signed payout had reason to, so `denied` (asked only for a
+/// bridger filer, with the maker) returns its bond.
 pub fn close_dispute_by_evidence(
     env: &Env,
     escrow: &Address,
     order_hash: &BytesN<32>,
     outcome: DisputeOutcome,
     maker_of: impl FnOnce() -> Option<Address>,
+    denied: impl FnOnce(&Address) -> Result<bool, Fault>,
 ) -> Result<(), Fault> {
     let Some(filer) = dispute_filer(env, order_hash)? else {
         return Ok(());
@@ -564,10 +567,18 @@ pub fn close_dispute_by_evidence(
     let Some(maker) = maker_of() else {
         return Ok(());
     };
+    let filer_is_bridger = filer != maker;
+    let return_to_filer = filer_is_bridger && denied(&maker)?;
     // `dispute_filer` returned a record, so the order has a module.
     let manager = order_dispute_manager(env, order_hash)?;
     cross_contract::DisputeManagerClient::new(env, &manager)
-        .try_settle_bond(escrow, order_hash, &outcome, &(filer != maker))
+        .try_settle_bond(
+            escrow,
+            order_hash,
+            &outcome,
+            &filer_is_bridger,
+            &return_to_filer,
+        )
         .map_err(dispute_module_fault)?
         .map_err(|_| Fault::DisputeModuleRejected)
 }

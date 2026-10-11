@@ -458,7 +458,7 @@ fn a_mutual_refund_returns_the_bond_to_the_filer() {
     f.client.resolve_dispute(&h, &DisputeOutcome::MutualRefund);
     warp_past_window(&f, &h);
     f.client
-        .settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false);
+        .settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false, &false);
 
     assert_eq!(t.balance(&f.filer), before + bond as i128);
     assert!(!f.client.is_disputed(&h), "the record is closed");
@@ -476,8 +476,13 @@ fn a_ruling_against_the_filer_forfeits_the_bond_to_the_fee_pool() {
     f.client
         .resolve_dispute(&h, &DisputeOutcome::BridgerForfeit);
     warp_past_window(&f, &h);
-    f.client
-        .settle_bond(&f.escrow, &h, &DisputeOutcome::BridgerForfeit, &true);
+    f.client.settle_bond(
+        &f.escrow,
+        &h,
+        &DisputeOutcome::BridgerForfeit,
+        &true,
+        &false,
+    );
 
     assert_eq!(t.balance(&f.fee_pool), bond as i128);
 }
@@ -495,8 +500,8 @@ fn bond_routing_matches_the_shared_vector() {
     let rows = v["bondRouting"].as_array().unwrap();
     assert_eq!(
         rows.len(),
-        10,
-        "the table must be exhaustive: 5 outcomes x 2 arms"
+        20,
+        "the table must be exhaustive: 5 outcomes x 2 x 2 arms"
     );
     for row in rows {
         let outcome = match row["outcome"].as_str().unwrap() {
@@ -510,12 +515,14 @@ fn bond_routing_matches_the_shared_vector() {
             }
         };
         let filer_is_bridger = row["filerIsBridger"].as_bool().unwrap();
+        let return_to_filer = row["returnToFiler"].as_bool().unwrap();
         assert_eq!(
-            returns(outcome, filer_is_bridger),
+            returns(outcome, filer_is_bridger, return_to_filer),
             row["bondReturnsToFiler"].as_bool().unwrap(),
-            "routing disagrees with the shared vector for {:?} / filerIsBridger={}",
+            "routing disagrees with the shared vector for {:?} / filerIsBridger={} / returnToFiler={}",
             outcome,
-            filer_is_bridger
+            filer_is_bridger,
+            return_to_filer
         );
     }
 }
@@ -615,7 +622,7 @@ fn only_the_escrow_that_opened_a_dispute_may_settle_it() {
     file(&f, &h);
     assert_eq!(
         f.client
-            .try_settle_bond(&other, &h, &DisputeOutcome::MutualRefund, &false),
+            .try_settle_bond(&other, &h, &DisputeOutcome::MutualRefund, &false, &false),
         Err(Ok(Error::WrongEscrow))
     );
 }
@@ -782,7 +789,7 @@ fn an_undisputed_order_is_not_disputed() {
     );
     assert_eq!(
         f.client
-            .try_settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false),
+            .try_settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false, &false),
         Err(Ok(Error::NotDisputed))
     );
     assert_eq!(
@@ -920,7 +927,7 @@ fn the_bond_credit_event_has_its_own_topic() {
         &(bond as i128),
     );
     f.client
-        .settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false);
+        .settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false, &false);
     // `events().all()` holds the last invocation only, so read them before any other call.
     let got = f.env.events().all().filter_by_contract(&f.client.address);
     let firsts: std::vec::Vec<ScVal> = got

@@ -455,6 +455,60 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, bond, "the fee pool took it");
     }
 
+    /// A bridger who filed while the maker halted, then won by evidence, had reason to file: the
+    /// bond comes back to it. The outcome stays `TradeProceeds`; only the recipient changes.
+    function test_evidenceClose_bridgerFiled_haltedMaker_bondBackToTheBridger() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(27);
+        vm.prank(maker);
+        adManager.haltSettlement();
+        uint256 bond = _file(p, filer);
+        bytes32 root = bytes32(uint256(0xf00d) + nextSeq);
+        anchor.anchor(orderChainId, root, nextSeq++);
+        vm.expectEmit(true, true, true, true, address(dm));
+        emit DisputeManager.BondRouted(h, filer, uint128(bond), true);
+        adManager.presentSettled(p, root, hex"");
+        assertEq(filer.balance + _wNativeToken.balanceOf(filer), bond, "the bridger's bond is back");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, 0, "the fee pool took nothing");
+    }
+
+    /// The co-signed unlock is an evidence close too: a halt held since the lock and lifted before
+    /// the unlock still denied the payout while it held.
+    function test_evidenceClose_byCoSignedUnlock_haltSinceTheLock_bondBackToTheBridger() public {
+        (IAdManager.OrderParams memory p,) = _lockedOrder(28);
+        vm.prank(maker);
+        adManager.haltSettlement();
+        uint256 bond = _file(p, filer);
+        vm.warp(block.timestamp + 1);
+        vm.prank(maker);
+        adManager.resumeSettlement();
+        adManager.unlock(p, bytes32(uint256(0x2828)), bytes32(0), hex"", hex"");
+        assertEq(filer.balance + _wNativeToken.balanceOf(filer), bond, "the bridger's bond is back");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, 0, "the fee pool took nothing");
+    }
+
+    /// An unwired order-chain verifier denies the payout like a halt: a bridger filer gets its bond
+    /// back when evidence settles the trade.
+    function test_evidenceClose_bridgerFiled_verifierUnset_bondBackToTheBridger() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(29);
+        uint256 bond = _file(p, filer);
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, address(0));
+        _presentSettledOn(p, h);
+        assertEq(filer.balance + _wNativeToken.balanceOf(filer), bond, "the bridger's bond is back");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, 0, "the fee pool took nothing");
+    }
+
+    /// The maker filed against its own halted order: unchanged, the fee pool takes the bond.
+    function test_evidenceClose_makerFiled_haltedMaker_bondStillToTheFeePool() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(30);
+        vm.prank(maker);
+        adManager.haltSettlement();
+        uint256 bond = _file(p, maker);
+        _presentSettledOn(p, h);
+        assertEq(maker.balance + _wNativeToken.balanceOf(maker), 0, "the maker's bond is not returned");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, bond, "the fee pool took it");
+    }
+
     /// B3: a ruling opens a window rather than paying. One issued a second before the deadline must
     /// not become payable a second after it — that is the room the forfeited party presents in.
     function test_b3_aRulingOpensARealWindow() public {
@@ -693,15 +747,16 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     function test_bondRoutingMatchesTheSharedVector() public view {
         string memory v = vm.readFile("../test-vectors/dispute.json");
         uint256 n = vm.parseJsonUint(v, ".counts.bondRouting");
-        assertEq(n, 10, "5 outcomes x both arms of the flag");
+        assertEq(n, 20, "5 outcomes x both arms of both flags");
 
         for (uint256 i = 0; i < n; i++) {
             string memory at = string.concat(".bondRouting[", vm.toString(i), "]");
             uint256 outcomeValue = vm.parseJsonUint(v, string.concat(at, ".outcomeValue"));
             bool filerIsBridger = vm.parseJsonBool(v, string.concat(at, ".filerIsBridger"));
+            bool returnToFiler = vm.parseJsonBool(v, string.concat(at, ".returnToFiler"));
             bool expected = vm.parseJsonBool(v, string.concat(at, ".bondReturnsToFiler"));
             assertEq(
-                Dispute.bondReturnsToFiler(Dispute.Outcome(outcomeValue), filerIsBridger),
+                Dispute.bondReturnsToFiler(Dispute.Outcome(outcomeValue), filerIsBridger, returnToFiler),
                 expected,
                 "routing disagrees with the shared vector"
             );
@@ -1113,7 +1168,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
         // Settling a bond or recording a response is for the escrow that opened it, nobody else.
         vm.expectRevert(DisputeManager.DisputeManager__NotEscrow.selector);
-        dm.settleBond(h, Dispute.Outcome.MutualRefund, false);
+        dm.settleBond(h, Dispute.Outcome.MutualRefund, false, false);
         vm.expectRevert(DisputeManager.DisputeManager__NotEscrow.selector);
         dm.recordResponse(h, maker, bytes32(0));
     }

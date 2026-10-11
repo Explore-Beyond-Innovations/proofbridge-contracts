@@ -187,8 +187,10 @@ impl DisputeManagerContract {
     /// Settle the bond for a dispute the escrow has just finalized, and close the record.
     ///
     /// Escrow-only, and the one direction funds move: out of this module, never out of the escrow.
-    /// `filer_was_counterparty` is the escrow's answer, because only it knows which party it
-    /// authenticates.
+    /// `filer_is_bridger` is the escrow's answer, because only it knows which party it
+    /// authenticates. `return_to_filer` is the escrow's finding on an evidence close that the
+    /// bridger filed against a payout the maker denied; the bond then goes back to the filer and
+    /// the outcome is unchanged.
     ///
     /// Authenticated against `d.escrow` rather than the allow-list, deliberately: an escrow
     /// de-authorised during a rotation or an incident must still be able to close the disputes it
@@ -199,6 +201,7 @@ impl DisputeManagerContract {
         order_hash: BytesN<32>,
         outcome: DisputeOutcome,
         filer_is_bridger: bool,
+        return_to_filer: bool,
     ) -> Result<(), Error> {
         escrow.require_auth();
         let d = storage::get_dispute(&env, &order_hash).ok_or(Error::NotDisputed)?;
@@ -208,7 +211,8 @@ impl DisputeManagerContract {
         storage::remove_dispute(&env, &order_hash);
 
         if d.bond != 0 {
-            let to_filer = dispute::bond_returns_to_filer(outcome, filer_is_bridger);
+            let to_filer =
+                dispute::bond_returns_to_filer(outcome, filer_is_bridger, return_to_filer);
             // An unset fee pool must not strand the bond; the filer keeps it rather than this
             // contract holding it forever.
             let to = if to_filer {

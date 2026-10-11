@@ -6235,6 +6235,95 @@ fn test_evidence_close_bridger_filed_bond_to_the_fee_pool() {
     );
 }
 
+/// A bridger who filed while the maker halted, then won by evidence, had reason to file: the bond
+/// comes back to it with the payout, and the fee pool takes nothing.
+#[test]
+fn test_evidence_close_bridger_filed_halted_maker_bond_back_to_the_bridger() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let (dm, _arbiter, maker) = wire_dispute_manager(&s);
+    let pool = dm.get_protocol_fee_pool().unwrap();
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let bridger = recipient_party(&s);
+    token.mint(&bridger, &1_000_000);
+    let p = locked_ad_order(&s);
+    s.ad_manager.halt_settlement(&maker);
+    s.ad_manager.dispute(&p, &bridger, &evidence(&s, 0xEE));
+    let payout = ad_locked(&s) as i128;
+    let (bridger_before, pool_before) = (token.balance(&bridger), token.balance(&pool));
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+    s.ad_manager.present_settled(&p, &root, &proof);
+    assert_eq!(
+        token.balance(&bridger) - bridger_before,
+        payout + DISPUTE_BOND_FLOOR as i128,
+        "the payout and the bond"
+    );
+    assert_eq!(
+        token.balance(&pool),
+        pool_before,
+        "the fee pool took nothing"
+    );
+}
+
+/// The co-signed unlock is an evidence close too: a halt held since the lock and lifted before the
+/// unlock still denied the payout while it held.
+#[test]
+fn test_evidence_close_by_co_signed_unlock_halt_since_the_lock_bond_back() {
+    let s = setup();
+    let (dm, _arbiter, maker) = wire_dispute_manager(&s);
+    let pool = dm.get_protocol_fee_pool().unwrap();
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let bridger = recipient_party(&s);
+    token.mint(&bridger, &1_000_000);
+    let p = locked_ad_order(&s);
+    s.ad_manager.halt_settlement(&maker);
+    s.ad_manager.dispute(&p, &bridger, &evidence(&s, 0xEE));
+    let now = s.env.ledger().timestamp();
+    warp(&s, now + 1);
+    s.ad_manager.resume_settlement(&maker);
+    let payout = ad_locked(&s) as i128;
+    let (bridger_before, pool_before) = (token.balance(&bridger), token.balance(&pool));
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    assert_eq!(
+        token.balance(&bridger) - bridger_before,
+        payout + DISPUTE_BOND_FLOOR as i128,
+        "the payout and the bond"
+    );
+    assert_eq!(
+        token.balance(&pool),
+        pool_before,
+        "the fee pool took nothing"
+    );
+}
+
+/// The maker filed against its own halted order: unchanged, the fee pool takes the bond.
+#[test]
+fn test_evidence_close_maker_filed_halted_maker_bond_still_to_the_fee_pool() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let (dm, _arbiter, maker) = wire_dispute_manager(&s);
+    let pool = dm.get_protocol_fee_pool().unwrap();
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let p = locked_ad_order(&s);
+    s.ad_manager.halt_settlement(&maker);
+    s.ad_manager.dispute(&p, &maker, &evidence(&s, 0xEE));
+    let (maker_before, pool_before) = (token.balance(&maker), token.balance(&pool));
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+    s.ad_manager.present_settled(&p, &root, &proof);
+    assert_eq!(
+        token.balance(&maker),
+        maker_before,
+        "the maker's bond is not returned"
+    );
+    assert_eq!(
+        token.balance(&pool) - pool_before,
+        DISPUTE_BOND_FLOOR as i128,
+        "the fee pool took it"
+    );
+}
+
 /// S3: the responder slot is single, so anyone able to write it could overwrite the genuine
 /// counterparty's evidence hash one ledger before the arbiter reads it.
 #[test]
@@ -7898,6 +7987,7 @@ fn test_49s3_a_record_another_escrow_opened_is_wrong_escrow() {
         &s.ad_manager.address,
         &h,
         &dispute_manager_contract::DisputeOutcome::MutualRefund,
+        &false,
         &false,
     );
     let other = Address::generate(&s.env);

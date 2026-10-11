@@ -1265,6 +1265,8 @@ impl AdManagerContract {
     /// Close any dispute this evidence path has just overridden. A no-op when nothing was
     /// disputed — but every path that admits `Disputed` must call it, or the status leaves
     /// `Disputed`, `finalize_dispute` can never run again, and the bond is stranded for good.
+    /// A bridger who filed while the maker denied the co-signed payout (the denial rule at the
+    /// presentation cutoff) gets its bond back.
     fn close_dispute(
         env: &Env,
         order_hash: &BytesN<32>,
@@ -1277,6 +1279,12 @@ impl AdManagerContract {
             order_hash,
             outcome,
             || storage::get_ad(env, &params.ad_id).map(|ad| ad.maker),
+            |maker| {
+                let t = ops::order_timing(env, order_hash, params.order_chain_id)?;
+                let cutoff = ops::window_end(env, order_hash, params.deadline, t.buffer)
+                    .saturating_sub(t.margin);
+                Ok(Self::co_sign_denied(env, maker, params, order_hash, cutoff))
+            },
         )?;
         Ok(())
     }

@@ -198,7 +198,7 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     /// @dev Keyed on `disputeEscrow[orderHash]` rather than `isEscrow`, deliberately: an escrow
     ///      de-authorised during a rotation or an incident must still be able to close the disputes
     ///      it opened, or their bonds have no exit and no admin override to give them one.
-    function settleBond(bytes32 orderHash, Dispute.Outcome outcome, bool filerIsBridger) external {
+    function settleBond(bytes32 orderHash, Dispute.Outcome outcome, bool filerIsBridger, bool returnToFiler) external {
         if (disputeEscrow[orderHash] != msg.sender) revert DisputeManager__NotEscrow();
         Dispute.Record storage d = disputes[orderHash];
         if (d.initiator == address(0)) revert DisputeManager__NotDisputed(orderHash);
@@ -209,7 +209,7 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         delete disputeEscrow[orderHash];
 
         if (bond != 0) {
-            bool toFiler = Dispute.bondReturnsToFiler(outcome, filerIsBridger);
+            bool toFiler = Dispute.bondReturnsToFiler(outcome, filerIsBridger, returnToFiler);
             address to = toFiler ? filer : protocolFeePool;
             // An unset fee pool must not strand the bond; the filer keeps it rather than this
             // contract holding it forever.

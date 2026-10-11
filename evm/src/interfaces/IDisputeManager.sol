@@ -78,7 +78,11 @@ interface IDisputeManager {
      *        so "the filer is my counterparty" means opposite things on the two escrows — phrasing
      *        it that way inverted the bond routing on the follower leg, returning a forfeited bond
      *        and forfeiting a vindicated one. The escrow answers the same question either way.
+     * @param returnToFiler True when the bond goes back to the filer whatever `outcome` says: set
+     *        by the escrow on an evidence close when the bridger filed and the maker had denied the
+     *        co-signed payout (a halt, an unwired verifier, a killed key). The record's outcome
+     *        stays `TradeProceeds`; only the bond's recipient changes.
      */
-    function settleBond(bytes32 orderHash, Dispute.Outcome outcome, bool filerIsBridger) external;
+    function settleBond(bytes32 orderHash, Dispute.Outcome outcome, bool filerIsBridger, bool returnToFiler) external;
 }
 

@@ -114,10 +114,12 @@ library Dispute {
      * @notice Whether the filer's position was vindicated, which is what routes the bond (D7).
      * @dev There is no separate "frivolous" discretion anywhere: the outcome *is* the finding. A
      *      `MutualRefund` returns the bond because neither side was shown wrong; a forfeit returns
-     *      it only when the forfeited party is the one the filer accused.
+     *      it only when the forfeited party is the one the filer accused. `returnToFiler` is the
+     *      escrow's own finding on an evidence close: the bridger filed against a co-signed payout
+     *      the maker denied, so filing was justified even though the trade then settled.
      */
-    function bondReturnsToFiler(Outcome outcome, bool filerIsBridger) internal pure returns (bool) {
-        if (outcome == Outcome.MutualRefund) return true;
+    function bondReturnsToFiler(Outcome outcome, bool filerIsBridger, bool returnToFiler) internal pure returns (bool) {
+        if (returnToFiler || outcome == Outcome.MutualRefund) return true;
         // The filer accused the other side; the ruling agreeing means that side forfeits.
         if (outcome == Outcome.MakerForfeit) return filerIsBridger;
         if (outcome == Outcome.BridgerForfeit) return !filerIsBridger;

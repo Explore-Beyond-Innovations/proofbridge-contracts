@@ -54,8 +54,17 @@ pub fn bond_for(p: &DisputeParams) -> u128 {
 ///
 /// There is no separate "frivolous" discretion anywhere: the outcome *is* the finding. A mutual
 /// refund returns the bond because neither side was shown wrong; a forfeit returns it only when the
-/// forfeited party is the one the filer accused.
-pub fn bond_returns_to_filer(outcome: DisputeOutcome, filer_is_bridger: bool) -> bool {
+/// forfeited party is the one the filer accused. `return_to_filer` is the escrow's own finding on
+/// an evidence close: the bridger filed against a co-signed payout the maker denied, so filing was
+/// justified even though the trade then settled.
+pub fn bond_returns_to_filer(
+    outcome: DisputeOutcome,
+    filer_is_bridger: bool,
+    return_to_filer: bool,
+) -> bool {
+    if return_to_filer {
+        return true;
+    }
     match outcome {
         DisputeOutcome::MutualRefund => true,
         // The filer accused the other side; the ruling agreeing means that side forfeits.

@@ -267,7 +267,7 @@ contract AdManager is EscrowBase, IAdManager {
 
         // A co-signed unlock is evidence too (D5), and `_requireSettleable` admits `Disputed`, so
         // this path can terminate a disputed order and must close its dispute like any other.
-        _closeDisputeByEvidence(orderHash, maker);
+        _closeDisputeByEvidence(params, orderHash, maker);
         _settle(orderHash, nullifierHash, params.adSettlementSigner);
         _payFromAd(params);
 
@@ -362,7 +362,7 @@ contract AdManager is EscrowBase, IAdManager {
         _resolve(orderHash, params.adSettlementSigner);
         // The flag is absolute: was this filed by the bridger? Filing is restricted to the order's
         // two parties, so on the ad leg "not the maker" is exactly "the bridger".
-        m.settleBond(orderHash, outcome, initiator != ad.maker);
+        m.settleBond(orderHash, outcome, initiator != ad.maker, false);
         // Pay once the order and the dispute are closed, so the recipient's hook sees no mid-transition state.
         if (outcome == Dispute.Outcome.MakerForfeit) {
             _payOrCredit(params.orderRecipient.toAddressChecked(), ad.token, adAmount);
@@ -455,12 +455,20 @@ contract AdManager is EscrowBase, IAdManager {
      *      Both callers settle the trade, so the bond routes on `TradeProceeds`: what the path
      *      proved, not what anyone ruled. Reads the order's own module (D5); a never-disputed order
      *      has none. `filerIsBridger` is "not the maker": only the two parties can file (D11).
+     *      One exception: a bridger who filed while the maker denied the co-signed payout (the
+     *      denial rule at the presentation cutoff) had reason to, so its bond comes back.
      */
-    function _closeDisputeByEvidence(bytes32 orderHash, address maker) internal {
+    function _closeDisputeByEvidence(OrderParams calldata p, bytes32 orderHash, address maker) internal {
         // `Disputed` here implies an open record on the order's module (filing writes both).
         if (_orders[orderHash].status != Status.Disputed) return;
         IDisputeManager m = disputeModuleOf[orderHash];
-        m.settleBond(orderHash, Dispute.Outcome.TradeProceeds, m.initiatorOf(orderHash) != maker);
+        bool byBridger = m.initiatorOf(orderHash) != maker;
+        m.settleBond(
+            orderHash,
+            Dispute.Outcome.TradeProceeds,
+            byBridger,
+            byBridger && _coSignDenied(p, orderHash, _presentationCutoff(orderHash, p))
+        );
     }
 
     /// @dev `→ Resolved`: the dispute terminal. Mirrors {_cancel}'s bookkeeping — in particular it
@@ -504,7 +512,7 @@ contract AdManager is EscrowBase, IAdManager {
 
         // Evidence beats arbitration: if this order was disputed, that dispute is now over and the
         // bond settles on what the proof shows, not on whatever the arbiter had ruled.
-        _closeDisputeByEvidence(orderHash, _adOf(params).maker);
+        _closeDisputeByEvidence(params, orderHash, _adOf(params).maker);
         _fill(orderHash, params.adSettlementSigner, true);
         _payFromAd(params);
     }

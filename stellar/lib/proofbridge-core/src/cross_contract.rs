@@ -45,6 +45,7 @@ pub trait DisputeManagerInterface {
         order_hash: BytesN<32>,
         outcome: crate::types::DisputeOutcome,
         filer_is_bridger: bool,
+        return_to_filer: bool,
     );
     fn record_response(
         env: Env,
