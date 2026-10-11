@@ -157,6 +157,8 @@ contract AgentPolicyPreflightTest is AgentPolicyBase {
     /// allowance, so a drained second token is where the hook disagrees with it: call 0 spends the
     /// healthy bucket, call 1 is the first request against the drained one.
     function test_theHookNamesTheCallItRefused() public {
+        _asAccount(abi.encodeCall(module.setAgentPolicy, (agentId, policyBothWays())));
+        _markHookProven();
         bytes memory drainedTokenLock = abi.encodeCall(
             IAdManager.lockForOrder, (orderParams(MAX_PER_ORDER, ORDER_TOKEN, AD_TOKEN, AD_ID, settlementSigner))
         );

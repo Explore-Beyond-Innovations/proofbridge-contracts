@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 import {IBLSKeyRegistry} from "src/interfaces/IBLSKeyRegistry.sol";
 import {BLSKeyRegistry} from "../src/BLSKeyRegistry.sol";
+import {IdleGuard} from "./utils/IdleGuard.sol";
 import {OwnerAuthVectors} from "./utils/OwnerAuthVectors.sol";
 
 /// Replays the real MetaMask / Freighter signatures of wallet-signatures.json against the registry,
@@ -31,11 +32,15 @@ contract WalletSignaturesTest is Test {
         localReg = place(v.readAddress("._meta.registries.local.evm"), "local");
     }
 
-    /// Deploy as the CLI does (constructor(admin, env), SCL auto-linked), then move the code to `at`.
+    /// Deploy as the CLI does (constructor(admin, env), SCL auto-linked, guards wired), then move
+    /// the code to `at`.
     function place(address at, string memory env) internal returns (BLSKeyRegistry) {
         BLSKeyRegistry impl = new BLSKeyRegistry(address(this), env);
         vm.etch(at, address(impl).code);
         vm.store(at, bytes32(0), bytes32(uint256(uint160(address(this))))); // admin
+        address[] memory guards = new address[](1);
+        guards[0] = address(new IdleGuard());
+        BLSKeyRegistry(at).setPositionGuards(guards);
         return BLSKeyRegistry(at);
     }
 

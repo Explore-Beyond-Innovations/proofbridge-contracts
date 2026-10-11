@@ -16,12 +16,13 @@ pub enum AccountError {
     UnsupportedContext = 5,
     /// `ctx.contract` is not one of the pinned escrows.
     TargetNotAllowed = 6,
-    /// `ctx.fn_name` is not in the policy's `allowed_actions`.
+    /// `ctx.fn_name` is not the policy's `allowed_action`.
     ActionNotAllowed = 7,
     /// Call args missing a required key, of the wrong type or arity, or with bad decimals (the lock,
     /// the owner path's escrow calls, and `schedule`'s args for any action).
     BadArgs = 8,
-    /// A token in the lock is not on the policy's whitelist.
+    /// The lock's ad-chain token is not one of the policy's `ad_tokens`, or its order-chain token
+    /// is not one of its `order_tokens`.
     TokenNotAllowed = 9,
     /// Ad-side lock amount exceeds `max_per_order`.
     CapExceeded = 10,
@@ -37,8 +38,8 @@ pub enum AccountError {
     AdNotAllowed = 15,
     /// A volume bucket — the agent's or the account's — cannot cover this lock (2.1d).
     VolumeExceeded = 16,
-    /// The ad token is whitelisted but has no configured volume limit, on the policy or the
-    /// account. Silence is not permission.
+    /// An ad token has no account-wide volume limit: at install, or because the row archived
+    /// under a live policy. Silence is not permission.
     NoVolumeLimit = 17,
     /// A delayed owner call with no matured, unexpired schedule committed to exactly its arguments.
     NotScheduled = 18,

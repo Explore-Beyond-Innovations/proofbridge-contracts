@@ -229,8 +229,9 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         emit SlotValidUntilSet(account, slotId, validUntil);
     }
 
-    /// Leaves the protocol: drops every slot, guarded while there are slots (t1-design §1.8). With
-    /// none it still consumes the nonce, so an owner can kill an unfiled registration (review D2).
+    /// Leaves the protocol: drops every slot, guarded while there are slots (t1-design §1.8), and
+    /// refused while there are slots and no guard is wired. With none it still consumes the nonce,
+    /// so an owner can kill an unfiled registration (review D2).
     function revoke(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external whenNotPaused {
         RegistryEntry storage e = entries[account];
         if (nonce != nonceOf[account]) revert BadNonce();
@@ -303,7 +304,9 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         }
     }
 
+    /// Fails closed like `_prune`: with no guard to ask, an open order cannot be ruled out.
     function _requireNoOpenPositions(bytes32 account) private view {
+        if (positionGuards.length == 0) revert GuardsUnset();
         if (_hasOpenPositions(account)) revert AccountInFlight();
     }
 

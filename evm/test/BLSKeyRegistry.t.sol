@@ -200,6 +200,7 @@ contract BLSKeyRegistryTest is Test {
 
     function test_revokeStellarHomeThenKeyIsGone() public {
         bytes32 account = registerMaker();
+        idleGuard();
         registry.revoke(account, oa("makerOnSepolia", "revoke[1]"), 1);
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.commitmentAt(account, 0);
@@ -209,6 +210,7 @@ contract BLSKeyRegistryTest is Test {
 
     function test_revokeEvmHomeWithNonce1Signature() public {
         bytes32 account = registerBridger();
+        idleGuard();
         registry.revoke(account, oa("bridgerOnSepolia", "revoke[1]"), 1);
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.commitmentAt(account, 0);
@@ -357,6 +359,7 @@ contract BLSKeyRegistryTest is Test {
     /// revoke drops every slot; the next registration continues the id sequence.
     function test_revokeClearsAllSlotsAndNextIdKeepsAdvancing() public {
         bytes32 account = registerMaker(); // nonce 0 -> slot 0
+        idleGuard();
         registry.revoke(account, oa("makerOnSepolia", "revoke[1]"), 1);
         assertEq(registry.liveSlots(account).length, 0);
 
@@ -671,6 +674,30 @@ contract BLSKeyRegistryTest is Test {
         assertEq(registry.nonceOf(account), 0);
     }
 
+    /// With live slots and no guard wired, revoke cannot rule out an open order: it refuses, and an
+    /// empty guard list counts as none. Nothing changes.
+    function test_revokeWithLiveSlotsAndNoGuardsIsRefused() public {
+        bytes32 account = registerMaker();
+        vm.expectRevert(IBLSKeyRegistry.GuardsUnset.selector);
+        registry.revoke(account, oa("makerOnSepolia", "revoke[1]"), 1);
+        registry.setPositionGuards(new address[](0));
+        vm.expectRevert(IBLSKeyRegistry.GuardsUnset.selector);
+        registry.revoke(account, oa("makerOnSepolia", "revoke[1]"), 1);
+        assertEq(registry.nonceOf(account), 1);
+        assertEq(registry.liveSlots(account).length, 1);
+        assertEq(registry.commitmentAt(account, 0), slotCommitment("makerOnSepolia", 0));
+    }
+
+    /// With no slots there is nothing to guard: revoke still burns the nonce with no guard wired.
+    function test_revokeWithNoSlotsAndNoGuardsBumpsTheNonce() public {
+        for (uint256 k = 0; k < 2; k++) {
+            string memory who = whoAt(k);
+            bytes32 account = v.readBytes32(string.concat(".slots.", who, ".account"));
+            registry.revoke(account, oa(who, "revoke[0]"), 0);
+            assertEq(registry.nonceOf(account), 1);
+        }
+    }
+
     function test_revokeBlockedWhileInFlight() public {
         bytes32 account = registerMaker();
         busyGuard();
@@ -768,6 +795,7 @@ contract BLSKeyRegistryTest is Test {
 
     /// Refusal: a stale nonce. The owner signed a revoke at nonce 0; at nonce 1 its leg is not ours.
     function test_aStaleNonceIsRefused() public {
+        idleGuard();
         for (uint256 k = 0; k < 2; k++) {
             string memory who = whoAt(k);
             bytes32 account = v.readBytes32(string.concat(".slots.", who, ".account"));
@@ -843,6 +871,7 @@ contract BLSKeyRegistryTest is Test {
         registry.slotOfKey(account, fp("makerOnSepolia", 0));
         registerSlot("makerOnSepolia", 0);
         assertEq(registry.slotOfKey(account, fp("makerOnSepolia", 0)), 0);
+        idleGuard();
         registry.revoke(account, oa("makerOnSepolia", "revoke[1]"), 1);
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.slotOfKey(account, fp("makerOnSepolia", 0));
@@ -1053,6 +1082,7 @@ contract BLSKeyRegistryTest is Test {
     // =========================================================================
 
     function test_aRegistryNamedTwiceAtDifferentNoncesIsRefused() public {
+        idleGuard();
         for (uint256 k = 0; k < 2; k++) {
             string memory who = whoAt(k);
             bytes32 account = v.readBytes32(string.concat(".slots.", who, ".account"));
