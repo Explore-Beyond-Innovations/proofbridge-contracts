@@ -833,8 +833,6 @@ impl AdManagerContract {
         Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
-        // The deadline is vouched for by the hash the caller had to reproduce; the module cannot do
-        // that itself, which is why filing starts here.
         // Only the order's two parties may file. Without this any address could dispute any live
         // order and, one short challenge period later, cancel it out from under both of them.
         // The bridger side is the same address this chain would pay, resolved the same way, so
@@ -842,6 +840,8 @@ impl AdManagerContract {
         let ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
         Self::require_party(&env, &filer, &ad.maker, &params.order_recipient)?;
         let timing = Self::timing(&env, params.order_chain_id)?;
+        // The deadline is vouched for by the hash the caller had to reproduce; the module cannot do
+        // that itself, which is why filing starts here.
         let bond = ops::open_dispute(
             &env,
             &env.current_contract_address(),
