@@ -34,8 +34,9 @@ fn field<T: TryFromVal<Env, Val>>(
     T::try_from_val(env, &v).map_err(|_| AccountError::BadArgs)
 }
 
-/// Target ∈ pinned escrows, selector ∈ allowed_actions, then the lock's args against the policy:
-/// settlement signer, whitelist, ad scope (reach), scaling and the cap (size), the buckets (rate).
+/// Target ∈ pinned escrows, selector = the policy's action, then the lock's args against the policy:
+/// settlement signer, the token lists, ad scope (reach), scaling and the cap (size), the buckets
+/// (rate).
 /// Fails closed on anything it cannot decode.
 ///
 /// **This writes.** Since 2.1d the last thing it does is debit two volume buckets, so the name
@@ -54,13 +55,9 @@ pub fn check_contract_call(
     if !targets.contains(&c.contract) {
         return Err(AccountError::TargetNotAllowed);
     }
-    if !policy.allowed_actions.contains(&c.fn_name) {
-        return Err(AccountError::ActionNotAllowed);
-    }
-    if c.fn_name != policy::lock_for_order(env) {
-        // Only lock_for_order can be installed today (policy::validate), so
-        // this is unreachable; kept so a future selector cannot slip through
-        // without its own arg rule.
+    // `validate` pins the action to `lock_for_order`, so the args below are a lock's. A second
+    // action later brings its own arg rule with it.
+    if c.fn_name != policy.allowed_action {
         return Err(AccountError::ActionNotAllowed);
     }
 
@@ -92,17 +89,13 @@ pub fn check_contract_call(
 
     let ad_chain_token: BytesN<32> = field(env, &lock, "ad_chain_token")?;
     let order_chain_token: BytesN<32> = field(env, &lock, "order_chain_token")?;
-    if !policy.token_whitelist.contains(&ad_chain_token)
-        || !policy.token_whitelist.contains(&order_chain_token)
-    {
+    // The ad-chain token must be an ad token (its row is the list, as on the EVM); the order-chain
+    // token must be an order token. A token listed only in the other list is a miss.
+    let token_limit =
+        policy::limit_for(policy, &ad_chain_token).ok_or(AccountError::TokenNotAllowed)?;
+    if !policy.order_tokens.contains(&order_chain_token) {
         return Err(AccountError::TokenNotAllowed);
     }
-    // The row is part of "is this token allowed": looked up here, not after scaling, because on
-    // the EVM the limit row *is* the whitelist and a token without one fails at this step. No
-    // current install path can produce a whitelisted token with no row (`validate` pins the two to
-    // each other), so this is for a policy an older wasm wrote — and the word stays this chain's.
-    let token_limit =
-        policy::limit_for(policy, &ad_chain_token).ok_or(AccountError::NoVolumeLimit)?;
 
     let ad_id: String = field(env, &lock, "ad_id")?;
     if !policy::ad_in_scope(policy, &ad_id) {
@@ -111,7 +104,7 @@ pub fn check_contract_call(
 
     // ---- size ----
     // The escrow locks `scale(amount, order_decimals, ad_decimals)` of the ad token; the cap is
-    // denominated in the same units. Per token, because the whitelist can hold sixteen of them and
+    // denominated in the same units. Per token, because the ad-token list can hold sixteen and
     // one number cannot be right for two assets of different value — 1,000,000 units is a few
     // cents of XLM and a few hundred dollars of wETH. Decimal scaling cannot fix that: it converts
     // units, and what differs here is worth, which nothing on chain knows.
@@ -151,9 +144,9 @@ fn spend_volume(
     amount: u128,
 ) -> Result<(), AccountError> {
     let now = env.ledger().timestamp();
-    // The agent's limit arrives from the caller, which looked it up at the whitelist step (a
-    // whitelisted token with no row is refused there, as on the EVM). Looking it up again here
-    // would be an arm nothing can reach.
+    // The agent's limit arrives from the caller, which looked it up at the token step (a token
+    // with no row is not an ad token, and is refused there). Looking it up again here would be an
+    // arm nothing can reach.
     // No stored bucket means never spent — the policy entry holds the buckets, so this cannot be
     // an entry that quietly archived and read back as full.
     let agent_bucket =

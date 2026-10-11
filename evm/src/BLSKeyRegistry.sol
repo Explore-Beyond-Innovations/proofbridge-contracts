@@ -236,8 +236,9 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         emit SlotValidUntilSet(account, slotId, validUntil);
     }
 
-    /// Leaves the protocol: drops every slot, guarded while there are slots (t1-design §1.8). With
-    /// none it still consumes the nonce, so an owner can kill an unfiled registration (review D2).
+    /// Leaves the protocol: drops every slot, guarded while there are slots (t1-design §1.8), and
+    /// refused while there are slots and no guard is wired. With none it still consumes the nonce,
+    /// so an owner can kill an unfiled registration (review D2).
     function revoke(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external whenNotPaused {
         RegistryEntry storage e = entries[account];
         if (nonce != nonceOf[account]) revert BadNonce();
@@ -336,19 +337,21 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         return at == 0 ? vu : at;
     }
 
-    /// Drops every dead slot the escrows can no longer need. With guards wired, a dead slot stays for
-    /// as long as any guard reports open positions for the account, however long that is (an open
-    /// order's cancel may still ask about its history), and goes at once when none does (#422 D17).
-    /// With no guard to ask, it goes after its expiry + GRACE_PERIOD (D17b). Not in the expiry's own
-    /// second (D17a): a lock in that second still counts the kill. Swap-remove; order is not meaningful.
+    /// Drops every dead slot the escrows can no longer need: at once when guards are wired and none
+    /// reports an open position for the account (#422 D17: no order's cancel can still ask about its
+    /// history), else after its expiry + GRACE_PERIOD, open positions or not. The 30 days outlast every
+    /// finalize a kill can still touch: an order's life as a payout is at most the window, its buffer,
+    /// the challenge period and the ruling buffer (about 16 days), plus a grace capped by the 7-day
+    /// anchor delay and one buffer, so a slot kept longer protects nothing and only fills the cap.
+    /// With no guard to ask, never at once (D17b). Not in the expiry's own second (D17a): a lock in
+    /// that second still counts the kill. Swap-remove; order is not meaningful.
     function _prune(bytes32 account, RegistryEntry storage e) private {
-        bool guarded = positionGuards.length != 0;
-        if (guarded && _hasOpenPositions(account)) return;
+        bool atOnce = positionGuards.length != 0 && !_hasOpenPositions(account);
         uint256 i = 0;
         while (i < e.liveSlots.length) {
             uint32 id = e.liveSlots[i];
             uint64 vu = _expiredAt(account, id);
-            if (vu != 0 && block.timestamp > uint256(vu) + (guarded ? 0 : GRACE_PERIOD)) {
+            if (vu != 0 && block.timestamp > uint256(vu) + (atOnce ? 0 : GRACE_PERIOD)) {
                 delete e.slots[id];
                 delete expiries[account][id];
                 e.liveSlots[i] = e.liveSlots[e.liveSlots.length - 1];
@@ -360,7 +363,9 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         }
     }
 
+    /// Fails closed like `_prune`: with no guard to ask, an open order cannot be ruled out.
     function _requireNoOpenPositions(bytes32 account) private view {
+        if (positionGuards.length == 0) revert GuardsUnset();
         if (_hasOpenPositions(account)) revert AccountInFlight();
     }
 

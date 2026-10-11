@@ -79,7 +79,7 @@ contract AgentPolicyRealEscrowTest is AgentPolicyBase {
         targets[0] = address(adManager);
         _asAccount(abi.encodeCall(module.setTargets, (targets, true)));
         _asAccount(abi.encodeCall(module.setAccountLimit, (_b32(address(adToken)), ACCOUNT_CAPACITY, ACCOUNT_REFILL)));
-        _asAccount(abi.encodeCall(module.setAccountLimit, (_b32(orderToken), ACCOUNT_CAPACITY, ACCOUNT_REFILL)));
+        // No ceiling for the order token: it is only checked for membership, never spent from here.
         _asAccount(abi.encodeCall(module.setAgentPolicy, (agentId, _realPolicy())));
     }
 
@@ -182,24 +182,18 @@ contract AgentPolicyRealEscrowTest is AgentPolicyBase {
         );
     }
 
-    /// The canonical policy, one lock action, the real ad token and order token.
+    /// The canonical policy: one lock action, the real ad token with its limits, the real order token.
     function _realPolicy() internal view returns (bytes memory out) {
-        bytes32 a = _b32(address(adToken));
-        bytes32 b = _b32(orderToken);
-        (bytes32 lo, bytes32 hi) = uint256(a) < uint256(b) ? (a, b) : (b, a);
         out = bytes.concat(
             AgentPolicyCodec.DOMAIN,
-            bytes1(uint8(1)),
             bytes1(AgentPolicyCodec.ACTION_LOCK_FOR_ORDER),
-            bytes1(uint8(2)),
-            lo,
+            bytes1(uint8(1)),
+            _b32(address(adToken)),
             bytes32(MAX_PER_ORDER),
             bytes32(CAPACITY),
             bytes32(REFILL),
-            hi,
-            bytes32(MAX_PER_ORDER),
-            bytes32(CAPACITY),
-            bytes32(REFILL)
+            bytes1(uint8(1)),
+            _b32(orderToken)
         );
         out = bytes.concat(out, bytes1(uint8(0)), bytes1(uint8(0)), bytes8(uint64(0)), settlementSigner);
     }

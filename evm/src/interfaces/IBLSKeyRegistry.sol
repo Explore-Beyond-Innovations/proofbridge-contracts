@@ -81,6 +81,9 @@ interface IBLSKeyRegistry is IKeyRegistry {
     error InvalidPop();
     error OwnerMismatch();
     error AccountInFlight();
+    /// `revoke` of an account with live slots while no position guard is wired: it cannot tell
+    /// whether an order still needs the slots, so it refuses.
+    error GuardsUnset();
     error BadLength();
     /// @notice The constructor was given no admin (C-37).
     error ZeroAdmin();

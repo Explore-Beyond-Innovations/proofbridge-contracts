@@ -73,6 +73,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         bytes32 settlementSigner;
         uint64 validUntil;
         bool adScopeAll;
+        /// @dev The policy's one action (today only `ACTION_LOCK_FOR_ORDER`); packs beside `validUntil`.
+        uint8 actionId;
     }
 
     struct TokenLimitRow {
@@ -207,6 +209,9 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
      */
     uint256 internal constant MAX_UNCOUNTED = 3;
 
+    /// @notice The largest gas field `_chargeGas` prices: 2^120, the EntryPoint v0.7 bound (AA94).
+    uint256 internal constant MAX_GAS_FIELD = 1 << 120;
+
     uint256 internal constant TYPE_BIT_VALIDATOR = 1;
     uint256 internal constant TYPE_BIT_HOOK = 2;
 
@@ -252,11 +257,11 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
     ///         healthy mount it reads 1, 0, 1, 0. See `MAX_UNCOUNTED`.
     mapping(bytes32 agentKey => mapping(address account => uint256)) private _uncounted;
     /// @notice Bumped by every policy write so the previous policy's rows become unreachable —
-    ///         otherwise dropping a token from the whitelist would leave its limit row behind.
+    ///         otherwise dropping a token from a list would leave its row behind.
     mapping(bytes32 agentKey => mapping(address account => uint256)) private _version;
     mapping(bytes32 agentKey => mapping(address account => PolicyMeta)) private _meta;
 
-    /// @notice Membership: allowed actions, scoped ad ids, pinned targets. A list would be
+    /// @notice Membership: order tokens, scoped ad ids, pinned targets. A list would be
     ///         unreadable during validation, and membership is all the validator ever asks.
     mapping(bytes32 flagKey => mapping(address account => bool)) private _flag;
 
@@ -491,15 +496,16 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         _version[aKey][msg.sender] = version;
         bytes32 vKey = _versionKey(aKey, version);
 
-        _meta[aKey][msg.sender] =
-            PolicyMeta({settlementSigner: d.settlementSigner, validUntil: d.validUntil, adScopeAll: d.adScopeAll});
+        _meta[aKey][msg.sender] = PolicyMeta({
+            settlementSigner: d.settlementSigner,
+            validUntil: d.validUntil,
+            adScopeAll: d.adScopeAll,
+            actionId: d.actionId
+        });
 
-        for (uint256 i = 0; i < d.actions.length; ++i) {
-            _flag[_actionKey(vKey, d.actions[i])][msg.sender] = true;
-        }
-
-        for (uint256 i = 0; i < d.tokens.length; ++i) {
-            AgentPolicyCodec.TokenRow memory row = d.tokens[i];
+        // Ad tokens: the token a lock spends, so each carries limits and needs the account ceiling.
+        for (uint256 i = 0; i < d.adTokens.length; ++i) {
+            AgentPolicyCodec.TokenRow memory row = d.adTokens[i];
             // Above `capacity` the per-order cap can never bind, so a larger one is inert; refused
             // rather than ignored, because an owner who wrote it meant something by it.
             if (row.capacity == 0 || row.refillPerSecond == 0 || row.maxPerOrder == 0 || row.maxPerOrder > row.capacity)
@@ -514,6 +520,11 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
             _agentLimit[_tokenKey(vKey, row.token)][msg.sender] = TokenLimitRow({
                 maxPerOrder: row.maxPerOrder, capacity: row.capacity, refillPerSecond: row.refillPerSecond
             });
+        }
+
+        // Order tokens: membership only. Their amounts are never spent from this account.
+        for (uint256 i = 0; i < d.orderTokens.length; ++i) {
+            _flag[_orderTokenKey(vKey, d.orderTokens[i])][msg.sender] = true;
         }
 
         for (uint256 i = 0; i < d.adScopeHashes.length; ++i) {
@@ -1068,6 +1079,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         bytes32 vKey;
         bytes32 settlementSigner;
         bool adScopeAll;
+        uint8 actionId;
         /// @dev Zero on the validator's pass: ERC-7562 [OP-011] bans TIMESTAMP during validation,
         ///      so the clock only exists on the hook's.
         uint64 nowTs;
@@ -1102,6 +1114,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
             vKey: gate.vKey,
             settlementSigner: gate.meta.settlementSigner,
             adScopeAll: gate.meta.adScopeAll,
+            actionId: gate.meta.actionId,
             nowTs: mode == Mode.Validate ? 0 : uint64(block.timestamp),
             mode: mode,
             // Two running buckets per call at worst: the agent's and the account's.
@@ -1156,9 +1169,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         if (c.data.length < 4) return _refuse(out, Refusal.MalformedCall);
 
         uint8 actionId = _actionIdOf(bytes4(c.data));
-        if (actionId == 0 || !_flag[_actionKey(ctx.vKey, actionId)][ctx.account]) {
-            return _refuse(out, Refusal.ActionNotAllowed);
-        }
+        if (actionId == 0 || actionId != ctx.actionId) return _refuse(out, Refusal.ActionNotAllowed);
 
         IAdManager.OrderParams memory params;
         try this.decodeLock(c.data) returns (IAdManager.OrderParams memory decoded) {
@@ -1172,15 +1183,15 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         // refused for the earlier one on every implementation, so the runtime's pre-flight reason is
         // the chain's.
         //
-        // Reach: the settlement signer, the whitelist, the ad scope.
+        // Reach: the settlement signer, the token lists, the ad scope.
         if (params.adSettlementSigner != ctx.settlementSigner) return _refuse(out, Refusal.SettlementSignerMismatch);
 
-        // Both tokens have to be on the whitelist, and a whitelisted token with no limit row is
-        // refused rather than waved through.
+        // The ad-chain token must be an ad token (its limit row is the list); the order-chain token
+        // must be an order token. A token listed only in the other list is a miss.
         out.token = params.adChainToken;
         out.row = _agentLimit[_tokenKey(ctx.vKey, out.token)][ctx.account];
         if (out.row.capacity == 0) return _refuse(out, Refusal.TokenNotAllowed);
-        if (_agentLimit[_tokenKey(ctx.vKey, params.orderChainToken)][ctx.account].capacity == 0) {
+        if (!_flag[_orderTokenKey(ctx.vKey, params.orderChainToken)][ctx.account]) {
             return _refuse(out, Refusal.TokenNotAllowed);
         }
 
@@ -1463,8 +1474,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         return keccak256(abi.encode(aKey, version));
     }
 
-    function _actionKey(bytes32 vKey, uint8 actionId) internal pure returns (bytes32) {
-        return keccak256(abi.encode(vKey, "action", actionId));
+    function _orderTokenKey(bytes32 vKey, bytes32 token) internal pure returns (bytes32) {
+        return keccak256(abi.encode(vKey, "orderToken", token));
     }
 
     function _adKey(bytes32 vKey, bytes32 adIdHash) internal pure returns (bytes32) {
@@ -1554,12 +1565,17 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
      */
     function _chargeGas(address account, bytes32 aKey, PackedUserOperation calldata userOp) internal returns (bool) {
         if (userOp.paymasterAndData.length != 0) return false;
-        uint256 gasLimit =
-            uint256(uint128(bytes16(userOp.accountGasLimits))) + uint256(uint128(uint256(userOp.accountGasLimits)));
-        if (userOp.preVerificationGas > type(uint128).max) return false;
-        gasLimit += userOp.preVerificationGas;
-        // maxFeePerGas is the low half; both factors fit 130 and 128 bits, so this cannot overflow.
-        uint256 maxCost = gasLimit * uint256(uint128(uint256(userOp.gasFees)));
+        uint256 verificationGas = uint128(bytes16(userOp.accountGasLimits));
+        uint256 callGas = uint128(uint256(userOp.accountGasLimits));
+        uint256 maxFee = uint128(uint256(userOp.gasFees)); // maxFeePerGas is the low half
+        // EntryPoint v0.7 refuses any gas field above 120 bits (AA94), so such an operation can never
+        // be paid; it is refused here as an answer, since this can be called outside the EntryPoint.
+        // With each field at most 2^120 the sum fits 122 bits and the cost 242: no overflow.
+        if (
+            verificationGas > MAX_GAS_FIELD || callGas > MAX_GAS_FIELD || userOp.preVerificationGas > MAX_GAS_FIELD
+                || maxFee > MAX_GAS_FIELD
+        ) return false;
+        uint256 maxCost = (verificationGas + callGas + userOp.preVerificationGas) * maxFee;
         uint256 budget = _gasBudget[aKey][account];
         // `budget == 0` on its own line of reasoning: a self-bundling agent can set a zero fee, the
         // cost is then zero, and `0 > 0` is false — so an owner who zeroed the budget to pause an

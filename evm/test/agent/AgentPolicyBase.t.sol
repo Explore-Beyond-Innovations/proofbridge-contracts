@@ -78,22 +78,17 @@ abstract contract AgentPolicyBase is RhinestoneModuleKit, Test {
         view
         returns (bytes memory out)
     {
+        // one ad token with its limits, one order token: the shape every lock here spends against
         out = bytes.concat(
-            AgentPolicyCodec.DOMAIN, bytes1(uint8(1)), bytes1(AgentPolicyCodec.ACTION_LOCK_FOR_ORDER), bytes1(uint8(2))
-        );
-        // ascending by token, which is what the parser insists on
-        (bytes32 lo, bytes32 hi) =
-            uint256(AD_TOKEN) < uint256(ORDER_TOKEN) ? (AD_TOKEN, ORDER_TOKEN) : (ORDER_TOKEN, AD_TOKEN);
-        out = bytes.concat(
-            out,
-            lo,
+            AgentPolicyCodec.DOMAIN,
+            bytes1(AgentPolicyCodec.ACTION_LOCK_FOR_ORDER),
+            bytes1(uint8(1)),
+            AD_TOKEN,
             bytes32(maxPerOrder),
             bytes32(capacity),
             bytes32(refill),
-            hi,
-            bytes32(maxPerOrder),
-            bytes32(capacity),
-            bytes32(refill)
+            bytes1(uint8(1)),
+            ORDER_TOKEN
         );
         if (scoped) {
             bytes memory ad = bytes(AD_ID);
@@ -106,6 +101,30 @@ abstract contract AgentPolicyBase is RhinestoneModuleKit, Test {
 
     function defaultPolicy() internal view returns (bytes memory) {
         return policyBytes(false, 0, MAX_PER_ORDER, CAPACITY, REFILL);
+    }
+
+    /// @dev Both tokens in both lists, with the default limits: for the suites that lock in each
+    ///      direction to reach two buckets.
+    function policyBothWays() internal view returns (bytes memory) {
+        (bytes32 lo, bytes32 hi) =
+            uint256(AD_TOKEN) < uint256(ORDER_TOKEN) ? (AD_TOKEN, ORDER_TOKEN) : (ORDER_TOKEN, AD_TOKEN);
+        bytes memory limits = bytes.concat(bytes32(MAX_PER_ORDER), bytes32(CAPACITY), bytes32(REFILL));
+        return bytes.concat(
+            AgentPolicyCodec.DOMAIN,
+            bytes1(AgentPolicyCodec.ACTION_LOCK_FOR_ORDER),
+            bytes1(uint8(2)),
+            lo,
+            limits,
+            hi,
+            limits,
+            bytes1(uint8(2)),
+            lo,
+            hi,
+            bytes1(uint8(0)),
+            bytes1(uint8(0)),
+            bytes8(uint64(0)),
+            settlementSigner
+        );
     }
 
     /*//////////////////////////////////////////////////////////////

@@ -32,6 +32,20 @@ pnpm --filter @proofbridge/stellar-deploy cli deploy --chain-id 1000001
 Re-runs are idempotent: addresses already present in the manifest are
 reused; missing ones are deployed and merged in.
 
+Two contracts are reused only under the code they were deployed from. The
+deploy records the wasm hash of the `bls-key-registry` and the
+`counterparty-verifier` in the manifest (`wasmHashes.blsKeyRegistry`,
+`wasmHashes.counterpartyVerifier`, beside `wasmHashes.agentAccount`), and a
+re-run compares each recorded hash with the hash of the wasm it is about to
+deploy before anything is sent. A different hash refuses, naming the
+contract and both hashes; a manifest with no recorded hash (written before
+the hash was recorded) refuses too, saying why. Either way the fix is to
+deploy the contract again (drop it from the manifest) or, once you have
+checked that the code on chain is this bundle's, to set
+`STELLAR_ALLOW_WASM_MISMATCH=1` (the `allowWasmMismatch` option) for that
+run; the override reuses without reading the bundle's wasm and leaves the
+recorded hash as it was.
+
 ### `deploy-test-tokens`
 
 Registers the native XLM SAC as a tradeable token under `pairKey="xlm"`
@@ -89,7 +103,41 @@ The registry stores keccak256 of a key's EIP-2537 128-byte form as the slot comm
 value EVM stores and the owner messages name); earlier builds stored keccak256 of the 96-byte
 key plus a separate fingerprint, and old slots do not decode under the new `KeySlot`. So a
 registry is not `upgrade`d across this change: redeploy it (and the counterparty verifier that
-reads it) and register the keys again.
+reads it) and register the keys again. `deploy` enforces this: it refuses to reuse a registry
+or verifier whose recorded wasm hash is not this bundle's (see `deploy` above).
+
+### Replacing a Soroban key registry (cut-over)
+
+The redeploy is a deliberate step, because the relayer and the vault keep work that names the
+registry:
+
+1. **Drain the relayer's open Stellar key legs first.** A key publication stores its filing,
+   including the registry address it was signed for; re-drives and the landed check use that
+   stored address. A register or retirement leg still `PENDING` / `SUBMITTED` for the Stellar
+   chain when the registry changes is sent to the **old** registry, lands there, and is recorded
+   `CONFIRMED` while the new registry has no slot. Before changing the relayer's chain row: stop
+   taking new key publications for that chain (disable the key publisher or hold the Stellar
+   lane), wait until no publication for the chain is `PENDING` or `SUBMITTED`, and finalize or fail
+   what is left by hand.
+2. **Check the retirement vault for that chain.** `PreSignedRetirement` rows are per registry chain
+   and record the slot id the key held on that registry. The signature itself names the key, not
+   the registry or the slot, so it stays valid for the same key once it is registered again; but
+   the row is sent against the chain row's current registry at submit time and its slot id is the
+   old registry's. After the keys are registered again, run the retirement drill for the chain and
+   fix what it reports: a key with no usable pre-signed retirement on the new registry has lost its
+   kill switch until one is exported again.
+3. Redeploy the registry and the verifier: drop `blsKeyRegistry` and `counterpartyVerifier` (and
+   their `wasmHashes` entries) from the manifest and run `deploy`, which deploys what is missing,
+   re-wires the position guards (`[AdManager, OrderPortal]`) and records the new hashes; then point
+   the relayer's chain row (`blsKeyRegistryAddress`) and the frontend / pods at the new address.
+4. Every account registers its keys again; the relayer names no maker key for a Stellar trade
+   until the maker's key is live on the new registry.
+5. **Regenerate the Soroban integration fixtures** (`stellar/tests/fixtures`,
+   `npx tsx generate_fixtures.ts`): the registration subject binds the commitment, so fixtures a
+   checkout holds from before the change fail the register-by-proof tests until regenerated.
+
+The monorepo's `scripts/deploy/README.md` carries the same section for the operator running the
+orchestrator.
 
 ## Environment
 

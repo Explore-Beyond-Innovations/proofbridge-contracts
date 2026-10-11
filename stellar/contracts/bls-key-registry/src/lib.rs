@@ -362,8 +362,9 @@ impl BlsKeyRegistry {
         Ok(())
     }
 
-    /// Leaves the protocol: drops every slot, guarded (t1-design §1.8). With no slots here it only
-    /// bumps the nonce, killing every outstanding signature at this registry (2.6 review D2).
+    /// Leaves the protocol: drops every slot, guarded (t1-design §1.8), and refused while there are
+    /// slots and no guard is wired. With no slots here it only bumps the nonce, killing every
+    /// outstanding signature at this registry (2.6 review D2).
     pub fn revoke(
         env: Env,
         account: BytesN<32>,
@@ -732,26 +733,25 @@ fn expired_at(env: &Env, account: &BytesN<32>, slot_id: u32) -> u64 {
     }
 }
 
-/// Drops every dead slot the escrows can no longer need. With guards wired: at once when none
+/// Drops every dead slot the escrows can no longer need: at once when guards are wired and none
 /// reports an open position for the account (#422 D17 — no order's cancel can still ask about its
-/// history), never while one does, past GRACE_PERIOD if need be. With no guard wired: after
-/// expiry + GRACE_PERIOD (D17b — with no guard to ask, never at once). Not in the
-/// expiry's own second (D17a): a lock in that second still counts the kill. Order of `live` is not
-/// meaningful.
+/// history), else after expiry + GRACE_PERIOD, open positions or not. The 30 days outlast every
+/// finalize a kill can still touch: an order's life as a payout is at most the window, its buffer,
+/// the challenge period and the ruling buffer (about 16 days), plus a grace capped by the 7-day
+/// anchor delay and one buffer, so a slot kept longer protects nothing and only fills the cap. With
+/// no guard to ask, never at once (D17b). Not in the expiry's own second (D17a): a lock in that
+/// second still counts the kill. Order of `live` is not meaningful.
 fn prune(env: &Env, account: &BytesN<32>, entry: &mut storage::RegistryEntry) {
     let now = env.ledger().timestamp();
     let wired = storage::get_guards(env).map_or(false, |g| !g.is_empty());
-    let open = wired && has_open_positions(env, account);
+    let at_once = wired && !has_open_positions(env, account);
     let mut kept = Vec::new(env);
     for slot_id in entry.live.iter() {
         let prunable = match storage::get_slot(env, account, slot_id) {
             Some(_) => {
                 let vu = expired_at(env, account, slot_id);
-                // Guarded: kept while any guard reports an open position, however long that is.
-                // Unguarded: the GRACE_PERIOD arm (no escrow, no order to protect).
                 vu != 0
-                    && !open
-                    && if wired {
+                    && if at_once {
                         now > vu
                     } else {
                         now > vu.saturating_add(GRACE_PERIOD)
@@ -773,7 +773,11 @@ fn prune(env: &Env, account: &BytesN<32>, entry: &mut storage::RegistryEntry) {
     entry.live = kept;
 }
 
+/// Fails closed like `prune`: with no guard to ask, an open order cannot be ruled out.
 fn require_no_open_positions(env: &Env, account: &BytesN<32>) -> Result<(), RegistryError> {
+    if storage::get_guards(env).map_or(true, |g| g.is_empty()) {
+        return Err(RegistryError::GuardsUnset);
+    }
     if has_open_positions(env, account) {
         return Err(RegistryError::AccountInFlight);
     }

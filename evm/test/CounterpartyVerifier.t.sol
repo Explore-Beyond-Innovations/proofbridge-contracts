@@ -9,6 +9,7 @@ import {CounterpartyVerifier} from "../src/CounterpartyVerifier.sol";
 import {CoSign} from "test/utils/CoSign.sol";
 import {BLS} from "src/libraries/BLS.sol";
 import {OwnerAuthVectors} from "test/utils/OwnerAuthVectors.sol";
+import {IdleGuard} from "test/utils/IdleGuard.sol";
 
 /// Vector-driven tests; the Soroban verifier suite consumes the same JSON.
 contract CounterpartyVerifierTest is Test {
@@ -259,6 +260,10 @@ contract CounterpartyVerifierTest is Test {
     }
 
     function test_unregisteredAccountFails() public {
+        vm.store(REGISTRY, bytes32(0), bytes32(uint256(uint160(address(this))))); // admin
+        address[] memory guards = new address[](1);
+        guards[0] = address(new IdleGuard());
+        registry.setPositionGuards(guards);
         registry.revoke(maker, OwnerAuthVectors.auth(v, ".ownerAuth.maker.revoke[1]"), 1);
         assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, metadata()));
     }

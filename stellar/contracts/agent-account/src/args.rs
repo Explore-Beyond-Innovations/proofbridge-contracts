@@ -89,20 +89,20 @@ pub fn check_account_call(env: &Env, action: &Symbol, args: &Vec<Val>) -> Result
         arg::<BytesN<32>>(env, args, 0)?;
         arg::<Limit>(env, args, 1)?;
     } else if *action == policy::act_set_policy(env) {
-        // (agent_id, allowed_actions, token_whitelist, valid_until, settlement_signer, ad_scope,
-        // limits), as `set_policy` takes them.
+        // (agent_id, allowed_action, ad_tokens, order_tokens, valid_until, settlement_signer,
+        // ad_scope), as `set_policy` takes them.
         arity(args, 7)?;
         let at = |i: u32| args.get(i).ok_or(AccountError::BadArgs);
         arg::<BytesN<32>>(env, args, 0)?;
-        typed_vec::<Symbol>(env, &at(1)?)?;
-        typed_vec::<BytesN<32>>(env, &at(2)?)?;
-        arg::<u64>(env, args, 3)?;
-        arg::<BytesN<32>>(env, args, 4)?;
-        let scope = at(5)?;
+        arg::<Symbol>(env, args, 1)?;
+        typed_vec::<TokenLimit>(env, &at(2)?)?;
+        typed_vec::<BytesN<32>>(env, &at(3)?)?;
+        arg::<u64>(env, args, 4)?;
+        arg::<BytesN<32>>(env, args, 5)?;
+        let scope = at(6)?;
         if !scope.is_void() {
             typed_vec::<String>(env, &scope)?;
         }
-        typed_vec::<TokenLimit>(env, &at(6)?)?;
     } else {
         return Err(AccountError::ActionNotAllowed);
     }

@@ -256,6 +256,7 @@ fn register_evm_home_account_via_secp256k1() {
 #[test]
 fn revoke_stellar_home_then_key_is_gone() {
     let (env, client, v) = setup();
+    idle_guard(&env, &client);
     let r = reg(&v, "makerOnStellarTestnet");
     let account = bn::<32>(&env, &r["account"]);
     let owner = maker_owner(&env, &v);
@@ -280,6 +281,7 @@ fn revoke_stellar_home_then_key_is_gone() {
 #[test]
 fn revoke_evm_home_with_nonce1_signature() {
     let (env, client, v) = setup();
+    idle_guard(&env, &client);
     let account = slot_account(&env, &v, BRIDGER);
     register_slot(&env, &client, &v, BRIDGER, 0);
     client.revoke(&account, &signed(&env, &oa(&v, BRIDGER)["revoke"][1]), &1);
@@ -601,6 +603,36 @@ fn revoke_blocked_while_in_flight() {
     );
 }
 
+/// With live slots and no guard wired, revoke cannot rule out an open order: it refuses, and an
+/// empty guard list counts as none. Nothing changes.
+#[test]
+fn revoke_with_live_slots_and_no_guards_is_refused() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    let owner = OwnerAuth::Stellar(maker_owner(&env, &v));
+    assert_eq!(
+        client.try_revoke(&account, &owner, &1),
+        Err(Ok(RegistryError::GuardsUnset))
+    );
+    client.set_position_guards(&soroban_sdk::vec![&env]);
+    assert_eq!(
+        client.try_revoke(&account, &owner, &1),
+        Err(Ok(RegistryError::GuardsUnset))
+    );
+    assert_eq!(client.nonce_of(&account), 1);
+    assert_eq!(client.live_slots(&account).len(), 1);
+}
+
+/// With no slots there is nothing to guard: revoke still burns the nonce with no guard wired.
+#[test]
+fn revoke_with_no_slots_and_no_guards_bumps_the_nonce() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, BRIDGER);
+    client.revoke(&account, &signed(&env, &oa(&v, BRIDGER)["revoke"][0]), &0);
+    assert_eq!(client.nonce_of(&account), 1);
+}
+
 #[test]
 fn first_registration_ignores_busy_guards() {
     let (env, client, v) = setup();
@@ -758,10 +790,10 @@ fn register_at_cap_prunes_expired_slot() {
     assert_eq!(client.next_slot_id(&account), 6);
 }
 
-/// While a guard reports an open position a dead slot keeps its place, past the 30-day grace if
-/// need be — an open order's cancel may still ask about it; once the position closes it is pruned.
+/// While a guard reports an open position a dead slot keeps its place inside the 30-day grace — an
+/// open order's cancel may still ask about it; once the position closes it is pruned at once.
 #[test]
-fn register_at_cap_keeps_a_dead_slot_while_in_flight_past_the_grace() {
+fn register_at_cap_keeps_a_dead_slot_while_in_flight_inside_the_grace() {
     let (env, client, v) = setup();
     let account = slot_account(&env, &v, MAKER);
     let guard = env.register(ToggleGuard, ());
@@ -790,13 +822,28 @@ fn register_at_cap_keeps_a_dead_slot_while_in_flight_past_the_grace() {
     };
     env.ledger().set_timestamp(T0 + 1);
     assert_eq!(full(&client), Err(Ok(RegistryError::RegistryFull)));
-    env.ledger().set_timestamp(grace_ts(&v)); // past the 30-day grace, in registerLate's window
-    assert_eq!(
-        full(&client),
-        Err(Ok(RegistryError::RegistryFull)),
-        "the grace alone never prunes while a position is open"
-    );
+    assert!(client.lookup(&account, &2).is_some());
     toggle.set_open(&false);
+    assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
+    assert_eq!(client.lookup(&account, &2), None);
+}
+
+/// The 30 days bound the wait whatever the guards say: a dead slot goes past the grace while a
+/// position is still open. Every finalize a kill can still touch happens inside those 30 days, so
+/// keeping the slot longer only fills the cap of an account that always has an order in flight.
+#[test]
+fn register_at_cap_prunes_a_dead_slot_past_the_grace_while_still_in_flight() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    let guard = env.register(ToggleGuard, ());
+    let toggle = ToggleGuardClient::new(&env, &guard);
+    toggle.set_open(&true);
+    client.set_position_guards(&soroban_sdk::vec![&env, guard]);
+    for i in 0..5 {
+        register_slot(&env, &client, &v, MAKER, i);
+    }
+    set_valid_until(&env, &client, &v, MAKER, 2, true);
+    env.ledger().set_timestamp(grace_ts(&v)); // past the 30-day grace, in registerLate's window
     assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
     assert_eq!(client.lookup(&account, &2), None);
 }
@@ -932,6 +979,7 @@ fn reused_key_rejected_after_retirement() {
 #[test]
 fn revoke_clears_all_slots_and_next_id_keeps_advancing() {
     let (env, client, v) = setup();
+    idle_guard(&env, &client);
     let account = slot_account(&env, &v, MAKER);
     register_slot(&env, &client, &v, MAKER, 0);
     client.revoke(&account, &OwnerAuth::Stellar(maker_owner(&env, &v)), &1);
@@ -1235,6 +1283,7 @@ fn sep53_vector_retires_the_makers_slot() {
 #[test]
 fn sep53_fresh_signature_over_the_text_verifies() {
     let (env, client, v) = setup();
+    idle_guard(&env, &client);
     let account = slot_account(&env, &v, MAKER);
     let sk = maker_wallet_sk(&v);
     let r0 = slot_reg(&v, MAKER, 0);
@@ -1315,6 +1364,7 @@ fn register_stellar_home_account_via_sep53() {
 #[test]
 fn revoke_stellar_home_account_via_sep53() {
     let (env, client, v) = setup();
+    idle_guard(&env, &client);
     let account = slot_account(&env, &v, MAKER);
     register_slot(&env, &client, &v, MAKER, 0);
     client.revoke(&account, &signed(&env, &oa(&v, MAKER)["revoke"][1]), &1);
@@ -1329,6 +1379,7 @@ fn revoke_stellar_home_account_via_sep53() {
 #[test]
 fn sep53_register_signature_does_not_authorise_the_revoke() {
     let (env, client, v) = setup();
+    idle_guard(&env, &client);
     let account = slot_account(&env, &v, MAKER);
     register_slot(&env, &client, &v, MAKER, 0);
     let replayed = signed(&env, &oa(&v, MAKER)["register"][1]); // legs at nonce 1, a RegisterKey
@@ -1493,6 +1544,7 @@ fn the_own_leg_twice_is_refused() {
 #[test]
 fn a_stale_nonce_is_refused() {
     let (env, client, v) = setup();
+    idle_guard(&env, &client);
     for who in [MAKER, BRIDGER] {
         let account = slot_account(&env, &v, who);
         register_slot(&env, &client, &v, who, 0);
@@ -1873,6 +1925,7 @@ fn a_fresh_secp256k1_signature_over_the_vector_digest_registers() {
 #[test]
 fn slot_of_key_follows_registration_and_revoke() {
     let (env, client, v) = setup();
+    idle_guard(&env, &client);
     let account = slot_account(&env, &v, MAKER);
     assert_eq!(
         client.slot_of_key(&account, &key_commit(&env, &v, MAKER, 0)),
@@ -2194,6 +2247,7 @@ fn a_registry_named_twice_is_refused_at_either_nonce() {
     let v = vectors();
     for who in [MAKER, BRIDGER] {
         let (env, client, _) = setup();
+        idle_guard(&env, &client);
         assert_eq!(
             try_register0(&env, &client, &v, who, "sameRegistryTwoNonces", DEADLINE),
             Err(Ok(RegistryError::LegMismatch)),
@@ -2267,7 +2321,8 @@ mod wallet_signatures {
     }
 
     impl W {
-        /// The registry `reg_env`'s strkey names, initialized for `reg_env` as the deploy CLI does.
+        /// The registry `reg_env`'s strkey names, initialized for `reg_env` and given a guard as the
+        /// deploy CLI does.
         fn new(w: &'static str, reg_env: &str) -> W {
             let v: serde_json::Value = serde_json::from_str(WALLET).unwrap();
             let p: serde_json::Value = serde_json::from_str(POP).unwrap();
@@ -2285,6 +2340,7 @@ mod wallet_signatures {
                 &CHAIN,
                 &SString::from_str(&env, reg_env),
             );
+            idle_guard(&env, &client);
             assert_eq!(
                 bn::<32>(&env, &p[w]["pop"][reg_env]["sorobanRegistry"]),
                 contract_address_bytes(&env, &id)
@@ -2765,6 +2821,7 @@ fn approve_maker_by_stellar_auth() {
 #[test]
 fn revoke_drops_every_approval() {
     let (env, client, v) = setup();
+    idle_guard(&env, &client); // a revoke with live slots asks the guards (14c)
     let account = slot_account(&env, &v, MAKER);
     register_slot(&env, &client, &v, MAKER, 0);
     let a = oa(&v, MAKER);

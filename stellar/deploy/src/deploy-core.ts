@@ -12,6 +12,7 @@ import {
 } from "./common.js";
 import { namedOutsideLocal, requireDeployEnv, requireStellarChainId } from "./deploy-env.js";
 import { assertReusedVk, sha256Hex, vkRecord } from "./vk.js";
+import { WASM_MISMATCH_OVERRIDE, assertReusableWasm, wasmSha256 } from "./wasm-reuse.js";
 import {
   Acting,
   type DescribedCall,
@@ -43,6 +44,8 @@ export interface DeployStellarCoreOptions {
   vkPath?: string;
   manifestOut?: string;
   reuseExisting?: boolean;
+  /** Reuse a key registry or counterparty verifier whose recorded wasm hash is missing or differs (else `STELLAR_ALLOW_WASM_MISMATCH=1`). */
+  allowWasmMismatch?: boolean;
 }
 
 export interface DeployStellarCoreResult {
@@ -116,6 +119,25 @@ export async function deployCore(
   const reusedRegistry = existing?.contracts.blsKeyRegistry?.address;
   if (reuse && reusedRegistry) {
     assertRegistryEnv("stellar-deploy", env, readView(reusedRegistry, "keys_env"));
+  }
+  // A reused registry or counterparty verifier must have been deployed from this bundle's wasm: a
+  // storage-shape change (one key commitment) leaves old slots undecodable under new code, and the
+  // admin `upgrade` keeps storage. The manifest records the hash at deploy; a mismatch, or no
+  // record to compare, refuses unless the operator overrides.
+  const allowWasmMismatch = opts.allowWasmMismatch ?? envOrDefault(WASM_MISMATCH_OVERRIDE, "") === "1";
+  const registryWasm = path.join(wasmBase, "bls_key_registry.wasm");
+  const counterpartyVerifierWasm = path.join(wasmBase, "counterparty_verifier.wasm");
+  const recordedHashes = existing?.wasmHashes ?? {};
+  let registryWasmHash = recordedHashes.blsKeyRegistry;
+  let counterpartyVerifierWasmHash = recordedHashes.counterpartyVerifier;
+  if (reuse && reusedRegistry) {
+    const r = assertReusableWasm("stellar-deploy BLSKeyRegistry", registryWasmHash, () => wasmSha256(registryWasm), allowWasmMismatch);
+    console.log(`  [reuse] BLSKeyRegistry wasm ${r === "match" ? `matches the bundle (${registryWasmHash})` : `not checked: ${WASM_MISMATCH_OVERRIDE} set (recorded ${registryWasmHash ?? "none"})`}`);
+  }
+  const reusedCounterpartyVerifier = existing?.contracts.counterpartyVerifier?.address;
+  if (reuse && reusedCounterpartyVerifier) {
+    const r = assertReusableWasm("stellar-deploy CounterpartyVerifier", counterpartyVerifierWasmHash, () => wasmSha256(counterpartyVerifierWasm), allowWasmMismatch);
+    console.log(`  [reuse] CounterpartyVerifier wasm ${r === "match" ? `matches the bundle (${counterpartyVerifierWasmHash})` : `not checked: ${WASM_MISMATCH_OVERRIDE} set (recorded ${counterpartyVerifierWasmHash ?? "none"})`}`);
   }
 
   function reused(existingAddr: string | undefined): string | undefined {
@@ -230,7 +252,8 @@ export async function deployCore(
   // ── BLS stack (1.2): key registry + module C verifier ──────────
   let blsKeyRegistry = reused(existing?.contracts.blsKeyRegistry?.address);
   if (!blsKeyRegistry) {
-    blsKeyRegistry = tracked("BLSKeyRegistry", deployContract(path.join(wasmBase, "bls_key_registry.wasm")));
+    registryWasmHash = wasmSha256(registryWasm);
+    blsKeyRegistry = tracked("BLSKeyRegistry", deployContract(registryWasm));
     invokeContract(blsKeyRegistry, "initialize", registryInitArgs(adminStrkey, chainId, env));
     deployedNow.push("BLSKeyRegistry");
     console.log(`  [deploy] BLSKeyRegistry: ${blsKeyRegistry}`);
@@ -242,9 +265,8 @@ export async function deployCore(
     existing?.contracts.counterpartyVerifier?.address,
   );
   if (!counterpartyVerifier) {
-    counterpartyVerifier = tracked("CounterpartyVerifier", deployContract(
-      path.join(wasmBase, "counterparty_verifier.wasm"),
-    ));
+    counterpartyVerifierWasmHash = wasmSha256(counterpartyVerifierWasm);
+    counterpartyVerifier = tracked("CounterpartyVerifier", deployContract(counterpartyVerifierWasm));
     invokeContract(counterpartyVerifier, "initialize", [
       "--registry",
       blsKeyRegistry,
@@ -386,7 +408,11 @@ export async function deployCore(
 
   // ── manifest ───────────────────────────────────────────────────
   const manifest = buildManifest({
-    wasmHashes: { agentAccount: agentAccountWasmHash },
+    wasmHashes: {
+      agentAccount: agentAccountWasmHash,
+      blsKeyRegistry: registryWasmHash,
+      counterpartyVerifier: counterpartyVerifierWasmHash,
+    },
     vk: vkRec,
     chainName,
     chainId,
