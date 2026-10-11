@@ -268,8 +268,8 @@ contract BLSKeyRegistryTest is Test {
         assertEq(registry.nextSlotId(account), 6);
     }
 
-    /// #422 D17: while a guard reports positions a dead slot keeps its place, past the grace if need
-    /// be (an open order's cancel may still ask about it), and leaves once the positions close.
+    /// #422 D17: while a guard reports positions a dead slot keeps its place inside the 30-day grace (an
+    /// open order's cancel may still ask about it), and leaves at once when the positions close.
     function test_registerAtCap_deadSlotKeptWhileInFlight_prunedOnceClosed() public {
         bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
         ToggleGuard guard = new ToggleGuard();
@@ -284,13 +284,30 @@ contract BLSKeyRegistryTest is Test {
         vm.warp(T0 + 1);
         vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
         registerSlot("makerOnSepolia", 5);
-
-        vm.warp(graceTs()); // well past the grace; register deadlines are signed for this clock (D2)
-        vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
-        registerSlot("makerOnSepolia", 5);
         registry.lookup(account, 2);
 
         guard.setBusy(false);
+        assertEq(registerSlot("makerOnSepolia", 5), 5);
+        vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
+        registry.lookup(account, 2);
+    }
+
+    /// The 30 days bound the wait whatever the guards say: a dead slot goes past the grace while a
+    /// position is still open. Every finalize a kill can still touch happens inside those 30 days, so
+    /// keeping the slot longer only fills the cap of an account that always has an order in flight.
+    function test_registerAtCap_deadSlotPrunedPastTheGrace_whileStillInFlight() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        ToggleGuard guard = new ToggleGuard();
+        address[] memory guards = new address[](1);
+        guards[0] = address(guard);
+        registry.setPositionGuards(guards);
+        guard.setBusy(true);
+        for (uint256 i = 0; i < 5; i++) {
+            registerSlot("makerOnSepolia", i);
+        }
+        setValidUntil("makerOnSepolia", 2, true);
+        vm.warp(graceTs()); // well past the grace; register deadlines are signed for this clock (D2)
+        assertTrue(guard.hasOpenPositions(account), "still in flight");
         assertEq(registerSlot("makerOnSepolia", 5), 5);
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.lookup(account, 2);

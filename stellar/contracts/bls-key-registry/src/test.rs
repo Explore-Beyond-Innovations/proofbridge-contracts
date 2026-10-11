@@ -827,10 +827,10 @@ fn any_slot_expired_within_an_early_shorten_expires_at_its_date() {
     assert!(!client.any_slot_expired_within(&account, &(T0 + 1), &(g - 1)));
 }
 
-/// While a guard reports an open position a dead slot keeps its place, past the 30-day grace if
-/// need be — an open order's cancel may still ask about it; once the position closes it is pruned.
+/// While a guard reports an open position a dead slot keeps its place inside the 30-day grace — an
+/// open order's cancel may still ask about it; once the position closes it is pruned at once.
 #[test]
-fn register_at_cap_keeps_a_dead_slot_while_in_flight_past_the_grace() {
+fn register_at_cap_keeps_a_dead_slot_while_in_flight_inside_the_grace() {
     let (env, client, v) = setup();
     let account = slot_account(&env, &v, MAKER);
     let guard = env.register(ToggleGuard, ());
@@ -859,13 +859,28 @@ fn register_at_cap_keeps_a_dead_slot_while_in_flight_past_the_grace() {
     };
     env.ledger().set_timestamp(T0 + 1);
     assert_eq!(full(&client), Err(Ok(RegistryError::RegistryFull)));
-    env.ledger().set_timestamp(grace_ts(&v)); // past the 30-day grace, in registerLate's window
-    assert_eq!(
-        full(&client),
-        Err(Ok(RegistryError::RegistryFull)),
-        "the grace alone never prunes while a position is open"
-    );
+    assert!(client.lookup(&account, &2).is_some());
     toggle.set_open(&false);
+    assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
+    assert_eq!(client.lookup(&account, &2), None);
+}
+
+/// The 30 days bound the wait whatever the guards say: a dead slot goes past the grace while a
+/// position is still open. Every finalize a kill can still touch happens inside those 30 days, so
+/// keeping the slot longer only fills the cap of an account that always has an order in flight.
+#[test]
+fn register_at_cap_prunes_a_dead_slot_past_the_grace_while_still_in_flight() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    let guard = env.register(ToggleGuard, ());
+    let toggle = ToggleGuardClient::new(&env, &guard);
+    toggle.set_open(&true);
+    client.set_position_guards(&soroban_sdk::vec![&env, guard]);
+    for i in 0..5 {
+        register_slot(&env, &client, &v, MAKER, i);
+    }
+    set_valid_until(&env, &client, &v, MAKER, 2, true);
+    env.ledger().set_timestamp(grace_ts(&v)); // past the 30-day grace, in registerLate's window
     assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
     assert_eq!(client.lookup(&account, &2), None);
 }
