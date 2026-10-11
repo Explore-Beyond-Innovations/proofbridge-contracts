@@ -296,7 +296,10 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
     /// The settlement signer consents to move `orderHash`'s co-signing pin from `fromSlot` to `toSlot`;
     /// anyone may then apply it on the AdManager (`repinOrder`), which checks the order is still open
     /// and `toSlot` usable. The (account, order) pair's own nonce, so a signature applies once. Not
-    /// pausable: it moves a pin off a leaked key, which only protects the order.
+    /// pausable: it moves a pin off a leaked key, which only protects the order. The consent has no
+    /// deadline and `revoke` leaves it: it is withdrawn by superseding it (a consent at the next nonce
+    /// naming another slot, or the current pin), and a late-applied one can only move the pin to a
+    /// slot that is usable then and stamp the order re-pinned, which gives the bridger the grace.
     function approveRepin(
         bytes32 account,
         bytes32 orderHash,

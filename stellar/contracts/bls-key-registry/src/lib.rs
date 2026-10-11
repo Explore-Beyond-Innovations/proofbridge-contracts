@@ -484,7 +484,10 @@ impl BlsKeyRegistry {
     /// The settlement signer consents to move `order_hash`'s co-signing pin from `from_slot` to
     /// `to_slot`; anyone may then apply it on the ad-manager (`repin_order`), which checks the order is
     /// still open and `to_slot` usable. The (account, order) pair's own nonce, so a signature applies
-    /// once. Not pausable: it moves a pin off a leaked key, which only protects the order.
+    /// once. Not pausable: it moves a pin off a leaked key, which only protects the order. The consent
+    /// has no deadline and `revoke` leaves it: it is withdrawn by superseding it (a consent at the next
+    /// nonce naming another slot, or the current pin), and a late-applied one can only move the pin to
+    /// a slot that is usable then and stamp the order re-pinned, which gives the bridger the grace.
     pub fn approve_repin(
         env: Env,
         account: BytesN<32>,
