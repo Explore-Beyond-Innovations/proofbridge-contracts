@@ -6176,6 +6176,65 @@ fn test_2_3g_evidence_closes_the_dispute_and_releases_the_bond() {
     );
 }
 
+/// The bridger-side party on the ad leg: the order's recipient, as an address this chain pays.
+fn recipient_party(s: &TestSetup) -> Address {
+    let strkey = stellar_strkey::ed25519::PublicKey(s.tp.order_recipient).to_string();
+    Address::from_string(&SorobanString::from_str(&s.env, &strkey))
+}
+
+/// Who the bond goes to on an evidence close, pinned per filer. The maker filed and evidence then
+/// settled the trade: the fee pool takes the bond.
+#[test]
+fn test_evidence_close_maker_filed_bond_to_the_fee_pool() {
+    let s = setup();
+    let (dm, _arbiter, maker) = wire_dispute_manager(&s);
+    let pool = dm.get_protocol_fee_pool().unwrap();
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let p = locked_ad_order(&s);
+    s.ad_manager.dispute(&p, &maker, &evidence(&s, 0xEE));
+    let (maker_before, pool_before) = (token.balance(&maker), token.balance(&pool));
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    assert_eq!(
+        token.balance(&maker),
+        maker_before,
+        "the maker's bond is not returned"
+    );
+    assert_eq!(dm.claimable(&maker), 0);
+    assert_eq!(
+        token.balance(&pool) - pool_before,
+        DISPUTE_BOND_FLOOR as i128,
+        "the fee pool took it"
+    );
+}
+
+/// A bridger who filed against a payout nobody denied disputed a settleable trade: the fee pool
+/// takes the bond, and the bridger receives only the payout.
+#[test]
+fn test_evidence_close_bridger_filed_bond_to_the_fee_pool() {
+    let s = setup();
+    let (dm, _arbiter, _maker) = wire_dispute_manager(&s);
+    let pool = dm.get_protocol_fee_pool().unwrap();
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let bridger = recipient_party(&s);
+    token.mint(&bridger, &1_000_000);
+    let p = locked_ad_order(&s);
+    s.ad_manager.dispute(&p, &bridger, &evidence(&s, 0xEE));
+    let payout = ad_locked(&s) as i128;
+    let (bridger_before, pool_before) = (token.balance(&bridger), token.balance(&pool));
+    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    assert_eq!(
+        token.balance(&bridger) - bridger_before,
+        payout,
+        "the payout, and no bond"
+    );
+    assert_eq!(dm.claimable(&bridger), 0);
+    assert_eq!(
+        token.balance(&pool) - pool_before,
+        DISPUTE_BOND_FLOOR as i128,
+        "the fee pool took it"
+    );
+}
+
 /// S3: the responder slot is single, so anyone able to write it could overwrite the genuine
 /// counterparty's evidence hash one ledger before the arbiter reads it.
 #[test]

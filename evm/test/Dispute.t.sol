@@ -436,6 +436,25 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, bond, "it went to the fee pool");
     }
 
+    /// Who the bond goes to on an evidence close, pinned per filer. A bridger who filed against a
+    /// payout nobody denied disputed a settleable trade: the fee pool takes the bond.
+    function test_evidenceClose_bridgerFiled_bondToTheFeePool() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(25);
+        uint256 bond = _file(p, filer);
+        _presentSettledOn(p, h);
+        assertEq(filer.balance + _wNativeToken.balanceOf(filer), 0, "the bridger's bond is not returned");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, bond, "the fee pool took it");
+    }
+
+    /// The maker filed and evidence then settled the trade: the fee pool takes the bond.
+    function test_evidenceClose_makerFiled_bondToTheFeePool() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(26);
+        uint256 bond = _file(p, maker);
+        _presentSettledOn(p, h);
+        assertEq(maker.balance + _wNativeToken.balanceOf(maker), 0, "the maker's bond is not returned");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, bond, "the fee pool took it");
+    }
+
     /// B3: a ruling opens a window rather than paying. One issued a second before the deadline must
     /// not become payable a second after it — that is the room the forfeited party presents in.
     function test_b3_aRulingOpensARealWindow() public {
