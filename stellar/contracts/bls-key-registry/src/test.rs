@@ -163,8 +163,9 @@ fn slot_commitment(env: &Env, v: &serde_json::Value, who: &str, i: usize) -> Byt
     bn::<32>(env, &slot_reg(v, who, i)["commitment"])
 }
 
-/// The fingerprint key i is named by in the owner's messages (keccak of its EIP-2537 form).
-fn fingerprint(env: &Env, v: &serde_json::Value, who: &str, i: usize) -> BytesN<32> {
+/// The commitment key i is named by in the owner's messages and stored under (keccak of its
+/// EIP-2537 form).
+fn key_commit(env: &Env, v: &serde_json::Value, who: &str, i: usize) -> BytesN<32> {
     bn::<32>(env, &oa(v, who)["register"][i]["keyCommitment"])
 }
 
@@ -192,7 +193,7 @@ fn set_valid_until(
     client.set_valid_until(
         &slot_account(env, v, who),
         &svu_owner(env, v, who, key, retire),
-        &fingerprint(env, v, who, key as usize),
+        &key_commit(env, v, who, key as usize),
         &if retire { 1 } else { grace_ts(v) },
     );
 }
@@ -999,7 +1000,7 @@ fn set_valid_until_shorten_only_and_never_zero() {
         client.try_set_valid_until(
             &account,
             &svu_owner(&env, &v, BRIDGER, 0, true),
-            &fingerprint(&env, &v, BRIDGER, 0),
+            &key_commit(&env, &v, BRIDGER, 0),
             &0
         ),
         Err(Ok(RegistryError::BadValidUntil))
@@ -1009,7 +1010,7 @@ fn set_valid_until_shorten_only_and_never_zero() {
         client.try_set_valid_until(
             &account,
             &svu_owner(&env, &v, BRIDGER, 0, false),
-            &fingerprint(&env, &v, BRIDGER, 0),
+            &key_commit(&env, &v, BRIDGER, 0),
             &grace_ts(&v)
         ),
         Err(Ok(RegistryError::BadValidUntil))
@@ -1025,7 +1026,7 @@ fn set_valid_until_unknown_slot_rejected() {
         client.try_set_valid_until(
             &account,
             &svu_owner(&env, &v, BRIDGER, 1, true),
-            &fingerprint(&env, &v, BRIDGER, 1),
+            &key_commit(&env, &v, BRIDGER, 1),
             &1
         ),
         Err(Ok(RegistryError::NoSuchSlot))
@@ -1038,13 +1039,13 @@ fn set_valid_until_sig_bound_to_key_value_and_signer() {
     let account = slot_account(&env, &v, BRIDGER);
     register_slot(&env, &client, &v, BRIDGER, 0);
     register_slot(&env, &client, &v, BRIDGER, 1);
-    let fp0 = fingerprint(&env, &v, BRIDGER, 0);
+    let fp0 = key_commit(&env, &v, BRIDGER, 0);
     // key-0 signature replayed against key 1
     assert_eq!(
         client.try_set_valid_until(
             &account,
             &svu_owner(&env, &v, BRIDGER, 0, true),
-            &fingerprint(&env, &v, BRIDGER, 1),
+            &key_commit(&env, &v, BRIDGER, 1),
             &1
         ),
         Err(Ok(RegistryError::OwnerMismatch))
@@ -1085,7 +1086,7 @@ fn pre_signed_retirement_survives_later_writes_and_replay_is_noop() {
     set_valid_until(&env, &client, &v, BRIDGER, 1, false); // another retirement, other slot
     let nonce = client.nonce_of(&account);
 
-    let fp0 = fingerprint(&env, &v, BRIDGER, 0);
+    let fp0 = key_commit(&env, &v, BRIDGER, 0);
     client.set_valid_until(&account, &pre_signed, &fp0, &1);
     assert_eq!(
         client.try_commitment_at(&account, &0),
@@ -1228,7 +1229,7 @@ fn sep53_vector_retires_the_makers_slot() {
     client.set_valid_until(
         &account,
         &signed(&env, e),
-        &fingerprint(&env, &v, MAKER, 0),
+        &key_commit(&env, &v, MAKER, 0),
         &1,
     );
     assert_eq!(
@@ -1265,7 +1266,7 @@ fn sep53_fresh_signature_over_the_text_verifies() {
             Vec::new(&env),
             OwnerSig::Sep53(sep53_sign_text(&env, text_of(e), &sk)),
         ),
-        &fingerprint(&env, &v, MAKER, 0),
+        &key_commit(&env, &v, MAKER, 0),
         &grace_ts(&v),
     );
     assert_eq!(
@@ -1297,7 +1298,7 @@ fn sep53_wrong_key_traps_and_changes_nothing() {
             client.set_valid_until(
                 &account,
                 &signed_with(&env, Vec::new(&env), OwnerSig::Sep53(sig)),
-                &fingerprint(&env, &v, MAKER, 0),
+                &key_commit(&env, &v, MAKER, 0),
                 &1,
             );
         },
@@ -1357,7 +1358,7 @@ fn sep53_signature_bound_to_key_and_value() {
     let key0_retire = svu_owner(&env, &v, MAKER, 0, true);
     assert_crypto_trap(
         || {
-            client.set_valid_until(&account, &key0_retire, &fingerprint(&env, &v, MAKER, 1), &1);
+            client.set_valid_until(&account, &key0_retire, &key_commit(&env, &v, MAKER, 1), &1);
         },
         "key 1 under key 0's retirement",
     );
@@ -1366,7 +1367,7 @@ fn sep53_signature_bound_to_key_and_value() {
             client.set_valid_until(
                 &account,
                 &key0_retire,
-                &fingerprint(&env, &v, MAKER, 0),
+                &key_commit(&env, &v, MAKER, 0),
                 &grace_ts(&v),
             );
         },
@@ -1593,7 +1594,7 @@ fn an_ed25519_signature_on_an_evm_account_is_refused() {
         client.try_set_valid_until(
             &account,
             &signed_with(&env, Vec::new(&env), OwnerSig::Sep53(sig)),
-            &fingerprint(&env, &v, BRIDGER, 0),
+            &key_commit(&env, &v, BRIDGER, 0),
             &1
         ),
         Err(Ok(RegistryError::OwnerMismatch))
@@ -1613,7 +1614,7 @@ fn a_retirement_with_legs_is_refused() {
         sig_of(&env, e),
     );
     assert_eq!(
-        client.try_set_valid_until(&account, &auth, &fingerprint(&env, &v, BRIDGER, 0), &1),
+        client.try_set_valid_until(&account, &auth, &key_commit(&env, &v, BRIDGER, 0), &1),
         Err(Ok(RegistryError::LegMismatch))
     );
 }
@@ -1646,14 +1647,14 @@ fn message_of(env: &Env, e: &serde_json::Value) -> KeyMessage {
     let fp = || bn::<32>(env, &e["keyCommitment"]);
     match e["kind"].as_str().unwrap() {
         "register" => KeyMessage::Register {
-            fingerprint: fp(),
+            key_commitment: fp(),
             nonce: 0,
             deadline: e["deadline"].as_str().unwrap().parse().unwrap(),
         },
         "revoke" => KeyMessage::Revoke { nonce: 0 },
         "cancel" => KeyMessage::Cancel { nonce: 0 },
         _ => KeyMessage::Retire {
-            fingerprint: fp(),
+            key_commitment: fp(),
             valid_until: e["validUntil"].as_str().unwrap().parse().unwrap(),
         },
     }
@@ -1781,26 +1782,55 @@ fn client_domain(_env: &Env, client: &BlsKeyRegistryClient) -> std::vec::Vec<u8>
     client.domain_separator().to_array().to_vec()
 }
 
-/// D2: the padded 96-byte key hashes to the vector fingerprint, which is the EVM commitment.
+/// One key commitment: the padded 96-byte key hashes to the value the owner's messages name, the
+/// EVM slot stores and this registry stores, never to the hash of the 96-byte form.
 #[test]
-fn key_fingerprint_is_the_evm_commitment() {
-    let (env, _client, v) = setup();
+fn one_key_commitment_matches_evm_and_the_messages() {
+    let (env, client, v) = setup();
     for who in [MAKER, BRIDGER] {
         let evm = if who == MAKER {
             "makerOnSepolia"
         } else {
             "bridgerOnSepolia"
         };
-        for i in 0..6 {
+        let account = slot_account(&env, &v, who);
+        for i in 0..3 {
             let pk = bn::<96>(&env, &slot_reg(&v, who, i)["pkNative"]);
-            let fp = owner::key_fingerprint(&env, &pk);
-            assert_eq!(fp, fingerprint(&env, &v, who, i));
-            assert_eq!(fp, bn::<32>(&env, &slot_reg(&v, evm, i)["commitment"]));
-            assert_ne!(
-                fp,
-                slot_commitment(&env, &v, who, i),
-                "storage keeps the native commitment"
+            let c = cross_contract::key_commitment(&env, &pk);
+            assert_eq!(
+                c,
+                key_commit(&env, &v, who, i),
+                "the owner message names it"
             );
+            assert_eq!(
+                c,
+                bn::<32>(&env, &slot_reg(&v, evm, i)["commitment"]),
+                "EVM stores it"
+            );
+            assert_eq!(
+                c,
+                slot_commitment(&env, &v, who, i),
+                "the Soroban vector stores it"
+            );
+
+            let slot_id = register_slot(&env, &client, &v, who, i);
+            assert_eq!(
+                client.commitment_at(&account, &slot_id),
+                c,
+                "commitment_at returns it"
+            );
+            assert_eq!(client.lookup(&account, &slot_id).unwrap().commitment, c);
+            assert_eq!(client.slot_of_key(&account, &c), Some(slot_id));
+            assert!(client.is_used(&account, &c));
+            let native: BytesN<32> = env
+                .crypto()
+                .keccak256(&Bytes::from_slice(&env, &pk.to_array()))
+                .to_bytes();
+            assert!(
+                !client.is_used(&account, &native),
+                "the 96-byte hash is not stored"
+            );
+            assert_eq!(client.slot_of_key(&account, &native), None);
         }
     }
 }
@@ -1825,33 +1855,33 @@ fn a_fresh_secp256k1_signature_over_the_vector_digest_registers() {
         &DEADLINE,
     );
     assert_eq!(
-        client.slot_of_key(&account, &fingerprint(&env, &v, BRIDGER, 2)),
+        client.slot_of_key(&account, &key_commit(&env, &v, BRIDGER, 2)),
         Some(2)
     );
 }
 
-/// The fingerprint map follows the slots: a key maps to its slot, a pruned or revoked key to none.
+/// The commitment-to-slot map follows the slots: a key maps to its slot, a pruned or revoked key to none.
 #[test]
 fn slot_of_key_follows_registration_and_revoke() {
     let (env, client, v) = setup();
     let account = slot_account(&env, &v, MAKER);
     assert_eq!(
-        client.slot_of_key(&account, &fingerprint(&env, &v, MAKER, 0)),
+        client.slot_of_key(&account, &key_commit(&env, &v, MAKER, 0)),
         None
     );
     register_slot(&env, &client, &v, MAKER, 0);
     assert_eq!(
-        client.slot_of_key(&account, &fingerprint(&env, &v, MAKER, 0)),
+        client.slot_of_key(&account, &key_commit(&env, &v, MAKER, 0)),
         Some(0)
     );
     client.revoke(&account, &OwnerAuth::Stellar(maker_owner(&env, &v)), &1);
     assert_eq!(
-        client.slot_of_key(&account, &fingerprint(&env, &v, MAKER, 0)),
+        client.slot_of_key(&account, &key_commit(&env, &v, MAKER, 0)),
         None
     );
     assert_eq!(register_slot(&env, &client, &v, MAKER, 2), 1);
     assert_eq!(
-        client.slot_of_key(&account, &fingerprint(&env, &v, MAKER, 2)),
+        client.slot_of_key(&account, &key_commit(&env, &v, MAKER, 2)),
         Some(1)
     );
     // the retired-then-revoked key's retirement now finds no slot
@@ -1859,7 +1889,7 @@ fn slot_of_key_follows_registration_and_revoke() {
         client.try_set_valid_until(
             &account,
             &svu_owner(&env, &v, MAKER, 0, true),
-            &fingerprint(&env, &v, MAKER, 0),
+            &key_commit(&env, &v, MAKER, 0),
             &1
         ),
         Err(Ok(RegistryError::NoSuchSlot))
@@ -2201,7 +2231,7 @@ fn a_registry_named_twice_is_refused_at_either_nonce() {
     }
 }
 
-/// 50-2: the unlock read keeps the fingerprint row alive with the slot, so a retirement long after
+/// 50-2: the unlock read keeps the keyslot row alive with the slot, so a retirement long after
 /// registration needs no restore.
 #[test]
 fn commitment_at_extends_the_keyslot_row() {
@@ -2209,7 +2239,7 @@ fn commitment_at_extends_the_keyslot_row() {
     let (env, client, v) = setup();
     let account = slot_account(&env, &v, MAKER);
     register_slot(&env, &client, &v, MAKER, 0);
-    let fp = fingerprint(&env, &v, MAKER, 0);
+    let fp = key_commit(&env, &v, MAKER, 0);
     let ttl = || {
         env.as_contract(&client.address, || {
             storage::key_slot_ttl(&env, &account, &fp)
@@ -2404,12 +2434,13 @@ mod wallet_signatures {
         let slot = t.register();
         let account = t.account();
         assert_eq!(t.client.nonce_of(&account), 1);
+        // the slot stores the commitment the wallet signed: one value, the EIP-2537 hash
+        let c = t.client.commitment_at(&account, &slot);
+        assert_eq!(c, bn::<32>(&t.env, &t.e("register")["keyCommitment"]));
+        let pk: [u8; 96] = hexval(&t.p[w]["sorobanPk"]).try_into().unwrap();
         assert_eq!(
-            t.client.commitment_at(&account, &slot),
-            t.env
-                .crypto()
-                .keccak256(&Bytes::from_slice(&t.env, &hexval(&t.p[w]["sorobanPk"])))
-                .to_bytes()
+            c,
+            cross_contract::key_commitment(&t.env, &BytesN::from_array(&t.env, &pk))
         );
     }
 
@@ -2505,7 +2536,7 @@ mod wallet_signatures {
             (
                 "register",
                 KeyMessage::Register {
-                    fingerprint: fp.clone(),
+                    key_commitment: fp.clone(),
                     nonce: 0,
                     deadline: t.num("register", "deadline"),
                 },
@@ -2513,7 +2544,7 @@ mod wallet_signatures {
             (
                 "retire",
                 KeyMessage::Retire {
-                    fingerprint: fp,
+                    key_commitment: fp,
                     valid_until: t.num("retire", "validUntil"),
                 },
             ),

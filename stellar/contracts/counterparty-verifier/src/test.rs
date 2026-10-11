@@ -569,3 +569,88 @@ fn initialize_twice_is_already_initialized() {
     );
     assert_eq!(s.verifier.registry(), before);
 }
+
+/// A registry that answers `commitment_at` with whatever the test stored for the account, so the
+/// verifier's slot check can be shown a value the real registry no longer writes.
+mod stub_registry {
+    use soroban_sdk::{contract, contractimpl, BytesN, Env};
+
+    #[contract]
+    pub struct StubRegistry;
+
+    #[contractimpl]
+    impl StubRegistry {
+        pub fn set(env: Env, account: BytesN<32>, commitment: BytesN<32>) {
+            env.storage().instance().set(&account, &commitment);
+        }
+
+        pub fn commitment_at(env: Env, account: BytesN<32>, _slot_id: u32) -> BytesN<32> {
+            env.storage().instance().get(&account).unwrap()
+        }
+    }
+}
+
+/// The stub-backed verifier and the two accounts' 96-byte keys.
+fn stub_setup(
+    s: &Setup,
+) -> (
+    CounterpartyVerifierClient<'static>,
+    stub_registry::StubRegistryClient<'static>,
+) {
+    let stub_addr = s.env.register(stub_registry::StubRegistry, ());
+    let stub = stub_registry::StubRegistryClient::new(&s.env, &stub_addr);
+    let verifier_addr = s.env.register(CounterpartyVerifier, ());
+    let verifier = CounterpartyVerifierClient::new(&s.env, &verifier_addr);
+    verifier.initialize(&stub_addr);
+    (verifier, stub)
+}
+
+fn party(s: &Setup, who: &str) -> (BytesN<32>, BytesN<96>) {
+    let r = &s.v["registration"][std::format!("{who}OnStellarTestnet")];
+    (
+        bn::<32>(&s.env, &r["account"]),
+        bn::<96>(&s.env, &r["pkNative"]),
+    )
+}
+
+fn keccak96(env: &Env, pk: &BytesN<96>) -> BytesN<32> {
+    env.crypto()
+        .keccak256(&Bytes::from_slice(env, &pk.to_array()))
+        .to_bytes()
+}
+
+/// One key commitment: a slot holding keccak of the EIP-2537 form settles; the same slot holding
+/// the hash of the 96-byte form (the old Soroban storage) does not, for either party.
+#[test]
+fn slot_check_reads_the_eip2537_commitment_not_the_96_byte_hash() {
+    let s = setup();
+    let (verifier, stub) = stub_setup(&s);
+    let (maker, pk_maker) = party(&s, "maker");
+    let (bridger, pk_bridger) = party(&s, "bridger");
+    let valid = || verifier.is_root_valid(&s.order_chain_id, &s.order_chain_root, &s.metadata());
+
+    stub.set(&maker, &key_commitment(&s.env, &pk_maker));
+    stub.set(&bridger, &key_commitment(&s.env, &pk_bridger));
+    assert!(valid(), "the EIP-2537 commitment settles");
+
+    stub.set(&maker, &keccak96(&s.env, &pk_maker));
+    assert!(!valid(), "a maker slot holding the 96-byte hash fails");
+
+    stub.set(&maker, &key_commitment(&s.env, &pk_maker));
+    stub.set(&bridger, &keccak96(&s.env, &pk_bridger));
+    assert!(!valid(), "a bridger slot holding the 96-byte hash fails");
+}
+
+/// The slot's commitment, the auth's maker key and the registry vector are one value.
+#[test]
+fn the_slot_commitment_is_the_auths_maker_key() {
+    let s = setup();
+    let (maker, pk_maker) = party(&s, "maker");
+    let registry = BlsKeyRegistryClient::new(&s.env, &s.verifier.registry());
+    let stored = registry.commitment_at(&maker, &0);
+    assert_eq!(stored, key_commitment(&s.env, &pk_maker));
+    assert_eq!(
+        stored,
+        bn::<32>(&s.env, &s.v["settlement"]["auth"]["makerKeyCommitment"])
+    );
+}

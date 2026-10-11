@@ -468,7 +468,7 @@ async function main() {
   }
 
   // ----- 2.1b: a registration leaf (domain 4) for the vector maker's account + key -----
-  // Subject = keccak256(TAG ‖ dstChainId ‖ dstRegistryId ‖ account32 ‖ keccak256(pkNative) ‖ epoch),
+  // Subject = keccak256(TAG ‖ dstChainId ‖ dstRegistryId ‖ account32 ‖ keyCommitment ‖ epoch),
   // every field 32 bytes (proofbridge_core::cross_contract::registration_subject /
   // RegistrationSubject.sol), minted for the vectors' Stellar registry at epoch 0, so the vectors'
   // nonce-0 proof of possession doubles as the epoch-0 one on both chains.
@@ -482,8 +482,8 @@ async function main() {
   const regChainId = Buffer.from(BigInt(regChain.chainId).toString(16).padStart(64, "0"), "hex");
   const regRegistryId = hexToBytes32(regChain.registryId);
   const regAccount = hexToBytes32(regVec.account);
-  const regPk = Buffer.from(regVec.pkNative.replace(/^0x/i, ""), "hex");
-  const regCommitment = keccak256(regPk);
+  // the one key commitment (keccak256 of the EIP-2537 form), what the registry stores on both chains
+  const regCommitment = hexToBytes32(regVec.commitment);
   const regEpoch = Buffer.alloc(32, 0);
   const regSubject =
     "0x" +

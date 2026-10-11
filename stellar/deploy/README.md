@@ -71,6 +71,14 @@ registry as a simulated `set_valid_until` and listed as `current`, `stale-format
 older RetireKey message; collect it again), `no-slot` or `already-shorter`. Exits 1 when any row is
 stale or could not be checked.
 
+### Key registry storage change (one key commitment)
+
+The registry stores keccak256 of a key's EIP-2537 128-byte form as the slot commitment (the
+value EVM stores and the owner messages name); earlier builds stored keccak256 of the 96-byte
+key plus a separate fingerprint, and old slots do not decode under the new `KeySlot`. So a
+registry is not `upgrade`d across this change: redeploy it (and the counterparty verifier that
+reads it) and register the keys again.
+
 ## Environment
 
 | Variable | Default | Purpose |

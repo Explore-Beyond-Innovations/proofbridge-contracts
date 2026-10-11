@@ -2884,7 +2884,7 @@ fn test_t67_register_by_proof_against_anchored_root_registers() {
     // The signature path's nonce is untouched: a proof registration is invisible to nonce-based
     // landing detection (plan §7).
     assert_eq!(client.nonce_of(&account), 0);
-    // 2.6: a proof registration writes the fingerprint map too, so `RetireKey` can find the slot.
+    // 2.6: a proof registration writes the commitment-to-slot map too, so `RetireKey` can find the slot.
     assert_eq!(client.slot_of_key(&account, &maker_fp(&s.env, 0)), Some(0));
 }
 
@@ -4001,7 +4001,7 @@ fn real_registry_signer(
     (client, account, auth)
 }
 
-/// The fingerprint `set_valid_until` names for the vector maker's slots key `i` (2.6).
+/// The key commitment `set_valid_until` names for the vector maker's slots key `i` (2.6).
 fn maker_fp(env: &Env, i: usize) -> BytesN<32> {
     let vectors: serde_json::Value =
         serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
@@ -7056,12 +7056,13 @@ fn wire_real_verifier_for_fixture(s: &TestSetup) -> Bytes {
     let v = vector_json();
     let registry = s.env.register(AccountKeyRegistry, ());
     let reg = AccountKeyRegistryClient::new(&s.env, &registry);
+    // the one key commitment: keccak256 of the key's EIP-2537 form
     let commit = |who: &str| {
         s.env
             .crypto()
             .keccak256(&Bytes::from_slice(
                 &s.env,
-                &vhex(&v["keys"][who]["pk"]["uncompressed"]),
+                &vhex(&v["keys"][who]["pk"]["eip2537"]),
             ))
             .to_bytes()
     };
