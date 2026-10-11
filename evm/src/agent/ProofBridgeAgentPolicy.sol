@@ -209,6 +209,9 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
      */
     uint256 internal constant MAX_UNCOUNTED = 3;
 
+    /// @notice The largest gas field `_chargeGas` prices: 2^120, the EntryPoint v0.7 bound (AA94).
+    uint256 internal constant MAX_GAS_FIELD = 1 << 120;
+
     uint256 internal constant TYPE_BIT_VALIDATOR = 1;
     uint256 internal constant TYPE_BIT_HOOK = 2;
 
@@ -1557,12 +1560,17 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
      */
     function _chargeGas(address account, bytes32 aKey, PackedUserOperation calldata userOp) internal returns (bool) {
         if (userOp.paymasterAndData.length != 0) return false;
-        uint256 gasLimit =
-            uint256(uint128(bytes16(userOp.accountGasLimits))) + uint256(uint128(uint256(userOp.accountGasLimits)));
-        if (userOp.preVerificationGas > type(uint128).max) return false;
-        gasLimit += userOp.preVerificationGas;
-        // maxFeePerGas is the low half; both factors fit 130 and 128 bits, so this cannot overflow.
-        uint256 maxCost = gasLimit * uint256(uint128(uint256(userOp.gasFees)));
+        uint256 verificationGas = uint128(bytes16(userOp.accountGasLimits));
+        uint256 callGas = uint128(uint256(userOp.accountGasLimits));
+        uint256 maxFee = uint128(uint256(userOp.gasFees)); // maxFeePerGas is the low half
+        // EntryPoint v0.7 refuses any gas field above 120 bits (AA94), so such an operation can never
+        // be paid; it is refused here as an answer, since this can be called outside the EntryPoint.
+        // With each field at most 2^120 the sum fits 122 bits and the cost 242: no overflow.
+        if (
+            verificationGas > MAX_GAS_FIELD || callGas > MAX_GAS_FIELD || userOp.preVerificationGas > MAX_GAS_FIELD
+                || maxFee > MAX_GAS_FIELD
+        ) return false;
+        uint256 maxCost = (verificationGas + callGas + userOp.preVerificationGas) * maxFee;
         uint256 budget = _gasBudget[aKey][account];
         // `budget == 0` on its own line of reasoning: a self-bundling agent can set a zero fee, the
         // cost is then zero, and `0 > 0` is false — so an owner who zeroed the budget to pause an
