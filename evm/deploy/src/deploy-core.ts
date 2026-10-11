@@ -27,6 +27,7 @@ import {
   runtimeCodeOf,
 } from "./artifacts.js";
 import { UTILS_LIBRARY, utilsLibraryLinkedBy, verifyUtilsLibrary, type LibraryVerdict } from "./utils-library.js";
+import { assertSettleBondPairOnChain } from "./settle-bond-pair.js";
 import {
   buildManifest,
   loadOrNull,
@@ -263,6 +264,15 @@ async function deployCoreRun(
         `AdManager at ${existing.contracts.adManager.address} has no keyRegistry() (pre-2.3c bytecode?); redeploy it instead of reusing: ${err}`,
       );
     }
+
+    // The escrow and the dispute module must agree on `settleBond`'s shape (its selector changed
+    // when the bond-return flag was added). A reused side is read from the chain; a side this run
+    // deploys is this build's. Refused here, before the first transaction.
+    await assertSettleBondPairOnChain(
+      provider,
+      { adManager: existing.contracts.adManager.address, disputeManager: existing.contracts.disputeManager?.address },
+      "deploy",
+    );
 
     // The escrows are reused only together with the library their own code links (EIP-170: both
     // DELEGATECALL one ProofBridgeUtils). The manifest is a claim; the escrow's code is the fact.

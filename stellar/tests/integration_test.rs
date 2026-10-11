@@ -6367,6 +6367,48 @@ fn test_evidence_close_bridger_filed_signer_expired_since_the_lock_bond_back() {
     );
 }
 
+/// A verifier repointed after the lock and in place when the proof lands: the change is stamped
+/// (`root_verifier_changed_at`), so the rule is still read as denied at close time and the bridger's
+/// bond comes back although a working verifier is wired. Soroban has no unset, so the gap is a
+/// repoint; without the stamp the fee pool would take the bond.
+#[test]
+fn test_evidence_close_bridger_filed_verifier_repointed_since_the_lock_bond_back() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let (dm, _arbiter, _maker) = wire_dispute_manager(&s);
+    let pool = dm.get_protocol_fee_pool().unwrap();
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let bridger = recipient_party(&s);
+    token.mint(&bridger, &1_000_000);
+    let p = locked_ad_order(&s);
+    s.ad_manager.dispute(&p, &bridger, &evidence(&s, 0xEF));
+    warp(&s, s.env.ledger().timestamp() + 10);
+    let rewired = s.env.register(MockRootVerifier, ());
+    MockRootVerifierClient::new(&s.env, &rewired).set_ok(&true);
+    s.ad_manager
+        .set_root_verifier(&s.tp.order_chain_id, &rewired);
+    assert_eq!(
+        s.ad_manager.root_verifier(&s.tp.order_chain_id),
+        Some(rewired),
+        "a working verifier is wired when the proof lands"
+    );
+    let payout = ad_locked(&s) as i128;
+    let (bridger_before, pool_before) = (token.balance(&bridger), token.balance(&pool));
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+    s.ad_manager.present_settled(&p, &root, &proof);
+    assert_eq!(
+        token.balance(&bridger) - bridger_before,
+        payout + DISPUTE_BOND_FLOOR as i128,
+        "the payout and the bond"
+    );
+    assert_eq!(
+        token.balance(&pool),
+        pool_before,
+        "the fee pool took nothing"
+    );
+}
+
 /// A rotation whose old slot outlives the presentation cutoff put no expiry in the payout's life:
 /// nothing was denied, so the fee pool takes the bond as for any other needless filing.
 #[test]

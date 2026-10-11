@@ -70,6 +70,13 @@ export function methodIdentifier(contractFile: string, contractName: string, sig
   return "0x" + id;
 }
 
+/** Every selector the artifact records, by the signature solc hashed (`forge inspect <name> methodIdentifiers`). */
+export function methodIdentifiers(contractFile: string, contractName: string): Record<string, string> {
+  const ids = loadArtifact(contractFile, contractName).methodIdentifiers;
+  if (!ids) throw new Error(`artifact ${contractFile}.sol/${contractName}.json records no methodIdentifiers`);
+  return ids;
+}
+
 /** The artifact's runtime bytecode, as `forge build` recorded it (link placeholders unresolved). */
 export function deployedCode(contractFile: string, contractName: string): string {
   const code = loadArtifact(contractFile, contractName).deployedBytecode?.object;
