@@ -18,7 +18,7 @@ const CLOCKS = {
   ROUTE_LONG_BACKSTOP_S: "86400",
   ROUTE_CLAIM_STAGGER_S: "0",
   DISPUTE_CHALLENGE_PERIOD_S: "3600",
-  DISPUTE_BOND_FLOOR: "1",
+  DISPUTE_BOND_FLOOR: "1000000000000000", // the minimum outside local (0.001 ETH)
   ANCHOR_DELAY_S: "60",
 };
 const CLEAN: Record<string, string | undefined> = {
