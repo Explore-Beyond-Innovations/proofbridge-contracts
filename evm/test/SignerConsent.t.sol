@@ -144,7 +144,7 @@ contract SignerConsentTest is AdManagerTest {
         keyRegistry.approve(SIGNER, _b32(maker), false);
 
         DisputeManager dm = new DisputeManager(admin, IwNativeToken(address(_wNativeToken)));
-        Dispute.Params memory params = Dispute.Params(2 hours, 1 ether, 100);
+        Dispute.Params memory params = Dispute.Params(2 hours, 1 ether);
         vm.startPrank(admin);
         dm.setEscrow(address(adManager), true);
         dm.setArbiter(arbiter);
@@ -153,7 +153,7 @@ contract SignerConsentTest is AdManagerTest {
         adManager.setDisputeManager(IDisputeManager(address(dm)));
         vm.stopPrank();
 
-        uint256 bond = Dispute.bondFor(p.amount, params);
+        uint256 bond = params.bondFloor;
         vm.deal(recipient, bond);
         vm.prank(recipient);
         adManager.dispute{value: bond}(p, bytes32("evidence"));

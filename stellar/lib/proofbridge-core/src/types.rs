@@ -85,10 +85,8 @@ pub enum DisputeOutcome {
 pub struct DisputeParams {
     /// How long after filing the arbiter may still rule. Pause-aware at read time.
     pub challenge_period: u64,
-    /// The bond floor, in the wrapped native token. Dominates on small orders.
+    /// The route's flat bond, in the wrapped native token. The same for every order on the route.
     pub bond_floor: u128,
-    /// Basis points of the order amount. Dominates on large ones.
-    pub bond_bps: u32,
 }
 
 /// One dispute, keyed by order hash.

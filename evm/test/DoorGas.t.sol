@@ -139,7 +139,7 @@ contract EscrowDoorGas is Test {
         dm.setEscrow(address(adManager), true);
         dm.setArbiter(arbiter);
         dm.setProtocolFeePool(feePool);
-        dm.setDisputeParams(ORDER_CHAIN, Dispute.Params(CHALLENGE, 1 ether, 100));
+        dm.setDisputeParams(ORDER_CHAIN, Dispute.Params(CHALLENGE, 1 ether));
 
         portal.setPeerEscrow(AD_CHAIN, _b32(address(adManager)));
         portal.setTokenRoute(address(orderToken), AD_CHAIN, _b32(address(adToken)));
@@ -185,7 +185,7 @@ contract EscrowDoorGas is Test {
 
     function test_gas_dispute() public {
         IAdManager.OrderParams memory p = _lock(3);
-        uint256 bond = Dispute.bondFor(AMOUNT, Dispute.Params(CHALLENGE, 1 ether, 100));
+        uint256 bond = 1 ether;
         vm.deal(recipient, bond);
         _prepare(adMmr);
         vm.prank(recipient);
@@ -435,7 +435,7 @@ contract EscrowDoorGas is Test {
     }
 
     function _fileAs(IAdManager.OrderParams memory p, address who) internal {
-        uint256 bond = Dispute.bondFor(AMOUNT, Dispute.Params(CHALLENGE, 1 ether, 100));
+        uint256 bond = 1 ether;
         vm.deal(who, bond);
         vm.prank(who);
         adManager.dispute{value: bond}(p, bytes32("evidence"));

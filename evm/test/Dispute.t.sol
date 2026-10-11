@@ -50,7 +50,6 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
     uint64 internal constant CHALLENGE = 2 hours;
     uint128 internal constant BOND_FLOOR = 1 ether;
-    uint16 internal constant BOND_BPS = 100; // 1%
 
     function setUp() public virtual override {
         super.setUp();
@@ -59,7 +58,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         dm.setEscrow(address(adManager), true);
         dm.setArbiter(arbiter);
         dm.setProtocolFeePool(feePool);
-        dm.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        dm.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR));
         adManager.setDisputeManager(IDisputeManager(address(dm)));
         adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
         vm.stopPrank();
@@ -102,7 +101,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     }
 
     function _file(IAdManager.OrderParams memory p, address who) internal returns (uint256 bond) {
-        bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        bond = BOND_FLOOR;
         vm.deal(who, bond);
         vm.prank(who);
         adManager.dispute{value: bond}(p, bytes32("evidence"));
@@ -114,7 +113,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     /// failure on either side of the call must leave neither half-updated.
     function test_boundary_filingIsAtomicAcrossBothContracts() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(1);
-        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint256 bond = BOND_FLOOR;
 
         // Under-funding fails inside the *module*, after the escrow has already written Disputed.
         vm.deal(filer, bond);
@@ -173,15 +172,44 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         dm.resolveDispute(h, Dispute.Outcome.MutualRefund);
     }
 
-    /// T-23: the bond is `max(floor, bps x amount)`, and both terms are per route.
-    function test_t23_bondScalesWithTheOrder() public pure {
-        Dispute.Params memory p = Dispute.Params(2 hours, 1 ether, 100); // 1%
-        // Floor dominates a small order.
-        assertEq(Dispute.bondFor(10 ether, p), 1 ether);
-        // The percentage dominates a large one.
-        assertEq(Dispute.bondFor(1000 ether, p), 10 ether);
-        // Exactly at the crossover the floor still wins (>= keeps it non-zero).
-        assertEq(Dispute.bondFor(100 ether, p), 1 ether);
+    /// T-23: the bond is the route's flat floor; nothing else sizes it.
+    function test_t23_bondIsTheRouteFloor() public pure {
+        assertEq(Dispute.bondFor(Dispute.Params(2 hours, 1 ether)), 1 ether);
+        assertEq(Dispute.bondFor(Dispute.Params(2 hours, 1)), 1, "the smallest legal floor");
+        assertEq(Dispute.bondFor(Dispute.Params(7 days, 250 ether)), 250 ether, "a large-order route");
+    }
+
+    /// The bond is the floor for any order amount and any order-token decimals: a dust order and
+    /// orders that together lock half the ad, in 6-, 18- and 30-decimal order units, all pay exactly
+    /// `bondFor(peerChainId)`, which is the floor. One wei more is refused.
+    function test_bondIsTheFloorForAnyAmountAndDecimals() public {
+        test_fundAd_makerOnly();
+        (,,,,,,, uint256 balance,) = adManager.ads(lastAdId);
+        uint8[3] memory decimals = [uint8(6), 18, 30];
+        // In order-token units; the ad token has 18 decimals.
+        uint256[3] memory amounts = [uint256(1), balance / 4, (balance / 4) * 1e12];
+        for (uint256 i = 0; i < 3; i++) {
+            IAdManager.OrderParams memory p = _defaultParams(lastAdId);
+            p.orderDecimals = decimals[i];
+            p.amount = amounts[i];
+            p.salt = 9_000 + i;
+            vm.prank(maker);
+            bytes32 h = adManager.lockForOrder(p);
+
+            assertEq(dm.bondFor(orderChainId), BOND_FLOOR, "the quote is the floor");
+            vm.deal(filer, BOND_FLOOR + 1);
+            vm.prank(filer);
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    DisputeManager.DisputeManager__NativeAmountMismatch.selector, BOND_FLOOR + 1, BOND_FLOOR
+                )
+            );
+            adManager.dispute{value: BOND_FLOOR + 1}(p, bytes32("evidence"));
+            vm.prank(filer);
+            adManager.dispute{value: BOND_FLOOR}(p, bytes32("evidence"));
+            (, uint128 bond,,,,,,,) = dm.disputes(h);
+            assertEq(bond, BOND_FLOOR, "filing took the floor");
+        }
     }
 
     /// The parameters fail closed: an unconfigured route cannot be disputed for free.
@@ -189,10 +217,10 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         (IAdManager.OrderParams memory p,) = _lockedOrder(6);
         vm.prank(admin);
         // A different peer chain has no params.
-        dm.setDisputeParams(orderChainId + 1, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        dm.setDisputeParams(orderChainId + 1, Dispute.Params(CHALLENGE, BOND_FLOOR));
         vm.startPrank(admin);
         vm.expectRevert(abi.encodeWithSelector(Dispute.Dispute__InvalidParams.selector, 1));
-        dm.setDisputeParams(orderChainId, Dispute.Params(1 minutes, BOND_FLOOR, BOND_BPS));
+        dm.setDisputeParams(orderChainId, Dispute.Params(1 minutes, BOND_FLOOR));
         vm.stopPrank();
         // And the validated one is still in force.
         _file(p, filer);
@@ -303,7 +331,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     /// cancel it. Filing is restricted to the order's two parties.
     function test_onlyAPartyMayFile() public {
         (IAdManager.OrderParams memory p,) = _lockedOrder(20);
-        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint256 bond = BOND_FLOOR;
         vm.deal(stranger, bond);
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotAParty.selector, stranger));
@@ -463,33 +491,21 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     /// so no surplus is ever wrapped and nothing needs refunding.
     /// 49E-2: the bond is exact, so the amount is quoted by the contract, not re-derived by clients.
     function test_49e2_bondForQuotesWhatTheFilingRequires() public {
-        assertEq(
-            dm.bondFor(60 ether, orderChainId),
-            Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS))
-        );
-        assertEq(dm.bondFor(1, orderChainId), BOND_FLOOR, "the floor dominates a tiny amount");
-        vm.expectRevert();
-        dm.bondFor(60 ether, orderChainId + 7);
+        assertEq(dm.bondFor(orderChainId), BOND_FLOOR);
+        vm.expectRevert(abi.encodeWithSelector(Dispute.Dispute__NoParams.selector, orderChainId + 7));
+        dm.bondFor(orderChainId + 7);
     }
 
-    /// 49E-2: above the floor the bond is BOND_BPS of the amount; the literals are 1% of each amount.
-    function test_49e2_bondForScalesAboveTheFloor() public view {
-        assertEq(dm.bondFor(500 ether, orderChainId), 5 ether, "1% of 500 is above the 1-ether floor");
-        assertEq(dm.bondFor(1000 ether, orderChainId), 10 ether, "and follows the amount");
-        assertEq(dm.bondFor(1000 ether + 12_300, orderChainId), 10 ether + 123, "to the wei");
-    }
-
-    /// 49E-2: at the boundary 1% of the amount equals the floor; one step past it the percentage wins.
-    function test_49e2_bondForAtTheFloorBoundary() public view {
-        assertEq(dm.bondFor(100 ether, orderChainId), 1 ether, "1% of 100 is exactly the floor");
-        assertEq(dm.bondFor(100 ether + 99, orderChainId), 1 ether, "rounds down onto the floor");
-        assertEq(dm.bondFor(100 ether + 100, orderChainId), 1 ether + 1, "one wei of bond past the floor");
-        assertEq(dm.bondFor(100 ether - 100, orderChainId), 1 ether, "just below: the floor");
+    /// 49E-2: the quote follows the route's floor when the admin retunes it.
+    function test_49e2_bondForFollowsTheRouteFloor() public {
+        vm.prank(admin);
+        dm.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, 3 ether));
+        assertEq(dm.bondFor(orderChainId), 3 ether);
     }
 
     function test_c17_bondMustBeExact() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(26);
-        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint256 bond = BOND_FLOOR;
         vm.deal(filer, bond * 2);
 
         vm.prank(filer);
@@ -672,22 +688,22 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         assertEq(vm.parseJsonUint(v, ".outcomes[4].value"), uint256(Dispute.Outcome.MakerForfeit));
     }
 
-    /// Bond sizing, likewise: the cases live in the vector, not in each chain's head.
-    function test_bondSizingMatchesTheSharedVector() public view {
+    /// Bond sizing, likewise: the cases live in the vector, not in each chain's head. Each row's
+    /// order amount and decimals differ; the bond is the row's floor regardless.
+    function test_bondSizingMatchesTheSharedVector() public {
         string memory v = vm.readFile("../test-vectors/dispute.json");
         uint256 n = vm.parseJsonUint(v, ".counts.bondSizing");
         for (uint256 i = 0; i < n; i++) {
             string memory at = string.concat(".bondSizing[", vm.toString(i), "]");
             Dispute.Params memory p = Dispute.Params({
-                challengePeriod: CHALLENGE,
-                bondFloor: uint128(vm.parseJsonUint(v, string.concat(at, ".bondFloor"))),
-                bondBps: uint16(vm.parseJsonUint(v, string.concat(at, ".bondBps")))
+                challengePeriod: CHALLENGE, bondFloor: uint128(vm.parseJsonUint(v, string.concat(at, ".bondFloor")))
             });
-            assertEq(
-                Dispute.bondFor(vm.parseJsonUint(v, string.concat(at, ".amount")), p),
-                vm.parseJsonUint(v, string.concat(at, ".bond")),
-                "bond sizing disagrees with the shared vector"
-            );
+            uint256 want = vm.parseJsonUint(v, string.concat(at, ".bond"));
+            assertEq(Dispute.bondFor(p), want, "bond sizing disagrees with the shared vector");
+            // And the module's quote, which is what a filing on the route charges.
+            vm.prank(admin);
+            dm.setDisputeParams(orderChainId, p);
+            assertEq(dm.bondFor(orderChainId), want, "the module's quote disagrees with the shared vector");
         }
     }
 
@@ -715,7 +731,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(61);
         uint256 windowEnd = p.deadline + 30 minutes;
         vm.warp(windowEnd + 1);
-        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint256 bond = BOND_FLOOR;
         vm.deal(filer, bond);
         vm.prank(filer);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeWindowClosed.selector, h, windowEnd));
@@ -747,7 +763,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 2 hours, 0, 1 days, 0));
 
         vm.warp(claimedEnd + 1);
-        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint256 bond = BOND_FLOOR;
         vm.deal(filer, bond);
         vm.prank(filer);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeWindowClosed.selector, h, claimedEnd));
@@ -763,11 +779,11 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     /// C-36: the challenge period has a ceiling of 7 days.
     function test_c36_challengePeriodCeiling() public {
         vm.startPrank(admin);
-        dm.setDisputeParams(orderChainId, Dispute.Params(7 days, BOND_FLOOR, BOND_BPS));
+        dm.setDisputeParams(orderChainId, Dispute.Params(7 days, BOND_FLOOR));
         vm.expectRevert(abi.encodeWithSelector(Dispute.Dispute__InvalidParams.selector, 1));
-        dm.setDisputeParams(orderChainId, Dispute.Params(7 days + 1, BOND_FLOOR, BOND_BPS));
+        dm.setDisputeParams(orderChainId, Dispute.Params(7 days + 1, BOND_FLOOR));
         vm.stopPrank();
-        (uint64 period,,) = dm.disputeParams(orderChainId);
+        (uint64 period,) = dm.disputeParams(orderChainId);
         assertEq(period, 7 days, "the refused write left the accepted one in force");
     }
 
@@ -782,8 +798,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
             string memory at = string.concat(".paramValidation[", vm.toString(i), "]");
             Dispute.Params memory p = Dispute.Params({
                 challengePeriod: uint64(vm.parseJsonUint(v, string.concat(at, ".challengePeriod"))),
-                bondFloor: uint128(vm.parseUint(vm.parseJsonString(v, string.concat(at, ".bondFloor")))),
-                bondBps: uint16(vm.parseJsonUint(v, string.concat(at, ".bondBps")))
+                bondFloor: uint128(vm.parseUint(vm.parseJsonString(v, string.concat(at, ".bondFloor"))))
             });
             uint256 field = vm.parseJsonUint(v, string.concat(at, ".validField"));
             if (field != 0) {
@@ -801,7 +816,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         b.setEscrow(address(adManager), true);
         b.setArbiter(arbiter);
         b.setProtocolFeePool(feePool);
-        b.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        b.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR));
         adManager.setDisputeManager(IDisputeManager(address(b)));
         vm.stopPrank();
     }
@@ -889,7 +904,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     /// C-14: the filing event carries the filer's evidence hash.
     function test_c14_filingEventCarriesTheEvidence() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(76);
-        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint256 bond = BOND_FLOOR;
         uint64 challengeDeadline = uint64(block.timestamp) + CHALLENGE;
         if (p.deadline + 30 minutes > challengeDeadline) challengeDeadline = uint64(p.deadline + 30 minutes);
         vm.deal(filer, bond);
@@ -1005,19 +1020,19 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     /// escrow asks twice.
     function test_c19_moduleEdgeRefusesStrangersAndDoubles() public {
         bytes32 h = keccak256("direct");
-        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint256 bond = BOND_FLOOR;
         vm.deal(stranger, 2 * bond);
         vm.prank(stranger);
         vm.expectRevert(DisputeManager.DisputeManager__NotEscrow.selector);
-        dm.openDispute{value: bond}(h, 60 ether, orderChainId, stranger, bytes32(0), 0, 0, 0);
+        dm.openDispute{value: bond}(h, orderChainId, stranger, bytes32(0), 0, 0, 0);
 
         vm.prank(admin);
         dm.setEscrow(stranger, true);
         vm.prank(stranger);
-        dm.openDispute{value: bond}(h, 60 ether, orderChainId, filer, bytes32(0), 0, 0, 0);
+        dm.openDispute{value: bond}(h, orderChainId, filer, bytes32(0), 0, 0, 0);
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__DisputeExists.selector, h));
-        dm.openDispute{value: bond}(h, 60 ether, orderChainId, filer, bytes32(0), 0, 0, 0);
+        dm.openDispute{value: bond}(h, orderChainId, filer, bytes32(0), 0, 0, 0);
 
         // Settling a bond or recording a response is for the escrow that opened it, nobody else.
         vm.expectRevert(DisputeManager.DisputeManager__NotEscrow.selector);

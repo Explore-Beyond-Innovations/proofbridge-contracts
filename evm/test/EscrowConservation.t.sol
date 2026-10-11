@@ -83,7 +83,6 @@ contract EscrowConservationInvariantTest is Test {
     uint256 internal orderChainId = 11155111;
     uint64 internal constant CHALLENGE = 2 hours;
     uint128 internal constant BOND_FLOOR = 1 ether;
-    uint16 internal constant BOND_BPS = 100;
     uint256 internal constant LOCK = 1 ether;
 
     EscrowHandler internal handler;
@@ -119,7 +118,7 @@ contract EscrowConservationInvariantTest is Test {
         dm.setEscrow(address(adManager), true);
         dm.setArbiter(arbiter);
         dm.setProtocolFeePool(feePool);
-        dm.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        dm.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR));
         vm.stopPrank();
 
         adToken = new RefusableERC20();
@@ -213,7 +212,7 @@ contract EscrowConservationInvariantTest is Test {
         IAdManager.OrderParams memory p = _params(salt);
         bytes32 h = _hash(p);
         address who = byBridger ? _recipientOf(salt) : maker;
-        uint256 bond = Dispute.bondFor(LOCK, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint256 bond = BOND_FLOOR;
         vm.deal(who, bond);
         vm.prank(who);
         adManager.dispute{value: bond}(p, bytes32("e"));

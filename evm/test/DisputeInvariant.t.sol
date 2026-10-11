@@ -65,7 +65,6 @@ contract DisputeInvariantTest is Test {
     uint256 internal orderChainId = 11155111;
     uint64 internal constant CHALLENGE = 2 hours;
     uint128 internal constant BOND_FLOOR = 1 ether;
-    uint16 internal constant BOND_BPS = 100;
     uint256 internal constant LOCK = 1 ether;
     /// Bounded so every invariant's loop stays cheap.
     /// The last slots only the steps `afterInvariant` counts on (outcomes, evidence, swap, unlock,
@@ -128,7 +127,7 @@ contract DisputeInvariantTest is Test {
         dm.setEscrow(address(adManager), true);
         dm.setArbiter(arbiter);
         dm.setProtocolFeePool(feePool);
-        dm.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        dm.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR));
         vm.stopPrank();
 
         adToken = new ERC20Mock();
@@ -276,7 +275,7 @@ contract DisputeInvariantTest is Test {
         next.setEscrow(address(adManager), true);
         next.setArbiter(arbiter);
         next.setProtocolFeePool(feePool);
-        next.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        next.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR));
         adManager.setDisputeManager(IDisputeManager(address(next)));
         vm.stopPrank();
         modules.push(next);
@@ -373,7 +372,7 @@ contract DisputeInvariantTest is Test {
 
     /// Returns whether the module recorded the bridger-side party as the filer.
     function _file(uint256 i, bool byBridger) internal returns (bool bridgerFiled) {
-        uint256 bond = Dispute.bondFor(LOCK, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint256 bond = BOND_FLOOR;
         address who = byBridger ? recipient : maker;
         // C-17: the bond is paid exactly; any other value is refused.
         vm.deal(who, bond);

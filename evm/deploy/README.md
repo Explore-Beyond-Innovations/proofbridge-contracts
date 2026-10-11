@@ -115,5 +115,4 @@ Orders locked before the move finish on their own registry epoch; only new locks
 | `DISPUTE_ARBITER` | admin (`local` only) | The only account that may rule a dispute (2.3g). Must not be the admin outside `local`: its whole containment is that it holds no escrow powers |
 | `DISPUTE_FEE_POOL` | admin (`local` only) | Where forfeited bonds go. Unset, every forfeited bond returns to the filer |
 | `DISPUTE_CHALLENGE_PERIOD_S` | `3600` (`local` only) | How long the arbiter has to rule. A floor, never a licence to finish early — no dispute completes before the order's own `deadline + buffer` |
-| `DISPUTE_BOND_FLOOR` | `1` (`local` only) | Bond floor in wrapped-native base units. Must be ≥ 1; the contract rejects zero |
-| `DISPUTE_BOND_BPS` | `0` (`local` only) | Bond as basis points of the order amount, capped at 1000 (10%) |
+| `DISPUTE_BOND_FLOOR` | `1` (`local` only) | The route's dispute bond, flat for every order, in wrapped-native base units. Must be ≥ 1; the contract rejects zero. No default outside `local` |

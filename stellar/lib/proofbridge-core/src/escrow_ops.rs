@@ -391,7 +391,7 @@ pub fn order_dispute_manager(env: &Env, order_hash: &BytesN<32>) -> Result<Addre
 ///
 /// Note the direction, and the order. The escrow calls the module and the module never calls back —
 /// filing has to begin here anyway, because a leg stores `{status, paused_at_open}` and nothing
-/// else, so only this contract can hash an order and vouch for the amount that sizes the bond. And
+/// else, so only this contract can hash an order and vouch for its deadline. And
 /// the module call runs *before* the status is committed, so a caller that ever swallowed its
 /// failure would leave the order `Open` with no record — a failed filing — rather than `Disputed`
 /// with no record, which is an order nobody can finalize.
@@ -400,7 +400,6 @@ pub fn open_dispute(
     env: &Env,
     escrow: &Address,
     order_hash: &BytesN<32>,
-    amount: u128,
     peer_chain_id: u128,
     filer: &Address,
     evidence: &BytesN<32>,
@@ -421,7 +420,6 @@ pub fn open_dispute(
         .try_open_dispute(
             escrow,
             order_hash,
-            &amount,
             &peer_chain_id,
             filer,
             evidence,

@@ -315,15 +315,10 @@ contract AdManager is EscrowBase, IAdManager {
         // Only the order's two parties may file. Without this any address could dispute any live
         // order and, one short challenge period later, cancel it out from under both of them.
         _requireParty(_adOf(params).maker, params.orderRecipient.toAddressChecked());
-        // The amount is validated by the hash the caller had to reproduce, which is why filing
+        // The deadline is validated by the hash the caller had to reproduce, which is why filing
         // starts here and not on the module: only this contract can vouch for it.
         _openDispute(
-            orderHash,
-            _adAmount(params),
-            params.orderChainId,
-            evidence,
-            uint64(params.deadline),
-            _timing(params.orderChainId).buffer
+            orderHash, params.orderChainId, evidence, uint64(params.deadline), _timing(params.orderChainId).buffer
         );
     }
 
@@ -408,17 +403,12 @@ contract AdManager is EscrowBase, IAdManager {
      *      Note the direction: the escrow calls the module and the module never calls back. An
      *      earlier draft gave the module a permissioned write so it could mark the status itself;
      *      it does not need one, because filing has to start here anyway — only this contract can
-     *      hash an order and vouch for its amount, since a leg stores `{status, pausedAtOpen}` and
-     *      nothing else. So the trust edge runs one way and carries no callback.
+     *      hash an order and vouch for its deadline, since a leg stores `{status, pausedAtOpen}`
+     *      and nothing else. So the trust edge runs one way and carries no callback.
      */
-    function _openDispute(
-        bytes32 orderHash,
-        uint256 amount,
-        uint256 peerChainId,
-        bytes32 evidence,
-        uint64 deadline,
-        uint64 buffer
-    ) internal {
+    function _openDispute(bytes32 orderHash, uint256 peerChainId, bytes32 evidence, uint64 deadline, uint64 buffer)
+        internal
+    {
         Order storage o = _orders[orderHash];
         if (o.status != Status.Open && o.status != Status.Claimed) revert Escrow__NotDisputable(orderHash, o.status);
         // D4: no filing once the primary's window closed (claimed window end once `Claimed`).
@@ -437,9 +427,7 @@ contract AdManager is EscrowBase, IAdManager {
         // a pause between lock and filing extends the unlock and the dispute alike.
         IDisputeManager m = disputeManager;
         if (address(m) == address(0)) revert Escrow__NoDisputeManager();
-        m.openDispute{value: msg.value}(
-            orderHash, amount, peerChainId, msg.sender, evidence, deadline, buffer, o.pausedAtOpen
-        );
+        m.openDispute{value: msg.value}(orderHash, peerChainId, msg.sender, evidence, deadline, buffer, o.pausedAtOpen);
         disputeModuleOf[orderHash] = m;
         o.status = Status.Disputed;
     }

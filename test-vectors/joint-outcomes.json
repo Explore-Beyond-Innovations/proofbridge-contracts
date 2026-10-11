@@ -13,7 +13,6 @@
     "bufferS": 1800,
     "longBackstopS": 86400,
     "bondFloorUnits": "10000",
-    "bondBps": 0,
     "bondUnits": "10000",
     "filerIsBridger": false
   },

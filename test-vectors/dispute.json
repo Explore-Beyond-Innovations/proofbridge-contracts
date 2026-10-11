@@ -9,13 +9,11 @@
     "bondSizing": 6,
     "bondRouting": 10,
     "legActions": 4,
-    "paramValidation": 6
+    "paramValidation": 5
   },
   "constants": {
-    "bpsDenominator": "10000",
     "minChallengePeriod": 3600,
-    "maxChallengePeriod": 604800,
-    "maxBondBps": 1000
+    "maxChallengePeriod": 604800
   },
   "outcomes": [
     {
@@ -41,46 +39,46 @@
   ],
   "bondSizing": [
     {
-      "label": "the floor dominates a small order",
-      "amount": "1000",
-      "bondFloor": "1000",
-      "bondBps": 100,
-      "bond": "1000"
-    },
-    {
-      "label": "the percentage dominates a large order",
-      "amount": "1000000",
-      "bondFloor": "1000",
-      "bondBps": 100,
-      "bond": "10000"
-    },
-    {
-      "label": "at the crossover the floor still wins",
-      "amount": "100000",
-      "bondFloor": "1000",
-      "bondBps": 100,
-      "bond": "1000"
-    },
-    {
-      "label": "a zero rate leaves only the floor",
-      "amount": "1000000",
-      "bondFloor": "500",
-      "bondBps": 0,
-      "bond": "500"
-    },
-    {
-      "label": "rounds down, so a dust order still pays the floor",
+      "label": "a dust order pays the floor",
       "amount": "1",
+      "decimals": 6,
       "bondFloor": "7",
-      "bondBps": 100,
       "bond": "7"
     },
     {
-      "label": "the ceiling rate, 10%",
+      "label": "a 6-decimal order pays the floor",
+      "amount": "1000000000000",
+      "decimals": 6,
+      "bondFloor": "1000",
+      "bond": "1000"
+    },
+    {
+      "label": "an 18-decimal order pays the floor",
+      "amount": "100000000000000000000000",
+      "decimals": 18,
+      "bondFloor": "1000",
+      "bond": "1000"
+    },
+    {
+      "label": "a 30-decimal order pays the floor",
+      "amount": "1000000000000000000000000000000000",
+      "decimals": 30,
+      "bondFloor": "1000",
+      "bond": "1000"
+    },
+    {
+      "label": "a higher floor on a large-order route",
       "amount": "1000000",
+      "decimals": 18,
+      "bondFloor": "1000000000000000000",
+      "bond": "1000000000000000000"
+    },
+    {
+      "label": "the smallest legal floor",
+      "amount": "1000000000000000000",
+      "decimals": 18,
       "bondFloor": "1",
-      "bondBps": 1000,
-      "bond": "100000"
+      "bond": "1"
     }
   ],
   "bondRouting": [
@@ -176,42 +174,30 @@
       "label": "challenge period below the minimum",
       "challengePeriod": 60,
       "bondFloor": "1",
-      "bondBps": 100,
       "validField": 1
     },
     {
-      "label": "a zero floor could round a bond to nothing",
+      "label": "a zero floor would let anyone file for free",
       "challengePeriod": 3600,
       "bondFloor": "0",
-      "bondBps": 100,
       "validField": 2
-    },
-    {
-      "label": "above the bps ceiling",
-      "challengePeriod": 3600,
-      "bondFloor": "1",
-      "bondBps": 1001,
-      "validField": 3
     },
     {
       "label": "the smallest legal set",
       "challengePeriod": 3600,
       "bondFloor": "1",
-      "bondBps": 0,
       "validField": 0
     },
     {
       "label": "the longest legal challenge period",
       "challengePeriod": 604800,
       "bondFloor": "1",
-      "bondBps": 0,
       "validField": 0
     },
     {
       "label": "one second past the challenge-period ceiling",
       "challengePeriod": 604801,
       "bondFloor": "1",
-      "bondBps": 0,
       "validField": 1
     }
   ]

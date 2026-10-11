@@ -36,8 +36,7 @@ pub enum DisputeManagerError {
     InvalidChallengePeriod = 18,
     /// `bond_floor` is zero.
     InvalidBondFloor = 19,
-    /// `bond_bps` above the ceiling.
-    InvalidBondBps = 20,
+    // 20 (`InvalidBondBps`) is retired with the percentage term: the bond is the route's floor.
     /// The escrow finalizing is not the one that opened the dispute.
     WrongEscrow = 21,
     /// Nothing credited to claim.
