@@ -7,7 +7,7 @@
 
 use soroban_sdk::{contractevent, Address, BytesN};
 
-use crate::types::{ClaimEntry, RouteTiming};
+use crate::types::RouteTiming;
 
 // =============================================================================
 // Settlement
@@ -85,6 +85,7 @@ pub struct PayoutClaimed {
 pub struct RouteTimingSet {
     #[topic]
     pub chain_id: u128,
+    pub version: u32,
     pub timing: RouteTiming,
 }
 
@@ -99,7 +100,6 @@ pub struct RootAnchorSet {
 pub struct ClaimOpened {
     #[topic]
     pub order_hash: BytesN<32>,
-    pub entry: ClaimEntry,
     pub finalize_at: u64,
 }
 

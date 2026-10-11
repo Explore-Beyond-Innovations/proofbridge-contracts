@@ -35,7 +35,7 @@ const POP_TAG: [u8; 32] = [
 ];
 
 pub const MAX_ACTIVE_SLOTS: u32 = 5;
-/// Seconds past valid_until before a slot may be pruned.
+/// Seconds past valid_until before a dead slot may be pruned when no position guard is wired.
 pub const GRACE_PERIOD: u64 = 30 * 24 * 60 * 60;
 
 /// Escrow-side seam so revoke can refuse while the account has open positions.
@@ -697,21 +697,30 @@ fn expired_at(env: &Env, account: &BytesN<32>, slot_id: u32) -> u64 {
     }
 }
 
-/// Drops every dead slot the escrows can no longer need: past its expiry + GRACE_PERIOD, or at once
-/// when the guards are wired and none reports open positions for the account (#422 D17 — no order's
-/// cancel can still ask about its history; D17b — with no guard to ask, never at once). Not in the
+/// Drops every dead slot the escrows can no longer need. With guards wired: at once when none
+/// reports an open position for the account (#422 D17 — no order's cancel can still ask about its
+/// history), never while one does, past GRACE_PERIOD if need be. With no guard wired: after
+/// expiry + GRACE_PERIOD (D17b — with no guard to ask, never at once). Not in the
 /// expiry's own second (D17a): a lock in that second still counts the kill. Order of `live` is not
 /// meaningful.
 fn prune(env: &Env, account: &BytesN<32>, entry: &mut storage::RegistryEntry) {
     let now = env.ledger().timestamp();
     let wired = storage::get_guards(env).map_or(false, |g| !g.is_empty());
-    let free = wired && !has_open_positions(env, account);
+    let open = wired && has_open_positions(env, account);
     let mut kept = Vec::new(env);
     for slot_id in entry.live.iter() {
         let prunable = match storage::get_slot(env, account, slot_id) {
             Some(_) => {
                 let vu = expired_at(env, account, slot_id);
-                vu != 0 && (now > vu.saturating_add(GRACE_PERIOD) || (free && now > vu))
+                // Guarded: kept while any guard reports an open position, however long that is.
+                // Unguarded: the GRACE_PERIOD arm (no escrow, no order to protect).
+                vu != 0
+                    && !open
+                    && if wired {
+                        now > vu
+                    } else {
+                        now > vu.saturating_add(GRACE_PERIOD)
+                    }
             }
             None => true,
         };

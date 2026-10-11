@@ -28,7 +28,6 @@ const CLOCKS = {
   ROUTE_MIN_WINDOW_S: "0",
   ROUTE_BUFFER_S: "1800",
   ROUTE_MARGIN_S: "0",
-  ROUTE_LONG_BACKSTOP_S: "86400",
   ROUTE_CLAIM_STAGGER_S: "0",
   DISPUTE_CHALLENGE_PERIOD_S: "3600",
   DISPUTE_BOND_FLOOR: "1",
@@ -173,14 +172,9 @@ function manifest(file: string, chainId: bigint, env: string, opts: { disputeMan
   fs.writeFileSync(out, JSON.stringify(m, null, 2));
   return out;
 }
-const peerEnv = (env: string) => {
-  const f = path.join(tmp, `peer-${env}.env`);
-  fs.writeFileSync(f, [`DEPLOY_ENV=${env}`, ...Object.entries(CLOCKS).map(([k, v]) => `${k}=${v}`)].join("\n"));
-  return f;
-};
 const TESTNET = { ...CLOCKS, STELLAR_NETWORK: "testnet", FAKE_STELLAR_PASSPHRASE: NETWORK_PASSPHRASES.testnet };
-const linkT = (localManifest: string, peerManifest: string, peerEnvFile?: string) =>
-  link({ localManifest, peerManifest, peerEnvFile, localChainId: 1000002n });
+const linkT = (localManifest: string, peerManifest: string) =>
+  link({ localManifest, peerManifest, localChainId: 1000002n });
 // Past every route check, the first thing link does is read the chain; the fake has no answer.
 const PAST_CHECKS = /fake stellar: no answer for contract invoke/;
 
@@ -192,36 +186,17 @@ test("A-4: link checks the network against the manifest's env before any call", 
   assert.deepEqual(calls, ["network info --network testnet --output json"]);
 });
 
-test("A-5: a real-network route whose peer has not linked, with no --peer-env, is refused", async () => {
-  const local = manifest("u-l.json", 1000002n, "testnet");
-  const peer = manifest("u-p.json", 11155111n, "testnet");
-  let calls = await withFake(TESTNET, () => assert.rejects(linkT(local, peer), /could not be checked in both directions/));
-  assert.deepEqual(sent(calls), []);
-  calls = await withFake(TESTNET, () => assert.rejects(linkT(local, peer, peerEnv("testnet")), PAST_CHECKS));
-  assert.deepEqual(sent(calls), []);
-});
-
 test("A-6: link refuses a peer deployed for another env, or against another VK", async () => {
   const local = manifest("c-l.json", 1000002n, "testnet", { vk: "0x" + "ab".repeat(32) });
   await withFake(TESTNET, () =>
-    assert.rejects(linkT(local, manifest("c-p1.json", 11155111n, "mainnet"), peerEnv("mainnet")), /cannot span environments/),
+    assert.rejects(linkT(local, manifest("c-p1.json", 11155111n, "mainnet")), /cannot span environments/),
   );
   await withFake(TESTNET, () =>
     assert.rejects(
-      linkT(local, manifest("c-p2.json", 11155111n, "testnet", { vk: "0x" + "cd".repeat(32) }), peerEnv("testnet")),
+      linkT(local, manifest("c-p2.json", 11155111n, "testnet", { vk: "0x" + "cd".repeat(32) })),
       /refuse each other's proofs/,
     ),
   );
-});
-
-test("A-5: no DisputeManager on either side links on the clocks alone; a mixed route is refused", async () => {
-  const bareLocal = manifest("d-l0.json", 1000002n, "testnet", { disputeManager: false });
-  const barePeer = manifest("d-p0.json", 11155111n, "testnet", { disputeManager: false });
-  await withFake(TESTNET, () => assert.rejects(linkT(bareLocal, barePeer, peerEnv("testnet")), PAST_CHECKS));
-  const fullLocal = manifest("d-l1.json", 1000002n, "testnet");
-  const fullPeer = manifest("d-p1.json", 11155111n, "testnet");
-  await withFake(TESTNET, () => assert.rejects(linkT(fullLocal, barePeer, peerEnv("testnet")), /only this chain has a DisputeManager/));
-  await withFake(TESTNET, () => assert.rejects(linkT(bareLocal, fullPeer, peerEnv("testnet")), /only the peer has a DisputeManager/));
 });
 
 test("the dispute bond floor is required outside local; a local route goes past the checks without it", async () => {
@@ -229,7 +204,7 @@ test("the dispute bond floor is required outside local; a local route goes past 
   const local = manifest("f-l.json", 1000002n, "testnet");
   const peer = manifest("f-p.json", 11155111n, "testnet");
   const calls = await withFake(noFloor, () =>
-    assert.rejects(linkT(local, peer, peerEnv("testnet")), /DISPUTE_BOND_FLOOR is unset for env=testnet/),
+    assert.rejects(linkT(local, peer), /DISPUTE_BOND_FLOOR is unset for env=testnet/),
   );
   assert.deepEqual(sent(calls), []);
   const localL = manifest("f-ll.json", 1000002n, "local");

@@ -1,5 +1,3 @@
-import * as fs from "fs";
-import { assertDisputeFitsBackstop } from "./dispute-fit.js";
 import { requireDeployEnv, stellarChainIdOrLocal } from "./deploy-env.js";
 import {
   readManifest,
@@ -19,12 +17,6 @@ export interface StellarLinkOptions {
   localManifest?: string;
   /** Path to the peer chain's manifest. Required. */
   peerManifest: string;
-  /**
-   * A-5: the peer chain's deploy env file. On a fresh deploy the peer has not linked yet, so its
-   * manifest carries no clocks or dispute params for this route; they are derived from its env
-   * file instead, so the first link can check both directions before sending its own values.
-   */
-  peerEnvFile?: string;
   /** Override local chain id (else STELLAR_CHAIN_ID, else the local id 1000001). */
   localChainId?: bigint;
   /**
@@ -75,32 +67,9 @@ export async function link(
 
   const peerChainId = peer.chain.chainId;
 
-  // C-10: before anything on this route is sent, the follower's backstop must outlast the primary's
-  // worst-case dispute, both ways. The peer's side is read from its manifest; unset there, its link checks.
-  {
-    const localKey = String(local.chain.chainId);
-    const peerKey = String(peerChainId);
-    const checked = assertDisputeFitsBackstop(
-      {
-        disputeModule: !!local.contracts.disputeManager,
-        timing: routeTimingFromEnv(local.meta.env),
-        dispute: local.contracts.disputeManager ? disputeParamsFromEnv(local.meta.env) : undefined,
-        anchorDelay: process.env.ANCHOR_DELAY_S ?? "0",
-      },
-      peerSide(peer, localKey, opts.peerEnvFile),
-      "link",
-    );
-    // A-5: nothing this link sends may go unchecked. If the peer's side is not recorded and no env
-    // file was given for it, refuse rather than leave "the peer's link will check" — by then a too
-    // short backstop would already be on this chain.
-    if (checked.length < 2) {
-      throw new Error(
-        `link: the route to ${peerKey} could not be checked in both directions (checked: ${checked.join(", ") || "none"}). ` +
-          `The peer has not linked yet; pass --peer-env <the peer chain's env file> so its clocks and dispute params can be derived, or link the peer first.`,
-      );
-    }
-    console.log(`  [check] dispute fits the follower's backstop (${peerKey}): ${checked.join(", ")}`);
-  }
+  // Every clock and dispute param is read before anything is sent: a missing one refuses the link up front.
+  routeTimingFromEnv(local.meta.env);
+  if (local.contracts.disputeManager) disputeParamsFromEnv(local.meta.env);
   assertPeerCompatible(local, peer);
 
   const registryOf = (v: string): string => readView(v, "registry") as string;
@@ -224,7 +193,7 @@ export async function link(
   }
 
   // ── Termination clocks + notary reference for the peer route (2.3e) ──
-  // ROUTE_{MIN_WINDOW,BUFFER,MARGIN,LONG_BACKSTOP,CLAIM_STAGGER}_S. Local deploys default to
+  // ROUTE_{MIN_WINDOW,BUFFER,MARGIN,CLAIM_STAGGER}_S. Local deploys default to
   // the smallest legal clocks; anywhere else every variable must be set explicitly, like the
   // anchor delay — a forgotten clock must not ship a default and record it as intended.
   {
@@ -242,21 +211,26 @@ export async function link(
       min_window: u64("ROUTE_MIN_WINDOW_S", timing.minWindow),
       buffer: u64("ROUTE_BUFFER_S", timing.buffer),
       margin: u64("ROUTE_MARGIN_S", timing.margin),
-      long_backstop: u64("ROUTE_LONG_BACKSTOP_S", timing.longBackstop),
       claim_stagger: u64("ROUTE_CLAIM_STAGGER_S", timing.claimStagger),
     });
+    // Each set writes a new version (the first creates version 1); compare the current one.
+    const lastJson = (out: string) => JSON.parse(out.split("\n").filter(Boolean).pop() ?? "null");
     const timingAlreadySet = (escrow: string): boolean => {
       try {
-        const out = invokeContract(escrow, "get_route_timing", ["--chain_id", peerChainId], {
-          send: false,
-        });
-        const parsed = JSON.parse(out.split("\n").filter(Boolean).pop() ?? "null");
+        const version = lastJson(
+          invokeContract(escrow, "timing_version", ["--chain_id", peerChainId], { send: false }),
+        );
+        if (!version) return false;
+        const parsed = lastJson(
+          invokeContract(escrow, "route_timing_at", ["--chain_id", peerChainId, "--version", String(version)], {
+            send: false,
+          }),
+        );
         return (
           !!parsed &&
           BigInt(parsed.min_window) === BigInt(timing.minWindow) &&
           BigInt(parsed.buffer) === BigInt(timing.buffer) &&
           BigInt(parsed.margin) === BigInt(timing.margin) &&
-          BigInt(parsed.long_backstop) === BigInt(timing.longBackstop) &&
           BigInt(parsed.claim_stagger) === BigInt(timing.claimStagger)
         );
       } catch {
@@ -273,7 +247,7 @@ export async function link(
         continue;
       }
       if (acting.call(escrow, name, "set_route_timing", ["--chain_id", peerChainId, "--timing", timingArg],
-        `${name}.set_route_timing(${peerChainId}, minWindow=${timing.minWindow}s buffer=${timing.buffer}s margin=${timing.margin}s longBackstop=${timing.longBackstop}s claimStagger=${timing.claimStagger}s)`)) chainTxs++;
+        `${name}.set_route_timing(${peerChainId}, minWindow=${timing.minWindow}s buffer=${timing.buffer}s margin=${timing.margin}s claimStagger=${timing.claimStagger}s)`)) chainTxs++;
       else onChain = false;
     }
     if (onChain) {
@@ -462,35 +436,6 @@ function disputeParamsFromEnv(env: string, vars: Record<string, string | undefin
 }
 
 /** The route clocks from env: local deploys get the smallest legal set; elsewhere every var is required. */
-/**
- * The peer's side of the route: what its manifest recorded, else (A-5) what its env file says its
- * link will set. `local` here is the peer's view of THIS chain.
- */
-export function peerSide(peer: ChainDeploymentManifest, localKey: string, peerEnvFile: string | undefined) {
-  const recorded = {
-    disputeModule: !!peer.contracts.disputeManager,
-    timing: peer.routeTiming?.[localKey],
-    dispute: peer.disputeParams?.[localKey],
-    anchorDelay: peer.rootAnchorConfig?.anchorDelays?.[localKey],
-  };
-  // Complete when the peer's link recorded its clocks and (where it has a dispute module) its params.
-  const complete = !!recorded.timing && (!!recorded.dispute || !peer.contracts.disputeManager);
-  if (complete) return recorded;
-  // A local pair needs no env file: both sides run the local defaults, which is exactly what the
-  // peer's link will set. A real network's peer must be linked already or described by --peer-env.
-  if (!peerEnvFile && peer.meta.env !== "local") return recorded;
-  const vars = peerEnvFile ? readEnvFile(peerEnvFile) : {};
-  const env = vars.DEPLOY_ENV ?? peer.meta.env;
-  // Only what the peer has not recorded is derived (a redeployed dispute module, for instance,
-  // has clocks on record but no params until the peer links again).
-  return {
-    disputeModule: recorded.disputeModule,
-    timing: recorded.timing ?? routeTimingFromEnv(env, vars),
-    dispute: recorded.dispute ?? (peer.contracts.disputeManager ? disputeParamsFromEnv(env, vars) : undefined),
-    anchorDelay: recorded.anchorDelay ?? vars.ANCHOR_DELAY_S ?? "0",
-  };
-}
-
 function routeTimingFromEnv(env: string, vars: Record<string, string | undefined> = process.env): RouteTiming {
   const local = env === "local";
   const read = (name: string, localDefault: string): string => {
@@ -508,26 +453,10 @@ function routeTimingFromEnv(env: string, vars: Record<string, string | undefined
     minWindow: read("ROUTE_MIN_WINDOW_S", "0"),
     buffer: read("ROUTE_BUFFER_S", "1800"),
     margin: read("ROUTE_MARGIN_S", "0"),
-    longBackstop: read("ROUTE_LONG_BACKSTOP_S", "86400"),
     claimStagger: read("ROUTE_CLAIM_STAGGER_S", "0"),
   };
 }
 
-/** KEY=VALUE lines of an env file (the deploy env files), `#` comments and blanks skipped. */
-export function readEnvFile(file: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const raw of fs.readFileSync(file, "utf8").split("\n")) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq <= 0) continue;
-    const key = line.slice(0, eq).trim().replace(/^export\s+/, "");
-    let value = line.slice(eq + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
-    out[key] = value;
-  }
-  return out;
-}
 
 /**
  * A-6: two chains linked into one route must have been deployed for the same environment and

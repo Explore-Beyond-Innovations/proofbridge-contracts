@@ -1,7 +1,7 @@
 //! The storage both escrows share.
 //!
 //! The ad-manager and the order-portal keep the same ledger shape for everything that is not an ad or an order
-//! record: the config, the pause clock, the two-step admin, orders, claims, settled flags, route timing, the anchor,
+//! record: the config, the pause flag, the two-step admin, orders, claims, settled flags, route timing, the anchor,
 //! nullifiers, in-flight counts and the claimable ledger. This module owns that half once.
 //!
 //! **Every `symbol_short!` literal here is the one the escrows already wrote**, and every key keeps its tuple arity
@@ -23,8 +23,6 @@ const KEY_ANCHOR: Symbol = symbol_short!("anchor");
 /// The dispute module the escrow reads (2.3g). Unset means disputes are unavailable here, which
 /// is a safe default rather than a broken one.
 const KEY_DSPMGR: Symbol = symbol_short!("dspmgr");
-const KEY_PAUSED_AT: Symbol = symbol_short!("pausedat");
-const KEY_PAUSEDSEC: Symbol = symbol_short!("pausedsec");
 
 // Persistent
 const KEY_ROUTES: Symbol = symbol_short!("routes");
@@ -34,7 +32,10 @@ const KEY_RVERIF: Symbol = symbol_short!("rverif");
 const KEY_WIRED: Symbol = symbol_short!("wired");
 const KEY_INFLT: Symbol = symbol_short!("inflt");
 const KEY_CLAIM: Symbol = symbol_short!("claim");
+/// `(timing, chain_id, version) -> RouteTiming`; versions are never edited in place.
 const KEY_TIMING: Symbol = symbol_short!("timing");
+/// `(timingv, chain_id) -> u32`: the route's current timing version (0 = unset).
+const KEY_TIMINGV: Symbol = symbol_short!("timingv");
 const KEY_CLAIMS: Symbol = symbol_short!("claims");
 const KEY_SETTLED: Symbol = symbol_short!("settled");
 /// C-11: the dispute module an order was filed with: `(dspord, order_hash) -> Address`.
@@ -92,9 +93,10 @@ pub fn get_order(env: &Env, order_hash: &BytesN<32>) -> OrderRecord {
         .get(&(KEY_ORDERS, order_hash.clone()))
         .unwrap_or(OrderRecord {
             status: Status::None,
-            paused_at_open: 0,
             locked_at: 0,
             registry_epoch: 0,
+            timing_version: 0,
+            anchor_delay: 0,
         })
 }
 
@@ -102,22 +104,29 @@ pub fn get_order_status(env: &Env, order_hash: &BytesN<32>) -> Status {
     get_order(env, order_hash).status
 }
 
-/// `None → Open`, stamping the pause counter the leg's window is measured from and, on the ad
-/// chain, the key-registry epoch it locks under (#465; the order portal passes 0).
-pub fn open_order(env: &Env, order_hash: &BytesN<32>, registry_epoch: u32) {
+/// `None → Open`, stamping the route-timing version every window reads and, on the ad chain, the
+/// key-registry epoch (#465) and the anchor-delay snapshot (the order portal passes 0 for both).
+pub fn open_order(
+    env: &Env,
+    order_hash: &BytesN<32>,
+    timing_version: u32,
+    registry_epoch: u32,
+    anchor_delay: u32,
+) {
     set_order(
         env,
         order_hash,
         &OrderRecord {
             status: Status::Open,
-            paused_at_open: get_paused_seconds(env),
             locked_at: env.ledger().timestamp(),
             registry_epoch,
+            timing_version,
+            anchor_delay,
         },
     );
 }
 
-/// Flip the status, keeping the leg's pause snapshot; every flip re-extends the record (2.3h's TTL
+/// Flip the status, keeping the rest of the record; every flip re-extends the record (2.3h's TTL
 /// runbook lists this write).
 pub fn set_order_status(env: &Env, order_hash: &BytesN<32>, status: Status) {
     let mut rec = get_order(env, order_hash);
@@ -133,14 +142,29 @@ fn set_order(env: &Env, order_hash: &BytesN<32>, rec: &OrderRecord) {
 
 // ── termination (2.3e) ───────────────────────────────────────────────────
 
-pub fn get_route_timing(env: &Env, chain_id: u128) -> Option<RouteTiming> {
-    env.storage().persistent().get(&(KEY_TIMING, chain_id))
+pub fn get_timing_version(env: &Env, chain_id: u128) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&(KEY_TIMINGV, chain_id))
+        .unwrap_or(0)
 }
 
-pub fn set_route_timing(env: &Env, chain_id: u128, timing: &RouteTiming) {
-    let key = (KEY_TIMING, chain_id);
+pub fn get_route_timing_at(env: &Env, chain_id: u128, version: u32) -> Option<RouteTiming> {
+    env.storage()
+        .persistent()
+        .get(&(KEY_TIMING, chain_id, version))
+}
+
+/// Write `timing` as the route's next version and return it; earlier versions stay readable.
+pub fn push_route_timing(env: &Env, chain_id: u128, timing: &RouteTiming) -> u32 {
+    let version = get_timing_version(env, chain_id) + 1;
+    let key = (KEY_TIMING, chain_id, version);
     env.storage().persistent().set(&key, timing);
     extend_persistent(env, &key);
+    let vkey = (KEY_TIMINGV, chain_id);
+    env.storage().persistent().set(&vkey, &version);
+    extend_persistent(env, &vkey);
+    version
 }
 
 pub fn get_root_anchor(env: &Env) -> Option<Address> {
@@ -276,7 +300,7 @@ pub fn set_in_flight(env: &Env, account: &BytesN<32>, count: u64) {
     extend_persistent(env, &key);
 }
 
-// ── pause clock and two-step admin ───────────────────────────────────────
+// ── pause flag and two-step admin ───────────────────────────────────────
 
 pub fn is_paused(env: &Env) -> bool {
     env.storage().instance().get(&KEY_PAUSED).unwrap_or(false)
@@ -284,22 +308,6 @@ pub fn is_paused(env: &Env) -> bool {
 
 pub fn set_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&KEY_PAUSED, &paused);
-}
-
-pub fn get_last_paused_at(env: &Env) -> u64 {
-    env.storage().instance().get(&KEY_PAUSED_AT).unwrap_or(0)
-}
-
-pub fn set_last_paused_at(env: &Env, at: u64) {
-    env.storage().instance().set(&KEY_PAUSED_AT, &at);
-}
-
-pub fn get_paused_seconds(env: &Env) -> u64 {
-    env.storage().instance().get(&KEY_PAUSEDSEC).unwrap_or(0)
-}
-
-pub fn set_paused_seconds(env: &Env, secs: u64) {
-    env.storage().instance().set(&KEY_PAUSEDSEC, &secs);
 }
 
 pub fn get_pending_admin(env: &Env) -> Option<Address> {

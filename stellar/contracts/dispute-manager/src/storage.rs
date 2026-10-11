@@ -68,10 +68,7 @@ pub fn set_w_native(env: &Env, a: &Address) {
     env.storage().instance().set(&KEY_WNATIVE, a);
 }
 
-// No `get_paused_seconds` here on purpose. The module never keeps its own pause clock: the escrow
-// passes its paused seconds in as an argument to `outcome_of`, because a module reading back into
-// its caller is re-entrancy, which Soroban refuses outright (`Error(Context, InvalidAction)`).
-// A dead accessor sitting here is an invitation to reintroduce that read.
+// No pause clock here: a pause stops entries only, so every deadline is plain time.
 
 // ── escrows ──────────────────────────────────────────────────────────────
 

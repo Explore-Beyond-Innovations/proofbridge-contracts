@@ -9,7 +9,7 @@ use crate::types::{DisputeOutcome, DisputeParams};
 /// A challenge period shorter than this leaves no room to gather evidence.
 pub const MIN_CHALLENGE_PERIOD: u64 = 60 * 60;
 
-/// C-36: a longer challenge period would let a dispute outlive the follower's backstop (D4).
+/// Bounds how long a dispute can delay the other party.
 pub const MAX_CHALLENGE_PERIOD: u64 = 7 * 24 * 60 * 60;
 
 /// The DisputeManager's `#[contracterror]` numbers the escrows relay (49S-3), defined once. The

@@ -2,7 +2,7 @@
 //! termination core (2.3e).
 //!
 //! These were two copies before. A copy that drifts is the failure mode that matters here — the
-//! pause arithmetic and the terminal transitions have to agree across the legs or a window closes on
+//! window arithmetic and the terminal transitions have to agree across the legs or a window closes on
 //! one chain and not the other — so they live once and each escrow calls in.
 //!
 //! **The error seam.** Each contract's `#[contracterror]` enum is its own ABI: the discriminants
@@ -15,7 +15,7 @@ use soroban_sdk::{Address, BytesN, Env};
 use crate::cross_contract;
 use crate::escrow_events;
 use crate::escrow_storage as storage;
-use crate::types::{ClaimEntry, ClaimRecord, ContractConfig, DisputeOutcome, RouteTiming, Status};
+use crate::types::{ClaimRecord, ContractConfig, DisputeOutcome, RouteTiming, Status};
 
 /// Declares `Fault` and `Fault::ALL` from one list, so `ALL` names every variant by construction.
 /// The escrows' code-table tests iterate `ALL` against an exhaustive `match`: a variant added here
@@ -110,6 +110,7 @@ impl From<crate::decimal_scaling::DecimalScalingError> for Fault {
 // Pause
 // =============================================================================
 
+/// Entries only (create/fund/lock, create order): a pause stops new trades, never exits.
 pub fn require_not_paused(env: &Env) -> Result<(), Fault> {
     if storage::is_paused(env) {
         return Err(Fault::ContractPaused);
@@ -117,11 +118,7 @@ pub fn require_not_paused(env: &Env) -> Result<(), Fault> {
     Ok(())
 }
 
-/// Start the pause clock, once: a second `pause` while paused must not move the start.
 pub fn pause(env: &Env, config: &ContractConfig) {
-    if !storage::is_paused(env) {
-        storage::set_last_paused_at(env, env.ledger().timestamp());
-    }
     storage::set_paused(env, true);
     escrow_events::Paused {
         admin: config.admin.clone(),
@@ -129,19 +126,7 @@ pub fn pause(env: &Env, config: &ContractConfig) {
     .publish(env);
 }
 
-/// A pause freezes evidence, so it stops the clocks: the seconds spent paused move every window
-/// that was open by exactly that much (see [`window_end`]).
 pub fn unpause(env: &Env, config: &ContractConfig) {
-    if storage::is_paused(env) {
-        let paused_for = env
-            .ledger()
-            .timestamp()
-            .saturating_sub(storage::get_last_paused_at(env));
-        storage::set_paused_seconds(
-            env,
-            storage::get_paused_seconds(env).saturating_add(paused_for),
-        );
-    }
     storage::set_paused(env, false);
     escrow_events::Unpaused {
         admin: config.admin.clone(),
@@ -192,11 +177,17 @@ pub fn set_root_verifier(env: &Env, chain_id: u128, module: Address) {
     escrow_events::RootVerifierSet { chain_id, module }.publish(env);
 }
 
-/// Set the termination clocks for a peer chain (2.3e D6). Validated; unset fails closed.
+/// Set the termination clocks for a peer chain (2.3e D6) as a new version: validated, never edited in
+/// place, so live orders keep the version they opened under. Unset (version 0) fails closed.
 pub fn set_route_timing(env: &Env, chain_id: u128, timing: RouteTiming) -> Result<(), Fault> {
     crate::timing::validate(&timing).map_err(|_| Fault::InvalidTiming)?;
-    storage::set_route_timing(env, chain_id, &timing);
-    escrow_events::RouteTimingSet { chain_id, timing }.publish(env);
+    let version = storage::push_route_timing(env, chain_id, &timing);
+    escrow_events::RouteTimingSet {
+        chain_id,
+        version,
+        timing,
+    }
+    .publish(env);
     crate::ttl::extend_instance(env);
     Ok(())
 }
@@ -266,16 +257,29 @@ pub fn claim(
 // Termination core (2.3e)
 // =============================================================================
 
-/// The route's clocks, or `NoRouteTiming` (the `RootVerifierNotSet` posture).
-pub fn timing(env: &Env, chain_id: u128) -> Result<RouteTiming, Fault> {
-    storage::get_route_timing(env, chain_id).ok_or(Fault::NoRouteTiming)
+/// The route's current version and clocks, or `NoRouteTiming` (the `RootVerifierNotSet` posture).
+pub fn current_timing(env: &Env, chain_id: u128) -> Result<(u32, RouteTiming), Fault> {
+    let version = storage::get_timing_version(env, chain_id);
+    let t = storage::get_route_timing_at(env, chain_id, version).ok_or(Fault::NoRouteTiming)?;
+    Ok((version, t))
 }
 
-/// `now + min_window <= deadline <= now + MAX_ORDER_WINDOW` at every lock/create. The floor (2.3e
-/// D5) makes "no lock can follow the deadline" hold for `cancel_never_locked`; the ceiling (#453)
-/// keeps the order inside the key registry's memory of a dead slot.
-pub fn require_min_window(env: &Env, chain_id: u128, deadline: u64) -> Result<(), Fault> {
-    let t = timing(env, chain_id)?;
+/// The clocks of the version `order_hash` opened under: every window reads these, never the live
+/// tuple, so a retiming applies to new orders only.
+pub fn order_timing(
+    env: &Env,
+    order_hash: &BytesN<32>,
+    chain_id: u128,
+) -> Result<RouteTiming, Fault> {
+    let version = storage::get_order(env, order_hash).timing_version;
+    storage::get_route_timing_at(env, chain_id, version).ok_or(Fault::NoRouteTiming)
+}
+
+/// `now + min_window <= deadline <= now + MAX_ORDER_WINDOW` at every lock/create, against the
+/// current version, which the leg then records. The floor (2.3e D5) makes "no lock can follow the
+/// deadline" hold for `cancel_never_locked`; the ceiling (#453) bounds an order's life.
+pub fn require_min_window(env: &Env, chain_id: u128, deadline: u64) -> Result<u32, Fault> {
+    let (version, t) = current_timing(env, chain_id)?;
     let now = env.ledger().timestamp();
     if deadline < now + t.min_window {
         return Err(Fault::DeadlineTooSoon);
@@ -283,7 +287,7 @@ pub fn require_min_window(env: &Env, chain_id: u128, deadline: u64) -> Result<()
     if deadline > now + crate::timing::MAX_ORDER_WINDOW {
         return Err(Fault::DeadlineTooFar);
     }
-    Ok(())
+    Ok(version)
 }
 
 pub fn require_reached(env: &Env, at: u64) -> Result<(), Fault> {
@@ -311,27 +315,17 @@ pub fn require_presentable(env: &Env, order_hash: &BytesN<32>) -> Result<(), Fau
     }
 }
 
-/// When the leg's presentation window ends, in real time. Once claimed: the claim's `finalize_at`
-/// plus every second the escrow has been paused since the claim opened (exact across any number of
-/// pauses). Before a claim: `deadline + buffer` plus every second paused since the leg was locked
-/// (its own snapshot; a pause before the deadline counts too — it froze both unlocks, and more time
-/// for evidence is the safe direction). A pause stops the clocks and never reopens a closed window:
-/// a pause after the end adds its length, but the clock moved on by the same length.
-/// One number serves both sides of the race: the unlock cutoff is this minus the margin, the
-/// finalize needs it reached. Saturating: a far deadline never panics (EVM uses uint256).
+/// When the leg's presentation window ends: the claim's `finalize_at` once claimed, else
+/// `deadline + buffer` (the order's version's buffer). One number serves both sides of the race:
+/// the unlock cutoff is this minus the margin, the finalize needs it reached. Saturating: a far
+/// deadline never panics (EVM uses uint256).
 pub fn window_end(env: &Env, order_hash: &BytesN<32>, deadline: u64, buffer: u64) -> u64 {
-    let order = storage::get_order(env, order_hash);
-    let paused = storage::get_paused_seconds(env);
-    if order.status == Status::Claimed {
+    if storage::get_order_status(env, order_hash) == Status::Claimed {
         if let Some(claim) = storage::get_claim(env, order_hash) {
-            return claim
-                .finalize_at
-                .saturating_add(paused.saturating_sub(claim.paused_at_open));
+            return claim.finalize_at;
         }
     }
-    deadline
-        .saturating_add(buffer)
-        .saturating_add(paused.saturating_sub(order.paused_at_open))
+    deadline.saturating_add(buffer)
 }
 
 /// `Claimed` and the window is over.
@@ -352,21 +346,18 @@ pub fn require_anchored(env: &Env, chain_id: u128, root: &BytesN<32>) -> Result<
 }
 
 /// Open a presentation window on an `Open` leg; only a finalize or evidence closes it.
-pub fn open_claim(env: &Env, order_hash: &BytesN<32>, entry: ClaimEntry, finalize_at: u64) {
+pub fn open_claim(env: &Env, order_hash: &BytesN<32>, finalize_at: u64) {
     storage::set_claim(
         env,
         order_hash,
         &ClaimRecord {
             opened_at: env.ledger().timestamp(),
             finalize_at,
-            paused_at_open: storage::get_paused_seconds(env),
-            entry,
         },
     );
     storage::set_order_status(env, order_hash, Status::Claimed);
     escrow_events::ClaimOpened {
         order_hash: order_hash.clone(),
-        entry,
         finalize_at,
     }
     .publish(env);
@@ -390,8 +381,8 @@ pub fn order_dispute_manager(env: &Env, order_hash: &BytesN<32>) -> Result<Addre
 /// `Open | Claimed → Disputed`, with the bond handed straight to the module.
 ///
 /// Note the direction, and the order. The escrow calls the module and the module never calls back —
-/// filing has to begin here anyway, because a leg stores `{status, paused_at_open}` and nothing
-/// else, so only this contract can hash an order and vouch for its deadline. And
+/// filing has to begin here anyway, because a leg stores no order fields, so only this contract can
+/// hash an order and vouch for its deadline. And
 /// the module call runs *before* the status is committed, so a caller that ever swallowed its
 /// failure would leave the order `Open` with no record — a failed filing — rather than `Disputed`
 /// with no record, which is an order nobody can finalize.
@@ -404,14 +395,14 @@ pub fn open_dispute(
     filer: &Address,
     evidence: &BytesN<32>,
     deadline: u64,
-    buffer: u64,
 ) -> Result<u128, Fault> {
     match storage::get_order_status(env, order_hash) {
         Status::Open | Status::Claimed => {}
         _ => return Err(Fault::NotDisputable),
     }
-    // C-10 (D4): no filing once the primary's window has closed, so a dispute cannot outlive the
-    // follower's backstop. The last second of the window still files.
+    // The order's version's buffer sets the module's floor, not the live one.
+    let buffer = order_timing(env, order_hash, peer_chain_id)?.buffer;
+    // No filing once the primary's window has closed. The last second of the window still files.
     if env.ledger().timestamp() > window_end(env, order_hash, deadline, buffer) {
         return Err(Fault::DisputeWindowClosed);
     }
@@ -425,10 +416,6 @@ pub fn open_dispute(
             evidence,
             &deadline,
             &buffer,
-            // c41-J: the module adds every second paused past this snapshot, so the order's own
-            // (from the lock, not the filing) makes its floor the primary's window end to the
-            // second — a pause between lock and filing extends the unlock and the dispute alike.
-            &storage::get_order(env, order_hash).paused_at_open,
         )
         .map_err(dispute_module_fault)?
         .map_err(|_| Fault::DisputeModuleRejected)?;
@@ -469,7 +456,7 @@ pub fn dispute_outcome(
     let manager = order_dispute_manager(env, order_hash)?;
     let (outcome, window_over, initiator) =
         cross_contract::DisputeManagerClient::new(env, &manager)
-            .try_outcome_of(order_hash, &storage::get_paused_seconds(env))
+            .try_outcome_of(order_hash)
             .map_err(dispute_module_fault)?
             .map_err(|_| Fault::DisputeModuleRejected)?;
     if !window_over {
@@ -488,17 +475,17 @@ pub fn dispute_outcome(
 pub fn dispute_ruling(env: &Env, order_hash: &BytesN<32>) -> Result<DisputeOutcome, Fault> {
     let manager = order_dispute_manager(env, order_hash)?;
     let (outcome, _, _) = cross_contract::DisputeManagerClient::new(env, &manager)
-        .try_outcome_of(order_hash, &storage::get_paused_seconds(env))
+        .try_outcome_of(order_hash)
         .map_err(dispute_module_fault)?
         .map_err(|_| Fault::DisputeModuleRejected)?;
     Ok(outcome)
 }
 
-/// The dispute's challenge deadline in real time, from the order's own module (#422, C-11).
+/// The dispute's challenge deadline, from the order's own module (#422, C-11).
 pub fn dispute_challenge_deadline(env: &Env, order_hash: &BytesN<32>) -> Result<u64, Fault> {
     let manager = order_dispute_manager(env, order_hash)?;
     cross_contract::DisputeManagerClient::new(env, &manager)
-        .try_challenge_deadline_of(order_hash, &storage::get_paused_seconds(env))
+        .try_challenge_deadline_of(order_hash)
         .map_err(dispute_module_fault)?
         .map_err(|_| Fault::DisputeModuleRejected)
 }
@@ -523,8 +510,7 @@ pub fn settle_bond(
 }
 
 /// Record the counterparty's response. Escrow-only on the module's side, because only the escrow
-/// knows the order's two parties (D11). The pause counter rides along: the module cannot read back
-/// into its caller, and the answer deadline is the pause-adjusted challenge deadline (D5).
+/// knows the order's two parties (D11). Answers close at the challenge deadline (D5).
 pub fn record_response(
     env: &Env,
     escrow: &Address,
@@ -534,13 +520,7 @@ pub fn record_response(
 ) -> Result<(), Fault> {
     let manager = order_dispute_manager(env, order_hash)?;
     cross_contract::DisputeManagerClient::new(env, &manager)
-        .try_record_response(
-            escrow,
-            order_hash,
-            responder,
-            evidence,
-            &storage::get_paused_seconds(env),
-        )
+        .try_record_response(escrow, order_hash, responder, evidence)
         .map_err(dispute_module_fault)?
         .map_err(|_| Fault::DisputeModuleRejected)
 }

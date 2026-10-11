@@ -544,6 +544,26 @@ impl MockGuard {
     }
 }
 
+/// A wired guard whose answer the test sets: an account's position opens and closes.
+#[contract]
+pub struct ToggleGuard;
+
+#[contractimpl]
+impl ToggleGuard {
+    pub fn has_open_positions(env: Env, _account: BytesN<32>) -> bool {
+        env.storage()
+            .instance()
+            .get(&soroban_sdk::symbol_short!("open"))
+            .unwrap_or(false)
+    }
+
+    pub fn set_open(env: Env, open: bool) {
+        env.storage()
+            .instance()
+            .set(&soroban_sdk::symbol_short!("open"), &open);
+    }
+}
+
 /// A wired guard that reports no positions.
 #[contract]
 pub struct IdleGuard;
@@ -775,31 +795,45 @@ fn any_slot_expired_within_an_early_shorten_expires_at_its_date() {
     assert!(!client.any_slot_expired_within(&account, &(T0 + 1), &(g - 1)));
 }
 
-/// #422 D17: while a guard reports positions a dead slot keeps its place for the grace — an open
-/// order's cancel may still ask about it — and leaves once the grace is over regardless.
+/// While a guard reports an open position a dead slot keeps its place, past the 30-day grace if
+/// need be — an open order's cancel may still ask about it; once the position closes it is pruned.
 #[test]
-fn register_at_cap_keeps_a_dead_slot_while_in_flight_until_the_grace() {
+fn register_at_cap_keeps_a_dead_slot_while_in_flight_past_the_grace() {
     let (env, client, v) = setup();
     let account = slot_account(&env, &v, MAKER);
-    busy_guard(&env, &client);
+    let guard = env.register(ToggleGuard, ());
+    let toggle = ToggleGuardClient::new(&env, &guard);
+    toggle.set_open(&true);
+    client.set_position_guards(&soroban_sdk::vec![&env, guard]);
     for i in 0..5 {
         register_slot(&env, &client, &v, MAKER, i);
     }
     set_valid_until(&env, &client, &v, MAKER, 2, true);
-    env.ledger().set_timestamp(T0 + 1);
     let r = slot_reg(&v, MAKER, 5);
-    assert_eq!(
-        client.try_register(
+    let full = |c: &BlsKeyRegistryClient| {
+        let (entry, deadline) = if env.ledger().timestamp() >= grace_ts(&v) {
+            ("registerLate", LATE_DEADLINE)
+        } else {
+            ("register", DEADLINE)
+        };
+        c.try_register(
             &account,
-            &signed(&env, &oa(&v, MAKER)["register"][5]),
+            &signed(&env, &oa(&v, MAKER)[entry][5]),
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &5,
-            &DEADLINE,
-        ),
-        Err(Ok(RegistryError::RegistryFull))
-    );
+            &deadline,
+        )
+    };
+    env.ledger().set_timestamp(T0 + 1);
+    assert_eq!(full(&client), Err(Ok(RegistryError::RegistryFull)));
     env.ledger().set_timestamp(grace_ts(&v)); // past the 30-day grace, in registerLate's window
+    assert_eq!(
+        full(&client),
+        Err(Ok(RegistryError::RegistryFull)),
+        "the grace alone never prunes while a position is open"
+    );
+    toggle.set_open(&false);
     assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
     assert_eq!(client.lookup(&account, &2), None);
 }

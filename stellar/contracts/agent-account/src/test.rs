@@ -1209,7 +1209,6 @@ fn escrow_fixture() -> Escrow {
             min_window: 0,
             buffer: 1_800,
             margin: 0,
-            long_backstop: 86_400,
             claim_stagger: 0,
         },
     );
@@ -3740,7 +3739,6 @@ fn test_agent_lock_metering() {
             min_window: 0,
             buffer: 1_800,
             margin: 0,
-            long_backstop: 86_400,
             claim_stagger: 0,
         },
     );

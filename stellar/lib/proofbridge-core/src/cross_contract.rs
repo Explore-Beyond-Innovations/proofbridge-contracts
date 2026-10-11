@@ -38,7 +38,6 @@ pub trait DisputeManagerInterface {
         evidence: BytesN<32>,
         deadline: u64,
         buffer: u64,
-        escrow_paused_seconds: u64,
     ) -> u128;
     fn settle_bond(
         env: Env,
@@ -53,25 +52,13 @@ pub trait DisputeManagerInterface {
         order_hash: BytesN<32>,
         responder: Address,
         evidence: BytesN<32>,
-        escrow_paused_seconds: u64,
     );
     fn outcome_of(
         env: Env,
         order_hash: BytesN<32>,
-        escrow_paused_seconds: u64,
     ) -> (crate::types::DisputeOutcome, bool, Option<Address>);
     fn initiator_of(env: Env, order_hash: BytesN<32>) -> Option<Address>;
-    fn challenge_deadline_of(env: Env, order_hash: BytesN<32>, escrow_paused_seconds: u64) -> u64;
-}
-
-/// The one thing the dispute module reads back off an escrow: its pause clock (2.3g D10).
-///
-/// Its own interface rather than a full escrow client, deliberately — the module depends on exactly
-/// this much, and saying so keeps the dependency visible and hard to widen by accident.
-#[allow(dead_code)]
-#[contractclient(name = "EscrowPauseClient")]
-pub trait EscrowPauseInterface {
-    fn paused_seconds(env: Env) -> u64;
+    fn challenge_deadline_of(env: Env, order_hash: BytesN<32>) -> u64;
 }
 
 /// Typed interface for cross-contract calls to the Verifier contract.
@@ -399,15 +386,7 @@ pub fn any_slot_expired_within(
     KeyRegistryClient::new(env, registry).any_slot_expired_within(account, &from, &to)
 }
 
-/// The dispute's challenge deadline in real time (#422: the cancel grace counts from it). The
-/// escrow passes its own pause counter, as for `outcome_of`: the module cannot read back into the
-/// escrow that is calling it.
-pub fn challenge_deadline_of(
-    env: &Env,
-    manager: &Address,
-    order_hash: &BytesN<32>,
-    escrow_paused_seconds: u64,
-) -> u64 {
-    DisputeManagerClient::new(env, manager)
-        .challenge_deadline_of(order_hash, &escrow_paused_seconds)
+/// The dispute's challenge deadline (#422: the cancel grace counts from it).
+pub fn challenge_deadline_of(env: &Env, manager: &Address, order_hash: &BytesN<32>) -> u64 {
+    DisputeManagerClient::new(env, manager).challenge_deadline_of(order_hash)
 }

@@ -43,25 +43,13 @@ fn params() -> DisputeParams {
     }
 }
 
-/// A stand-in escrow. The module reads one thing back off an escrow — its pause clock — so the
-/// fixture needs a real contract at that address rather than a bare one.
+/// A stand-in escrow: a real contract address the module authenticates as its caller.
 #[soroban_sdk::contract]
 pub struct MockEscrow;
 
 #[soroban_sdk::contractimpl]
 impl MockEscrow {
-    pub fn paused_seconds(env: Env) -> u64 {
-        env.storage()
-            .instance()
-            .get(&soroban_sdk::symbol_short!("paused"))
-            .unwrap_or(0)
-    }
-
-    pub fn set_paused_seconds(env: Env, v: u64) {
-        env.storage()
-            .instance()
-            .set(&soroban_sdk::symbol_short!("paused"), &v);
-    }
+    pub fn noop(_env: Env) {}
 }
 
 fn hash(env: &Env, fill: u8) -> BytesN<32> {
@@ -113,15 +101,18 @@ fn fixture() -> F {
 }
 
 fn file(f: &F, h: &BytesN<32>) -> u128 {
+    file_at(f, h, DEADLINE)
+}
+
+fn file_at(f: &F, h: &BytesN<32>, deadline: u64) -> u128 {
     f.client.open_dispute(
         &f.escrow,
         h,
         &CHAIN,
         &f.filer,
         &hash(&f.env, 0xEE),
-        &DEADLINE,
+        &deadline,
         &BUFFER,
-        &0u64,
     )
 }
 
@@ -244,8 +235,7 @@ fn an_unconfigured_route_cannot_be_disputed() {
             &f.filer,
             &hash(&f.env, 0),
             &DEADLINE,
-            &BUFFER,
-            &0u64
+            &BUFFER
         ),
         Err(Ok(Error::NoDisputeParams))
     );
@@ -266,8 +256,7 @@ fn only_a_registered_escrow_may_open_a_dispute() {
             &f.filer,
             &hash(&f.env, 0),
             &DEADLINE,
-            &BUFFER,
-            &0u64
+            &BUFFER
         ),
         Err(Ok(Error::NotEscrow))
     );
@@ -297,8 +286,7 @@ fn one_dispute_per_order() {
             &f.filer,
             &hash(&f.env, 0),
             &DEADLINE,
-            &BUFFER,
-            &0u64
+            &BUFFER
         ),
         Err(Ok(Error::DisputeExists))
     );
@@ -334,7 +322,7 @@ fn a_ruling_opens_a_window_it_does_not_pay() {
     // Still held: the ruling has opened a window, not moved money.
     let t = token::Client::new(&f.env, &f.token);
     assert_eq!(t.balance(&f.client.address), bond as i128);
-    let (outcome, window_over, _) = f.client.outcome_of(&h, &0u64);
+    let (outcome, window_over, _) = f.client.outcome_of(&h);
     assert_eq!(outcome, DisputeOutcome::MutualRefund);
     assert!(!window_over, "the window is still running");
 }
@@ -348,18 +336,18 @@ fn the_fallback_waits_out_the_challenge_period() {
     let f = fixture();
     let h = hash(&f.env, 7);
     file(&f, &h);
-    let (_, window_over, _) = f.client.outcome_of(&h, &0u64);
+    let (_, window_over, _) = f.client.outcome_of(&h);
     assert!(!window_over);
 
     // The challenge period alone is NOT enough: the order still has time on its own clock, and no
     // dispute path may complete before `deadline + buffer` (D3, T-50). This is the bug that let a
     // filer cancel a week-long order an hour after filing.
     f.env.ledger().with_mut(|l| l.timestamp += CHALLENGE + 1);
-    let (_, window_over, _) = f.client.outcome_of(&h, &0u64);
+    let (_, window_over, _) = f.client.outcome_of(&h);
     assert!(!window_over);
 
     warp_past_window(&f, &h);
-    let (outcome, window_over, _) = f.client.outcome_of(&h, &0u64);
+    let (outcome, window_over, _) = f.client.outcome_of(&h);
     assert!(window_over);
     assert_eq!(
         outcome,
@@ -381,20 +369,67 @@ fn the_window_floors_at_the_orders_own_deadline() {
     );
 }
 
-/// S1: a pause on the *escrow* extends the challenge window, because a pause is what stops the
-/// parties presenting and presentation is gated by the escrow.
+/// The filing writes one deadline in plain time: `max(now + challenge, deadline + buffer)`, either
+/// arm winning.
 #[test]
-fn an_escrow_pause_extends_the_challenge_window() {
+fn the_filing_deadline_is_the_max_of_challenge_and_order_floor() {
     let f = fixture();
-    let h = hash(&f.env, 31);
-    file(&f, &h);
-    let before = f.client.effective_challenge_deadline(&h);
-    MockEscrowClient::new(&f.env, &f.escrow).set_paused_seconds(&600);
+    let far = hash(&f.env, 31);
+    file(&f, &far);
     assert_eq!(
-        f.client.effective_challenge_deadline(&h),
-        before + 600,
-        "the escrow's paused seconds move the deadline"
+        f.client.effective_challenge_deadline(&far),
+        DEADLINE + BUFFER
     );
+    let near = hash(&f.env, 32);
+    file_at(&f, &near, T0 + 60);
+    assert_eq!(f.client.effective_challenge_deadline(&near), T0 + CHALLENGE);
+    assert_eq!(
+        f.client.challenge_deadline_of(&near),
+        T0 + CHALLENGE,
+        "the escrow's mid-call read is the same stored value"
+    );
+}
+
+/// A ruling writes `max(now, deadline) + buffer`: before the deadline it counts from the deadline.
+#[test]
+fn a_ruling_before_the_deadline_counts_from_the_deadline() {
+    let f = fixture();
+    let h = hash(&f.env, 33);
+    file(&f, &h);
+    f.client.resolve_dispute(&h, &DisputeOutcome::MutualRefund);
+    assert_eq!(f.client.effective_challenge_deadline(&h), DEADLINE + BUFFER);
+}
+
+/// After the deadline, the ruling's window counts from the ruling.
+#[test]
+fn a_ruling_after_the_deadline_counts_from_now() {
+    let f = fixture();
+    let h = hash(&f.env, 34);
+    file_at(&f, &h, T0 + 60);
+    let now = T0 + 600;
+    f.env.ledger().set_timestamp(now);
+    f.client.resolve_dispute(&h, &DisputeOutcome::MutualRefund);
+    assert_eq!(f.client.effective_challenge_deadline(&h), now + BUFFER);
+}
+
+/// `window_over` is exactly `now >= deadline`, the comparison the escrow's finalize makes, at every
+/// second around the boundary.
+#[test]
+fn window_over_is_the_deadline_comparison_at_the_boundary() {
+    let f = fixture();
+    let h = hash(&f.env, 35);
+    file(&f, &h);
+    let until = f.client.effective_challenge_deadline(&h);
+    for t in [until - 1, until, until + 1] {
+        f.env.ledger().set_timestamp(t);
+        let (_, over, _) = f.client.outcome_of(&h);
+        assert_eq!(over, t >= until, "at {t}");
+        assert_eq!(
+            f.client.effective_challenge_deadline(&h),
+            until,
+            "the deadline never moves"
+        );
+    }
 }
 
 #[test]
@@ -751,13 +786,8 @@ fn an_undisputed_order_is_not_disputed() {
         Err(Ok(Error::NotDisputed))
     );
     assert_eq!(
-        f.client.try_record_response(
-            &f.escrow,
-            &h,
-            &Address::generate(&f.env),
-            &hash(&f.env, 1),
-            &0
-        ),
+        f.client
+            .try_record_response(&f.escrow, &h, &Address::generate(&f.env), &hash(&f.env, 1),),
         Err(Ok(Error::NotDisputed))
     );
 }
@@ -770,7 +800,7 @@ fn the_filer_cannot_respond_to_their_own_dispute() {
     file(&f, &h);
     assert_eq!(
         f.client
-            .try_record_response(&f.escrow, &h, &f.filer, &hash(&f.env, 0x11), &0),
+            .try_record_response(&f.escrow, &h, &f.filer, &hash(&f.env, 0x11)),
         Err(Ok(Error::NotResponder))
     );
     assert_eq!(
@@ -782,7 +812,7 @@ fn the_filer_cannot_respond_to_their_own_dispute() {
     // The real counterparty still can.
     let counterparty = Address::generate(&f.env);
     f.client
-        .record_response(&f.escrow, &h, &counterparty, &hash(&f.env, 0x11), &0);
+        .record_response(&f.escrow, &h, &counterparty, &hash(&f.env, 0x11));
     assert_eq!(
         f.client.get_dispute(&h).unwrap().responder_evidence,
         hash(&f.env, 0x11)
@@ -798,13 +828,8 @@ fn a_response_through_another_escrow_is_wrong_escrow() {
     let h = hash(&f.env, 42);
     file(&f, &h);
     assert_eq!(
-        f.client.try_record_response(
-            &other,
-            &h,
-            &Address::generate(&f.env),
-            &hash(&f.env, 0x11),
-            &0
-        ),
+        f.client
+            .try_record_response(&other, &h, &Address::generate(&f.env), &hash(&f.env, 0x11),),
         Err(Ok(Error::WrongEscrow))
     );
 }
@@ -836,7 +861,6 @@ fn an_unfunded_bond_is_bond_transfer_failed() {
             &hash(&f.env, 0xEE),
             &DEADLINE,
             &BUFFER,
-            &0u64,
         ),
         Err(Ok(Error::BondTransferFailed))
     );
@@ -943,10 +967,10 @@ fn d5_a_second_answer_is_refused() {
     file(&f, &h);
     let other = Address::generate(&f.env);
     f.client
-        .record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11), &0);
+        .record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11));
     assert_eq!(
         f.client
-            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x22), &0),
+            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x22)),
         Err(Ok(Error::AlreadyResponded))
     );
     assert_eq!(
@@ -967,7 +991,7 @@ fn d5_an_answer_after_the_ruling_is_refused() {
     let other = Address::generate(&f.env);
     assert_eq!(
         f.client
-            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11), &0),
+            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11)),
         Err(Ok(Error::AlreadyRuled))
     );
     assert_eq!(
@@ -987,12 +1011,12 @@ fn d5_an_answer_at_the_challenge_deadline_is_refused() {
     f.env.ledger().set_timestamp(until);
     assert_eq!(
         f.client
-            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11), &0),
+            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11)),
         Err(Ok(Error::ResponseWindowClosed))
     );
     f.env.ledger().set_timestamp(until - 1);
     f.client
-        .record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11), &0);
+        .record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11));
 }
 
 /// D5: an empty answer is refused, so "answered" is exactly "the slot is non-zero".
@@ -1002,30 +1026,8 @@ fn d5_a_zero_answer_is_refused() {
     let h = hash(&f.env, 52);
     file(&f, &h);
     assert_eq!(
-        f.client.try_record_response(
-            &f.escrow,
-            &h,
-            &Address::generate(&f.env),
-            &hash(&f.env, 0),
-            &0
-        ),
+        f.client
+            .try_record_response(&f.escrow, &h, &Address::generate(&f.env), &hash(&f.env, 0),),
         Err(Ok(Error::ZeroResponse))
-    );
-}
-
-/// D5: the deadline is the pause-adjusted one, from the counter the escrow passes in.
-#[test]
-fn d5_the_escrows_pause_moves_the_answer_deadline() {
-    let f = fixture();
-    let h = hash(&f.env, 53);
-    file(&f, &h);
-    let until = f.client.effective_challenge_deadline(&h);
-    f.env.ledger().set_timestamp(until);
-    f.client.record_response(
-        &f.escrow,
-        &h,
-        &Address::generate(&f.env),
-        &hash(&f.env, 0x11),
-        &3_600,
     );
 }

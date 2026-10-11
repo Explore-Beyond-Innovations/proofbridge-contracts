@@ -26,7 +26,6 @@ mod storage;
 #[cfg(test)]
 mod test;
 
-use proofbridge_core::cross_contract;
 use proofbridge_core::dispute;
 use proofbridge_core::types::{DisputeOutcome, DisputeParams, DisputeRecord};
 use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env};
@@ -135,7 +134,6 @@ impl DisputeManagerContract {
         evidence: BytesN<32>,
         deadline: u64,
         buffer: u64,
-        escrow_paused_seconds: u64,
     ) -> Result<u128, Error> {
         Self::require_escrow(&env, &escrow)?;
         if storage::get_dispute(&env, &order_hash).is_some() {
@@ -166,7 +164,6 @@ impl DisputeManagerContract {
                 initiator: filer.clone(),
                 bond,
                 challenge_deadline,
-                paused_at_open: escrow_paused_seconds,
                 initiator_evidence: evidence.clone(),
                 responder_evidence: BytesN::from_array(&env, &[0u8; 32]),
                 ruling: DisputeOutcome::None,
@@ -235,8 +232,7 @@ impl DisputeManagerContract {
     // ── the dispute itself ───────────────────────────────────────────────
 
     /// Record the counterparty's evidence hash. Moves no funds, posts no bond. One non-zero answer,
-    /// strictly before the pause-adjusted challenge deadline (D5); the escrow passes its pause
-    /// counter because the module cannot read back into its caller.
+    /// strictly before the challenge deadline (D5).
     ///
     /// Escrow-only. `require_auth` on the responder proves *an* address consented, not that it is
     /// *the* counterparty — and the responder slot is single rather than an append, so anyone able
@@ -248,7 +244,6 @@ impl DisputeManagerContract {
         order_hash: BytesN<32>,
         responder: Address,
         evidence: BytesN<32>,
-        escrow_paused_seconds: u64,
     ) -> Result<(), Error> {
         escrow.require_auth();
         // The escrow proves the named responder is a party; only this proves the caller is them.
@@ -272,7 +267,7 @@ impl DisputeManagerContract {
         if d.ruling != DisputeOutcome::None {
             return Err(Error::AlreadyRuled);
         }
-        if env.ledger().timestamp() >= Self::deadline_at(&d, escrow_paused_seconds) {
+        if env.ledger().timestamp() >= d.challenge_deadline {
             return Err(Error::ResponseWindowClosed);
         }
         d.responder_evidence = evidence.clone();
@@ -298,13 +293,12 @@ impl DisputeManagerContract {
             return Err(Error::ArbiterCannotSettle);
         }
         let mut d = storage::get_dispute(&env, &order_hash).ok_or(Error::NotDisputed)?;
-        let until = Self::effective_challenge_deadline_of(&env, &d);
-        if env.ledger().timestamp() >= until {
+        if env.ledger().timestamp() >= d.challenge_deadline {
             return Err(Error::ChallengeClosed);
         }
         // D3: a ruling opens a window, it does not pay. `max(now, deadline) + buffer` is the room
         // the forfeited party presents in — a ruling issued a ledger before the deadline must not
-        // become payable a ledger after it. Stored unadjusted; the pause is applied on read.
+        // become payable a ledger after it.
         d.ruling = outcome;
         let finalize_at = env.ledger().timestamp().max(d.order_deadline) + d.buffer;
         d.challenge_deadline = finalize_at;
@@ -320,22 +314,13 @@ impl DisputeManagerContract {
 
     // ── views ────────────────────────────────────────────────────────────
 
-    /// How a dispute has ended, if it has: the ruling, whether its window is over in real time, and
-    /// who filed. The escrow's whole dependency on this module.
-    ///
-    /// `escrow_paused_seconds` is passed in rather than read back off the escrow, and that is not a
-    /// style choice: the escrow is the caller here, so reading back into it would be re-entrancy,
-    /// which Soroban rejects outright. The EVM twin takes the same argument so the two contracts
-    /// keep one shape.
-    pub fn outcome_of(
-        env: Env,
-        order_hash: BytesN<32>,
-        escrow_paused_seconds: u64,
-    ) -> (DisputeOutcome, bool, Option<Address>) {
+    /// How a dispute has ended, if it has: the ruling, whether its deadline has passed (the same
+    /// comparison the finalize makes), and who filed. The escrow's whole dependency on this module.
+    pub fn outcome_of(env: Env, order_hash: BytesN<32>) -> (DisputeOutcome, bool, Option<Address>) {
         match storage::get_dispute(&env, &order_hash) {
             None => (DisputeOutcome::None, false, None),
             Some(d) => {
-                let over = env.ledger().timestamp() >= Self::deadline_at(&d, escrow_paused_seconds);
+                let over = env.ledger().timestamp() >= d.challenge_deadline;
                 (d.ruling, over, Some(d.initiator))
             }
         }
@@ -351,28 +336,15 @@ impl DisputeManagerContract {
         storage::get_dispute(&env, &order_hash).is_some()
     }
 
-    /// The challenge deadline in real time from the escrow's own pause counter, for the escrow
-    /// mid-call (#422): the same arithmetic as `effective_challenge_deadline`, without reading back
-    /// into the caller.
-    pub fn challenge_deadline_of(
-        env: Env,
-        order_hash: BytesN<32>,
-        escrow_paused_seconds: u64,
-    ) -> u64 {
-        match storage::get_dispute(&env, &order_hash) {
-            None => 0,
-            Some(d) => Self::deadline_at(&d, escrow_paused_seconds),
-        }
+    /// The challenge deadline, for the escrow mid-call (#422). Same value as
+    /// `effective_challenge_deadline`; 0 when nothing is disputed.
+    pub fn challenge_deadline_of(env: Env, order_hash: BytesN<32>) -> u64 {
+        Self::effective_challenge_deadline(env, order_hash)
     }
 
-    /// The challenge deadline in real time: the recorded one plus every second the *escrow* has been
-    /// paused past the snapshot the filing carried — the order's own, from its lock, so the floor
-    /// is the escrow's window end to the second (D10, c41-J).
+    /// The one stored deadline, in real time: the filing's, or the ruling's once ruled.
     pub fn effective_challenge_deadline(env: Env, order_hash: BytesN<32>) -> u64 {
-        match storage::get_dispute(&env, &order_hash) {
-            None => 0,
-            Some(d) => Self::effective_challenge_deadline_of(&env, &d),
-        }
+        storage::get_dispute(&env, &order_hash).map_or(0, |d| d.challenge_deadline)
     }
 
     pub fn get_dispute(env: Env, order_hash: BytesN<32>) -> Option<DisputeRecord> {
@@ -461,21 +433,6 @@ impl DisputeManagerContract {
             return Err(Error::NotEscrow);
         }
         Ok(())
-    }
-
-    /// The *escrow's* paused seconds, not this module's. A pause matters here for exactly one
-    /// reason — it stops the parties presenting evidence — and presentation is gated by the escrow.
-    /// A pause clock on this module would be a second, unrelated number that happened to share the
-    /// name, and would leave the failure D10 describes unfixed.
-    fn effective_challenge_deadline_of(env: &Env, d: &DisputeRecord) -> u64 {
-        let escrow_paused = cross_contract::EscrowPauseClient::new(env, &d.escrow).paused_seconds();
-        Self::deadline_at(d, escrow_paused)
-    }
-
-    /// The recorded deadline plus the escrow's seconds paused past the filing's snapshot.
-    fn deadline_at(d: &DisputeRecord, escrow_paused: u64) -> u64 {
-        d.challenge_deadline
-            .saturating_add(escrow_paused.saturating_sub(d.paused_at_open))
     }
 
     /// Best effort, then credit — a recipient that cannot be paid must not brick a resolution.

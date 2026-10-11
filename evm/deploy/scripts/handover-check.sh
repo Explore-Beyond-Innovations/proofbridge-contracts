@@ -60,9 +60,12 @@ for e in adManager orderPortal; do
   [ "$(cast call --rpc-url http://127.0.0.1:$PA $(addrOf $e) 'rootVerifier(uint256)(address)' 31338)" = "$(addrOf counterpartyVerifier)" ] && pass "plain link wired $e.rootVerifier(31338)" || fail "plain link left $e without a root verifier"
 done
 
-echo "== 2a. (C-10) a follower backstop shorter than the primary's worst-case dispute is refused before anything is sent"
-n0=$(nonceA); A env ROUTE_LONG_BACKSTOP_S=3600 pnpm -s cli link --peer $MB > $L/2a.log 2>&1; rc=$?
-[ $rc -ne 0 ] && grep -q "this chain as follower" $L/2a.log && [ "$(nonceA)" = "$n0" ] && pass "link refused a 1-hour backstop against a 1-hour challenge period (exit $rc, 0 txs)" || fail "short backstop: exit $rc, txs $(( $(nonceA) - n0 )), $(grep -m1 -i 'error' $L/2a.log | cut -c1-140)"
+echo "== 2a. a retimed link writes a new timing version; the one live orders read stays"
+A env ROUTE_BUFFER_S=3600 pnpm -s cli link --peer $MB > $L/2a.log 2>&1; rc=$?
+V=$(cast call --rpc-url http://127.0.0.1:$PA $(addrOf adManager) 'timingVersion(uint256)(uint32)' 31338)
+OLD=$(cast call --rpc-url http://127.0.0.1:$PA $(addrOf adManager) 'routeTimingAt(uint256,uint32)(uint64,uint64,uint64,uint64)' 31338 1 | sed -n 2p)
+NEW=$(cast call --rpc-url http://127.0.0.1:$PA $(addrOf adManager) 'routeTimingAt(uint256,uint32)(uint64,uint64,uint64,uint64)' 31338 2 | sed -n 2p)
+[ $rc -eq 0 ] && [ "$V" = "2" ] && [ "$OLD" = "1800" ] && [ "$NEW" = "3600" ] && pass "retimed link wrote version 2 (buffer 3600), version 1 kept 1800" || fail "retime: exit $rc, version $V, v1 buffer $OLD, v2 buffer $NEW"
 
 echo "== 2b. (#466) a verifier on another registry, wired by hand for any peer, is refused by deploy and link"
 RPA=http://127.0.0.1:$PA
