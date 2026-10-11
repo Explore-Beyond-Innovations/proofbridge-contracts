@@ -603,8 +603,9 @@ contract AgentPolicyEnforcementTest is AgentPolicyBase {
     }
 
     function _assertRefused(bytes32 adToken, bytes32 orderToken, ProofBridgeAgentPolicy.Refusal want) internal view {
-        bytes memory call =
-            abi.encodeCall(IAdManager.lockForOrder, (orderParams(1, adToken, orderToken, AD_ID, settlementSigner)));
+        bytes memory call = abi.encodeCall(
+            IAdManager.lockForOrder, (orderParams(1, adToken, orderToken, AD_ID, settlementSigner), uint32(0))
+        );
         (ProofBridgeAgentPolicy.Refusal why,) =
             module.preflight(instance.account, agentId, _executeSingle(address(escrow), call));
         assertEq(uint8(why), uint8(want));
