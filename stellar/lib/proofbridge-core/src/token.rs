@@ -96,7 +96,10 @@ pub fn transfer_tokens(
     Ok(())
 }
 
-/// Transfer tokens from user to contract using BytesN<32> token address
+/// Transfer tokens from user to contract using BytesN<32> token address. Every non-native pull
+/// checks this escrow's balance rose by exactly `amount` (`TransferShort` otherwise): the escrow
+/// does not know a token's kind, and a fee-on-transfer or rebasing token would leave it short, the
+/// shortfall later paid from other users' funds. Native (wrapped XLM) is exact already.
 pub fn transfer_from_user_bytes32(
     env: &Env,
     token_bytes: &BytesN<32>,
@@ -105,14 +108,24 @@ pub fn transfer_from_user_bytes32(
     amount: u128,
 ) -> Result<(), Fault> {
     let contract_addr = env.current_contract_address();
-    transfer_tokens(
-        env,
-        token_bytes,
-        w_native_addr,
-        from,
-        &contract_addr,
-        amount,
-    )
+    if is_native_token(token_bytes) {
+        return transfer_tokens(
+            env,
+            token_bytes,
+            w_native_addr,
+            from,
+            &contract_addr,
+            amount,
+        );
+    }
+    let token_addr = bytes32_to_token_address(env, token_bytes).ok_or(Fault::TokenZeroAddress)?;
+    let client = token::Client::new(env, &token_addr);
+    let before = client.balance(&contract_addr);
+    client.transfer(from, &contract_addr, &(amount as i128));
+    if client.balance(&contract_addr) - before != amount as i128 {
+        return Err(Fault::TransferShort);
+    }
+    Ok(())
 }
 
 /// Transfer tokens from contract to user using BytesN<32> token address

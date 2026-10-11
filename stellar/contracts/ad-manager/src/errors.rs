@@ -173,6 +173,8 @@ pub enum AdManagerError {
     DisputeAlreadyRuled = 85,
     /// The settlement signer is not the maker and has not approved the maker in the key registry.
     SignerNotApproved = 86,
+    /// A token pull credited the escrow less than the amount (fee-on-transfer or rebasing token).
+    TransferShort = 87,
 }
 
 /// The shared escrow code reports an opaque reason; this is where it becomes this contract's own
@@ -218,6 +220,7 @@ impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
             NonExactDownscale => AdManagerError::NonExactDownscale,
             DecimalOverflow => AdManagerError::DecimalOverflow,
             InvalidAccountAddress => AdManagerError::InvalidAccountAddress,
+            TransferShort => AdManagerError::TransferShort,
         }
     }
 }

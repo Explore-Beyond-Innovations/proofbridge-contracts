@@ -132,6 +132,8 @@ pub enum OrderPortalError {
     /// Every dispute-module fault, collapsed: the follower never calls the module, so none can occur
     /// here; the one code keeps the `From<Fault>` table total without a wildcard.
     DisputeModuleRejected = 92,
+    /// A token pull credited the escrow less than the amount (fee-on-transfer or rebasing token).
+    TransferShort = 106,
 }
 
 /// The shared escrow code reports an opaque reason; this is where it becomes this contract's own
@@ -162,6 +164,7 @@ impl From<proofbridge_core::escrow_ops::Fault> for OrderPortalError {
             NonExactDownscale => OrderPortalError::NonExactDownscale,
             DecimalOverflow => OrderPortalError::DecimalOverflow,
             InvalidAccountAddress => OrderPortalError::InvalidAccountAddress,
+            TransferShort => OrderPortalError::TransferShort,
             // The leader relays module refusals 1:1; the follower collapses them. Named, not a
             // wildcard: a new `Fault` still fails to compile until someone places it.
             NoDisputeManager

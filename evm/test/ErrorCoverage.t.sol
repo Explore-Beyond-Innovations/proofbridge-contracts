@@ -58,6 +58,11 @@ contract FalseReturnToken {
         return 18;
     }
 
+    /// The escrow reads its balance around every pull.
+    function balanceOf(address) external pure returns (uint256) {
+        return 0;
+    }
+
     function transferFrom(address, address, uint256) external pure returns (bool) {
         return false;
     }
@@ -75,6 +80,11 @@ contract ReentrantToken {
 
     function decimals() external pure returns (uint8) {
         return 18;
+    }
+
+    /// The escrow reads its balance around every pull.
+    function balanceOf(address) external pure returns (uint256) {
+        return 0;
     }
 
     function transferFrom(address, address, uint256) external returns (bool) {

@@ -63,6 +63,13 @@ impl TokenContract {
             .instance()
             .set(&soroban_sdk::symbol_short!("fail"), &fail);
     }
+
+    /// Model a fee-on-transfer token: every transfer delivers `fee` less than asked.
+    pub fn set_transfer_fee(e: &Env, fee: i128) {
+        e.storage()
+            .instance()
+            .set(&soroban_sdk::symbol_short!("fee"), &fee);
+    }
 }
 
 #[contractimpl(contracttrait)]
@@ -78,7 +85,12 @@ impl FungibleToken for TokenContract {
         if fail {
             panic!("transfers disabled");
         }
-        Base::transfer(e, &from, &to, amount);
+        let fee: i128 = e
+            .storage()
+            .instance()
+            .get(&soroban_sdk::symbol_short!("fee"))
+            .unwrap_or(0);
+        Base::transfer(e, &from, &to, amount - fee);
     }
 }
 
@@ -2113,6 +2125,66 @@ fn test_t13_lock_then_unlock_clears_the_signer() {
         .has_open_positions(&params.ad_settlement_signer));
     assert!(!s.ad_manager.has_open_positions(&params.ad_creator));
     assert!(!s.ad_manager.has_open_positions(&params.bridger));
+}
+
+// --- short transfers: a fee-on-transfer token is refused on every pull --------
+
+/// `create_ad` and `fund_ad` refuse a token that credits the escrow less than the amount; nothing
+/// is recorded. The same token without a fee works.
+#[test]
+fn test_short_transfer_refused_on_create_ad_and_fund_ad() {
+    let s = setup();
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    token.set_transfer_fee(&1);
+    let create = |id: &str| {
+        s.ad_manager.try_create_ad(
+            &s.maker_addr,
+            &SorobanString::from_str(&s.env, id),
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token),
+            &s.tp.amount,
+            &s.tp.order_chain_id,
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_recipient),
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_settlement_signer),
+        )
+    };
+    assert_eq!(
+        create("fee-ad"),
+        Err(Ok(ad_manager_contract::AdManagerError::TransferShort))
+    );
+    assert!(s
+        .ad_manager
+        .get_ad(&SorobanString::from_str(&s.env, "fee-ad"))
+        .is_none());
+    let before = s.ad_manager.get_ad(&ad_id(&s)).unwrap().balance;
+    assert_eq!(
+        s.ad_manager.try_fund_ad(&ad_id(&s), &s.tp.amount),
+        Err(Ok(ad_manager_contract::AdManagerError::TransferShort))
+    );
+    assert_eq!(s.ad_manager.get_ad(&ad_id(&s)).unwrap().balance, before);
+
+    token.set_transfer_fee(&0);
+    assert!(create("fee-ad").is_ok());
+    s.ad_manager.fund_ad(&ad_id(&s), &s.tp.amount);
+}
+
+/// `create_order` refuses a token that credits the escrow less than the amount.
+#[test]
+fn test_short_transfer_refused_on_create_order() {
+    let s = setup();
+    let bridger_addr = {
+        let strkey = stellar_strkey::ed25519::PublicKey(s.tp.bridger).to_string();
+        Address::from_string(&SorobanString::from_str(&s.env, &strkey))
+    };
+    let token = TokenContractClient::new(&s.env, &s.order_token_addr);
+    token.mint(&bridger_addr, &(s.tp.amount as i128 * 10));
+    token.set_transfer_fee(&1);
+    let params = order_portal_order_params(&s.env, &s.tp);
+    assert_eq!(
+        s.order_portal.try_create_order(&params),
+        Err(Ok(order_portal_contract::OrderPortalError::TransferShort))
+    );
+    token.set_transfer_fee(&0);
+    s.order_portal.create_order(&params);
 }
 
 // --- T-14: the createAd gate (D2) -------------------------------------------

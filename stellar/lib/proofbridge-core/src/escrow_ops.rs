@@ -93,6 +93,9 @@ faults! {
     DecimalOverflow,
     /// 32 bytes that cannot be an account address (all zero).
     InvalidAccountAddress,
+    /// A token pull credited this escrow less (or more) than the amount: a fee-on-transfer or
+    /// rebasing token, which would leave the escrow short of what it owes.
+    TransferShort,
 }
 
 impl From<crate::decimal_scaling::DecimalScalingError> for Fault {
