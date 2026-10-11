@@ -95,7 +95,8 @@ pub enum OrderPortalError {
     // ==========================================================================
     /// Recipient bytes do not decode to a valid Stellar account address
     InvalidAccountAddress = 70,
-    /// The order's deadline has passed; it can no longer be unlocked.
+    /// The unlock is past the follower's cutoff, `deadline - claim_stagger` (the last second
+    /// accepted, inclusive).
     OrderExpired = 74,
 
     // ==========================================================================
@@ -132,7 +133,8 @@ pub enum OrderPortalError {
     /// Every dispute-module fault, collapsed: the follower never calls the module, so none can occur
     /// here; the one code keeps the `From<Fault>` table total without a wildcard.
     DisputeModuleRejected = 92,
-    /// A token pull credited the escrow less than the amount (fee-on-transfer or rebasing token).
+    /// A token pull credited the escrow anything other than the amount (a fee-on-transfer token,
+    /// or one that pays a bonus on receipt).
     TransferShort = 106,
     // 107 was `PaidByForfeit`: retired, never reused. A forfeit fill marks the order settled-recorded
     // instead, so `record_settled` answers `SettledRecorded` for it.

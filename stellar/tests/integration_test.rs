@@ -64,7 +64,8 @@ impl TokenContract {
             .set(&soroban_sdk::symbol_short!("fail"), &fail);
     }
 
-    /// Model a fee-on-transfer token: every transfer delivers `fee` less than asked.
+    /// Model a fee-on-transfer token: every transfer delivers `fee` less than asked. A negative
+    /// `fee` models a token that pays a bonus on receipt: every transfer delivers more than asked.
     pub fn set_transfer_fee(e: &Env, fee: i128) {
         e.storage()
             .instance()
@@ -2229,6 +2230,71 @@ fn test_short_transfer_refused_on_create_order() {
     );
     token.set_transfer_fee(&0);
     s.order_portal.create_order(&params);
+}
+
+/// `create_ad` and `fund_ad` refuse a token that credits the escrow more than the amount just the
+/// same: the escrow records only what it asked for, so an over-credit is a balance nothing
+/// accounts for. Nothing is recorded; the same token without the bonus works.
+#[test]
+fn test_over_credit_refused_on_create_ad_and_fund_ad() {
+    let s = setup();
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    token.set_transfer_fee(&-1);
+    let create = |id: &str| {
+        s.ad_manager.try_create_ad(
+            &s.maker_addr,
+            &SorobanString::from_str(&s.env, id),
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token),
+            &s.tp.amount,
+            &s.tp.order_chain_id,
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_recipient),
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_settlement_signer),
+        )
+    };
+    assert_eq!(
+        create("bonus-ad"),
+        Err(Ok(ad_manager_contract::AdManagerError::TransferShort))
+    );
+    assert!(s
+        .ad_manager
+        .get_ad(&SorobanString::from_str(&s.env, "bonus-ad"))
+        .is_none());
+    let before = s.ad_manager.get_ad(&ad_id(&s)).unwrap().balance;
+    assert_eq!(
+        s.ad_manager.try_fund_ad(&ad_id(&s), &s.tp.amount),
+        Err(Ok(ad_manager_contract::AdManagerError::TransferShort))
+    );
+    assert_eq!(s.ad_manager.get_ad(&ad_id(&s)).unwrap().balance, before);
+
+    token.set_transfer_fee(&0);
+    assert!(create("bonus-ad").is_ok());
+    s.ad_manager.fund_ad(&ad_id(&s), &s.tp.amount);
+}
+
+/// `create_order` refuses a token that credits the escrow more than the amount.
+#[test]
+fn test_over_credit_refused_on_create_order() {
+    let s = setup();
+    let bridger_addr = {
+        let strkey = stellar_strkey::ed25519::PublicKey(s.tp.bridger).to_string();
+        Address::from_string(&SorobanString::from_str(&s.env, &strkey))
+    };
+    let token = TokenContractClient::new(&s.env, &s.order_token_addr);
+    token.mint(&bridger_addr, &(s.tp.amount as i128 * 10));
+    token.set_transfer_fee(&-2);
+    let params = order_portal_order_params(&s.env, &s.tp);
+    assert_eq!(
+        s.order_portal.try_create_order(&params),
+        Err(Ok(order_portal_contract::OrderPortalError::TransferShort))
+    );
+    let escrow_balance = token.balance(&s.order_portal.address);
+    token.set_transfer_fee(&0);
+    s.order_portal.create_order(&params);
+    assert_eq!(
+        token.balance(&s.order_portal.address) - escrow_balance,
+        s.tp.amount as i128,
+        "the same token without a bonus credits exactly the amount"
+    );
 }
 
 // --- T-14: the createAd gate (D2) -------------------------------------------
@@ -6938,6 +7004,72 @@ fn test_evidence_close_by_co_signed_unlock_halt_since_the_lock_bond_back() {
         token.balance(&pool),
         pool_before,
         "the fee pool took nothing"
+    );
+}
+
+/// The third denial lever: a slot of the signer expiring between the lock and the presentation
+/// cutoff (a kill, a shorten) denied the payout, so a bridger filer gets its bond back. The expiry
+/// sits strictly after the lock, so a close that reads only the lock's second misses it.
+#[test]
+fn test_evidence_close_bridger_filed_signer_expired_since_the_lock_bond_back() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let (dm, _arbiter, _maker) = wire_dispute_manager(&s);
+    let pool = dm.get_protocol_fee_pool().unwrap();
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let bridger = recipient_party(&s);
+    token.mint(&bridger, &1_000_000);
+    let p = locked_ad_order(&s);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .add_slot_expiry(&p.ad_settlement_signer, &s.env.ledger().timestamp());
+    s.ad_manager.dispute(&p, &bridger, &evidence(&s, 0xEE));
+    let payout = ad_locked(&s) as i128;
+    let (bridger_before, pool_before) = (token.balance(&bridger), token.balance(&pool));
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+    s.ad_manager.present_settled(&p, &root, &proof);
+    assert_eq!(
+        token.balance(&bridger) - bridger_before,
+        payout + DISPUTE_BOND_FLOOR as i128,
+        "the payout and the bond"
+    );
+    assert_eq!(
+        token.balance(&pool),
+        pool_before,
+        "the fee pool took nothing"
+    );
+}
+
+/// A rotation whose old slot outlives the presentation cutoff put no expiry in the payout's life:
+/// nothing was denied, so the fee pool takes the bond as for any other needless filing.
+#[test]
+fn test_evidence_close_bridger_filed_slot_outliving_the_cutoff_bond_to_the_fee_pool() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let (dm, _arbiter, _maker) = wire_dispute_manager(&s);
+    let pool = dm.get_protocol_fee_pool().unwrap();
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let bridger = recipient_party(&s);
+    token.mint(&bridger, &1_000_000);
+    let p = locked_ad_order(&s);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .add_slot_expiry(&p.ad_settlement_signer, &(p.deadline + 30 * SUITE_BUFFER));
+    s.ad_manager.dispute(&p, &bridger, &evidence(&s, 0xEE));
+    let payout = ad_locked(&s) as i128;
+    let (bridger_before, pool_before) = (token.balance(&bridger), token.balance(&pool));
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+    s.ad_manager.present_settled(&p, &root, &proof);
+    assert_eq!(
+        token.balance(&bridger) - bridger_before,
+        payout,
+        "the payout alone: the bond is not returned"
+    );
+    assert_eq!(
+        token.balance(&pool) - pool_before,
+        DISPUTE_BOND_FLOOR as i128,
+        "the fee pool took it"
     );
 }
 

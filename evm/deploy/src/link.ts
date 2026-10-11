@@ -415,7 +415,8 @@ function routeTimingFromEnv(env: string, vars: Record<string, string | undefined
     margin: read("ROUTE_MARGIN_S", "0"),
     claimStagger: read("ROUTE_CLAIM_STAGGER_S", "0"),
   };
-  // The contract's margin cap (field 2): refused here, before anything is sent.
+  // Mirror of `RouteTiming.validate` / `timing::validate` field 2 (`margin <= buffer / 2`): refused
+  // here, before anything is sent. The contract stays the authority; a change to the cap touches both.
   if (BigInt(timing.margin) > BigInt(timing.buffer) / 2n) {
     throw new Error(
       `link: ROUTE_MARGIN_S=${timing.margin} exceeds half of ROUTE_BUFFER_S=${timing.buffer}; the escrows refuse a margin above half the buffer`,
@@ -425,11 +426,25 @@ function routeTimingFromEnv(env: string, vars: Record<string, string | undefined
 }
 
 /**
- * The contract's challenge period is 1 hour to 7 days and its bond floor at least 1; both are
- * re-checked by the manifest schema, so a bad value fails before it reaches a transaction.
+ * The smallest floor `link` accepts outside `local`: 0.001 of the wrapped native (10^15 wei). The floor is the whole
+ * bond, so a dust floor makes a dispute free in practice. A sanity bound, not the tuned value: the
+ * operating rules size each route's floor above it.
  */
-function disputeParamsFromEnv(env: string, vars: Record<string, string | undefined> = process.env): DisputeParams {
+export const MIN_BOND_FLOOR_OUTSIDE_LOCAL = 1_000_000_000_000_000n;
+
+/**
+ * The contract's challenge period is 1 hour to 7 days and its bond floor at least 1; both are
+ * re-checked by the manifest schema, so a bad value fails before it reaches a transaction. Outside
+ * `local` the floor must also clear `MIN_BOND_FLOOR_OUTSIDE_LOCAL`, and a `DISPUTE_BOND_BPS` left in
+ * the env is refused: the percentage term is gone, so a value there would be silently ignored.
+ */
+export function disputeParamsFromEnv(env: string, vars: Record<string, string | undefined> = process.env): DisputeParams {
   const isLocal = env === "local";
+  if (vars.DISPUTE_BOND_BPS !== undefined) {
+    throw new Error(
+      "link: DISPUTE_BOND_BPS is set, but the percentage term was removed: the bond is the route's flat DISPUTE_BOND_FLOOR. Unset it",
+    );
+  }
   const read = (name: string, localDefault: string): string => {
     const v = vars[name];
     if (v !== undefined) {
@@ -441,12 +456,18 @@ function disputeParamsFromEnv(env: string, vars: Record<string, string | undefin
       `link: ${name} is unset for env=${env}; set every DISPUTE_* parameter or deploy with DEPLOY_ENV=local`,
     );
   };
+  // 1, not 0: `Dispute.validate` rejects a zero floor, because the floor is the whole bond and a
+  // zero one is a free dispute. "The smallest legal value" is the rule everywhere here, and for
+  // this parameter the smallest legal value is one. Outside local there is no default.
+  const bondFloor = read("DISPUTE_BOND_FLOOR", "1");
+  if (!isLocal && BigInt(bondFloor) < MIN_BOND_FLOOR_OUTSIDE_LOCAL) {
+    throw new Error(
+      `link: DISPUTE_BOND_FLOOR=${bondFloor} is below the ${MIN_BOND_FLOOR_OUTSIDE_LOCAL} minimum for env=${env}; the floor is the whole bond, so a dust floor makes disputes free`,
+    );
+  }
   return {
     challengePeriod: read("DISPUTE_CHALLENGE_PERIOD_S", "3600"),
-    // 1, not 0: `Dispute.validate` rejects a zero floor, because the floor is the whole bond and a
-    // zero one is a free dispute. "The smallest legal value" is the rule everywhere here, and for
-    // this parameter the smallest legal value is one. Outside local there is no default.
-    bondFloor: read("DISPUTE_BOND_FLOOR", "1"),
+    bondFloor,
   };
 }
 
