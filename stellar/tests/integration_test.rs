@@ -6297,6 +6297,72 @@ fn test_evidence_close_by_co_signed_unlock_halt_since_the_lock_bond_back() {
     );
 }
 
+/// The third denial lever: a slot of the signer expiring between the lock and the presentation
+/// cutoff (a kill, a shorten) denied the payout, so a bridger filer gets its bond back. The expiry
+/// sits strictly after the lock, so a close that reads only the lock's second misses it.
+#[test]
+fn test_evidence_close_bridger_filed_signer_expired_since_the_lock_bond_back() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let (dm, _arbiter, _maker) = wire_dispute_manager(&s);
+    let pool = dm.get_protocol_fee_pool().unwrap();
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let bridger = recipient_party(&s);
+    token.mint(&bridger, &1_000_000);
+    let p = locked_ad_order(&s);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .add_slot_expiry(&p.ad_settlement_signer, &s.env.ledger().timestamp());
+    s.ad_manager.dispute(&p, &bridger, &evidence(&s, 0xEE));
+    let payout = ad_locked(&s) as i128;
+    let (bridger_before, pool_before) = (token.balance(&bridger), token.balance(&pool));
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+    s.ad_manager.present_settled(&p, &root, &proof);
+    assert_eq!(
+        token.balance(&bridger) - bridger_before,
+        payout + DISPUTE_BOND_FLOOR as i128,
+        "the payout and the bond"
+    );
+    assert_eq!(
+        token.balance(&pool),
+        pool_before,
+        "the fee pool took nothing"
+    );
+}
+
+/// A rotation whose old slot outlives the presentation cutoff put no expiry in the payout's life:
+/// nothing was denied, so the fee pool takes the bond as for any other needless filing.
+#[test]
+fn test_evidence_close_bridger_filed_slot_outliving_the_cutoff_bond_to_the_fee_pool() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    let (dm, _arbiter, _maker) = wire_dispute_manager(&s);
+    let pool = dm.get_protocol_fee_pool().unwrap();
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let bridger = recipient_party(&s);
+    token.mint(&bridger, &1_000_000);
+    let p = locked_ad_order(&s);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry)
+        .add_slot_expiry(&p.ad_settlement_signer, &(p.deadline + 30 * SUITE_BUFFER));
+    s.ad_manager.dispute(&p, &bridger, &evidence(&s, 0xEE));
+    let payout = ad_locked(&s) as i128;
+    let (bridger_before, pool_before) = (token.balance(&bridger), token.balance(&pool));
+    let (root, proof) = settled_proof(&s);
+    notarize(&s, &anchor, s.tp.order_chain_id, &root);
+    s.ad_manager.present_settled(&p, &root, &proof);
+    assert_eq!(
+        token.balance(&bridger) - bridger_before,
+        payout,
+        "the payout alone: the bond is not returned"
+    );
+    assert_eq!(
+        token.balance(&pool) - pool_before,
+        DISPUTE_BOND_FLOOR as i128,
+        "the fee pool took it"
+    );
+}
+
 /// The maker filed against its own halted order: unchanged, the fee pool takes the bond.
 #[test]
 fn test_evidence_close_maker_filed_halted_maker_bond_still_to_the_fee_pool() {

@@ -743,8 +743,7 @@ impl AdManagerContract {
         // the margin, on the order's own timing version, so a retiming cannot move it. Strict, so
         // it never shares a second with finalize_cancel (which needs the end reached).
         let t = Self::order_timing(&env, &order_hash, params.order_chain_id)?;
-        let cutoff =
-            Self::window_end(&env, &order_hash, params.deadline, t.buffer).saturating_sub(t.margin);
+        let cutoff = Self::presentation_cutoff(&env, &order_hash, &params, &t);
         if env.ledger().timestamp() >= cutoff {
             return Err(AdManagerError::OrderExpired);
         }
@@ -1281,8 +1280,7 @@ impl AdManagerContract {
             || storage::get_ad(env, &params.ad_id).map(|ad| ad.maker),
             |maker| {
                 let t = ops::order_timing(env, order_hash, params.order_chain_id)?;
-                let cutoff = ops::window_end(env, order_hash, params.deadline, t.buffer)
-                    .saturating_sub(t.margin);
+                let cutoff = Self::presentation_cutoff(env, order_hash, params, &t);
                 Ok(Self::co_sign_denied(env, maker, params, order_hash, cutoff))
             },
         )?;
@@ -1352,6 +1350,20 @@ impl AdManagerContract {
 
     fn window_end(env: &Env, order_hash: &BytesN<32>, deadline: u64, buffer: u64) -> u64 {
         ops::window_end(env, order_hash, deadline, buffer)
+    }
+
+    /// The first second the co-signed unlock is refused (2.3e D2): the window's end minus the
+    /// margin, both from the order's own timing version `t`. The one formula behind the unlock's
+    /// cutoff, the evidence close's bond rule and the cancel clock's denial read, so the three
+    /// cannot drift. Once the order is `Claimed` the window's end is the claim's, and the deadline
+    /// is not consulted.
+    fn presentation_cutoff(
+        env: &Env,
+        order_hash: &BytesN<32>,
+        params: &OrderParams,
+        t: &RouteTiming,
+    ) -> u64 {
+        Self::window_end(env, order_hash, params.deadline, t.buffer).saturating_sub(t.margin)
     }
 
     /// Is the maker's halt in force.
@@ -1429,8 +1441,10 @@ impl AdManagerContract {
         order_hash: &BytesN<32>,
         t: &RouteTiming,
     ) -> Result<u64, AdManagerError> {
-        let end = Self::window_end(env, order_hash, 0, t.buffer);
-        if !Self::co_sign_denied(env, maker, params, order_hash, end.saturating_sub(t.margin)) {
+        // Only reached while `Claimed`, so the window's end is the claim's own `finalize_at`.
+        let end = Self::window_end(env, order_hash, params.deadline, t.buffer);
+        let cutoff = Self::presentation_cutoff(env, order_hash, params, t);
+        if !Self::co_sign_denied(env, maker, params, order_hash, cutoff) {
             return Ok(end);
         }
         let grace = Self::evidence_grace(env, order_hash, params.order_chain_id, t.buffer)?;
