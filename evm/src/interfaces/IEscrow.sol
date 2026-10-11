@@ -101,6 +101,12 @@ interface IEscrow {
     error Escrow__PeerTokenMismatch(bytes32 expected, bytes32 provided);
     error Escrow__OrderExists(bytes32 orderHash);
     error Escrow__OrderNotOpen(bytes32 orderHash);
+    /// @notice The timed door is shut. The argument names the cutoff the door checked, and its meaning
+    ///         follows the door: on the AdManager's co-signed `unlock` it is the first second refused
+    ///         (the presentation cutoff, strict, so it never shares a second with `finalizeCancel`);
+    ///         on the OrderPortal's `unlock` it is the last second accepted (inclusive, the
+    ///         follower's `deadline − claimStagger`). A display that says "expired at" is exact on the
+    ///         follower and one second early on the primary.
     error Escrow__OrderExpired(uint256 deadline);
     error Escrow__NullifierUsed(bytes32 nullifierHash);
     error Escrow__InvalidProof();
@@ -135,8 +141,9 @@ interface IEscrow {
     error Escrow__DisputeWindowClosed(bytes32 orderHash, uint256 windowEnd);
     /// @notice Native value must equal the amount exactly (C-17).
     error Escrow__NativeAmountMismatch(uint256 sent, uint256 expected);
-    /// @notice A token pull credited this escrow other than the amount (a fee-on-transfer or
-    ///         rebasing token), which would leave the escrow short of what it owes.
+    /// @notice A token pull credited this escrow anything other than the amount: less (a
+    ///         fee-on-transfer token) leaves it short of what it owes; more is a balance it did
+    ///         not record. Refused either way, exactly `amount` or nothing.
     error Escrow__TransferShort(uint256 expected, uint256 received);
     /// @notice Plain native sends are refused; only the wrapped-native contract's unwraps land (C-17).
     error Escrow__NativeNotAccepted(address sender);

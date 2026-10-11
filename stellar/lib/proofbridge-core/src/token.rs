@@ -98,8 +98,10 @@ pub fn transfer_tokens(
 
 /// Transfer tokens from user to contract using BytesN<32> token address. Every non-native pull
 /// checks this escrow's balance rose by exactly `amount` (`TransferShort` otherwise): the escrow
-/// does not know a token's kind, and a fee-on-transfer or rebasing token would leave it short, the
-/// shortfall later paid from other users' funds. Native (wrapped XLM) is exact already.
+/// does not know a token's kind, a fee-on-transfer token would leave it short (the shortfall later
+/// paid from other users' funds), and an over-credit is a balance nothing accounts for. Only the
+/// transfer itself is checked; a token that rebases later is kept out by route admission. Native
+/// (wrapped XLM) is exact already.
 pub fn transfer_from_user_bytes32(
     env: &Env,
     token_bytes: &BytesN<32>,

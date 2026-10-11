@@ -223,8 +223,10 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     }
 
     /// @dev Take `amount` of `token` from the caller: native (exact `msg.value` wrapped) or ERC20.
-    ///      An ERC20 pull must raise this escrow's balance by exactly `amount`: a fee-on-transfer or
-    ///      rebasing token would otherwise leave it short, paid later from other users' tokens.
+    ///      An ERC20 pull must raise this escrow's balance by exactly `amount`: a fee-on-transfer
+    ///      token would otherwise leave it short, paid later from other users' tokens, and an
+    ///      over-credit is a balance nothing accounts for. Only the transfer itself is checked; a
+    ///      token that rebases later is kept out by route admission, not by this check.
     function _pullFunds(address token, uint256 amount) internal {
         if (token.isNative()) {
             // Exact: a surplus would be wrapped nowhere and stranded here (C-17).

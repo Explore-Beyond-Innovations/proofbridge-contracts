@@ -743,8 +743,7 @@ impl AdManagerContract {
         // the margin, on the order's own timing version, so a retiming cannot move it. Strict, so
         // it never shares a second with finalize_cancel (which needs the end reached).
         let t = Self::order_timing(&env, &order_hash, params.order_chain_id)?;
-        let cutoff =
-            Self::window_end(&env, &order_hash, params.deadline, t.buffer).saturating_sub(t.margin);
+        let cutoff = Self::presentation_cutoff(&env, &order_hash, &params, &t);
         if env.ledger().timestamp() >= cutoff {
             return Err(AdManagerError::OrderExpired);
         }
@@ -836,14 +835,14 @@ impl AdManagerContract {
     ) -> Result<u128, AdManagerError> {
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
-        // The deadline is vouched for by the hash the caller had to reproduce; the module cannot do
-        // that itself, which is why filing starts here.
         // Only the order's two parties may file. Without this any address could dispute any live
         // order and, one short challenge period later, cancel it out from under both of them.
         // The bridger side is the same address this chain would pay, resolved the same way, so
         // "who may file" and "who gets paid" cannot drift apart.
         let ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
         Self::require_party(&env, &filer, &ad.maker, &params.order_recipient)?;
+        // The deadline is vouched for by the hash the caller had to reproduce; the module cannot do
+        // that itself, which is why filing starts here.
         let bond = ops::open_dispute(
             &env,
             &env.current_contract_address(),
@@ -1299,8 +1298,7 @@ impl AdManagerContract {
             || storage::get_ad(env, &params.ad_id).map(|ad| ad.maker),
             |maker| {
                 let t = ops::order_timing(env, order_hash, params.order_chain_id)?;
-                let cutoff = ops::window_end(env, order_hash, params.deadline, t.buffer)
-                    .saturating_sub(t.margin);
+                let cutoff = Self::presentation_cutoff(env, order_hash, params, &t);
                 Ok(Self::co_sign_denied(env, maker, params, order_hash, cutoff))
             },
         )?;
@@ -1372,6 +1370,20 @@ impl AdManagerContract {
         ops::window_end(env, order_hash, deadline, buffer)
     }
 
+    /// The first second the co-signed unlock is refused (2.3e D2): the window's end minus the
+    /// margin, both from the order's own timing version `t`. The one formula behind the unlock's
+    /// cutoff, the evidence close's bond rule and the cancel clock's denial read, so the three
+    /// cannot drift. Once the order is `Claimed` the window's end is the claim's, and the deadline
+    /// is not consulted.
+    fn presentation_cutoff(
+        env: &Env,
+        order_hash: &BytesN<32>,
+        params: &OrderParams,
+        t: &RouteTiming,
+    ) -> u64 {
+        Self::window_end(env, order_hash, params.deadline, t.buffer).saturating_sub(t.margin)
+    }
+
     /// Is the maker's halt in force.
     fn is_halted(env: &Env, maker: &Address) -> bool {
         storage::get_halt(env, maker).map_or(false, |h| h.halted)
@@ -1393,7 +1405,10 @@ impl AdManagerContract {
     /// or at any point since the lock (a resume stamp at or after `locked_at`), the order chain's root
     /// verifier unset (`unlock` refuses `RootVerifierNotSet`), any of the signer's registry slots
     /// expiring during the order's life as a payout, `[locked_at, until]` with `until` the payout's
-    /// own cutoff (`any_slot_expired_within`, D12/D14/D14b/D16: a kill, a near-future shorten, a
+    /// own cutoff, inclusive. For the cancel path that is the presentation cutoff, the first second
+    /// the unlock is refused, so a slot expiring exactly there still counts: one second conservative,
+    /// which only lengthens the maker's own refund, never moves a payout
+    /// (`any_slot_expired_within`, D12/D14/D14b/D16: a kill, a near-future shorten, a
     /// pre-lock shorten naming a date in the window and a re-kill after it all count; a rotation
     /// whose old slot outlives the cutoff does not). Every reference is one the chain stamped (the
     /// lock) or the caller derives from the signed deadline, never one the maker can choose later.
@@ -1447,8 +1462,10 @@ impl AdManagerContract {
         order_hash: &BytesN<32>,
         t: &RouteTiming,
     ) -> Result<u64, AdManagerError> {
-        let end = Self::window_end(env, order_hash, 0, t.buffer);
-        if !Self::co_sign_denied(env, maker, params, order_hash, end.saturating_sub(t.margin)) {
+        // Only reached while `Claimed`, so the window's end is the claim's own `finalize_at`.
+        let end = Self::window_end(env, order_hash, params.deadline, t.buffer);
+        let cutoff = Self::presentation_cutoff(env, order_hash, params, t);
+        if !Self::co_sign_denied(env, maker, params, order_hash, cutoff) {
             return Ok(end);
         }
         let grace = Self::evidence_grace(env, order_hash, params.order_chain_id, t.buffer)?;

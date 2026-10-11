@@ -498,6 +498,30 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, 0, "the fee pool took nothing");
     }
 
+    /// The third denial lever: a slot of the signer expiring between the lock and the presentation
+    /// cutoff (a kill, a shorten) denied the payout, so a bridger filer gets its bond back. The expiry
+    /// sits strictly after the lock, so a close that reads only the lock's second misses it.
+    function test_evidenceClose_bridgerFiled_signerExpiredSinceTheLock_bondBackToTheBridger() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(31);
+        vm.warp(block.timestamp + 10);
+        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(block.timestamp));
+        uint256 bond = _file(p, filer);
+        _presentSettledOn(p, h);
+        assertEq(filer.balance + _wNativeToken.balanceOf(filer), bond, "the bridger's bond is back");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, 0, "the fee pool took nothing");
+    }
+
+    /// A rotation whose old slot outlives the presentation cutoff put no expiry in the payout's
+    /// life: nothing was denied, so the fee pool takes the bond as for any other needless filing.
+    function test_evidenceClose_bridgerFiled_slotOutlivingTheCutoff_bondToTheFeePool() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(32);
+        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(p.deadline + 2 days));
+        uint256 bond = _file(p, filer);
+        _presentSettledOn(p, h);
+        assertEq(filer.balance + _wNativeToken.balanceOf(filer), 0, "the bridger's bond is not returned");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, bond, "the fee pool took it");
+    }
+
     /// The maker filed against its own halted order: unchanged, the fee pool takes the bond.
     function test_evidenceClose_makerFiled_haltedMaker_bondStillToTheFeePool() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(30);
