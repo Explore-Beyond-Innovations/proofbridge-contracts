@@ -10,7 +10,7 @@ import {IRootAnchor} from "src/interfaces/IRootAnchor.sol";
 import {IVerifier} from "src/interfaces/IVerifier.sol";
 import {IMerkleManager} from "src/interfaces/IMerkleManager.sol";
 import {IwNativeToken} from "src/wNativeToken.sol";
-import {HonkVerifier} from "src/Verifier.sol";
+import {HonkVerifier, BaseHonkVerifier} from "src/Verifier.sol";
 import {RootAnchor} from "src/RootAnchor.sol";
 import {LeafDomain} from "src/libraries/LeafDomain.sol";
 import {RouteTiming} from "src/libraries/RouteTiming.sol";
@@ -54,6 +54,20 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
     function _wireAnchor() internal {
         vm.prank(admin);
         adManager.setRootAnchor(IRootAnchor(address(anchor)));
+    }
+
+    /// An order-chain root holding the order's AD leaf, as the never-locked cancel proves against.
+    bytes32 internal constant NEVER_LOCKED_ROOT = bytes32(uint256(0xa11));
+    bytes32 internal immutable NL = TestField.fe("NL");
+
+    /// The anchor wired and `NEVER_LOCKED_ROOT` notarized for the order chain.
+    function _anchorNeverLockedRoot() internal {
+        _wireAnchor();
+        _anchorRoot(NEVER_LOCKED_ROOT);
+    }
+
+    function _cancelNeverLocked(IAdManager.OrderParams memory p) internal {
+        adManager.cancelNeverLocked(p, NEVER_LOCKED_ROOT, NL, hex"");
     }
 
     function _anchorRoot(bytes32 root) internal {
@@ -186,7 +200,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
 
         vm.warp(p.deadline);
         vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__NotSet.selector, orderChainId));
-        bare.cancelNeverLocked(p);
+        bare.cancelNeverLocked(p, NEVER_LOCKED_ROOT, NL, hex"");
     }
 
     /// The two evidence paths fail closed with no anchor; settlement never reads it.
@@ -247,6 +261,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
     }
 
     function test_T45_cancelNeverLocked_onlyNoneAtDeadline_appendsLeaf() public {
+        _anchorNeverLockedRoot();
         test_fundAd_makerOnly();
         IAdManager.OrderParams memory p = _defaultParams(lastAdId);
         bytes32 h = adManager.hashOrderPublic(p);
@@ -254,20 +269,20 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
 
         vm.warp(p.deadline - 1);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline));
-        adManager.cancelNeverLocked(p);
+        _cancelNeverLocked(p);
         assertEq(adManager.getMerkleLeafCount(), leaves, "no leaf before the deadline");
 
         vm.warp(p.deadline);
         vm.expectEmit(true, true, true, true);
         emit IEscrow.OrderCancelled(h, false);
-        adManager.cancelNeverLocked(p);
+        _cancelNeverLocked(p);
         assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Cancelled));
         assertEq(adManager.getMerkleLeafCount(), leaves + 1, "the cancel leaf");
         assertEq(adManager.inFlightOf(p.adSettlementSigner), 0, "nothing was counted");
 
         // Single-shot, and a lock can never follow it.
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, h, IEscrow.Status.Cancelled));
-        adManager.cancelNeverLocked(p);
+        _cancelNeverLocked(p);
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExists.selector, h));
         adManager.lockForOrder(p);
@@ -278,14 +293,116 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         p.orderChainId = unsupportedChainId;
         vm.warp(p.deadline);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__ChainNotSupported.selector, unsupportedChainId));
-        adManager.cancelNeverLocked(p);
+        _cancelNeverLocked(p);
     }
 
     function test_cancelNeverLocked_refusesAnOpenLock() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lock(2);
         vm.warp(p.deadline);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, h, IEscrow.Status.Open));
-        adManager.cancelNeverLocked(p);
+        _cancelNeverLocked(p);
+    }
+
+    /*//////////////////////////// the never-locked cancel needs the deposit ////////////////////////////*/
+
+    /// The proof is checked against a notarized order-chain root: no anchor wired, or a root the
+    /// anchor never notarized, refuses before any proof is read.
+    function test_cancelNeverLocked_unanchoredRoot_reverts() public {
+        test_fundAd_makerOnly();
+        IAdManager.OrderParams memory p = _defaultParams(lastAdId);
+        vm.warp(p.deadline);
+        vm.expectRevert(IEscrow.Escrow__NoRootAnchor.selector);
+        _cancelNeverLocked(p);
+
+        _wireAnchor();
+        vm.expectRevert(
+            abi.encodeWithSelector(IEscrow.Escrow__RootNotAnchored.selector, orderChainId, NEVER_LOCKED_ROOT)
+        );
+        _cancelNeverLocked(p);
+        assertEq(uint256(statusOf(address(adManager), adManager.hashOrderPublic(p))), uint256(IEscrow.Status.None));
+    }
+
+    /// A proof the verifier rejects (an order with no AD leaf in the root) appends nothing.
+    function test_cancelNeverLocked_invalidProof_reverts() public {
+        _anchorNeverLockedRoot();
+        test_fundAd_makerOnly();
+        IAdManager.OrderParams memory p = _defaultParams(lastAdId);
+        uint256 leaves = adManager.getMerkleLeafCount();
+        vm.warp(p.deadline);
+        verifier.setResult(false);
+        vm.expectRevert(IEscrow.Escrow__InvalidProof.selector);
+        _cancelNeverLocked(p);
+        assertEq(adManager.getMerkleLeafCount(), leaves, "no cancel leaf");
+    }
+
+    /// Nothing settles, so the nullifier is not consumed: a later unlock under the same value is not
+    /// blocked by it.
+    function test_cancelNeverLocked_leavesTheNullifierUnused() public {
+        _anchorNeverLockedRoot();
+        test_fundAd_makerOnly();
+        IAdManager.OrderParams memory p = _defaultParams(lastAdId);
+        vm.warp(p.deadline);
+        _cancelNeverLocked(p);
+        assertFalse(adManager.nullifierUsed(NL), "the never-locked cancel consumed no nullifier");
+    }
+
+    /// The order's AD leaf (domain 1) in a one-leaf order-chain tree, proven by the events circuit.
+    function _adLeafProof(bytes32 orderHash, bool adSide)
+        internal
+        returns (bytes memory proof, bytes32 root, bytes32 n)
+    {
+        string[] memory a = new string[](4);
+        a[0] = "npx";
+        a[1] = "tsx";
+        a[2] = "js-scripts/deposits/getNullifierHash.ts";
+        a[3] = vm.toString(orderHash);
+        (bytes32 orderLeg, bytes32 adLeg, bytes32 secret) = abi.decode(vm.ffi(a), (bytes32, bytes32, bytes32));
+        n = adSide ? adLeg : orderLeg;
+        string[] memory g = new string[](8);
+        g[0] = "npx";
+        g[1] = "tsx";
+        g[2] = "js-scripts/deposits/generateProof.ts";
+        g[3] = vm.toString(n);
+        g[4] = vm.toString(orderHash);
+        g[5] = adSide ? "true" : "false";
+        g[6] = vm.toString(secret);
+        g[7] = vm.toString(orderHash);
+        bytes32[] memory pub;
+        (proof, pub) = abi.decode(vm.ffi(g), (bytes, bytes32[]));
+        root = pub[2];
+    }
+
+    /// The real circuit: a never-locked order whose AD leaf is in a notarized order-chain root is
+    /// cancelled; a made-up order (no leaf) and a proof of the order's other domain are refused.
+    function test_cancelNeverLocked_realProof_onlyARealOrderCancels() public {
+        _wireAnchor();
+        test_fundAd_makerOnly();
+        IAdManager.OrderParams memory p = _defaultParams(lastAdId);
+        bytes32 h = adManager.hashOrderPublic(p);
+        (bytes memory proof, bytes32 root, bytes32 n) = _adLeafProof(h, true);
+        (bytes memory orderLeafProof, bytes32 orderLeafRoot, bytes32 n0) = _adLeafProof(h, false);
+        _anchorRoot(root);
+        _anchorRoot(orderLeafRoot);
+        _useRealVerifier();
+        vm.warp(p.deadline);
+
+        // A made-up order: the same proof names an order hash with no leaf. The Honk verifier
+        // reverts on a proof of other public inputs rather than returning false.
+        IAdManager.OrderParams memory madeUp = _defaultParams(lastAdId); // a copy, not an alias of p
+        madeUp.salt = p.salt + 1;
+        madeUp.deadline = p.deadline;
+        vm.expectPartialRevert(BaseHonkVerifier.SumcheckFailed.selector);
+        adManager.cancelNeverLocked(madeUp, root, n, proof);
+        // The order's ORDER leaf (domain 0) is not its AD leaf.
+        vm.expectPartialRevert(BaseHonkVerifier.SumcheckFailed.selector);
+        adManager.cancelNeverLocked(p, orderLeafRoot, n0, orderLeafProof);
+        assertEq(uint256(statusOf(address(adManager), adManager.hashOrderPublic(madeUp))), 0, "made-up order");
+
+        vm.expectEmit(true, true, true, true);
+        emit IEscrow.OrderCancelled(h, false);
+        adManager.cancelNeverLocked(p, root, n, proof);
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Cancelled));
+        assertFalse(adManager.nullifierUsed(n), "no nullifier consumed");
     }
 
     /*//////////////////////////// claim → window → finalize ////////////////////////////*/
@@ -539,7 +656,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimed.selector, h));
         adManager.finalizeCancel(p);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, h, IEscrow.Status.Filled));
-        adManager.cancelNeverLocked(p);
+        _cancelNeverLocked(p);
         assertEq(adManager.getMerkleLeafCount(), leaves, "no cancel leaf");
     }
 
@@ -587,7 +704,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         adManager.presentSettled(b, root, hex"");
         vm.warp(c.deadline);
         adManager.claimCancel(c);
-        adManager.cancelNeverLocked(d);
+        adManager.cancelNeverLocked(d, root, NL, hex"");
         vm.warp(c.deadline + 30 minutes);
         adManager.finalizeCancel(c);
         assertEq(uint256(statusOf(address(adManager), ha)), uint256(IEscrow.Status.Filled));
@@ -657,7 +774,8 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         q.salt = 18;
         bytes32 hq = adManager.hashOrderPublic(q);
         vm.warp(q.deadline);
-        adManager.cancelNeverLocked(q);
+        _anchorNeverLockedRoot();
+        _cancelNeverLocked(q);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotFilled.selector, hq));
         adManager.recordSettled(q);
         assertEq(adManager.getMerkleLeafCount(), 3, "the CANCEL leaf only");

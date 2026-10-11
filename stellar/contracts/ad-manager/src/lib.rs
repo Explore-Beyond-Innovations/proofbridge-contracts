@@ -990,8 +990,17 @@ impl AdManagerContract {
     }
 
     /// Attest that an order the bridger deposited for was never locked here: `None` and
-    /// `now >= deadline` → `Cancelled` + CANCEL leaf. No funds move; nothing was counted.
-    pub fn cancel_never_locked(env: Env, params: OrderParams) -> Result<(), AdManagerError> {
+    /// `now >= deadline` → `Cancelled` + CANCEL leaf. No funds move; nothing was counted. The order
+    /// must be real: `proof` shows its AD leaf (the one the order portal's `create_order` appended)
+    /// in `target_root`, an order-chain root the anchor notarized. Any secret proves the leaf, so
+    /// `nullifier_hash` is neither checked against nor added to the used set.
+    pub fn cancel_never_locked(
+        env: Env,
+        params: OrderParams,
+        target_root: BytesN<32>,
+        nullifier_hash: BytesN<32>,
+        proof: Bytes,
+    ) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
         Self::require_status(&env, &order_hash, Status::None)?;
@@ -999,6 +1008,12 @@ impl AdManagerContract {
         // D5: a lock needs `deadline >= now + min_window`, so past the deadline none can follow.
         storage::get_chain(&env, params.order_chain_id).ok_or(AdManagerError::ChainNotSupported)?;
         ops::current_timing(&env, params.order_chain_id)?;
+        // The order is real: its AD leaf is in a notarized order-chain root. Nothing settles, so
+        // the nullifier is not consumed.
+        Self::require_anchored(&env, params.order_chain_id, &target_root)?;
+        let public_inputs =
+            cross_contract::build_public_inputs(&env, &nullifier_hash, &target_root, &order_hash)?;
+        cross_contract::verify_proof(&env, &config.verifier, &public_inputs, &proof)?;
 
         storage::set_order_status(&env, &order_hash, Status::Cancelled);
         cross_contract::append_to_merkle(

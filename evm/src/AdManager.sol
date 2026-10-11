@@ -492,13 +492,22 @@ contract AdManager is EscrowBase, IAdManager {
     }
 
     /// @inheritdoc IAdManager
-    function cancelNeverLocked(OrderParams calldata params) external nonReentrant {
+    function cancelNeverLocked(
+        OrderParams calldata params,
+        bytes32 targetRoot,
+        bytes32 nullifierHash,
+        bytes calldata proof
+    ) external nonReentrant {
         bytes32 orderHash = _orderHash(params);
         _requireStatus(orderHash, Status.None);
         _requireReached(params.deadline);
         // D5: a lock needs `deadline ≥ now + minWindow`, so past the deadline none can follow this.
         if (peerEscrow[params.orderChainId] == bytes32(0)) revert Escrow__ChainNotSupported(params.orderChainId);
         timingVersion.current(params.orderChainId);
+        // The order is real: its AD leaf is in a notarized order-chain root. Nothing settles, so the
+        // nullifier is not consumed; any secret proves the leaf.
+        _requireAnchored(params.orderChainId, targetRoot);
+        _requireDepositProof(orderHash, nullifierHash, targetRoot, proof, _PUBLIC_INPUT_SIDE_AD);
 
         _orders[orderHash].status = Status.Cancelled;
         _appendLeaf(orderHash, LeafDomain.CANCEL);

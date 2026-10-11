@@ -190,7 +190,15 @@ interface IAdManager is IEscrow {
     function finalizeCancel(OrderParams calldata params) external;
     /// @notice Attest that an order the bridger deposited for was never locked here: `None` and
     ///         `now ≥ deadline` → `Cancelled` + CANCEL leaf. No funds move; nothing was counted.
-    function cancelNeverLocked(OrderParams calldata params) external;
+    /// @dev The order must be real: `proof` shows its AD leaf (the one the OrderPortal's `createOrder`
+    ///      appended) in `targetRoot`, an order-chain root the RootAnchor notarized. Any secret proves
+    ///      the leaf, so `nullifierHash` is neither checked against nor added to the used set.
+    function cancelNeverLocked(
+        OrderParams calldata params,
+        bytes32 targetRoot,
+        bytes32 nullifierHash,
+        bytes calldata proof
+    ) external;
 
     /// @notice Set the dispute module the primary reads (2.3g).
     /// @dev On the primary only. The OrderPortal is the follower and has no dispute of its own — it

@@ -3552,6 +3552,42 @@ fn notarize(
     anchor.anchor(&s.admin_addr, &chain_id, root, &seq);
 }
 
+/// The order's AD leaf on the order chain (domain 1, what `create_order` appended there): the
+/// fixture's bridger proof against its order root, and that proof's nullifier.
+fn never_locked_proof(s: &TestSetup) -> (BytesN<32>, BytesN<32>, Bytes) {
+    (
+        bytes32_to_bytesn(&s.env, &s.tp.order_root),
+        bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        Bytes::from_slice(&s.env, PROOF_BRIDGER),
+    )
+}
+
+/// A never-locked cancel with the fixture's AD-leaf proof; the caller has notarized its root.
+fn try_never_locked(s: &TestSetup, p: &ad_manager_contract::OrderParams) -> Result<(), AdErr> {
+    let (root, nullifier, proof) = never_locked_proof(s);
+    match s
+        .ad_manager
+        .try_cancel_never_locked(p, &root, &nullifier, &proof)
+    {
+        Ok(_) => Ok(()),
+        Err(Ok(e)) => Err(e),
+        Err(Err(e)) => panic!("cancel_never_locked: {e:?}"),
+    }
+}
+
+/// The anchor wired (if `anchor` is None) and the fixture order root notarized on the order chain.
+fn notarize_never_locked_root(s: &TestSetup, anchor: Option<&root_anchor_contract::Client>) {
+    let (root, _, _) = never_locked_proof(s);
+    match anchor {
+        Some(a) => notarize(s, a, s.tp.order_chain_id, &root),
+        None => notarize(s, &wire_anchor(s), s.tp.order_chain_id, &root),
+    }
+}
+
+fn cancel_never_locked(s: &TestSetup, p: &ad_manager_contract::OrderParams) {
+    try_never_locked(s, p).unwrap();
+}
+
 fn cancel_proof(s: &TestSetup) -> (BytesN<32>, Bytes) {
     (
         bytes32_to_bytesn(&s.env, &s.tp.event_roots[0]),
@@ -3782,23 +3818,18 @@ fn test_t45_cancel_never_locked_only_none_at_deadline_appends_leaf() {
     assert_eq!(ad_leaves(&s), 0);
 
     warp(&s, p.deadline - 1);
-    assert_eq!(
-        s.ad_manager.try_cancel_never_locked(&p),
-        Err(Ok(AdErr::TooEarly))
-    );
+    assert_eq!(try_never_locked(&s, &p), Err(AdErr::TooEarly));
     assert_eq!(ad_leaves(&s), 0, "no leaf before the deadline");
 
     warp(&s, p.deadline);
-    s.ad_manager.cancel_never_locked(&p);
+    notarize_never_locked_root(&s, None);
+    cancel_never_locked(&s, &p);
     assert_eq!(ad_status(&s), ad_manager_contract::Status::Cancelled);
     assert_eq!(ad_leaves(&s), 1, "the cancel leaf");
     assert_eq!(signer_in_flight(&s), 0, "nothing was counted");
 
     // Single-shot, and a lock can never follow it.
-    assert_eq!(
-        s.ad_manager.try_cancel_never_locked(&p),
-        Err(Ok(AdErr::NotClaimable))
-    );
+    assert_eq!(try_never_locked(&s, &p), Err(AdErr::NotClaimable));
     assert_eq!(
         s.ad_manager.try_lock_for_order(&p),
         Err(Ok(AdErr::OrderExists))
@@ -3810,16 +3841,62 @@ fn test_t45_cancel_never_locked_refuses_open_and_unsupported_chain() {
     let s = setup();
     let p = locked_ad_order(&s);
     warp(&s, p.deadline);
-    assert_eq!(
-        s.ad_manager.try_cancel_never_locked(&p),
-        Err(Ok(AdErr::NotClaimable))
-    );
+    assert_eq!(try_never_locked(&s, &p), Err(AdErr::NotClaimable));
 
     let mut q = ad_manager_order_params(&s.env, &s.tp);
     q.order_chain_id = 999;
+    assert_eq!(try_never_locked(&s, &q), Err(AdErr::ChainNotSupported));
+}
+
+// --- the never-locked cancel needs the deposit ------------------------------------------------------
+
+/// The proof is checked against a notarized order-chain root: no anchor wired, or a root the anchor
+/// never notarized, refuses before any proof is read.
+#[test]
+fn test_never_locked_unanchored_root_refused() {
+    let s = setup();
+    let p = ad_manager_order_params(&s.env, &s.tp);
+    warp(&s, p.deadline);
+    assert_eq!(try_never_locked(&s, &p), Err(AdErr::NoRootAnchor));
+    wire_anchor(&s);
+    assert_eq!(try_never_locked(&s, &p), Err(AdErr::RootNotAnchored));
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::None);
+    assert_eq!(ad_leaves(&s), 0);
+}
+
+/// Only a real order cancels: a made-up order hash (no leaf in the root) and the order's ORDER leaf
+/// (domain 0) are refused; the order's AD leaf cancels it, and its nullifier stays unused.
+#[test]
+fn test_never_locked_needs_the_orders_ad_leaf() {
+    let s = setup();
+    let anchor = wire_anchor(&s);
+    notarize_never_locked_root(&s, Some(&anchor));
+    let ad_root = bytes32_to_bytesn(&s.env, &s.tp.ad_root);
+    notarize(&s, &anchor, s.tp.order_chain_id, &ad_root);
+    let p = ad_manager_order_params(&s.env, &s.tp);
+    warp(&s, p.deadline);
+
+    let mut made_up = ad_manager_order_params(&s.env, &s.tp);
+    made_up.salt = soroban_sdk::U256::from_u128(&s.env, s.tp.salt + 7);
+    assert_eq!(try_never_locked(&s, &made_up), Err(AdErr::InvalidProof));
     assert_eq!(
-        s.ad_manager.try_cancel_never_locked(&q),
-        Err(Ok(AdErr::ChainNotSupported))
+        s.ad_manager.try_cancel_never_locked(
+            &p,
+            &ad_root,
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_creator_nullifier),
+            &Bytes::from_slice(&s.env, PROOF_AD_CREATOR),
+        ),
+        Err(Ok(AdErr::InvalidProof))
+    );
+    assert_eq!(ad_leaves(&s), 0, "nothing appended");
+
+    cancel_never_locked(&s, &p);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Cancelled);
+    assert_eq!(ad_leaves(&s), 1, "the cancel leaf");
+    assert!(
+        !s.ad_manager
+            .nullifier_used(&bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier)),
+        "the never-locked cancel consumed no nullifier"
     );
 }
 
@@ -5435,10 +5512,7 @@ fn test_t41_filled_primary_no_cancel_leaf_is_reachable() {
         s.ad_manager.try_finalize_cancel(&p),
         Err(Ok(AdErr::NotClaimed))
     );
-    assert_eq!(
-        s.ad_manager.try_cancel_never_locked(&p),
-        Err(Ok(AdErr::NotClaimable))
-    );
+    assert_eq!(try_never_locked(&s, &p), Err(AdErr::NotClaimable));
     assert_eq!(ad_leaves(&s), 2, "no cancel leaf");
 }
 
@@ -5690,7 +5764,8 @@ fn test_t59_record_settled_single_shot_only_when_filled() {
     let t = setup();
     let q = ad_manager_order_params(&t.env, &t.tp);
     warp(&t, q.deadline);
-    t.ad_manager.cancel_never_locked(&q);
+    notarize_never_locked_root(&t, None);
+    cancel_never_locked(&t, &q);
     assert_eq!(
         t.ad_manager.try_record_settled(&q),
         Err(Ok(AdErr::NotFilled))
@@ -5925,10 +6000,7 @@ fn test_timing_unset_fails_closed_on_every_timed_path() {
         Err(Ok(AdErr::NoRouteTiming))
     );
     warp(&s, p.deadline);
-    assert_eq!(
-        s.ad_manager.try_cancel_never_locked(&p),
-        Err(Ok(AdErr::NoRouteTiming))
-    );
+    assert_eq!(try_never_locked(&s, &p), Err(AdErr::NoRouteTiming));
 
     let bridger = account_addr(&s, &s.tp.bridger);
     TokenContractClient::new(&s.env, &s.order_token_addr).mint(&bridger, &(s.tp.amount as i128));
@@ -5965,10 +6037,14 @@ fn test_pause_gates_no_termination_exit() {
     s.order_portal.refund_by_cancel(&q, &root, &proof);
     assert_eq!(portal_status(&s), order_portal_contract::Status::Cancelled);
 
-    // A never-locked cancel too.
-    let mut r = ad_manager_order_params(&s.env, &s.tp);
-    r.salt = soroban_sdk::U256::from_u32(&s.env, 4242);
-    s.ad_manager.cancel_never_locked(&r);
+    // A never-locked cancel too: the fixture order, never locked on a fresh pair, paused.
+    let t = setup();
+    t.ad_manager.pause();
+    let r = ad_manager_order_params(&t.env, &t.tp);
+    warp(&t, r.deadline);
+    notarize_never_locked_root(&t, None);
+    cancel_never_locked(&t, &r);
+    assert_eq!(ad_status(&t), ad_manager_contract::Status::Cancelled);
 }
 
 // =============================================================================
