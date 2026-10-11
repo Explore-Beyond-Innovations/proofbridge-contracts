@@ -330,6 +330,29 @@ contract BLSKeyRegistryTest is Test {
         registry.lookup(account, 2);
     }
 
+    /// The grace boundary second: a dead slot is kept at exactly expiry + GRACE_PERIOD and pruned one
+    /// second later. The kill lands at graceTs - 30 d so the boundary falls on graceTs, the clock the
+    /// `registerLate` vectors are signed for (D2).
+    function test_registerAtCap_graceBoundary_keptAtExpiryPlusGrace_prunedTheSecondAfter() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        for (uint256 i = 0; i < 5; i++) {
+            registerSlot("makerOnSepolia", i);
+        }
+        uint64 g = graceTs();
+        vm.warp(g - registry.GRACE_PERIOD());
+        setValidUntil("makerOnSepolia", 2, true); // expiry recorded at the kill: graceTs - 30 d
+
+        vm.warp(g); // expiry + GRACE_PERIOD exactly: still kept
+        vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
+        registerSlot("makerOnSepolia", 5);
+        registry.lookup(account, 2);
+
+        vm.warp(g + 1); // one second past the grace: pruned
+        assertEq(registerSlot("makerOnSepolia", 5), 5);
+        vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
+        registry.lookup(account, 2);
+    }
+
     /// #422 D14b: a shorten on a slot that already died cannot move its death later — a re-kill
     /// after an order's window must not erase an expiry inside it.
     function test_setValidUntil_recordedExpiryOnlyMovesEarlier() public {
