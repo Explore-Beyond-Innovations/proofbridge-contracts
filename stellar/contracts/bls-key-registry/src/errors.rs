@@ -50,6 +50,9 @@ pub enum RegistryError {
     DeadlineTooFar = 23,
     /// `initialize` was given an environment other than local, testnet or mainnet (D3).
     BadEnv = 24,
+    /// `revoke` of an account with live slots while no position guard is wired: an open order
+    /// cannot be ruled out, so it refuses.
+    GuardsUnset = 25,
 }
 
 // No `From<Fault>` here on purpose. The registry's only shared helper is the event public-input
