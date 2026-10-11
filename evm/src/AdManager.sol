@@ -441,6 +441,9 @@ contract AdManager is EscrowBase, IAdManager {
         m.openDispute{value: msg.value}(orderHash, peerChainId, msg.sender, evidence, deadline, buffer);
         disputeModuleOf[orderHash] = m;
         o.status = Status.Disputed;
+        // A `Claimed` leg's window is over once disputed: nothing reads the claim again, so it goes now
+        // rather than lingering as a live record with a `finalizeAt` that no longer means anything.
+        delete claims[orderHash];
     }
 
     /// @dev The order's two parties, as this chain knows them: whoever it would pay. Filing and
@@ -481,13 +484,11 @@ contract AdManager is EscrowBase, IAdManager {
         );
     }
 
-    /// @dev `→ Resolved`: the dispute terminal. Mirrors {_cancel}'s bookkeeping — in particular it
-    ///      clears `claims`, so "terminal implies no open claim" holds here too. A `Claimed` leg that
-    ///      is then disputed and resolved would otherwise keep a live claim with a past `finalizeAt`,
-    ///      which #345's conservation sweep and the relayer's projections both read.
+    /// @dev `→ Resolved`: the dispute terminal. Only a `Disputed` leg resolves, and filing already
+    ///      cleared its claim (`_openDispute`), so "terminal implies no open claim" holds here with
+    ///      nothing to delete.
     function _resolve(bytes32 orderHash, bytes32 account) internal {
         _orders[orderHash].status = Status.Resolved;
-        delete claims[orderHash];
         _countOut(account);
     }
 

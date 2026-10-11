@@ -135,23 +135,33 @@ UltraHonk zero-knowledge proof verifier.
 
 ### Order struct
 
+Seventeen fields, hashed in this order (`OrderHash.ORDER_TYPEHASH`, the Soroban `eip712` module):
+
 ```text
 Order {
-    orderChainToken     // source token (order chain)
-    adChainToken        // destination token (ad chain)
-    amount              // transfer amount
-    bridger             // bridger address
-    orderChainId        // source chain ID
-    orderPortal         // order portal contract address
-    orderRecipient      // recipient on order chain
-    adChainId           // destination chain ID
-    adManager           // ad manager contract address
-    adId                // advertisement identifier
-    adCreator           // ad creator address
-    adRecipient         // recipient on ad chain
+    orderChainToken     // token deposited on the order chain
+    adChainToken        // token paid out on the ad chain
+    amount              // amount, in the order chain's decimals
+    bridger             // the bridger's account
+    orderChainId        // order chain id
+    orderPortal         // the OrderPortal on the order chain
+    orderRecipient      // who the ad chain pays (the bridger's recipient)
+    adChainId           // ad chain id
+    adManager           // the AdManager on the ad chain
+    adId                // the ad (string)
+    adCreator           // the maker's custody account on the ad chain
+    adRecipient         // who the order chain pays (the maker's recipient)
     salt                // caller-controlled nonce
+    orderDecimals       // the order-chain token's decimals
+    adDecimals          // the ad-chain token's decimals
+    deadline            // unix seconds; the termination clocks run from it
+    adSettlementSigner  // the account whose BLS key co-signs for the maker
 }
 ```
+
+Each escrow passes the fields it holds and fills in its own chain id and address (the AdManager's
+`OrderParams` names the portal `srcOrderPortal`; the two chain/contract pairs come from the
+contract), so both legs hash the same order.
 
 **Address encoding differs by implementation:**
 
@@ -162,41 +172,60 @@ Both produce identical EIP-712 hashes when given the same 32-byte values.
 
 ## Zero-Knowledge Proof System
 
-The protocol employs a ZK proof system for privacy-preserving cross-chain settlements:
+One Noir circuit (`proof_circuits/events`) proves that a leaf `poseidon2(orderHash % p, leafDomain)`
+is in an MMR root. Domains 0 and 1 are deposits and also prove half of the trade secret; domains 2
+and up are event leaves (CANCEL, SETTLED, REGISTERED, FORFEIT) and carry no secret.
 
-**Proof Generation Process:**
+**Nullifiers.** The trade secret's 32 bytes split into `a` (high 16 bytes) and `b` (low 16 bytes):
 
-1. **Secret Generation**: Each participant generates a private secret for nullifier computation
-2. **Nullifier Calculation**: `nullifierHash = poseidon2(secret_half, orderHashMod)` — bridger uses left half, ad creator uses right half
-3. **Circuit Execution**: Noir circuit validates the relationship between secrets, nullifiers, and MMR inclusion
-4. **Proof Creation**: UltraHonk backend generates proof with keccak-based Fiat-Shamir
+* the ad leg (`AdManager.unlock`, leaf domain 1, pays the bridger): `poseidon2(a, orderHash % p)`;
+* the order leg (`OrderPortal.unlock`, leaf domain 0, pays the maker): `poseidon2(orderHash % p, b)`.
+
+Both values are part of the co-signed `SettlementAuth` (below), so an unlock can only consume the
+nullifier the two parties signed for its leg. `legNullifiers` in the `proofbridge-mmr` package is the
+off-chain rule, pinned to the circuit's proven public inputs.
 
 **Proof circuits**: See [proof_circuits/](../proof_circuits/)
 
 ### Verifier Public Inputs
 
-The circuit produces 4 public inputs (each 32 bytes, 128 bytes total):
+Four 32-byte public inputs, always written by the contract, never taken from calldata as a vector:
 
-**OrderPortal.unlock** (Source Chain):
+| | `OrderPortal.unlock` | `AdManager.unlock` | event claims |
+| --- | --- | --- | --- |
+| 0 | the order leg's nullifier | the ad leg's nullifier | `0` |
+| 1 | `orderHash % p` | `orderHash % p` | the leaf's subject `% p` |
+| 2 | the co-signed ad-chain root | the co-signed order-chain root | an anchored root |
+| 3 | `0` (ORDER leaf) | `1` (AD leaf) | the event domain |
 
-1. **`adCreator's nullifierHash`**: Poseidon2 commitment proving ad creator's secret knowledge
-2. **`orderHashMod`**: EIP-712 order hash reduced to BN254 field
-3. **`targetRoot`**: MMR root at the time of proof generation
-4. **`0`**: Chain flag (0 = source chain / order portal)
+`AdManager.cancelNeverLocked` also proves domain 1: the order's AD leaf under an order-chain root the
+RootAnchor notarized, so only a real order can be marked never locked. It consumes no nullifier.
 
-**AdManager.unlock** (Destination Chain):
+### The co-signed root gate
 
-1. **`bridger's nullifierHash`**: Poseidon2 commitment proving bridger's secret knowledge
-2. **`orderHashMod`**: EIP-712 order hash reduced to BN254 field
-3. **`targetRoot`**: MMR root at the time of proof generation
-4. **`1`**: Chain flag (1 = destination chain / ad manager)
+The destination chain cannot read the source chain, so the root an unlock proves against is
+authenticated by both parties: they BLS-sign one `SettlementAuth`
+(`orderChainId, adChainId, orderHash, orderChainRoot, adChainRoot, makerKeyCommitment,
+adLegNullifier, orderLegNullifier`, a 288-byte preimage under `ProofBridge.Settlement.v1`). At unlock
+the escrow hands its route's root verifier (`CounterpartyVerifier`, metadata version 4) an envelope
+it builds itself: `(settlementSigner, bridger, orderHash, pinnedSlot, nullifierHash, side, cosigData)`.
+The verifier accepts only if:
+
+* the auth names this order and the version is 4;
+* the escrow's `side` picks the leg — side 1 (AdManager) needs the order chain, its root and
+  `adLegNullifier`; side 0 (OrderPortal) the ad chain, its root and `orderLegNullifier`;
+* both keys sit in live registry slots of the settlement signer and the bridger, the maker key is
+  the one the auth names, and the aggregate signature verifies over the preimage.
+
+The evidence paths (`presentSettled`, `refundByCancel`, `payMakerByForfeit`, the never-locked
+cancel) need no co-signature: they prove a leaf against a root the RootAnchor notarized.
 
 ## Security Model
 
 **Multi-Layer Protection:**
 
 1. **EIP-712 Domain Separation**: Prevents cross-contract and cross-chain replay attacks
-2. **Nullifier Uniqueness**: Cryptographic guarantee against double-spending
+2. **Co-signed nullifiers**: each unlock consumes only the nullifier both parties signed for its leg, once
 3. **MMR Integrity**: Tamper-proof order history with Poseidon2 hashing
 4. **Manager Permissions**: Only authorized contracts can append to the MMR
 5. **Bidirectional Chain Linking**: Contracts only accept proofs from configured counterparts

@@ -35,6 +35,9 @@ contract OrderPortal is EscrowBase, IOrderPortal {
     /// @notice The deposit proof's chain flag on the order chain (not a leaf domain).
     uint256 private constant _PUBLIC_INPUT_SIDE_ORDER = 0;
 
+    /// @inheritdoc IOrderPortal
+    mapping(bytes32 orderHash => bool) public paidByForfeit;
+
     constructor(address admin, IVerifier verifier_, IMerkleManager merkleManager_, IwNativeToken wNativeToken_)
         EscrowBase(admin, verifier_, merkleManager_, wNativeToken_)
     {}
@@ -159,13 +162,18 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         // No deadline read: like the cancel refund, this is the primary's decision arriving, and it
         // is valid whenever it arrives (D4's rule, T-41).
         _fill(orderHash, params.bridger, true);
+        paidByForfeit[orderHash] = true;
         emit OrderForfeited(orderHash);
         _payMaker(params);
     }
 
     /// @inheritdoc IOrderPortal
     function recordSettled(OrderParams calldata params) external nonReentrant {
-        _recordSettled(_hashOrder(params, block.chainid, address(this)));
+        bytes32 orderHash = _hashOrder(params, block.chainid, address(this));
+        // A forfeit fill settled no trade: a SETTLED leaf for it would tell the ad chain a trade
+        // happened that did not.
+        if (paidByForfeit[orderHash]) revert OrderPortal__PaidByForfeit(orderHash);
+        _recordSettled(orderHash);
     }
 
     /// @inheritdoc IOrderPortal

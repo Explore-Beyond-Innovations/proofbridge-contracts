@@ -5547,6 +5547,34 @@ fn test_2_3g_follower_pays_the_maker_on_a_forfeit_proof() {
         before + s.tp.amount as i128,
         "the deposit went to the maker"
     );
+
+    // No trade settled, so no SETTLED leaf can follow the forfeit fill.
+    let h = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
+    assert!(s.order_portal.paid_by_forfeit(&h));
+    assert_eq!(
+        s.order_portal.try_record_settled(&p),
+        Err(Ok(OpErr::PaidByForfeit))
+    );
+    assert!(!s.order_portal.is_settled_recorded(&h));
+}
+
+/// Filing on a `Claimed` leg ends its cancel window, so the claim record goes at the filing: while
+/// disputed, `get_claim` reads nothing.
+#[test]
+fn test_filing_on_a_claimed_leg_clears_the_claim() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    let h = s.ad_manager.hash_order(&p);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert!(s.ad_manager.get_claim(&h).is_some(), "the claim is open");
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Disputed);
+    assert!(
+        s.ad_manager.get_claim(&h).is_none(),
+        "no claim record while disputed"
+    );
 }
 
 /// The domains are not interchangeable. A CANCEL leaf means "refund the bridger" and must never be
@@ -9424,7 +9452,7 @@ const OP_UNLOCK_REAL: Ceil = ceil(141_500_000, 6_800_000, 26, 7, 753, 542);
 const OP_RECORD_SETTLED: Ceil = ceil(14_400_000, 3_230_000, 13, 6, 955, 335);
 const OP_PRESENT_SETTLED: Ceil = ceil(105_500_000, 6_180_000, 15, 6, 608, 317);
 const REFUND_BY_CANCEL: Ceil = ceil(105_400_000, 6_170_000, 15, 6, 608, 515);
-const PAY_MAKER_BY_FORFEIT: Ceil = ceil(105_500_000, 6_180_000, 15, 6, 608, 441);
+const PAY_MAKER_BY_FORFEIT: Ceil = ceil(105_500_000, 6_180_000, 15, 6, 780, 441);
 
 /// The primary: lock, the co-signed unlock with the real BLS gate, then its SETTLED leaf.
 #[test]

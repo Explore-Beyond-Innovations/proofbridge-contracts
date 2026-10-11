@@ -48,3 +48,22 @@ pub fn remove_chain(env: &Env, chain_id: u128) {
     let key = (KEY_CHAINS, chain_id);
     env.storage().persistent().remove(&key);
 }
+
+// ── forfeit payouts ──────────────────────────────────────────────────────
+
+const KEY_FORFEIT_PAID: Symbol = symbol_short!("forfeit");
+
+/// The deposit was paid to the maker on a forfeit ruling: `record_settled` refuses it. Read only by
+/// `record_settled` and the view; its TTL is extended like the order record it qualifies.
+pub fn set_paid_by_forfeit(env: &Env, order_hash: &soroban_sdk::BytesN<32>) {
+    let key = (KEY_FORFEIT_PAID, order_hash.clone());
+    env.storage().persistent().set(&key, &true);
+    proofbridge_core::ttl::extend_persistent(env, &key);
+}
+
+pub fn is_paid_by_forfeit(env: &Env, order_hash: &soroban_sdk::BytesN<32>) -> bool {
+    env.storage()
+        .persistent()
+        .get(&(KEY_FORFEIT_PAID, order_hash.clone()))
+        .unwrap_or(false)
+}

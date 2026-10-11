@@ -75,9 +75,9 @@ faults! {
     DisputeZeroResponse,
     /// The ruling closed the answer window (D5, R1).
     DisputeAlreadyRuled,
-    /// A public input at or above the field prime (2.3h, residual 9). Defence in depth: both shipped
-    /// verifiers already reject one, but the escrow's nullifier ledger keys on raw bytes, so a
-    /// verifier that reduced instead would turn one proof into many nullifiers.
+    /// A public input at or above the field prime (2.3h, residual 9). A named early refusal: both
+    /// shipped verifiers reject one too, and since metadata v4 the unlock's nullifier must equal the
+    /// co-signed value byte for byte, so an alias of it already fails the root check.
     NonCanonicalInput,
     /// A token address that names no contract (the zero / native marker where a contract is due).
     TokenZeroAddress,
@@ -425,6 +425,9 @@ pub fn open_dispute(
         .map_err(|_| Fault::DisputeModuleRejected)?;
     storage::set_order_dispute_manager(env, order_hash, &manager);
     storage::set_order_status(env, order_hash, Status::Disputed);
+    // A `Claimed` leg's window is over once disputed: nothing reads the claim again, so it goes now
+    // rather than lingering with a `finalize_at` that no longer means anything.
+    storage::remove_claim(env, order_hash);
     Ok(bond)
 }
 
@@ -605,13 +608,10 @@ pub fn fill(env: &Env, order_hash: &BytesN<32>, account: &BytesN<32>, by_evidenc
 
 /// `→ Cancelled`: close the window, count out. The leaf, where there is one, and the funds are the
 /// caller's.
-/// `→ Resolved`: the dispute terminal. Mirrors `cancel`'s bookkeeping — in particular it clears the
-/// claim, so "terminal implies no open claim" holds here too. A `Claimed` leg that is then disputed
-/// and resolved would otherwise keep a live claim with a past `finalize_at`, which #345's
-/// conservation sweep and the relayer's projections both read.
+/// `→ Resolved`: the dispute terminal. Only a `Disputed` leg resolves, and filing already removed
+/// its claim (`open_dispute`), so "terminal implies no open claim" holds with nothing to remove.
 pub fn resolve(env: &Env, order_hash: &BytesN<32>, account: &BytesN<32>) {
     storage::set_order_status(env, order_hash, Status::Resolved);
-    storage::remove_claim(env, order_hash);
     storage::set_in_flight(env, account, storage::get_in_flight(env, account) - 1);
 }
 

@@ -218,13 +218,13 @@ pub fn field_mod(data: &BytesN<32>) -> BytesN<32> {
 /// no second copy of the prime anywhere on this side. The EVM twin re-exports the MMR library's
 /// constant for the same reason.
 ///
-/// Defence in depth. Both shipped verifiers already reject a non-canonical public input — the
-/// transcript hashes inputs as given, so `n` and `n + r` produce different challenges, which
-/// `verifier-negative.json`'s `deposit/public-input-ge-r` vector pins on both chains.
-///
-/// It earns its place by not depending on verifier internals: the escrow's nullifier ledger keys on
-/// raw bytes, so a verifier that *reduced* instead of rejecting would turn one proof into
-/// unboundedly many nullifiers. Checking here makes that guarantee the escrow's own.
+/// Refuses a malformed public input by name, before the verifier runs. It closes no hole: both
+/// shipped verifiers already reject a non-canonical input (the transcript hashes inputs as given,
+/// pinned by `verifier-negative.json`'s `deposit/public-input-ge-r` vector), and on the co-signed
+/// unlock (metadata v4) the root verifier has already required the nullifier to equal the value
+/// both parties signed for that leg, so an alias `n + r` fails there. The never-locked cancel
+/// consumes no nullifier. What it keeps is every input the escrows hand a verifier canonical, should
+/// one ever reduce instead of rejecting.
 pub fn is_canonical(value: &BytesN<32>) -> bool {
     field_mod(value) == *value
 }

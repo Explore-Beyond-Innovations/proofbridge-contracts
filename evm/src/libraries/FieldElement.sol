@@ -10,19 +10,21 @@ import {MMRPoseidon2} from "@solidity-mmr/MMRPoseidon2.sol";
  * @notice Canonicality for the BN254 scalar field: a 32-byte public input must be the unique
  *         representative of its field element, not one of the several that reduce to it (2.3h,
  *         residual 9).
- * @dev Why this is here, and what it does *not* claim.
+ * @dev What this guards, and what it does not.
  *
- *      A non-canonical input is already refused by both shipped verifiers — the transcript
- *      hashes public inputs as given, so `n` and `n + PRIME` produce different challenges and a
- *      proof made for one fails for the other. `verifier-negative.json`'s `deposit/public-input-ge-r`
- *      vector pins exactly that, on both chains.
+ *      A non-canonical input is already refused by both shipped verifiers: the transcript hashes
+ *      public inputs as given, so `n` and `n + PRIME` produce different challenges and a proof made
+ *      for one fails for the other. `verifier-negative.json`'s `deposit/public-input-ge-r` vector
+ *      pins that on both chains.
  *
- *      So this is defence in depth, not the closing of an open hole. It earns its place by not
- *      depending on verifier internals: it fails locally, cheaply, with a named error, and it keeps
- *      holding if the verifier is ever ported (T3) to one that reduces instead of rejecting. The
- *      escrow's `nullifierUsed` ledger keys on raw bytes, so a reducing verifier *would* turn one
- *      proof into unboundedly many nullifiers; this makes the escrow's guarantee independent of
- *      which verifier is underneath.
+ *      The nullifier is not a free calldata key either. On the co-signed unlock (metadata v4) the
+ *      root verifier requires it to equal, byte for byte, the nullifier both parties signed for that
+ *      leg, so an alias `n + PRIME` of the signed value fails the root check before any proof is read,
+ *      whatever the ZK verifier does. The never-locked cancel consumes no nullifier at all.
+ *
+ *      So this check closes no hole. It refuses a malformed input locally, with a named error, before
+ *      the verifier call, and it keeps every public input the escrows hand a verifier canonical if
+ *      the verifier is ever ported (T3) to one that reduces instead of rejecting.
  *
  *      The order hash is exempt because it is already reduced by `_fieldMod` on the way in, so it is
  *      canonical by construction. Side flags and leaf domains are contract constants, never calldata.

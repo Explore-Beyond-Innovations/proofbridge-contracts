@@ -32,18 +32,13 @@ library RequestAuth {
         pure
         returns (bytes32[] memory inputs)
     {
-        // Defence in depth, not a hole being closed: both shipped verifiers already reject a
-        // non-canonical public input, because the transcript hashes inputs as given. This fails
-        // earlier, locally, with a named error, and keeps holding if the verifier is ever ported to
-        // one that reduces — see `FieldElement`.
-        //
-        // The nullifier and only the nullifier. The root is validated *before* this runs on every
-        // path — `_requireRootValid` against the co-signed root, `_requireAnchored` against the
-        // notary's — and both compare against known-good stored data. On the co-signed unlock the
-        // root verifier also compares the nullifier with the one the parties signed for this leg;
-        // the never-locked cancel consumes none. It is a *write* key on the unlock, which is why its
-        // form is worth guarding here. The order hash is reduced below; the side flag is a contract
-        // constant.
+        // A malformed nullifier is refused here, by name, before the verifier runs. It is not what
+        // keeps a nullifier unique: on the co-signed unlock the root verifier has already required it
+        // to equal the value both parties signed for this leg (an alias `n + p` fails that), and the
+        // never-locked cancel consumes none. Both shipped verifiers reject a non-canonical input too;
+        // see `FieldElement`. The root is checked against stored data before this runs on every path
+        // (`_requireRootValid`, `_requireAnchored`), the order hash is reduced below, and the side
+        // flag is a contract constant.
         FieldElement.requireCanonical(nullifierHash);
 
         inputs = new bytes32[](4);

@@ -1213,6 +1213,13 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
 
         assertEq(uint256(statusOf(address(portal), h)), uint256(IEscrow.Status.Filled), "the deposit was paid out");
         assertEq(orderToken.balanceOf(adRecipient), before + p.amount, "and it went to the maker");
+
+        // No trade settled, so no SETTLED leaf can follow the forfeit fill.
+        assertTrue(portal.paidByForfeit(h));
+        uint256 leaves = portal.getMerkleLeafCount();
+        vm.expectRevert(abi.encodeWithSelector(IOrderPortal.OrderPortal__PaidByForfeit.selector, h));
+        portal.recordSettled(p);
+        assertEq(portal.getMerkleLeafCount(), leaves, "no SETTLED leaf");
     }
 
     /// The domains must not be interchangeable: a CANCEL leaf means "refund the bridger" and can

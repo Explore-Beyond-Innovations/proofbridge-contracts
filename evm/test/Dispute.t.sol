@@ -668,6 +668,20 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         assertEq(finalizeAt, 0, "the claim record is cleared on the dispute terminal too");
     }
 
+    /// Filing on a `Claimed` leg ends its cancel window, so the claim record goes at the filing,
+    /// not only at the terminal: while disputed, `claims(h)` reads empty.
+    function test_filingOnAClaimedLeg_clearsTheClaim() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(30);
+        vm.warp(p.deadline);
+        adManager.claimCancel(p);
+        (, uint64 before) = adManager.claims(h);
+        assertGt(before, 0, "the claim is open");
+        _file(p, filer);
+        (uint64 openedAt, uint64 finalizeAt) = adManager.claims(h);
+        assertEq(openedAt, 0, "no claim record while disputed");
+        assertEq(finalizeAt, 0, "no claim record while disputed");
+    }
+
     /// S6: de-authorising an escrow mid-incident must not strand the bonds it already opened.
     function test_s6_deauthorisedEscrowCanStillCloseItsDisputes() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(28);
