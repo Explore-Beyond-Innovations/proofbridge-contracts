@@ -1428,9 +1428,12 @@ impl AdManagerContract {
                 return true;
             }
         }
-        // An unset verifier refuses every co-signed unlock: deny. Once set it can only be
-        // repointed, never unset; the runbook covers repointing.
-        if storage::get_root_verifier(env, params.order_chain_id).is_none() {
+        // An unset verifier refuses every co-signed unlock: deny. So does a verifier changed after
+        // the lock's second (set or repointed): the gap it opened in the co-signed path counts for
+        // the rest of the order's life, however it ended.
+        if storage::get_root_verifier(env, params.order_chain_id).is_none()
+            || storage::get_root_verifier_changed_at(env, params.order_chain_id) > order.locked_at
+        {
             return true;
         }
         // #465: the registry the order was locked under, not the live one: a migration mid-order

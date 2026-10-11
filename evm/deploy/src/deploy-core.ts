@@ -847,9 +847,10 @@ async function isAgentPolicyCodec(address: string, signer: ethers.Wallet): Promi
   const signerField = ethers.zeroPadValue("0xc0dec0de", 32);
   const word = (n: bigint) => ethers.zeroPadValue(ethers.toBeHex(n), 32);
   const policy = ethers.concat([
-    ethers.keccak256(ethers.toUtf8Bytes("ProofBridge.AgentPolicy.v1")),
-    "0x01", "0x01", // one action: lock for order
-    "0x01", word(1n), word(1n), word(1n), word(1n), // one token row: token, maxPerOrder, capacity, refill
+    ethers.keccak256(ethers.toUtf8Bytes("ProofBridge.AgentPolicy.v3")),
+    "0x01", // the action: lock for order
+    "0x01", word(1n), word(1n), word(1n), word(1n), // one ad-token row: token, maxPerOrder, capacity, refill
+    "0x01", word(2n), // one order token
     "0x00", "0x00", // every ad
     ethers.zeroPadValue("0x00", 8), // no expiry
     signerField,

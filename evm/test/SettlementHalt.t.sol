@@ -215,8 +215,8 @@ contract SettlementHaltTest is AdManagerCancellationTest {
     }
 
     /// An unwired root verifier refuses every co-signed unlock, so it denies the payout like a halt:
-    /// the cancel waits the grace. Wired again, the order is back to ordinary timing.
-    function test_finalizeCancel_verifierUnsetAfterTheLock_waitsTheGrace_setAgainOrdinary() public {
+    /// the cancel waits the grace. Wired again, the gap it opened still counts: the grace stays.
+    function test_finalizeCancel_verifierUnsetAfterTheLock_waitsTheGrace_setAgainStillWaits() public {
         (IAdManager.OrderParams memory p,) = _lock(19);
         _claim(p);
         vm.prank(admin);
@@ -229,9 +229,34 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         address verifier = address(new MockRootVerifier(true));
         vm.prank(admin);
         adManager.setRootVerifier(orderChainId, verifier);
-        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 30 minutes);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "rewiring does not erase the gap");
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        vm.warp(p.deadline + 60 minutes);
         adManager.finalizeCancel(p);
         assertEq(_locked(), 0);
+    }
+
+    /// A verifier repointed after the lock is a change in the co-signed path too: the grace applies.
+    function test_finalizeCancel_verifierRepointedAfterTheLock_waitsTheGrace() public {
+        (IAdManager.OrderParams memory p,) = _lock(20);
+        address other = address(new MockRootVerifier(true));
+        vm.warp(block.timestamp + 10);
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, other);
+        _claim(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes);
+    }
+
+    /// The boundary: a verifier wired in the lock's own second is the route's set-up, not a change
+    /// after it, so the order runs ordinary timing.
+    function test_finalizeCancel_verifierSetInTheLocksSecond_ordinaryTiming() public {
+        address fresh = address(new MockRootVerifier(true));
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, fresh);
+        (IAdManager.OrderParams memory p,) = _lock(21);
+        _claim(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 30 minutes);
     }
 
     /// A resume at the deadline is after the lock, so it counts.

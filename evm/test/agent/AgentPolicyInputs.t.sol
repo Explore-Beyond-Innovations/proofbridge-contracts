@@ -102,12 +102,12 @@ contract AgentPolicyInputsTest is AgentPolicyBase {
     function test_unknownActionIdsAreNotAPolicy() public {
         CodecHarness codec = new CodecHarness();
         bytes memory policy = defaultPolicy();
-        policy[33] = bytes1(uint8(7));
+        policy[32] = bytes1(uint8(7));
         vm.expectRevert(
             abi.encodeWithSelector(IAgentPolicyCodecErrors.AgentPolicyCodec__UnknownAction.selector, uint8(7))
         );
         codec.parse(policy);
-        policy[33] = bytes1(uint8(0));
+        policy[32] = bytes1(uint8(0));
         vm.expectRevert(
             abi.encodeWithSelector(IAgentPolicyCodecErrors.AgentPolicyCodec__UnknownAction.selector, uint8(0))
         );
@@ -182,13 +182,14 @@ contract AgentPolicyInputsTest is AgentPolicyBase {
     function _scoped(string memory first, string memory second) internal view returns (bytes memory) {
         bytes memory head = bytes.concat(
             AgentPolicyCodec.DOMAIN,
-            bytes1(uint8(1)),
             bytes1(AgentPolicyCodec.ACTION_LOCK_FOR_ORDER),
             bytes1(uint8(1)),
             AD_TOKEN,
             bytes32(uint256(1)),
             bytes32(uint256(1)),
-            bytes32(uint256(1))
+            bytes32(uint256(1)),
+            bytes1(uint8(1)),
+            ORDER_TOKEN
         );
         return bytes.concat(
             head,
