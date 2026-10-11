@@ -8,6 +8,7 @@ import {
 import { Acting, adminsOf, connect, foreignAdmins, requireEnv, type DescribedCall } from "./common.js";
 import { attachContract } from "./artifacts.js";
 import { allPeers, assertOneRegistry, checkPeers, verifierRegistry, type EscrowWiring } from "./one-registry.js";
+import { assertSettleBondPairOnChain } from "./settle-bond-pair.js";
 import { manifestPath, writeManifest } from "./manifest.js";
 
 export interface LinkOptions {
@@ -80,6 +81,15 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
   routeTimingFromEnv(local.meta.env);
   if (local.contracts.disputeManager) disputeParamsFromEnv(local.meta.env);
   assertPeerCompatible(local, peer);
+  // The module link wires below is only usable if the escrow calls `settleBond` under the selector
+  // the module dispatches: both from one build, read from the chain before anything is sent.
+  if (local.contracts.disputeManager) {
+    await assertSettleBondPairOnChain(
+      signer.provider!,
+      { adManager: local.contracts.adManager.address, disputeManager: local.contracts.disputeManager.address },
+      "link",
+    );
+  }
 
   const registryOf = async (v: string): Promise<string> =>
     String(await attachContract(v, "CounterpartyVerifier", "CounterpartyVerifier", signer).getFunction("registry")());
