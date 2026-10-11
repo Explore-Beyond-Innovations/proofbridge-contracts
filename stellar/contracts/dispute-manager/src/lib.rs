@@ -70,8 +70,7 @@ impl DisputeManagerContract {
         Self::require_admin(&env)?;
         dispute::validate(&params).map_err(|f| match f {
             1 => Error::InvalidChallengePeriod,
-            2 => Error::InvalidBondFloor,
-            _ => Error::InvalidBondBps,
+            _ => Error::InvalidBondFloor,
         })?;
         storage::set_params(&env, chain_id, &params);
         events::DisputeParamsSet { chain_id, params }.publish(&env);
@@ -123,16 +122,14 @@ impl DisputeManagerContract {
 
     /// Open a dispute on an order the escrow has already hashed and checked, taking the bond.
     ///
-    /// Escrow-only. The escrow must pass `amount` because it does not store one — an order's leg is
-    /// `{status, paused_at_open}` and the amount lives in the caller's params, validated against the
-    /// hash. So the escrow is the only party that can vouch for it, which is why filing starts there
-    /// and this contract is never the entry point.
+    /// Escrow-only: the escrow hashed the order, so it is the only party that can vouch for the
+    /// deadline it passes, which is why filing starts there and this contract is never the entry
+    /// point. The bond is the route's flat floor (`bond_for`), so no order amount is passed.
     #[allow(clippy::too_many_arguments)]
     pub fn open_dispute(
         env: Env,
         escrow: Address,
         order_hash: BytesN<32>,
-        amount: u128,
         peer_chain_id: u128,
         filer: Address,
         evidence: BytesN<32>,
@@ -145,7 +142,7 @@ impl DisputeManagerContract {
             return Err(Error::DisputeExists);
         }
         let p = storage::get_params(&env, peer_chain_id).ok_or(Error::NoDisputeParams)?;
-        let bond = dispute::bond_for(amount, &p);
+        let bond = dispute::bond_for(&p);
 
         // The filer funds the bond directly into this contract: it never rests in the escrow, which
         // keeps "the escrow's balance is its order escrow" a single-contract invariant for 2.3h.
@@ -408,6 +405,14 @@ impl DisputeManagerContract {
     /// the filing path treats as fail-closed.
     pub fn dispute_params(env: Env, chain_id: u128) -> Option<DisputeParams> {
         storage::get_params(&env, chain_id)
+    }
+
+    /// The exact bond a filing on `peer_chain_id`'s route pulls. Clients quote it here rather than
+    /// reading `dispute_params`, so the rule stays the contract's. Fails as the filing would when
+    /// the route has no params.
+    pub fn bond_for(env: Env, peer_chain_id: u128) -> Result<u128, Error> {
+        let p = storage::get_params(&env, peer_chain_id).ok_or(Error::NoDisputeParams)?;
+        Ok(dispute::bond_for(&p))
     }
 
     pub fn claimable(env: Env, who: Address) -> u128 {

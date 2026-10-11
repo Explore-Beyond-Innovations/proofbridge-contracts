@@ -33,7 +33,6 @@ pub trait DisputeManagerInterface {
         env: Env,
         escrow: Address,
         order_hash: BytesN<32>,
-        amount: u128,
         peer_chain_id: u128,
         filer: Address,
         evidence: BytesN<32>,

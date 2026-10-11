@@ -5660,7 +5660,6 @@ fn test_pause_gates_every_termination_path() {
 
 const DISPUTE_CHALLENGE: u64 = 2 * 60 * 60;
 const DISPUTE_BOND_FLOOR: u128 = 1_000;
-const DISPUTE_BOND_BPS: u32 = 100;
 
 /// Deploy the module, wire it to the ad-manager, and fund a filer. Returns the module client and the
 /// filer's address.
@@ -5695,7 +5694,6 @@ fn deploy_dispute_manager(
         &dispute_manager_contract::DisputeParams {
             challenge_period: DISPUTE_CHALLENGE,
             bond_floor: DISPUTE_BOND_FLOOR,
-            bond_bps: DISPUTE_BOND_BPS,
         },
     );
     TokenContractClient::new(&s.env, &s.ad_token_addr).mint(&filer, &1_000_000);
@@ -5759,6 +5757,40 @@ fn test_2_3g_the_bond_never_rests_in_the_escrow() {
         escrow_before,
         "the escrow took none of it"
     );
+}
+
+/// The bond is the route's flat floor for any order amount and order-token decimals: filing through
+/// the escrow pulls exactly `bond_for`, which is the floor, on 6-, 18- and 30-decimal orders.
+#[test]
+fn test_bond_is_the_floor_for_any_amount_and_decimals() {
+    let s = setup();
+    let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
+    let ad_units = s.tp.amount / 4;
+    for (i, dec) in [6u32, 18, 30].into_iter().enumerate() {
+        let mut p = ad_manager_order_params(&s.env, &s.tp);
+        p.order_decimals = dec;
+        // The same quarter of the ad, written in each order token's units.
+        p.amount = if dec >= s.tp.ad_decimals {
+            ad_units * 10u128.pow(dec - s.tp.ad_decimals)
+        } else {
+            ad_units / 10u128.pow(s.tp.ad_decimals - dec)
+        };
+        p.salt = soroban_sdk::U256::from_u128(&s.env, 9_000 + i as u128);
+        s.ad_manager.lock_for_order(&p);
+
+        assert_eq!(dm.bond_for(&s.tp.order_chain_id), DISPUTE_BOND_FLOOR);
+        let before = token.balance(&filer);
+        let bond = s
+            .ad_manager
+            .dispute(&p, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+        assert_eq!(bond, DISPUTE_BOND_FLOOR, "{dec}-decimal order");
+        assert_eq!(
+            before - token.balance(&filer),
+            DISPUTE_BOND_FLOOR as i128,
+            "{dec}-decimal order: the filing pulled the floor"
+        );
+    }
 }
 
 /// Evidence beats arbitration: a co-signed unlock still settles a disputed order, and the dispute
@@ -5978,7 +6010,7 @@ fn test_2_3g_in_flight_clears_on_resolved() {
 const DISPUTE_SCENARIOS_JSON: &str = include_str!("../../test-vectors/dispute-scenarios.json");
 #[allow(dead_code)]
 const DISPUTE_SCENARIOS_SHA256: &str =
-    "81694f5b2341bf014de61495376c63f977391daa24f85cc4d28967d3fba12de0";
+    "db25fd031e13b0af8b54255530c3c73214c4478bc745183902652bab7ebb8a14";
 
 fn t24_wire(
     s: &TestSetup,
@@ -5999,7 +6031,6 @@ fn t24_wire(
         &dispute_manager_contract::DisputeParams {
             challenge_period: challenge,
             bond_floor: floor,
-            bond_bps: 0, // the fixture pins bps=0: the bond decouples from the order amount
         },
     );
     s.ad_manager.set_dispute_manager(&dm_addr);
@@ -6083,7 +6114,6 @@ fn test_t24_differential_scenarios() {
         .parse::<u128>()
         .unwrap()
         * scale as u128;
-    assert_eq!(header["bondBps"].as_u64().unwrap(), 0, "T-24 pins bps=0");
     let bond_units: i128 = header["bondUnits"].as_str().unwrap().parse().unwrap();
     let buffer_s = t24_buffer_from(header);
 
@@ -6269,13 +6299,12 @@ fn t24_run_scenario(
 const JOINT_OUTCOMES_JSON: &str = include_str!("../../test-vectors/joint-outcomes.json");
 #[allow(dead_code)]
 const JOINT_OUTCOMES_SHA256: &str =
-    "8dc63f3fcacaeee13be175e96afb49f21fa61c8a62b302fdd9dc320664476097";
+    "5d08d02783a449041f8c6961bf09da059e55937a53eaa971abc8a60d5457b8cf";
 
 fn t25_wire(
     s: &TestSetup,
     challenge: u64,
     floor: u128,
-    bond_bps: u32,
 ) -> (dispute_manager_contract::Client<'static>, Address, Address) {
     let dm_addr = Address::generate(&s.env);
     s.env.register_at(&dm_addr, DISPUTE_MANAGER_WASM, ());
@@ -6291,7 +6320,6 @@ fn t25_wire(
         &dispute_manager_contract::DisputeParams {
             challenge_period: challenge,
             bond_floor: floor,
-            bond_bps,
         },
     );
     s.ad_manager.set_dispute_manager(&dm_addr);
@@ -6445,11 +6473,6 @@ fn test_t25_joint_outcome_sweep() {
         .parse::<u128>()
         .unwrap()
         * scale as u128;
-    // r3 F5: read the rate from the header and wire it, instead of hard-coding
-    // 0 — otherwise the EVM driver could configure something else while this
-    // silently stayed 0, and the two chains would settle different bonds
-    // against one expected record.
-    let bond_bps: u32 = header["bondBps"].as_u64().unwrap() as u32;
     let bond_units: i128 = header["bondUnits"].as_str().unwrap().parse().unwrap();
     let order_amount_units: i128 = header["orderAmountUnits"]
         .as_str()
@@ -6464,7 +6487,6 @@ fn test_t25_joint_outcome_sweep() {
             floor,
             scale,
             bond_units,
-            bond_bps,
             order_amount_units,
             buffer_s,
         );
@@ -6477,7 +6499,6 @@ fn t25_run_scenario(
     floor: u128,
     scale: i128,
     bond_units: i128,
-    bond_bps: u32,
     order_amount_units: i128,
     buffer_s: u64,
 ) {
@@ -6486,7 +6507,7 @@ fn t25_run_scenario(
     // fresh env per scenario — every scenario is its own isolated world
     let s = setup();
     let anchor = wire_anchor(&s);
-    let (dm, arbiter, fee_pool) = t25_wire(&s, challenge, floor, bond_bps);
+    let (dm, arbiter, fee_pool) = t25_wire(&s, challenge, floor);
     // The fixture's order size, in chain units, must be the size the legs
     // actually carry — otherwise `orderAmountUnits` describes nothing (F5).
     assert_eq!(
@@ -7550,7 +7571,6 @@ fn test_49s3_a_record_the_module_already_holds_is_dispute_exists() {
     dm.open_dispute(
         &s.ad_manager.address,
         &h,
-        &1_000_000,
         &s.tp.order_chain_id,
         &filer,
         &evidence(&s, 0xAA),
@@ -7584,7 +7604,6 @@ fn test_49s3_a_record_another_escrow_opened_is_wrong_escrow() {
     dm.open_dispute(
         &other,
         &h,
-        &1_000_000,
         &s.tp.order_chain_id,
         &filer,
         &evidence(&s, 0xAA),
@@ -7616,7 +7635,7 @@ fn test_49s3_every_relayed_code_from_the_real_module() {
     let esc = s.ad_manager.address.clone();
     let chain = s.tp.order_chain_id;
     let open = |escrow: &Address, h: &BytesN<32>, chain: u128, who: &Address| {
-        dm.try_open_dispute(escrow, h, &1_000_000, &chain, who, &ev, &p.deadline, &0, &0)
+        dm.try_open_dispute(escrow, h, &chain, who, &ev, &p.deadline, &0, &0)
             .unwrap_err()
             .unwrap()
     };

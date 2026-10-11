@@ -40,11 +40,10 @@ interface IDisputeManager {
     /**
      * @notice Open a dispute on an order the escrow has already hashed and checked, taking the bond.
      * @dev Escrow-only, and payable: the bond arrives with the call rather than sitting in the
-     *      escrow. The escrow must pass `amount` because it does not store one — an order's leg is
-     *      `{status, pausedAtOpen}` and the amount lives in the caller's `OrderParams`, validated
-     *      against the hash. So the escrow is the only party that can vouch for it.
+     *      escrow. The bond is the route's flat floor (`bondFor(peerChainId)`), so no order amount
+     *      is passed.
      *
-     *      The same goes for every other value here. `deadline` and `buffer` are what stop a short
+     *      The escrow vouches for every value here. `deadline` and `buffer` are what stop a short
      *      challenge period finalizing a dispute before the order's own deadline (D3, T-50), and
      *      `escrowPausedSeconds` is the escrow's counter as of the order's lock (c41-J: the same
      *      snapshot the unlock's cutoff counts from) — the module has no pause of its own, because
@@ -53,7 +52,6 @@ interface IDisputeManager {
      */
     function openDispute(
         bytes32 orderHash,
-        uint256 amount,
         uint256 peerChainId,
         address filer,
         bytes32 evidence,

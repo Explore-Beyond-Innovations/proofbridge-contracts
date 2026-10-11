@@ -337,9 +337,10 @@ export async function link(
       }
     }
 
-    // DISPUTE_{CHALLENGE_PERIOD_S,BOND_FLOOR,BOND_BPS}. Same rule as the clocks and the anchor
-    // delay: local deploys get the smallest legal values, anywhere else every variable is
-    // explicit, because a bond that silently defaults is a bond nobody chose.
+    // DISPUTE_{CHALLENGE_PERIOD_S,BOND_FLOOR}. Same rule as the clocks and the anchor delay: local
+    // deploys get the smallest legal values, anywhere else every variable is explicit, because a
+    // bond that silently defaults is a bond nobody chose. The floor is the whole bond: one flat
+    // amount per route, in this chain's wrapped native.
     const params = disputeParamsFromEnv(local.meta.env);
     // u64/u32 slots go out as JSON numbers (a string there is read as an enum variant name);
     // the u128 bond floor goes out as a string, which is how the CLI carries a u128.
@@ -352,24 +353,21 @@ export async function link(
     const paramsArg = JSON.stringify({
       challenge_period: Number(challengePeriod),
       bond_floor: params.bondFloor,
-      bond_bps: params.bondBps,
     });
     const cur = readOne(moduleAddr, "dispute_params", ["--chain_id", peerChainId]) as {
       challenge_period?: string | number;
       bond_floor?: string | number;
-      bond_bps?: string | number;
     } | null;
     const same =
       !!cur &&
       BigInt(cur.challenge_period ?? -1) === challengePeriod &&
-      BigInt(cur.bond_floor ?? -1) === BigInt(params.bondFloor) &&
-      Number(cur.bond_bps ?? -1) === params.bondBps;
+      BigInt(cur.bond_floor ?? -1) === BigInt(params.bondFloor);
     let onChain = same;
     if (onChain) {
       console.log(`  [skip] DisputeManager.set_dispute_params(${peerChainId}) already set`);
     } else {
       onChain = acting.call(moduleAddr, "DisputeManager", "set_dispute_params", ["--chain_id", peerChainId, "--params", paramsArg],
-        `DisputeManager.set_dispute_params(${peerChainId}, challengePeriod=${params.challengePeriod}s bondFloor=${params.bondFloor} bondBps=${params.bondBps})`);
+        `DisputeManager.set_dispute_params(${peerChainId}, challengePeriod=${params.challengePeriod}s bondFloor=${params.bondFloor})`);
       if (onChain) chainTxs++;
     }
     if (onChain) {
@@ -437,8 +435,9 @@ export async function link(
 export type { ChainDeploymentManifest };
 
 /**
- * The dispute params from env, same rule as the clocks. The contract's floor is 1 hour and its bond
- * cap is 10%; both are re-checked by the manifest schema, so a bad value fails before a transaction.
+ * The dispute params from env, same rule as the clocks. The contract's challenge period is 1 hour to
+ * 7 days and its bond floor at least 1; both are re-checked by the manifest schema, so a bad value
+ * fails before a transaction.
  */
 function disputeParamsFromEnv(env: string, vars: Record<string, string | undefined> = process.env): DisputeParams {
   const isLocal = env === "local";
@@ -455,11 +454,10 @@ function disputeParamsFromEnv(env: string, vars: Record<string, string | undefin
   };
   return {
     challengePeriod: read("DISPUTE_CHALLENGE_PERIOD_S", "3600"),
-    // 1, not 0: `Dispute.validate` rejects a zero floor, because a zero floor with a zero bps
-    // is a free dispute. "The smallest legal value" is the rule everywhere here, and for this
-    // parameter the smallest legal value is one.
+    // 1, not 0: `Dispute.validate` rejects a zero floor, because the floor is the whole bond and a
+    // zero one is a free dispute. "The smallest legal value" is the rule everywhere here, and for
+    // this parameter the smallest legal value is one. Outside local there is no default.
     bondFloor: read("DISPUTE_BOND_FLOOR", "1"),
-    bondBps: Number(read("DISPUTE_BOND_BPS", "0")),
   };
 }
 

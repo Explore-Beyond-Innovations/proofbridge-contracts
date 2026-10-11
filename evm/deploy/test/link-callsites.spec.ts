@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { ethers } from "ethers";
 import { deployCore } from "../src/deploy-core.js";
 import { link } from "../src/link.js";
 import { K0, startAnvil, withEnv, type Anvil } from "./helpers/anvil.js";
@@ -18,7 +19,6 @@ const CLOCKS = {
   ROUTE_CLAIM_STAGGER_S: "0",
   DISPUTE_CHALLENGE_PERIOD_S: "3600",
   DISPUTE_BOND_FLOOR: "1",
-  DISPUTE_BOND_BPS: "0",
   ANCHOR_DELAY_S: "60",
 };
 const CLEAN: Record<string, string | undefined> = {
@@ -113,4 +113,22 @@ test("A-5: a mixed route (a module on one side only) is refused, either way roun
     await refusesWithNoTx(() => linkA(MA, variant(MB, "b-mixed.json", noModule)), /only this chain has a DisputeManager/);
     await refusesWithNoTx(() => linkA(variant(MA, "a-mixed.json", noModule), MB), /only the peer has a DisputeManager/);
   });
+});
+
+test("the dispute bond floor is required outside local; a local route links on the default and quotes it", async () => {
+  const localT = variant(MA, "a-floor.json", testnet);
+  const peerT = variant(MB, "b-floor.json", testnet);
+  const envFile = path.join(tmp, "peer-floor.env");
+  fs.writeFileSync(envFile, ["DEPLOY_ENV=testnet", ...Object.entries(CLOCKS).map(([k, v]) => `${k}=${v}`)].join("\n"));
+  const { DISPUTE_BOND_FLOOR: _floor, ...noFloor } = CLOCKS;
+  await withEnv({ ...CLEAN, ...noFloor }, async () => {
+    await refusesWithNoTx(() => linkA(localT, peerT, envFile), /DISPUTE_BOND_FLOOR is unset for env=testnet/);
+  });
+  // Local: no DISPUTE_* variable at all, and the route ends up with the smallest legal floor.
+  await withEnv({ ...CLEAN }, async () => {
+    await linkA(MA, MB);
+  });
+  const dm = JSON.parse(fs.readFileSync(MA, "utf8")).contracts.disputeManager.address;
+  const quote = new ethers.Contract(dm, ["function bondFor(uint256) view returns (uint256)"], new ethers.JsonRpcProvider(a.url));
+  assert.equal(await quote.bondFor(1337n), 1n);
 });

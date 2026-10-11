@@ -155,7 +155,6 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     /// @inheritdoc IDisputeManager
     function openDispute(
         bytes32 orderHash,
-        uint256 amount,
         uint256 peerChainId,
         address filer,
         bytes32 evidence,
@@ -168,7 +167,7 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         }
 
         Dispute.Params storage p = disputeParams.load(peerChainId);
-        uint256 required = Dispute.bondFor(amount, p);
+        uint256 required = Dispute.bondFor(p);
         // Exact (C-17): an over- or under-paid bond is refused, so nothing is left to refund.
         if (msg.value != required) revert DisputeManager__NativeAmountMismatch(msg.value, required);
         bond = uint128(required);
@@ -294,11 +293,11 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         windowOver = initiator != address(0) && block.timestamp >= until_;
     }
 
-    /// @notice The exact bond a filing on `peerChainId`'s route must carry for `amount` (49E-2): the
-    ///         bond is exact (C-17), so clients quote it here instead of re-deriving the formula.
+    /// @notice The exact bond a filing on `peerChainId`'s route must carry (49E-2): the bond is exact
+    ///         (C-17), so clients quote it here rather than reading the raw params.
     ///         Reverts as the filing would when the route has no params.
-    function bondFor(uint256 amount, uint256 peerChainId) external view returns (uint256) {
-        return Dispute.bondFor(amount, disputeParams.load(peerChainId));
+    function bondFor(uint256 peerChainId) external view returns (uint256) {
+        return Dispute.bondFor(disputeParams.load(peerChainId));
     }
 
     /// @inheritdoc IDisputeManager

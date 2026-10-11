@@ -45,7 +45,7 @@ import {MockKeyRegistry} from "./mocks/MockKeyRegistry.sol";
 /// scenario's negatives are proof-semantic (wrong domain, foreign order),
 /// mock elsewhere (deposit-proof unlocks stay mock territory).
 contract JointOutcomesTest is Test {
-    string internal constant FIXTURE_SHA256 = "8dc63f3fcacaeee13be175e96afb49f21fa61c8a62b302fdd9dc320664476097";
+    string internal constant FIXTURE_SHA256 = "5d08d02783a449041f8c6961bf09da059e55937a53eaa971abc8a60d5457b8cf";
 
     bytes32 private constant LEAF_TOPIC = keccak256("DepositHashAppended(uint256,bytes32,uint256,bytes32)");
 
@@ -115,7 +115,6 @@ contract JointOutcomesTest is Test {
         amountWei = vm.parseJsonUint(v, ".header.orderAmountUnits") * scale;
         bondWei = vm.parseJsonUint(v, ".header.bondUnits") * scale;
         uint128 floorWei = uint128(vm.parseJsonUint(v, ".header.bondFloorUnits") * scale);
-        uint16 bps = uint16(vm.parseJsonUint(v, ".header.bondBps"));
 
         dm = new DisputeManager(admin, IwNativeToken(address(wnat)));
         anchorP = _anchorOf();
@@ -134,7 +133,7 @@ contract JointOutcomesTest is Test {
         dm.setEscrow(address(adManager), true);
         dm.setArbiter(arbiter);
         dm.setProtocolFeePool(feePool);
-        dm.setDisputeParams(block.chainid, Dispute.Params(challenge, floorWei, bps));
+        dm.setDisputeParams(block.chainid, Dispute.Params(challenge, floorWei));
         adManager.setDisputeManager(IDisputeManager(address(dm)));
         adManager.setRootAnchor(IRootAnchor(address(anchorP)));
         portal.setRootAnchor(IRootAnchor(address(anchorF)));

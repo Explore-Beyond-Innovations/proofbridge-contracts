@@ -22,7 +22,7 @@ import {RouteTiming} from "../src/libraries/RouteTiming.sol";
 /// wei. The fixture's sha256 is pinned below; scripts/repo-checks compares
 /// it against the file so neither driver can drift alone.
 contract DisputeDifferentialTest is DisputeTest {
-    string internal constant FIXTURE_SHA256 = "81694f5b2341bf014de61495376c63f977391daa24f85cc4d28967d3fba12de0";
+    string internal constant FIXTURE_SHA256 = "db25fd031e13b0af8b54255530c3c73214c4478bc745183902652bab7ebb8a14";
 
     bytes32 private constant LEAF_TOPIC = keccak256("DepositHashAppended(uint256,bytes32,uint256,bytes32)");
 
@@ -43,17 +43,12 @@ contract DisputeDifferentialTest is DisputeTest {
         uint64 challenge = uint64(vm.parseJsonUint(v, ".header.challengePeriodS"));
         challengeS = challenge;
         uint128 floorWei = uint128(vm.parseJsonUint(v, ".header.bondFloorUnits") * scale);
-        uint16 bps = uint16(vm.parseJsonUint(v, ".header.bondBps"));
         uint256 amountWei = vm.parseJsonUint(v, ".header.orderAmountUnits") * scale;
         uint256 bondWei = vm.parseJsonUint(v, ".header.bondUnits") * scale;
-        assertEq(
-            Dispute.bondFor(amountWei, Dispute.Params(challenge, floorWei, bps)),
-            bondWei,
-            "the header's bond must be exact in chain units"
-        );
 
         vm.startPrank(admin);
-        dm.setDisputeParams(orderChainId, Dispute.Params(challenge, floorWei, bps));
+        dm.setDisputeParams(orderChainId, Dispute.Params(challenge, floorWei));
+        assertEq(dm.bondFor(orderChainId), bondWei, "the header's bond must be exact in chain units");
         // route wiring the base does inside its create test, done once here
         adManager.setPeerEscrow(orderChainId, _b32(orderPortal));
         adManager.setTokenRoute(address(adToken), orderChainId, _b32(orderToken));

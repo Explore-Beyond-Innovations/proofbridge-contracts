@@ -32,7 +32,6 @@ const CLOCKS = {
   ROUTE_CLAIM_STAGGER_S: "0",
   DISPUTE_CHALLENGE_PERIOD_S: "3600",
   DISPUTE_BOND_FLOOR: "1",
-  DISPUTE_BOND_BPS: "0",
   ANCHOR_DELAY_S: "60",
 };
 const CLEAN: Record<string, string | undefined> = {
@@ -223,6 +222,21 @@ test("A-5: no DisputeManager on either side links on the clocks alone; a mixed r
   const fullPeer = manifest("d-p1.json", 11155111n, "testnet");
   await withFake(TESTNET, () => assert.rejects(linkT(fullLocal, barePeer, peerEnv("testnet")), /only this chain has a DisputeManager/));
   await withFake(TESTNET, () => assert.rejects(linkT(bareLocal, fullPeer, peerEnv("testnet")), /only the peer has a DisputeManager/));
+});
+
+test("the dispute bond floor is required outside local; a local route goes past the checks without it", async () => {
+  const { DISPUTE_BOND_FLOOR: _floor, ...noFloor } = TESTNET;
+  const local = manifest("f-l.json", 1000002n, "testnet");
+  const peer = manifest("f-p.json", 11155111n, "testnet");
+  const calls = await withFake(noFloor, () =>
+    assert.rejects(linkT(local, peer, peerEnv("testnet")), /DISPUTE_BOND_FLOOR is unset for env=testnet/),
+  );
+  assert.deepEqual(sent(calls), []);
+  const localL = manifest("f-ll.json", 1000002n, "local");
+  const peerL = manifest("f-lp.json", 11155111n, "local");
+  await withFake({ STELLAR_NETWORK: "local", FAKE_STELLAR_PASSPHRASE: NETWORK_PASSPHRASES.local }, () =>
+    assert.rejects(linkT(localL, peerL), PAST_CHECKS),
+  );
 });
 
 test("deploy makes the escrows MerkleManager managers and not the Registrar", async () => {
