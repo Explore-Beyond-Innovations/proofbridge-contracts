@@ -6,7 +6,7 @@
     "note": "`filerIsBridger` is absolute — a fact about the dispute, not about which escrow is asking. Reading it as 'is the filer my counterparty' inverted the routing on the follower leg."
   },
   "counts": {
-    "bondSizing": 6,
+    "bondSizing": 4,
     "bondRouting": 10,
     "legActions": 4,
     "paramValidation": 5
@@ -39,46 +39,24 @@
   ],
   "bondSizing": [
     {
-      "label": "a dust order pays the floor",
-      "amount": "1",
-      "decimals": 6,
+      "label": "the smallest legal floor",
+      "bondFloor": "1",
+      "bond": "1"
+    },
+    {
+      "label": "a small floor",
       "bondFloor": "7",
       "bond": "7"
     },
     {
-      "label": "a 6-decimal order pays the floor",
-      "amount": "1000000000000",
-      "decimals": 6,
-      "bondFloor": "1000",
-      "bond": "1000"
-    },
-    {
-      "label": "an 18-decimal order pays the floor",
-      "amount": "100000000000000000000000",
-      "decimals": 18,
-      "bondFloor": "1000",
-      "bond": "1000"
-    },
-    {
-      "label": "a 30-decimal order pays the floor",
-      "amount": "1000000000000000000000000000000000",
-      "decimals": 30,
+      "label": "a typical floor",
       "bondFloor": "1000",
       "bond": "1000"
     },
     {
       "label": "a higher floor on a large-order route",
-      "amount": "1000000",
-      "decimals": 18,
       "bondFloor": "1000000000000000000",
       "bond": "1000000000000000000"
-    },
-    {
-      "label": "the smallest legal floor",
-      "amount": "1000000000000000000",
-      "decimals": 18,
-      "bondFloor": "1",
-      "bond": "1"
     }
   ],
   "bondRouting": [

@@ -30,7 +30,7 @@ const CLOCKS = {
   ROUTE_MARGIN_S: "0",
   ROUTE_CLAIM_STAGGER_S: "0",
   DISPUTE_CHALLENGE_PERIOD_S: "3600",
-  DISPUTE_BOND_FLOOR: "1",
+  DISPUTE_BOND_FLOOR: "10000000", // the minimum outside local (1 XLM)
   ANCHOR_DELAY_S: "60",
 };
 const CLEAN: Record<string, string | undefined> = {
