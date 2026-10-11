@@ -81,10 +81,21 @@ export interface BuildStellarManifestInput {
   disputeParams?: Record<string, DisputeParams>;
   /** Who holds admin (#424): the source account until `handover`; preserved across redeploys. */
   admin?: AdminHandover;
-  /** Wasm installed for operators to instantiate (C-4). */
-  wasmHashes?: { agentAccount?: string };
+  /** Wasm installed for operators to instantiate (C-4), and the wasm the key registry and the
+   *  counterparty verifier were deployed from (a re-run refuses to reuse them under other code). */
+  wasmHashes?: { agentAccount?: string; blsKeyRegistry?: string; counterpartyVerifier?: string };
   /** The VK hash and circuits commit this deploy carries (C-20). */
   vk?: { vkSha256?: string; circuitsCommit?: string };
+}
+
+function wasmHashesEntry(
+  h: BuildStellarManifestInput["wasmHashes"],
+): { wasmHashes: NonNullable<ChainDeploymentManifest["wasmHashes"]> } | Record<string, never> {
+  const out: NonNullable<ChainDeploymentManifest["wasmHashes"]> = {};
+  if (h?.agentAccount) out.agentAccount = h.agentAccount;
+  if (h?.blsKeyRegistry) out.blsKeyRegistry = h.blsKeyRegistry;
+  if (h?.counterpartyVerifier) out.counterpartyVerifier = h.counterpartyVerifier;
+  return Object.keys(out).length ? { wasmHashes: out } : {};
 }
 
 export function buildManifest(
@@ -133,7 +144,7 @@ export function buildManifest(
     routeTiming: input.routeTiming ?? {},
     disputeParams: input.disputeParams ?? {},
     ...(input.admin ? { admin: input.admin } : {}),
-    ...(input.wasmHashes?.agentAccount ? { wasmHashes: { agentAccount: input.wasmHashes.agentAccount } } : {}),
+    ...wasmHashesEntry(input.wasmHashes),
     meta: {
       deployedAt: new Date().toISOString(),
       deployer: input.deployer,

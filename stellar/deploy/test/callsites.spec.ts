@@ -9,6 +9,7 @@ import { appendersAtDeploy, deployCore } from "../src/deploy-core.js";
 import { link } from "../src/link.js";
 import { buildManifest } from "../src/manifest.js";
 import { NETWORK_PASSPHRASES } from "../src/stellar-cli.js";
+import { wasmSha256 } from "../src/wasm-reuse.js";
 
 // The checks are pinned as pure functions elsewhere; these drive `deployCore` and `link` with a fake
 // `stellar` on PATH (test/helpers/fake-stellar), so removing a call from either path turns them red.
@@ -23,6 +24,15 @@ const OTHER = Keypair.random().publicKey();
 const contractId = () => StrKey.encodeContract(randomBytes(32));
 const vkFile = path.join(tmp, "vk");
 fs.writeFileSync(vkFile, "a vk");
+// the bundle's wasm for the two contracts whose reuse is hash-checked (the rest is never reached)
+const wasmDirPath = path.join(tmp, "wasm");
+fs.mkdirSync(wasmDirPath);
+fs.writeFileSync(path.join(wasmDirPath, "bls_key_registry.wasm"), "registry wasm v2");
+fs.writeFileSync(path.join(wasmDirPath, "counterparty_verifier.wasm"), "verifier wasm v2");
+const BUNDLE_HASHES = {
+  blsKeyRegistry: wasmSha256(path.join(wasmDirPath, "bls_key_registry.wasm")),
+  counterpartyVerifier: wasmSha256(path.join(wasmDirPath, "counterparty_verifier.wasm")),
+};
 
 const CLOCKS = {
   ROUTE_MIN_WINDOW_S: "0",
@@ -69,8 +79,8 @@ async function withFake(vars: Record<string, string | undefined>, fn: () => Prom
   return fs.readFileSync(log, "utf8").split("\n").filter(Boolean);
 }
 const sent = (calls: string[]) => calls.filter((c) => /^contract (deploy|upload|asset)|--send yes/.test(c));
-const deploy = (env: string, out: string) =>
-  deployCore({ env, manifestOut: path.join(tmp, out), wasmDir: path.join(tmp, "no-wasm") });
+const deploy = (env: string, out: string, extra: { allowWasmMismatch?: boolean } = {}) =>
+  deployCore({ env, manifestOut: path.join(tmp, out), wasmDir: wasmDirPath, ...extra });
 const NAMED = { ANCHOR_PUBLISHER: OTHER, DISPUTE_ARBITER: OTHER, DISPUTE_FEE_POOL: OTHER, STELLAR_EVENT_VK: vkFile };
 
 // ── deploy ─────────────────────────────────────────────────────────────
@@ -144,9 +154,66 @@ test("D3: a reused key registry initialized for another env is refused before an
   assert.deepEqual(sent(calls), []);
 });
 
+// A reused key registry or counterparty verifier is compared with the bundle's wasm before anything
+// is sent: a storage-shape change leaves old slots undecodable, and the admin upgrade keeps storage.
+test("a reused key registry deployed from other wasm is refused before anything is sent", async () => {
+  const out = "reuse-wasm.json";
+  manifest(out, 1000003n, "local", { wasmHashes: { blsKeyRegistry: "1".repeat(64) } });
+  const LOCAL = { FAKE_STELLAR_PASSPHRASE: NETWORK_PASSPHRASES.local, STELLAR_EVENT_VK: vkFile, FAKE_STELLAR_KEYS_ENV: "local" };
+  const calls = await withFake(LOCAL, () =>
+    assert.rejects(deploy("local", out), new RegExp(`BLSKeyRegistry: the reused contract was deployed from wasm 1{64}, but this bundle's wasm hashes to ${BUNDLE_HASHES.blsKeyRegistry}`)),
+  );
+  assert.deepEqual(sent(calls), []);
+});
+
+test("a reused counterparty verifier deployed from other wasm is refused before anything is sent", async () => {
+  const out = "reuse-wasm-v.json";
+  manifest(out, 1000003n, "local", { wasmHashes: { counterpartyVerifier: "2".repeat(64) } });
+  const LOCAL = { FAKE_STELLAR_PASSPHRASE: NETWORK_PASSPHRASES.local, STELLAR_EVENT_VK: vkFile, FAKE_STELLAR_KEYS_ENV: "local" };
+  const calls = await withFake(LOCAL, () =>
+    assert.rejects(deploy("local", out), /CounterpartyVerifier: the reused contract was deployed from wasm 2{64}/),
+  );
+  assert.deepEqual(sent(calls), []);
+});
+
+test("a manifest from before the wasm hash was recorded refuses to reuse, saying why", async () => {
+  const out = "reuse-wasm-old.json";
+  manifest(out, 1000003n, "local", { wasmHashes: null });
+  const LOCAL = { FAKE_STELLAR_PASSPHRASE: NETWORK_PASSPHRASES.local, STELLAR_EVENT_VK: vkFile, FAKE_STELLAR_KEYS_ENV: "local" };
+  const calls = await withFake(LOCAL, () =>
+    assert.rejects(deploy("local", out), /BLSKeyRegistry: the manifest records no wasm hash for the reused contract.*manifests from before the hash was recorded.*STELLAR_ALLOW_WASM_MISMATCH=1/),
+  );
+  assert.deepEqual(sent(calls), []);
+});
+
+test("STELLAR_ALLOW_WASM_MISMATCH=1 (or the option) reuses past a mismatch or a missing record; a matching record passes on its own", async () => {
+  const out = "reuse-wasm-ok.json";
+  manifest(out, 1000003n, "local", { wasmHashes: { blsKeyRegistry: "1".repeat(64), counterpartyVerifier: undefined } });
+  const LOCAL = { FAKE_STELLAR_PASSPHRASE: NETWORK_PASSPHRASES.local, STELLAR_EVENT_VK: vkFile, FAKE_STELLAR_KEYS_ENV: "local" };
+  // past both checks, the deploy goes on to the next read (who holds admin on what is reused)
+  const PAST = /fake stellar: no answer for contract invoke .* -- get_admin/;
+  let calls = await withFake({ ...LOCAL, STELLAR_ALLOW_WASM_MISMATCH: "1" }, () => assert.rejects(deploy("local", out), PAST));
+  assert.deepEqual(sent(calls), []);
+  calls = await withFake(LOCAL, () => assert.rejects(deploy("local", out, { allowWasmMismatch: true }), PAST));
+  assert.deepEqual(sent(calls), []);
+  // the bundle's own hashes recorded: no override needed
+  const ok = "reuse-wasm-match.json";
+  manifest(ok, 1000003n, "local");
+  calls = await withFake(LOCAL, () => assert.rejects(deploy("local", ok), PAST));
+  assert.deepEqual(sent(calls), []);
+  // the manifest round-trips the two hashes through the schema (a stripped field would read as "no record")
+  const back = JSON.parse(fs.readFileSync(path.join(tmp, ok), "utf8")) as { wasmHashes?: Record<string, string> };
+  assert.deepEqual(back.wasmHashes, BUNDLE_HASHES);
+});
+
 // ── link ───────────────────────────────────────────────────────────────
 
-function manifest(file: string, chainId: bigint, env: string, opts: { disputeManager?: boolean; vk?: string } = {}): string {
+function manifest(
+  file: string,
+  chainId: bigint,
+  env: string,
+  opts: { disputeManager?: boolean; vk?: string; wasmHashes?: { blsKeyRegistry?: string; counterpartyVerifier?: string } | null } = {},
+): string {
   const m = buildManifest({
     chainName: `c-${chainId}`,
     chainId,
@@ -154,6 +221,8 @@ function manifest(file: string, chainId: bigint, env: string, opts: { disputeMan
     commit: "unknown",
     deployer: DEPLOYER,
     vk: opts.vk ? { vkSha256: opts.vk } : undefined,
+    // recorded as the bundle's unless a case says otherwise (null: a manifest from before the record)
+    wasmHashes: opts.wasmHashes === null ? undefined : { ...BUNDLE_HASHES, ...opts.wasmHashes },
     contracts: {
       verifier: contractId(),
       merkleManager: contractId(),
