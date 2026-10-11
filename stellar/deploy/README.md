@@ -41,10 +41,15 @@ deploy before anything is sent. A different hash refuses, naming the
 contract and both hashes; a manifest with no recorded hash (written before
 the hash was recorded) refuses too, saying why. Either way the fix is to
 deploy the contract again (drop it from the manifest) or, once you have
-checked that the code on chain is this bundle's, to set
-`STELLAR_ALLOW_WASM_MISMATCH=1` (the `allowWasmMismatch` option) for that
-run; the override reuses without reading the bundle's wasm and leaves the
-recorded hash as it was.
+checked that the code on chain is this bundle's, to pass
+`deploy --allow-wasm-mismatch` (the `allowWasmMismatch` option) to that one
+run; the override reuses without reading the bundle's wasm, leaves the
+recorded hash as it was, and is announced as a warning, once up front and
+once per contract it skipped. On a local stack `STELLAR_ALLOW_WASM_MISMATCH=1`
+(exactly `1`) does the same from the environment; outside local the variable
+is ignored, and the CLI says so, because the deploy orchestrator sources env
+files with `set -a` and a variable left in one would carry into every later
+run on a real network. The flag is the only override there.
 
 ### `deploy-test-tokens`
 
@@ -118,6 +123,9 @@ registry:
    their `wasmHashes` entries) from the manifest and run `deploy`, which deploys what is missing,
    re-wires the position guards (`[AdManager, OrderPortal]`) and records the new hashes; then point
    the relayer's chain row (`blsKeyRegistryAddress`) and the frontend / pods at the new address.
+   A re-run against an old manifest stops at the hash check instead of keeping the old registry;
+   outside local the only override is `deploy --allow-wasm-mismatch` on the one run that needs it,
+   once the on-chain code has been checked (the env variable counts on a local stack only).
 4. Every account registers its keys again; the relayer names no maker key for a Stellar trade
    until the maker's key is live on the new registry.
 5. **Regenerate the Soroban integration fixtures** (`stellar/tests/fixtures`,

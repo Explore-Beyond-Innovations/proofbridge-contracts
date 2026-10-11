@@ -12,5 +12,27 @@ fi
 if [ "$1 $2" = "keys address" ]; then echo "${FAKE_STELLAR_ADDRESS:-}"; exit 0; fi
 # the key registry's environment view, when a spec names one (2.6 D3)
 case "$*" in *" -- keys_env"*) if [ -n "${FAKE_STELLAR_KEYS_ENV:-}" ]; then printf '"%s"\n' "$FAKE_STELLAR_KEYS_ENV"; exit 0; fi;; esac
+# Fresh-chain mode (FAKE_STELLAR_IDS = a file of "<wasm basename | native> <C...>" lines): a deploy
+# answers the id the spec chose for that wasm, a send answers nothing, a read answers what a chain
+# with nothing on it would, and an upload answers the file's sha256, so a spec can drive `deploy`
+# all the way to the manifest it writes. Anything else still has no answer.
+if [ -n "${FAKE_STELLAR_IDS:-}" ]; then
+  id_for() { awk -v k="$1" '$1 == k { print $2 }' "$FAKE_STELLAR_IDS"; }
+  wasm_arg() { while [ $# -gt 0 ]; do if [ "$1" = "--wasm" ]; then echo "$2"; return; fi; shift; done; }
+  case "$1 $2 $3" in
+    "contract deploy "*) id_for "$(basename "$(wasm_arg "$@")")"; exit 0;;
+    "contract asset deploy") id_for native; exit 0;;
+    "contract upload "*) sha256sum "$(wasm_arg "$@")" | cut -d' ' -f1; exit 0;;
+  esac
+  if [ "$1 $2" = "contract invoke" ]; then
+    case "$*" in
+      *"--send yes"*) exit 0;;
+      *" -- registry"*) printf '"%s"\n' "$(id_for bls_key_registry.wasm)"; exit 0;;
+      *" -- position_guards"*|*" -- wired_chains"*) echo '[]'; exit 0;;
+      *" -- key_registry"*|*" -- get_arbiter"*|*" -- get_protocol_fee_pool"*) echo null; exit 0;;
+      *" -- is_manager"*) echo false; exit 0;;
+    esac
+  fi
+fi
 echo "fake stellar: no answer for $*" >&2
 exit 1
