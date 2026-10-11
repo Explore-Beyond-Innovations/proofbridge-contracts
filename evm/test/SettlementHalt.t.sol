@@ -160,19 +160,81 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
-    /// A halt lifted before the deadline never denied this window: ordinary timing.
-    function test_finalizeCancel_haltLiftedBeforeTheDeadline_ordinaryTiming() public {
+    /// A halt during the order's life refused the co-signed unlock while it held, so it counts even
+    /// when lifted before the deadline: the cancel waits the grace.
+    function test_finalizeCancel_haltDuringTheOrder_resumedBeforeTheDeadline_waitsTheGrace() public {
         (IAdManager.OrderParams memory p,) = _lock(6);
         _halt();
         vm.warp(p.deadline - 1);
         _resume();
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        vm.warp(p.deadline + 60 minutes);
         adManager.finalizeCancel(p);
         assertEq(_locked(), 0);
     }
 
-    /// The boundary is the deadline itself: a resume in the deadline's second counts (`>=`).
+    /// The lock never reads the halt, so a halt from before the lock, resumed before the deadline,
+    /// was in force during the order's life: denied.
+    function test_finalizeCancel_haltFromBeforeTheLock_resumedBeforeTheDeadline_waitsTheGrace() public {
+        _halt();
+        vm.warp(block.timestamp + 10);
+        (IAdManager.OrderParams memory p,) = _lock(16);
+        vm.warp(p.deadline - 1);
+        _resume();
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes);
+    }
+
+    /// A halt held and lifted entirely before the lock never touched this order: ordinary timing.
+    function test_finalizeCancel_haltAndResumeBothBeforeTheLock_ordinaryTiming() public {
+        _halt();
+        vm.warp(block.timestamp + 10);
+        _resume();
+        vm.warp(block.timestamp + 1);
+        (IAdManager.OrderParams memory p,) = _lock(17);
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        adManager.finalizeCancel(p);
+        assertEq(_locked(), 0);
+    }
+
+    /// The boundary is the lock itself: a resume in the lock's second counts (`>=`).
+    function test_finalizeCancel_resumeInTheLocksSecond_counts() public {
+        _halt();
+        vm.warp(block.timestamp + 10);
+        _resume();
+        (IAdManager.OrderParams memory p,) = _lock(18);
+        _claim(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes);
+    }
+
+    /// An unwired root verifier refuses every co-signed unlock, so it denies the payout like a halt:
+    /// the cancel waits the grace. Wired again, the order is back to ordinary timing.
+    function test_finalizeCancel_verifierUnsetAfterTheLock_waitsTheGrace_setAgainOrdinary() public {
+        (IAdManager.OrderParams memory p,) = _lock(19);
+        _claim(p);
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, address(0));
+        vm.warp(p.deadline + 30 minutes);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+
+        address verifier = address(new MockRootVerifier(true));
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, verifier);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 30 minutes);
+        adManager.finalizeCancel(p);
+        assertEq(_locked(), 0);
+    }
+
+    /// A resume at the deadline is after the lock, so it counts.
     function test_finalizeCancel_resumeInTheDeadlinesSecond_counts() public {
         (IAdManager.OrderParams memory p,) = _lock(7);
         _halt();

@@ -66,10 +66,11 @@ contract AdManager is EscrowBase, IAdManager {
     ///         every evidence path ignores it, so a halt can delay a payout but never keep both sides.
     mapping(address maker => bool) public halted;
 
-    /// @notice When `maker` last resumed. A halt in force at any point at or after an order's
-    ///         deadline is a denied payout even if it was resumed since: either it is still in force,
-    ///         or this stamp is at or after the deadline. The deadline is signed into the order, so
-    ///         nothing the maker does later moves the reference (#422 review, F2).
+    /// @notice When `maker` last resumed. A halt in force at any point during an order's life is a
+    ///         denied payout even if it was resumed since: either it is still in force, or this stamp
+    ///         is at or after the order's lock (a halt from before the lock counts too: the lock never
+    ///         reads `halted`). The lock time is stamped by the chain, so nothing the maker does later
+    ///         moves the reference.
     mapping(address maker => uint64) public lastResumedAt;
 
     /*//////////////////////////////////////////////////////////////
@@ -591,16 +592,19 @@ contract AdManager is EscrowBase, IAdManager {
     }
 
     /// @dev Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force
-    ///      now or at any point at or after the order's deadline (a resume stamp at or after it), any
+    ///      now or at any point since the lock (a resume stamp at or after `lockedAt`), the order
+    ///      chain's root verifier unset (`unlock` reverts `NoRootVerifier`), any
     ///      of the signer's registry slots expiring during the order's life (`anySlotExpiredWithin`,
     ///      D12: a kill, a near-future shorten and a pre-lock shorten naming a date in the window all
     ///      count; a rotation whose old slot outlives the cancel does not). Every reference is one
-    ///      the maker signed (the deadline) or the chain stamped (the lock), never one the maker can
-    ///      choose later. No registry wired means no lever 2 to read. #461: no "no usable slot" term —
+    ///      the chain stamped (the lock) or the caller derives from the signed deadline, never one
+    ///      the maker can choose later. No registry wired means no lever 2 to read. #461: no "no usable slot" term —
     ///      the lock required one, so losing it by the cutoff is an expiry in the interval already.
     function _coSignDenied(OrderParams calldata p, bytes32 orderHash, uint256 until) private view returns (bool) {
         address maker = _adOf(p).maker;
-        if (halted[maker] || lastResumedAt[maker] >= p.deadline) return true;
+        if (halted[maker] || lastResumedAt[maker] >= _lockedAt(orderHash)) return true;
+        // An unwired verifier refuses every co-signed unlock, whoever unwired it: deny.
+        if (address(rootVerifier[p.orderChainId]) == address(0)) return true;
         // #465: the registry the order was locked under, not the live one: a migration mid-order
         // would otherwise read a registry that never saw the kill.
         IKeyRegistry registry = registryAt[_orders[orderHash].registryEpoch];

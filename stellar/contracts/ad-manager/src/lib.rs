@@ -1351,13 +1351,6 @@ impl AdManagerContract {
         storage::get_halt(env, maker).map_or(false, |h| h.halted)
     }
 
-    /// Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force now
-    /// or at any point at or after the order's deadline (a resume stamp at or after it), any of the
-    /// signer's registry slots expiring during the order's life as a payout, `[locked_at, until]`
-    /// with `until` the payout's own cutoff (`any_slot_expired_within`, D12/D14/D14b/D16: a kill, a
-    /// near-future shorten, a pre-lock shorten naming a date in the window and a re-kill after it
-    /// all count; a rotation whose old slot outlives the cutoff does not). Every reference is one the maker signed (the deadline) or the chain stamped (the
-    /// lock), never one the maker can choose later. No registry wired means no lever 2 to read.
     /// #464: does the order chain's root verifier read a key registry other than this escrow's?
     /// A verifier that does not answer `registry()` is not a BLS co-signature verifier: no split.
     fn registry_split(env: &Env, order_chain_id: u128, expected: Option<&Address>) -> bool {
@@ -1370,6 +1363,15 @@ impl AdManagerContract {
         }
     }
 
+    /// Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force now
+    /// or at any point since the lock (a resume stamp at or after `locked_at`), the order chain's root
+    /// verifier unset (`unlock` refuses `RootVerifierNotSet`), any of the signer's registry slots
+    /// expiring during the order's life as a payout, `[locked_at, until]` with `until` the payout's
+    /// own cutoff (`any_slot_expired_within`, D12/D14/D14b/D16: a kill, a near-future shorten, a
+    /// pre-lock shorten naming a date in the window and a re-kill after it all count; a rotation
+    /// whose old slot outlives the cutoff does not). Every reference is one the chain stamped (the
+    /// lock) or the caller derives from the signed deadline, never one the maker can choose later.
+    /// No registry wired means no lever 2 to read.
     fn co_sign_denied(
         env: &Env,
         maker: &Address,
@@ -1377,14 +1379,21 @@ impl AdManagerContract {
         order_hash: &BytesN<32>,
         until: u64,
     ) -> bool {
+        let order = storage::get_order(env, order_hash);
+        // A halt in force at any point since the lock: still on, or resumed at or after it (a halt
+        // from before the lock counts too: the lock never reads it).
         if let Some(h) = storage::get_halt(env, maker) {
-            if h.halted || h.last_resumed_at >= params.deadline {
+            if h.halted || h.last_resumed_at >= order.locked_at {
                 return true;
             }
         }
+        // An unset verifier refuses every co-signed unlock: deny. Once set it can only be
+        // repointed, never unset; the runbook covers repointing.
+        if storage::get_root_verifier(env, params.order_chain_id).is_none() {
+            return true;
+        }
         // #465: the registry the order was locked under, not the live one: a migration mid-order
         // would otherwise read a registry that never saw the kill.
-        let order = storage::get_order(env, order_hash);
         let Some(registry) = storage::get_registry_at(env, order.registry_epoch) else {
             return false;
         };

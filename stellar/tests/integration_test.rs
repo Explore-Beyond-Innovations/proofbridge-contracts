@@ -4076,9 +4076,10 @@ fn test_422_finalize_cancel_halted_through_the_window_resumed_at_the_end_still_w
     s.ad_manager.finalize_cancel(&p);
 }
 
-/// A halt lifted before the deadline never denied this window: ordinary timing.
+/// A halt during the order's life refused the co-signed unlock while it held, so it counts even
+/// when lifted before the deadline: the cancel waits the grace.
 #[test]
-fn test_422_finalize_cancel_halt_lifted_before_the_deadline_ordinary_timing() {
+fn test_422_finalize_cancel_halt_during_the_order_resumed_before_the_deadline_waits() {
     let s = setup();
     let p = locked_ad_order(&s);
     let maker = maker_addr(&s);
@@ -4088,11 +4089,107 @@ fn test_422_finalize_cancel_halt_lifted_before_the_deadline_ordinary_timing() {
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
     s.ad_manager.finalize_cancel(&p);
     assert_eq!(ad_locked(&s), 0);
 }
 
-/// The boundary is the deadline itself: a resume in the deadline's second counts (`>=`).
+/// The lock never reads the halt, so a halt from before the lock, resumed before the deadline, was
+/// in force during the order's life: denied.
+#[test]
+fn test_422_finalize_cancel_halt_from_before_the_lock_resumed_before_the_deadline_waits() {
+    let s = setup();
+    let maker = maker_addr(&s);
+    s.ad_manager.halt_settlement(&maker);
+    let now = s.env.ledger().timestamp();
+    warp(&s, now + 10);
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline - 1);
+    s.ad_manager.resume_settlement(&maker);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER
+    );
+}
+
+/// A halt held and lifted entirely before the lock never touched this order: ordinary timing.
+#[test]
+fn test_422_finalize_cancel_halt_and_resume_both_before_the_lock_ordinary_timing() {
+    let s = setup();
+    let maker = maker_addr(&s);
+    s.ad_manager.halt_settlement(&maker);
+    let now = s.env.ledger().timestamp();
+    warp(&s, now + 10);
+    s.ad_manager.resume_settlement(&maker);
+    warp(&s, now + 11);
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+    assert_eq!(ad_locked(&s), 0);
+}
+
+/// The boundary is the lock itself: a resume in the lock's second counts (`>=`).
+#[test]
+fn test_422_finalize_cancel_resume_in_the_locks_second_counts() {
+    let s = setup();
+    let maker = maker_addr(&s);
+    s.ad_manager.halt_settlement(&maker);
+    let now = s.env.ledger().timestamp();
+    warp(&s, now + 10);
+    s.ad_manager.resume_settlement(&maker);
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER
+    );
+}
+
+/// An unset root verifier refuses every co-signed unlock, so it denies the payout like a halt: the
+/// cancel waits the grace. Set, the order is back to ordinary timing. (A Soroban verifier cannot be
+/// unset once set, so the order is locked on a route that never had one.)
+#[test]
+fn test_unset_root_verifier_denies_the_payout_set_again_ordinary() {
+    let s = setup_with_verifiers(false);
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER
+    );
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+
+    let mock = s.env.register(MockRootVerifier, ());
+    MockRootVerifierClient::new(&s.env, &mock).set_ok(&true);
+    s.ad_manager.set_root_verifier(&s.tp.order_chain_id, &mock);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + SUITE_BUFFER
+    );
+    s.ad_manager.finalize_cancel(&p);
+    assert_eq!(ad_locked(&s), 0);
+}
+
+/// A resume at the deadline is after the lock, so it counts.
 #[test]
 fn test_422_finalize_cancel_resume_in_the_deadlines_second_counts() {
     let s = setup();

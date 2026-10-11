@@ -105,7 +105,7 @@ pub fn get_key_registry(env: &Env) -> Option<Address> {
 // ── the settlement halt (#422) ────────────────────────────────────────────
 
 /// A maker's halt, absent until they first halt. `last_resumed_at` survives a resume: the cancel
-/// grace treats a halt in force at any point at or after the order's deadline as a denied payout.
+/// grace treats a halt in force at any point since the order's lock as a denied payout.
 pub fn get_halt(env: &Env, maker: &Address) -> Option<Halt> {
     let key = (KEY_HALT, maker.clone());
     env.storage().persistent().get(&key)
