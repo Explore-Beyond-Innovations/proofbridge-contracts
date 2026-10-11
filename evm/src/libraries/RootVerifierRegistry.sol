@@ -8,6 +8,10 @@ import {IRootVerifier} from "../interfaces/IRootVerifier.sol";
 ///         `_setRootVerifier` belongs to the inheritor.
 abstract contract RootVerifierRegistry {
     mapping(uint256 => IRootVerifier) public rootVerifier;
+    /// @dev When the route's verifier last changed (set, repointed or unset). The AdManager's denial
+    ///      rule counts a change after an order's lock as a gap in the co-signed path: an unwire that
+    ///      covered the window still counts once the route is rewired.
+    mapping(uint256 => uint64) internal _rootVerifierChangedAt;
 
     /// @dev #466: every chain a verifier was ever set for, once each, so tools can find hand-wired peers.
     uint256[] private _wiredChains;
@@ -29,6 +33,7 @@ abstract contract RootVerifierRegistry {
             _wiredChains.push(chainId);
         }
         rootVerifier[chainId] = IRootVerifier(verifier);
+        _rootVerifierChangedAt[chainId] = uint64(block.timestamp);
         emit RootVerifierSet(chainId, verifier);
     }
 
