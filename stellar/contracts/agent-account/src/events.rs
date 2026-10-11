@@ -1,16 +1,20 @@
 use soroban_sdk::{contractevent, Address, BytesN, String, Symbol, Val, Vec};
 
-use crate::policy::Scope;
+use crate::policy::{Scope, TokenLimit};
 
-/// `fingerprint` is the canonical policy hash (`policy_fingerprint`), so a watcher can tell which
-/// policy was installed without a storage read.
+/// The installed policy, every field the canonical encoding covers. The account never hashes it: a
+/// watcher computes the fingerprint (the value the EVM module stores) from these fields with
+/// `@proofbridge/order-params`. Lists are as the owner passed them; the encoder sorts.
 #[contractevent(topics = ["pol_set"], data_format = "vec")]
 pub struct PolicySet {
     #[topic]
     pub agent_id: BytesN<32>,
-    pub settlement_signer: BytesN<32>,
+    pub allowed_action: Symbol,
+    pub ad_tokens: Vec<TokenLimit>,
+    pub order_tokens: Vec<BytesN<32>>,
+    pub ad_scope: Option<Vec<String>>,
     pub valid_until: u64,
-    pub fingerprint: BytesN<32>,
+    pub settlement_signer: BytesN<32>,
 }
 
 /// 2.1e wires the runtime to fire the owner's pre-signed registry

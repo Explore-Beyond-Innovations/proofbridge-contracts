@@ -83,4 +83,59 @@ contract AgentPolicyGasBudgetTest is AgentPolicyBase {
         op.execUserOps();
         assertEq(escrow.locks(), 0);
     }
+
+    /*//////////////////////////////////////////////////////////////
+                      GAS FIELDS PAST THE ENTRYPOINT'S BOUND
+    //////////////////////////////////////////////////////////////*/
+
+    uint256 internal constant TWO_120 = 1 << 120;
+
+    /// An operation whose gas fields the EntryPoint would never accept, sent straight to the
+    /// validator: refused with an answer, and nothing charged. With an unlimited budget so the
+    /// budget is not what refuses it; the all-`uint128` case is one whose cost overflows 256 bits.
+    function test_aGasFieldAboveTwoTo120IsRefusedNotReverted() public {
+        _asAccount(abi.encodeCall(module.setAgentGasBudget, (agentId, type(uint256).max)));
+        uint256 big = TWO_120 + 1;
+        uint256 max = type(uint128).max;
+        uint256[4][5] memory cases = [
+            [big, 1, 1, 1], // verificationGasLimit
+            [uint256(1), big, 1, 1], // callGasLimit
+            [uint256(1), 1, big, 1], // preVerificationGas
+            [uint256(1), 1, 1, big], // maxFeePerGas
+            [max, max, max, max]
+        ];
+        for (uint256 i = 0; i < cases.length; ++i) {
+            assertEq(_validateWith(cases[i]), 1, "VALIDATION_FAILED, not a revert");
+            assertEq(module.gasBudgetOf(instance.account, agentId), type(uint256).max, "nothing charged");
+        }
+    }
+
+    /// The bound itself is priced like any other operation.
+    function test_gasFieldsOfExactlyTwoTo120AreCharged() public {
+        _asAccount(abi.encodeCall(module.setAgentGasBudget, (agentId, type(uint256).max)));
+        assertEq(_validateWith([TWO_120, TWO_120, TWO_120, TWO_120]), 0, "approved");
+        assertEq(
+            module.gasBudgetOf(instance.account, agentId),
+            type(uint256).max - 3 * TWO_120 * TWO_120,
+            "debited at (verification + call + preVerification) x maxFeePerGas"
+        );
+    }
+
+    /// `validateUserOp` called the way the account calls it, with
+    /// `[verificationGasLimit, callGasLimit, preVerificationGas, maxFeePerGas]`.
+    function _validateWith(uint256[4] memory g) internal returns (uint256) {
+        UserOpData memory op = _agentOp(lockCall(1));
+        op.userOp.accountGasLimits = bytes32(abi.encodePacked(uint128(g[0]), uint128(g[1])));
+        op.userOp.preVerificationGas = g[2];
+        op.userOp.gasFees = bytes32(abi.encodePacked(uint128(1), uint128(g[3])));
+        bytes32 hash = keccak256("an operation outside the EntryPoint");
+        op.userOp.signature = _sign(hash, agentKey);
+        vm.prank(instance.account);
+        // A raw call, so a revert is a failed assertion here rather than the test's own revert. (The
+        // module and ModuleKit each declare `PackedUserOperation`; the encoding is the same.)
+        (bool ok, bytes memory ret) =
+            address(module).call(abi.encodeWithSelector(module.validateUserOp.selector, op.userOp, hash));
+        assertTrue(ok, "validateUserOp reverted");
+        return abi.decode(ret, (uint256));
+    }
 }
