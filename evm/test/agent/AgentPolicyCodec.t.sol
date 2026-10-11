@@ -254,6 +254,28 @@ contract AgentPolicyCodecTest is Test {
         codec.parse(policy);
     }
 
+    /// 512 bytes is the shared ad-id bound (Soroban `validate`, `order-params`): it parses, 513 does not.
+    function test_anAdIdIsAtMost512Bytes() public {
+        assertEq(codec.parse(_scopedWithId(512)).adScopeCount, 1);
+        vm.expectRevert(IAgentPolicyCodecErrors.AgentPolicyCodec__BadAdScope.selector);
+        codec.parse(_scopedWithId(513));
+    }
+
+    function _scopedWithId(uint256 len) internal pure returns (bytes memory) {
+        bytes memory id = new bytes(len);
+        for (uint256 i = 0; i < len; ++i) {
+            id[i] = "x";
+        }
+        return bytes.concat(
+            _head(_row(T1, 1, 1, 1), 1, bytes.concat(T2), 1),
+            hex"0101",
+            bytes2(uint16(len)),
+            id,
+            bytes8(uint64(0)),
+            bytes32(0)
+        );
+    }
+
     function test_anyActionButLockForOrderIsRefused() public {
         for (uint256 id = 0; id < 256; ++id) {
             if (id == AgentPolicyCodec.ACTION_LOCK_FOR_ORDER) continue;

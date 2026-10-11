@@ -18,8 +18,9 @@ pub const MAX_TARGETS: u32 = 2;
 /// enough that the linear scan in the auth path stays cheap.
 pub const MAX_AD_SCOPE: u32 = 16;
 /// Longest ad id a scope may name, in bytes: the bound the EVM codec and the off-chain encoder
-/// share, so one policy means the same on both chains.
-pub const MAX_AD_ID_BYTES: u32 = 1024;
+/// share, so one policy means the same on both chains. 512 so the largest policy's `PolicySet`
+/// (12,712 bytes) fits the network's 16,384-byte event limit; at 1,024 it did not.
+pub const MAX_AD_ID_BYTES: u32 = 512;
 /// Guarded ads per account. The roster lives in the instance, which is loaded on every call, so it
 /// is bounded for the same reason the token lists are.
 pub const MAX_GUARDED_ADS: u32 = 16;

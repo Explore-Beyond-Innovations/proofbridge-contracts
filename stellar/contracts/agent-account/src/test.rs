@@ -1843,15 +1843,15 @@ fn ad_scope_is_validated_like_the_token_lists() {
         Err(Ok(AccountError::BadPolicy)),
         "an empty ad id"
     );
-    // The bound the EVM codec shares: 1,024 bytes installs, 1,025 does not. Without it this chain
-    // would hold a policy the other refuses and no encoder can fingerprint.
+    // The bound the EVM codec shares: 512 bytes installs, 513 does not. Without it this chain
+    // would hold a policy the other refuses, and the largest policy's event would not fit.
     let long = |n: usize| String::from_str(&f.env, &"x".repeat(n));
     assert_eq!(
-        install(Some(vec![&f.env, long(1_025)])),
+        install(Some(vec![&f.env, long(513)])),
         Err(Ok(AccountError::BadPolicy)),
-        "an ad id over 1,024 bytes"
+        "an ad id over 512 bytes"
     );
-    assert_eq!(install(Some(vec![&f.env, long(1_024)])), Ok(Ok(())));
+    assert_eq!(install(Some(vec![&f.env, long(512)])), Ok(Ok(())));
 }
 
 /// Every ad-token row is a well-formed limit: a zero on either side of the rate, no size cap, or a
@@ -4227,7 +4227,7 @@ fn schedule_commitment_vectors() {
 }
 
 /// The largest `set_policy` an owner can install: 16 tokens with limits and 16 ad-scope ids of
-/// `MAX_AD_ID` (1,024) bytes. Its `Scheduled` event must fit the network's 16,384-byte
+/// `MAX_AD_ID_BYTES` (512) bytes. Its `Scheduled` event must fit the network's 16,384-byte
 /// per-transaction contract-event limit, or a guarded account could never schedule it.
 fn maximal_policy_args(f: &Fixture) -> Vec<Val> {
     let mut tokens = Vec::new(&f.env);
@@ -4239,7 +4239,7 @@ fn maximal_policy_args(f: &Fixture) -> Vec<Val> {
     }
     let mut scope = Vec::new(&f.env);
     for i in 0..policy::MAX_AD_SCOPE {
-        let id = std::format!("{i:02}{}", "x".repeat(1_022));
+        let id = std::format!("{i:02}{}", "x".repeat(policy::MAX_AD_ID_BYTES as usize - 2));
         scope.push_back(String::from_str(&f.env, &id));
     }
     policy_args(
@@ -4531,10 +4531,10 @@ fn the_owner_path_refuses_an_undecodable_destination() {
     );
 }
 
-/// `PolicySet` carries the whole policy, so its size grows with the lists. Sixteen ad tokens at the
-/// widest limits, sixteen order tokens and sixteen ad ids of 512 bytes fit the network's
-/// 16,384-byte per-transaction event limit. At the 1,024-byte ad-id bound the event measures
-/// 20,904 bytes and the install is refused by the host (plan 10 §7 records this).
+/// `PolicySet` carries the whole policy, so its size grows with the lists. The largest policy that
+/// installs — sixteen ad tokens at the widest limits, sixteen order tokens and sixteen ad ids at
+/// the 512-byte bound — fits the network's 16,384-byte per-transaction event limit. (At a
+/// 1,024-byte bound it measured 20,904 bytes and the host refused the install.)
 #[test]
 fn a_policy_set_event_with_full_lists_and_512_byte_ad_ids_fits_the_event_limit() {
     let f = fixture();

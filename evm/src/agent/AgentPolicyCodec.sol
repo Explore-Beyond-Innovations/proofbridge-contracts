@@ -61,7 +61,8 @@ library AgentPolicyCodec {
     /// @notice Per list: at most 16 ad tokens and 16 order tokens.
     uint8 internal constant MAX_WHITELIST_TOKENS = 16;
     uint8 internal constant MAX_AD_SCOPE = 16;
-    uint16 internal constant MAX_AD_ID_BYTES = 1024;
+    /// @notice 512 so the largest policy's Soroban `PolicySet` event fits the network's event limit.
+    uint16 internal constant MAX_AD_ID_BYTES = 512;
 
     uint256 private constant ROW_BYTES = 128;
 
@@ -204,7 +205,7 @@ library AgentPolicyCodec {
         for (uint256 i = 0; i < v.adScopeCount; ++i) {
             uint16 len = uint16(bytes2(policy[at:at + 2]));
             at += 2;
-            // 1024 is Soroban's ad id bound; a longer id would be a policy one chain accepts and the
+            // Soroban's ad id bound too; a longer id would be a policy one chain accepts and the
             // other refuses.
             if (len == 0 || len > MAX_AD_ID_BYTES) revert IAgentPolicyCodecErrors.AgentPolicyCodec__BadAdScope();
             // Strictly ascending by raw bytes, the rule both token lists already follow. The first
