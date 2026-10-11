@@ -134,9 +134,8 @@ pub enum OrderPortalError {
     DisputeModuleRejected = 92,
     /// A token pull credited the escrow less than the amount (fee-on-transfer or rebasing token).
     TransferShort = 106,
-    /// record_settled: the deposit went to the maker on a forfeit ruling, so no trade settled and
-    /// there is no SETTLED leaf to record.
-    PaidByForfeit = 107,
+    // 107 was `PaidByForfeit`: retired, never reused. A forfeit fill marks the order settled-recorded
+    // instead, so `record_settled` answers `SettledRecorded` for it.
 }
 
 /// The shared escrow code reports an opaque reason; this is where it becomes this contract's own

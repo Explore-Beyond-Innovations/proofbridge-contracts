@@ -1214,10 +1214,11 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         assertEq(uint256(statusOf(address(portal), h)), uint256(IEscrow.Status.Filled), "the deposit was paid out");
         assertEq(orderToken.balanceOf(adRecipient), before + p.amount, "and it went to the maker");
 
-        // No trade settled, so no SETTLED leaf can follow the forfeit fill.
-        assertTrue(portal.paidByForfeit(h));
+        // No trade settled, so no SETTLED leaf can follow the forfeit fill: the fill marked the order
+        // recorded without appending, and `recordSettled` refuses a recorded order.
+        assertTrue(portal.settledRecorded(h), "the forfeit fill marks the order recorded");
         uint256 leaves = portal.getMerkleLeafCount();
-        vm.expectRevert(abi.encodeWithSelector(IOrderPortal.OrderPortal__PaidByForfeit.selector, h));
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__SettledRecorded.selector, h));
         portal.recordSettled(p);
         assertEq(portal.getMerkleLeafCount(), leaves, "no SETTLED leaf");
     }
