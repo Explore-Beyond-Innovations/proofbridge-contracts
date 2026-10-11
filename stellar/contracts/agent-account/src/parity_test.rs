@@ -139,23 +139,21 @@ fn rig(start: u64, ceilings: &Value) -> Rig {
 /// Install the fixture's policy, returning this chain's refusal if there is one.
 fn install(r: &Rig, policy: &Value) -> Result<(), AccountError> {
     let env = &r.env;
-    let mut actions: Vec<Symbol> = Vec::new(env);
-    for a in policy["actions"].as_array().unwrap() {
-        actions.push_back(Symbol::new(env, a.as_str().unwrap()));
-    }
-    let mut tokens: Vec<BytesN<32>> = Vec::new(env);
-    let mut limits: Vec<TokenLimit> = Vec::new(env);
-    for l in policy["limits"].as_array().unwrap() {
-        let token = hex32(env, l["token"].as_str().unwrap());
-        tokens.push_back(token.clone());
-        limits.push_back(TokenLimit {
-            token,
+    let action = Symbol::new(env, policy["action"].as_str().unwrap());
+    let mut ad_tokens: Vec<TokenLimit> = Vec::new(env);
+    for l in policy["adTokens"].as_array().unwrap() {
+        ad_tokens.push_back(TokenLimit {
+            token: hex32(env, l["token"].as_str().unwrap()),
             max_per_order: u128_of(&l["maxPerOrder"]),
             rate: Limit {
                 capacity: u128_of(&l["capacity"]),
                 refill_per_second: u128_of(&l["refillPerSecond"]),
             },
         });
+    }
+    let mut order_tokens: Vec<BytesN<32>> = Vec::new(env);
+    for t in policy["orderTokens"].as_array().unwrap() {
+        order_tokens.push_back(hex32(env, t.as_str().unwrap()));
     }
     let ad_scope: Option<Vec<String>> = policy["adScope"].as_array().map(|ads| {
         let mut v = Vec::new(env);
@@ -167,12 +165,12 @@ fn install(r: &Rig, policy: &Value) -> Result<(), AccountError> {
 
     match r.client.try_set_policy(
         &r.agent_id,
-        &actions,
-        &tokens,
+        &action,
+        &ad_tokens,
+        &order_tokens,
         &policy["validUntil"].as_u64().unwrap(),
         &r.signer,
         &ad_scope,
-        &limits,
     ) {
         Ok(_) => Ok(()),
         Err(Ok(e)) => Err(e),

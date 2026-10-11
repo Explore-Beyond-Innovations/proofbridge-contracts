@@ -4298,10 +4298,10 @@ fn test_422_finalize_cancel_resume_in_the_locks_second_counts() {
 }
 
 /// An unset root verifier refuses every co-signed unlock, so it denies the payout like a halt: the
-/// cancel waits the grace. Set, the order is back to ordinary timing. (A Soroban verifier cannot be
-/// unset once set, so the order is locked on a route that never had one.)
+/// cancel waits the grace. Set after the lock, the gap it opened still counts: the grace stays. (A
+/// Soroban verifier cannot be unset once set, so the order is locked on a route that never had one.)
 #[test]
-fn test_unset_root_verifier_denies_the_payout_set_again_ordinary() {
+fn test_unset_root_verifier_denies_the_payout_set_again_still_waits() {
     let s = setup_with_verifiers(false);
     let p = locked_ad_order(&s);
     warp(&s, p.deadline);
@@ -4321,10 +4321,46 @@ fn test_unset_root_verifier_denies_the_payout_set_again_ordinary() {
     s.ad_manager.set_root_verifier(&s.tp.order_chain_id, &mock);
     assert_eq!(
         s.ad_manager.cancel_finalizes_at(&p),
-        p.deadline + SUITE_BUFFER
+        p.deadline + 2 * SUITE_BUFFER,
+        "wiring the verifier does not erase the gap"
     );
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
     s.ad_manager.finalize_cancel(&p);
     assert_eq!(ad_locked(&s), 0);
+}
+
+/// A verifier repointed after the lock is a change in the co-signed path too: the grace applies. A
+/// verifier set in the lock's own second is the route's set-up, not a change after it.
+#[test]
+fn test_422_root_verifier_repointed_after_the_lock_waits_the_grace() {
+    let s = setup();
+    let p = locked_ad_order(&s);
+    let mock = s.env.register(MockRootVerifier, ());
+    MockRootVerifierClient::new(&s.env, &mock).set_ok(&true);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    s.ad_manager.set_root_verifier(&s.tp.order_chain_id, &mock);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER
+    );
+
+    let t = setup();
+    let other = t.env.register(MockRootVerifier, ());
+    MockRootVerifierClient::new(&t.env, &other).set_ok(&true);
+    t.ad_manager.set_root_verifier(&t.tp.order_chain_id, &other);
+    let q = locked_ad_order(&t); // the same second as the set
+    warp(&t, q.deadline);
+    t.ad_manager.claim_cancel(&q);
+    assert_eq!(
+        t.ad_manager.cancel_finalizes_at(&q),
+        q.deadline + SUITE_BUFFER
+    );
 }
 
 /// A resume at the deadline is after the lock, so it counts.

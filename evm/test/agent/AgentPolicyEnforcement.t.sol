@@ -7,6 +7,8 @@ import {Execution} from "modulekit/accounts/erc7579/lib/ExecutionLib.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
 import {ProofBridgeAgentPolicy} from "src/agent/ProofBridgeAgentPolicy.sol";
 import {AgentRateLimit} from "src/agent/AgentRateLimit.sol";
+import {AgentPolicyCodec} from "src/agent/AgentPolicyCodec.sol";
+import {stdJson} from "forge-std/StdJson.sol";
 import {AgentPolicyBase} from "./AgentPolicyBase.t.sol";
 import {MockEscrow} from "./mocks/MockEscrow.sol";
 
@@ -498,18 +500,132 @@ contract AgentPolicyEnforcementTest is AgentPolicyBase {
         module.setAgentPolicy(bytes32(uint256(0xa9)), _policyForToken(fresh));
     }
 
+    /*//////////////////////////////////////////////////////////////
+                    TWO TOKEN LISTS AND ONE ACTION (v3)
+    //////////////////////////////////////////////////////////////*/
+
+    /// The order token is checked for membership only, so it needs no account ceiling; the ad token
+    /// is spent from this account, so it does.
+    function test_anOrderTokenNeedsNoCeilingButAnAdTokenDoes() public {
+        bytes32 freshOrder = bytes32(uint256(0x4444));
+        bytes memory policy = _policyWith(AD_TOKEN, freshOrder);
+        vm.prank(instance.account);
+        module.setAgentPolicy(bytes32(uint256(0xa9)), policy);
+        assertEq(module.fingerprintOf(instance.account, bytes32(uint256(0xa9))), keccak256(policy));
+
+        bytes32 freshAd = bytes32(uint256(0x3333));
+        vm.prank(instance.account);
+        vm.expectRevert(abi.encodeWithSelector(ProofBridgeAgentPolicy.AgentPolicy__NoAccountCeiling.selector, freshAd));
+        module.setAgentPolicy(bytes32(uint256(0xaa)), _policyWith(freshAd, ORDER_TOKEN));
+    }
+
+    function test_anOrderTokenInNeitherListIsRefused() public {
+        _assertRefused(AD_TOKEN, bytes32(uint256(0xdead)), ProofBridgeAgentPolicy.Refusal.TokenNotAllowed);
+        _assertRefused(AD_TOKEN, ORDER_TOKEN, ProofBridgeAgentPolicy.Refusal.None);
+    }
+
+    /// The default policy lists AD_TOKEN as an ad token only and ORDER_TOKEN as an order token only.
+    /// Each in the other's place is a miss.
+    function test_aTokenInTheWrongListIsRefused() public {
+        // the order-chain token is listed only in the ad tokens
+        _assertRefused(AD_TOKEN, AD_TOKEN, ProofBridgeAgentPolicy.Refusal.TokenNotAllowed);
+        // the ad-chain token is listed only in the order tokens
+        _assertRefused(ORDER_TOKEN, ORDER_TOKEN, ProofBridgeAgentPolicy.Refusal.TokenNotAllowed);
+        // and reversed, both at once
+        _assertRefused(ORDER_TOKEN, AD_TOKEN, ProofBridgeAgentPolicy.Refusal.TokenNotAllowed);
+    }
+
+    /// A token may sit in both lists, and then serves either side.
+    function test_aTokenInBothListsServesBothSides() public {
+        _asAccount(abi.encodeCall(module.setAgentPolicy, (agentId, policyBothWays())));
+        _assertRefused(AD_TOKEN, ORDER_TOKEN, ProofBridgeAgentPolicy.Refusal.None);
+        _assertRefused(ORDER_TOKEN, AD_TOKEN, ProofBridgeAgentPolicy.Refusal.None);
+        _assertRefused(AD_TOKEN, AD_TOKEN, ProofBridgeAgentPolicy.Refusal.None);
+    }
+
+    /// Order-token rows are keyed by the policy version, so a re-install drops the old list.
+    function test_reinstallingDropsTheOldOrderTokens() public {
+        bytes32 other = bytes32(uint256(0x5555));
+        _asAccount(abi.encodeCall(module.setAgentPolicy, (agentId, _policyWith(AD_TOKEN, other))));
+        _assertRefused(AD_TOKEN, other, ProofBridgeAgentPolicy.Refusal.None);
+        _assertRefused(AD_TOKEN, ORDER_TOKEN, ProofBridgeAgentPolicy.Refusal.TokenNotAllowed);
+    }
+
+    /// The policy's one action is the only selector that passes; the call is refused before its
+    /// arguments are read.
+    function test_aSelectorOtherThanThePolicysActionIsRefusedByName() public view {
+        bytes memory withdraw = abi.encodeCall(MockEscrow.withdrawFromAd, ("ad-alpha", 1, address(this)));
+        (ProofBridgeAgentPolicy.Refusal why,) =
+            module.preflight(instance.account, agentId, _executeSingle(address(escrow), withdraw));
+        assertEq(uint8(why), uint8(ProofBridgeAgentPolicy.Refusal.ActionNotAllowed));
+    }
+
+    /// The cross-chain vector: Soroban's `PolicySet` carries `policySet`, `order-params` fingerprints
+    /// those fields to `fingerprint`, and this module stores exactly that for `encoded`.
+    function test_theSorobanEventFieldsFingerprintToWhatTheModuleStores() public {
+        string memory v = vm.readFile("../test-vectors/agent-policy-cross-chain.json");
+        uint256 i;
+        for (; vm.keyExistsJson(v, string.concat(".cases[", vm.toString(i), "]")); ++i) {
+            string memory at = string.concat(".cases[", vm.toString(i), "]");
+            uint256 n;
+            while (vm.keyExistsJson(v, string.concat(at, ".policySet.adTokens[", vm.toString(n), "]"))) {
+                bytes32 token =
+                    stdJson.readBytes32(v, string.concat(at, ".policySet.adTokens[", vm.toString(n), "].token"));
+                _asAccount(abi.encodeCall(module.setAccountLimit, (token, ACCOUNT_CAPACITY, ACCOUNT_REFILL)));
+                ++n;
+            }
+            bytes32 id = bytes32(uint256(0xc0 + i));
+            bytes memory encoded = stdJson.readBytes(v, string.concat(at, ".encoded"));
+            _asAccount(abi.encodeCall(module.setAgentPolicy, (id, encoded)));
+            assertEq(
+                module.fingerprintOf(instance.account, id),
+                stdJson.readBytes32(v, string.concat(at, ".fingerprint")),
+                stdJson.readString(v, string.concat(at, ".name"))
+            );
+        }
+        assertEq(i, 2, "both cross-chain cases ran");
+    }
+
+    function _assertRefused(bytes32 adToken, bytes32 orderToken, ProofBridgeAgentPolicy.Refusal want) internal view {
+        bytes memory call =
+            abi.encodeCall(IAdManager.lockForOrder, (orderParams(1, adToken, orderToken, AD_ID, settlementSigner)));
+        (ProofBridgeAgentPolicy.Refusal why,) =
+            module.preflight(instance.account, agentId, _executeSingle(address(escrow), call));
+        assertEq(uint8(why), uint8(want));
+    }
+
+    function _executeSingle(address target, bytes memory data) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(bytes4(0xe9ae5c53), bytes32(0), abi.encodePacked(target, uint256(0), data));
+    }
+
+    function _policyWith(bytes32 adToken, bytes32 orderToken) internal view returns (bytes memory) {
+        return bytes.concat(
+            AgentPolicyCodec.DOMAIN,
+            bytes1(AgentPolicyCodec.ACTION_LOCK_FOR_ORDER),
+            bytes1(uint8(1)),
+            adToken,
+            bytes32(MAX_PER_ORDER),
+            bytes32(CAPACITY),
+            bytes32(REFILL),
+            bytes1(uint8(1)),
+            orderToken,
+            hex"0000",
+            bytes8(uint64(0)),
+            settlementSigner
+        );
+    }
+
     function _policyForToken(bytes32 token) internal view returns (bytes memory) {
         return bytes.concat(
-            bytes.concat(
-                hex"",
-                abi.encodePacked(
-                    keccak256("ProofBridge.AgentPolicy.v1"), bytes1(uint8(1)), bytes1(uint8(1)), bytes1(uint8(1))
-                )
-            ),
+            AgentPolicyCodec.DOMAIN,
+            bytes1(AgentPolicyCodec.ACTION_LOCK_FOR_ORDER),
+            bytes1(uint8(1)),
             token,
             bytes32(uint256(1)),
             bytes32(uint256(1)),
             bytes32(uint256(1)),
+            bytes1(uint8(1)),
+            ORDER_TOKEN,
             hex"0000",
             bytes8(uint64(0)),
             settlementSigner
