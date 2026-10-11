@@ -93,8 +93,9 @@ faults! {
     DecimalOverflow,
     /// 32 bytes that cannot be an account address (all zero).
     InvalidAccountAddress,
-    /// A token pull credited this escrow less (or more) than the amount: a fee-on-transfer or
-    /// rebasing token, which would leave the escrow short of what it owes.
+    /// A token pull credited this escrow anything other than the amount: less (a fee-on-transfer
+    /// token) leaves it short of what it owes; more is a balance it did not record. Refused either
+    /// way, exactly `amount` or nothing.
     TransferShort,
 }
 

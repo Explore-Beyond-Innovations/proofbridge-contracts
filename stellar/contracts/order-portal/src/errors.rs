@@ -132,7 +132,8 @@ pub enum OrderPortalError {
     /// Every dispute-module fault, collapsed: the follower never calls the module, so none can occur
     /// here; the one code keeps the `From<Fault>` table total without a wildcard.
     DisputeModuleRejected = 92,
-    /// A token pull credited the escrow less than the amount (fee-on-transfer or rebasing token).
+    /// A token pull credited the escrow anything other than the amount (a fee-on-transfer token,
+    /// or one that pays a bonus on receipt).
     TransferShort = 106,
 }
 

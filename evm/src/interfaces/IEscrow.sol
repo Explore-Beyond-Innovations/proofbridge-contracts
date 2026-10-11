@@ -135,8 +135,9 @@ interface IEscrow {
     error Escrow__DisputeWindowClosed(bytes32 orderHash, uint256 windowEnd);
     /// @notice Native value must equal the amount exactly (C-17).
     error Escrow__NativeAmountMismatch(uint256 sent, uint256 expected);
-    /// @notice A token pull credited this escrow other than the amount (a fee-on-transfer or
-    ///         rebasing token), which would leave the escrow short of what it owes.
+    /// @notice A token pull credited this escrow anything other than the amount: less (a
+    ///         fee-on-transfer token) leaves it short of what it owes; more is a balance it did
+    ///         not record. Refused either way, exactly `amount` or nothing.
     error Escrow__TransferShort(uint256 expected, uint256 received);
     /// @notice Plain native sends are refused; only the wrapped-native contract's unwraps land (C-17).
     error Escrow__NativeNotAccepted(address sender);

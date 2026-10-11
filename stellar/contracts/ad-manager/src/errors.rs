@@ -173,7 +173,8 @@ pub enum AdManagerError {
     DisputeAlreadyRuled = 85,
     /// The settlement signer is not the maker and has not approved the maker in the key registry.
     SignerNotApproved = 86,
-    /// A token pull credited the escrow less than the amount (fee-on-transfer or rebasing token).
+    /// A token pull credited the escrow anything other than the amount (a fee-on-transfer token,
+    /// or one that pays a bonus on receipt).
     TransferShort = 87,
 }
 
