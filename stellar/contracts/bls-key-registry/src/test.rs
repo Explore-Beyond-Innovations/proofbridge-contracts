@@ -2809,6 +2809,7 @@ fn approve_maker_by_stellar_auth() {
 #[test]
 fn revoke_drops_every_approval() {
     let (env, client, v) = setup();
+    idle_guard(&env, &client); // a revoke with live slots asks the guards (14c)
     let account = slot_account(&env, &v, MAKER);
     register_slot(&env, &client, &v, MAKER, 0);
     let a = oa(&v, MAKER);

@@ -1149,6 +1149,7 @@ contract BLSKeyRegistryTest is Test {
     }
 
     function test_revoke_dropsEveryApproval() public {
+        idleGuard(); // a revoke with live slots asks the guards (14c)
         bytes32 account = registerMaker();
         fileApproval("makerOnSepolia", "approveMaker[0]");
         assertTrue(registry.isApprovedMaker(account, makerId("approved")));
