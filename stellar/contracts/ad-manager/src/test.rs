@@ -1511,3 +1511,132 @@ fn fault_codes_never_move() {
         );
     }
 }
+
+// =============================================================================
+// Settlement-signer consent: the registry gate's maker check
+// =============================================================================
+
+mod signer_consent_tests {
+    use crate::errors::AdManagerError;
+    use crate::storage;
+    use crate::validation;
+    use soroban_sdk::{contract, contractimpl, symbol_short, BytesN, Env};
+
+    use super::*;
+
+    /// Every account holds a usable key; approvals are (account, maker) pairs a test files.
+    #[contract]
+    pub struct ConsentRegistry;
+
+    #[contractimpl]
+    impl ConsentRegistry {
+        pub fn approve(env: Env, account: BytesN<32>, maker: BytesN<32>, ok: bool) {
+            env.storage()
+                .instance()
+                .set(&(symbol_short!("appr"), account, maker), &ok);
+        }
+        pub fn has_usable_slot(_env: Env, _account: BytesN<32>) -> bool {
+            true
+        }
+        pub fn is_approved_maker(env: Env, account: BytesN<32>, maker: BytesN<32>) -> bool {
+            env.storage()
+                .instance()
+                .get(&(symbol_short!("appr"), account, maker))
+                .unwrap_or(false)
+        }
+    }
+
+    /// A registry from before consent: it cannot answer `is_approved_maker`.
+    #[contract]
+    pub struct OldRegistry;
+
+    #[contractimpl]
+    impl OldRegistry {
+        pub fn has_usable_slot(_env: Env, _account: BytesN<32>) -> bool {
+            true
+        }
+    }
+
+    fn setup() -> (Env, Address, Address, ConsentRegistryClient<'static>) {
+        let env = Env::default();
+        let escrow = env.register(AdManagerContract, ());
+        let registry = env.register(ConsentRegistry, ());
+        let client = ConsentRegistryClient::new(&env, &registry);
+        env.as_contract(&escrow, || {
+            storage::set_key_registry(&env, &registry);
+        });
+        (env, escrow, registry, client)
+    }
+
+    fn check(
+        env: &Env,
+        escrow: &Address,
+        signer: &BytesN<32>,
+        maker: &Address,
+    ) -> Result<(), AdManagerError> {
+        env.as_contract(escrow, || {
+            validation::require_registered(env, signer, maker)
+        })
+    }
+
+    fn id(env: &Env, a: &Address) -> BytesN<32> {
+        proofbridge_core::eip712::address_to_bytes32(env, a)
+    }
+
+    #[test]
+    fn self_signer_needs_no_approval() {
+        let (env, escrow, _, _) = setup();
+        let maker = Address::generate(&env);
+        assert_eq!(check(&env, &escrow, &id(&env, &maker), &maker), Ok(()));
+    }
+
+    #[test]
+    fn another_signer_needs_the_makers_approval() {
+        let (env, escrow, _, registry) = setup();
+        let maker = Address::generate(&env);
+        let signer = BytesN::from_array(&env, &[0x77; 32]);
+        assert_eq!(
+            check(&env, &escrow, &signer, &maker),
+            Err(AdManagerError::SignerNotApproved)
+        );
+        registry.approve(&signer, &id(&env, &maker), &true);
+        assert_eq!(check(&env, &escrow, &signer, &maker), Ok(()));
+        registry.approve(&signer, &id(&env, &maker), &false);
+        assert_eq!(
+            check(&env, &escrow, &signer, &maker),
+            Err(AdManagerError::SignerNotApproved),
+            "a withdrawal refuses again"
+        );
+    }
+
+    #[test]
+    fn an_approval_for_one_maker_does_not_cover_another() {
+        let (env, escrow, _, registry) = setup();
+        let (m, n) = (Address::generate(&env), Address::generate(&env));
+        let signer = BytesN::from_array(&env, &[0x77; 32]);
+        registry.approve(&signer, &id(&env, &m), &true);
+        assert_eq!(check(&env, &escrow, &signer, &m), Ok(()));
+        assert_eq!(
+            check(&env, &escrow, &signer, &n),
+            Err(AdManagerError::SignerNotApproved)
+        );
+    }
+
+    /// A registry that cannot answer the approval read refuses, never traps or passes.
+    #[test]
+    fn a_registry_without_the_view_fails_closed() {
+        let env = Env::default();
+        let escrow = env.register(AdManagerContract, ());
+        let old = env.register(OldRegistry, ());
+        env.as_contract(&escrow, || {
+            storage::set_key_registry(&env, &old);
+        });
+        let maker = Address::generate(&env);
+        let signer = BytesN::from_array(&env, &[0x77; 32]);
+        assert_eq!(
+            check(&env, &escrow, &signer, &maker),
+            Err(AdManagerError::SignerNotApproved)
+        );
+        assert_eq!(check(&env, &escrow, &id(&env, &maker), &maker), Ok(()));
+    }
+}

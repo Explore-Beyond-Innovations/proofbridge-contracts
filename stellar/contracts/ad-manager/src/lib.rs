@@ -352,7 +352,7 @@ impl AdManagerContract {
 
         // Creator authorizes the call (and the downstream SAC transfer).
         creator.require_auth();
-        validation::require_registered(&env, &settlement_signer)?;
+        validation::require_registered(&env, &settlement_signer, &creator)?;
 
         token::transfer_from_user_bytes32(
             &env,
@@ -476,7 +476,7 @@ impl AdManagerContract {
         // freezable, and unpause re-enables locks in the same instant it would re-enable this.
         let mut ad = storage::get_ad(&env, &ad_id).ok_or(AdManagerError::AdNotFound)?;
         ad.maker.require_auth();
-        validation::require_registered(&env, &identity)?;
+        validation::require_registered(&env, &identity, &ad.maker)?;
 
         let previous = ad.settlement_signer.clone();
         ad.settlement_signer = identity.clone();
@@ -635,7 +635,7 @@ impl AdManagerContract {
         validation::validate_order(&env, &ad, &params)?;
         // A key retired after the ad was pointed at it (set_valid_until, a watchtower retirement)
         // must not take new locks: the bridger's deposit could never be unlocked (2.3c D2).
-        validation::require_registered(&env, &ad.settlement_signer)?;
+        validation::require_registered(&env, &ad.settlement_signer, &ad.maker)?;
         Self::assert_ad_decimals(&env, &params, &config.w_native_token)?;
         // 2.3e D5: the window bound that makes cancel_never_locked's "no lock can follow the
         // deadline" hold.

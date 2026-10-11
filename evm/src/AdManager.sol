@@ -117,7 +117,7 @@ contract AdManager is EscrowBase, IAdManager {
 
         Ad storage ad = ads[adId];
         if (ad.maker != address(0)) revert AdManager__UsedAdId();
-        _requireRegistered(settlementSigner);
+        _requireRegistered(settlementSigner, msg.sender);
 
         _pullFunds(adToken, initialAmount);
 
@@ -142,7 +142,7 @@ contract AdManager is EscrowBase, IAdManager {
      */
     function setSettlementSigner(string calldata adId, bytes32 identity) external nonReentrant {
         Ad storage ad = _getAdOwned(adId, msg.sender);
-        _requireRegistered(identity);
+        _requireRegistered(identity, ad.maker);
         emit SettlementSignerSet(adId, ad.settlementSigner, identity);
         ad.settlementSigner = identity;
     }
@@ -597,12 +597,11 @@ contract AdManager is EscrowBase, IAdManager {
     }
 
     /// @dev The registry gate on every settlement-signer set and on every lock (2.3c D2): fails
-    ///      closed with no registry, refuses the zero identity, and refuses an account with no live,
-    ///      unexpired key on this chain.
-    function _requireRegistered(bytes32 signer) private view {
-        if (address(keyRegistry) == address(0)) revert AdManager__NoKeyRegistry();
-        if (signer == bytes32(0)) revert AdManager__SettlementSignerZero();
-        if (!keyRegistry.hasUsableSlot(signer)) revert AdManager__SignerNotRegistered(signer);
+    ///      closed with no registry, refuses the zero identity, an account with no live, unexpired key
+    ///      on this chain, and a signer other than the maker that has not approved the maker. The body
+    ///      lives in the linked `ProofBridgeUtils` for EIP-170 headroom.
+    function _requireRegistered(bytes32 signer, address maker) private view {
+        ProofBridgeUtils.requireSettlementSigner(keyRegistry, signer, maker.toBytes32());
     }
 
     /// @dev Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force
@@ -757,7 +756,7 @@ contract AdManager is EscrowBase, IAdManager {
 
         // A key retired after the ad was pointed at it (setValidUntil, a watchtower retirement) must
         // not take new locks: the bridger's deposit could never be unlocked (2.3c D2).
-        _requireRegistered(ad.settlementSigner);
+        _requireRegistered(ad.settlementSigner, ad.maker);
 
         orderHash = _orderHash(params);
     }

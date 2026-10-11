@@ -171,6 +171,8 @@ pub enum AdManagerError {
     DisputeZeroResponse = 84,
     /// D5 (R1): the ruling closed the answer window.
     DisputeAlreadyRuled = 85,
+    /// The settlement signer is not the maker and has not approved the maker in the key registry.
+    SignerNotApproved = 86,
 }
 
 /// The shared escrow code reports an opaque reason; this is where it becomes this contract's own

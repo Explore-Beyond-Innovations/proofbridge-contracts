@@ -11,6 +11,9 @@ pragma solidity ^0.8.34;
 ///      on chain.
 interface IKeyRegistry {
     function hasUsableSlot(bytes32 account) external view returns (bool);
+    /// @notice Did `account` approve `maker` to name it as an ad's settlement signer (and not withdraw
+    ///         it, nor revoke since). The escrow asks it whenever the signer is not the maker itself.
+    function isApprovedMaker(bytes32 account, bytes32 maker) external view returns (bool);
     /// @notice Did any of `account`'s slots expire in `[from, to]` (#422 D12/D14/D14b). The escrow's
     ///         cancel grace asks it over the order's life as a payout, `[lockedAt, cutoff]` (D16):
     ///         a slot the order may have been co-signed under died while the payout could still

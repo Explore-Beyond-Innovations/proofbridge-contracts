@@ -106,6 +106,7 @@ pub trait RootAnchorInterface {
 pub trait KeyRegistryInterface {
     fn has_usable_slot(env: Env, account: BytesN<32>) -> bool;
     fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool;
+    fn is_approved_maker(env: Env, account: BytesN<32>, maker: BytesN<32>) -> bool;
 }
 
 // =============================================================================
@@ -371,6 +372,20 @@ pub fn verifier_registry(env: &Env, verifier: &Address) -> Option<Address> {
 /// True iff `account` holds at least one live, unexpired key slot in the registry.
 pub fn has_usable_slot(env: &Env, registry: &Address, account: &BytesN<32>) -> bool {
     KeyRegistryClient::new(env, registry).has_usable_slot(account)
+}
+
+/// Did `account` approve `maker` to name it as an ad's settlement signer. A failed call (a registry
+/// without the entry point, a trap) is a typed `false`, so the escrow's gate fails closed.
+pub fn is_approved_maker(
+    env: &Env,
+    registry: &Address,
+    account: &BytesN<32>,
+    maker: &BytesN<32>,
+) -> bool {
+    matches!(
+        KeyRegistryClient::new(env, registry).try_is_approved_maker(account, maker),
+        Ok(Ok(true))
+    )
 }
 
 /// Did any of `account`'s slots expire in `[from, to]` (#422 D12). The escrows' cancel grace asks

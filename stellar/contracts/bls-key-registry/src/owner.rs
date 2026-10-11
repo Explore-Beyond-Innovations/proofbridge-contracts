@@ -1,5 +1,5 @@
 //! The owner's key messages, shared with the EVM registry (2.6 plan 13, D1–D5): one signature over
-//! RegisterKey / RevokeKeys / CancelPending / RetireKey names every registry it is for. secp256k1 owners sign the
+//! RegisterKey / RevokeKeys / CancelPending / RetireKey / ApproveMaker names every registry it is for. secp256k1 owners sign the
 //! EIP-712 form, ed25519 owners the fixed text (SEP-53). Pinned by bls-encodings.json `ownerAuth`.
 
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String, Vec};
@@ -37,6 +37,12 @@ pub(crate) const RETIRE_KEY_TYPEHASH: [u8; 32] = [
     0xa9, 0xf4, 0xb4, 0xa0, 0x10, 0xfc, 0x40, 0xd9, 0x09, 0x30, 0x8c, 0x8e, 0x77, 0xcb, 0x90, 0xfd,
 ];
 
+/// keccak256("ApproveMaker(bytes32 account,bytes32 maker,bool approved,KeyLeg[] legs,uint64 deadline)KeyLeg(...)")
+pub(crate) const APPROVE_MAKER_TYPEHASH: [u8; 32] = [
+    0x1a, 0xcb, 0x1f, 0x6f, 0xfc, 0x96, 0x0f, 0xf0, 0x61, 0xd0, 0xad, 0x70, 0xe5, 0x84, 0x83, 0x18,
+    0x41, 0xb1, 0xfa, 0x26, 0x81, 0x5c, 0xed, 0x60, 0x8b, 0x79, 0x8b, 0x3b, 0x50, 0xd0, 0xab, 0x72,
+];
+
 const SEP53_PREFIX: &[u8; 24] = b"Stellar Signed Message:\n";
 /// D2: a RegisterKey deadline may sit at most this far past ledger time.
 pub(crate) const MAX_REGISTER_TTL: u64 = 7 * 24 * 3600;
@@ -46,6 +52,10 @@ const REGISTER_HEADING: &[u8] = b"ProofBridge: register a settlement key";
 const REVOKE_HEADING: &[u8] = b"ProofBridge: remove every settlement key";
 const CANCEL_HEADING: &[u8] = b"ProofBridge: cancel a pending key registration";
 const RETIRE_HEADING: &[u8] = b"ProofBridge: retire a settlement key";
+const APPROVE_MAKER_HEADING: &[u8] =
+    b"ProofBridge: allow a maker to name this account as settlement signer";
+const WITHDRAW_MAKER_HEADING: &[u8] =
+    b"ProofBridge: withdraw a maker's permission to name this account as settlement signer";
 
 /// One registry a signature is for: its chain, its 32-byte id and its nonce for the account.
 #[contracttype]
@@ -100,6 +110,13 @@ pub(crate) enum KeyMessage {
     Retire {
         fingerprint: BytesN<32>,
         valid_until: u64,
+    },
+    /// `nonce` is the (account, maker) pair's, not the account's.
+    ApproveMaker {
+        maker: BytesN<32>,
+        approved: bool,
+        nonce: u64,
+        deadline: u64,
     },
 }
 
@@ -181,7 +198,8 @@ fn check_legs(env: &Env, legs: &Vec<KeyLeg>, msg: &KeyMessage) -> Result<(), Reg
     let nonce = match msg {
         KeyMessage::Register { nonce, .. }
         | KeyMessage::Revoke { nonce }
-        | KeyMessage::Cancel { nonce } => *nonce,
+        | KeyMessage::Cancel { nonce }
+        | KeyMessage::ApproveMaker { nonce, .. } => *nonce,
         KeyMessage::Retire { .. } => {
             return if legs.is_empty() {
                 Ok(())
@@ -301,6 +319,19 @@ pub(crate) fn struct_hash(
             enc.extend_from_slice(&account.to_array());
             enc.extend_from_slice(&legs_hash(env, legs));
         }
+        KeyMessage::ApproveMaker {
+            maker,
+            approved,
+            deadline,
+            ..
+        } => {
+            enc.extend_from_slice(&APPROVE_MAKER_TYPEHASH);
+            enc.extend_from_slice(&account.to_array());
+            enc.extend_from_slice(&maker.to_array());
+            enc.extend_from_slice(&abi_encode_uint256(*approved as u128));
+            enc.extend_from_slice(&legs_hash(env, legs));
+            enc.extend_from_slice(&abi_encode_uint256(*deadline as u128));
+        }
         KeyMessage::Retire {
             fingerprint,
             valid_until,
@@ -324,6 +355,10 @@ pub(crate) fn text(env: &Env, account: &BytesN<32>, legs: &Vec<KeyLeg>, msg: &Ke
         KeyMessage::Revoke { .. } => REVOKE_HEADING,
         KeyMessage::Cancel { .. } => CANCEL_HEADING,
         KeyMessage::Retire { .. } => RETIRE_HEADING,
+        KeyMessage::ApproveMaker { approved: true, .. } => APPROVE_MAKER_HEADING,
+        KeyMessage::ApproveMaker {
+            approved: false, ..
+        } => WITHDRAW_MAKER_HEADING,
     };
     t.extend_from_slice(heading);
     t.extend_from_slice(b"\n\nNetwork: ");
@@ -337,9 +372,13 @@ pub(crate) fn text(env: &Env, account: &BytesN<32>, legs: &Vec<KeyLeg>, msg: &Ke
             t.extend_from_slice(b"\nKey fingerprint: ");
             t.extend_from_slice(&hex_0x_lower(&fingerprint.to_array()));
         }
+        KeyMessage::ApproveMaker { maker, .. } => {
+            t.extend_from_slice(b"\nMaker: ");
+            t.extend_from_slice(&hex_0x_lower(&maker.to_array()));
+        }
         KeyMessage::Revoke { .. } | KeyMessage::Cancel { .. } => {}
     }
-    if let KeyMessage::Register { deadline, .. } = msg {
+    if let KeyMessage::Register { deadline, .. } | KeyMessage::ApproveMaker { deadline, .. } = msg {
         t.extend_from_slice(b"\nValid until: ");
         push_utc(&mut t, *deadline);
         t.extend_from_slice(b" (");

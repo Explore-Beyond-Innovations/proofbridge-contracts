@@ -128,6 +128,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         bytes32 signer = vjson.readBytes32(".registration.makerOnSepolia.account");
         test_fundAd_makerOnly();
         keyRegistry.set(signer, true);
+        keyRegistry.approve(signer, _b32(maker), true);
         vm.prank(maker);
         adManager.setSettlementSigner(lastAdId, signer);
         IAdManager.OrderParams memory p = _defaultParams(lastAdId);
@@ -156,6 +157,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         bytes32 signer = vjson.readBytes32(".registration.makerOnSepolia.account");
         test_fundAd_makerOnly();
         keyRegistry.set(signer, true);
+        keyRegistry.approve(signer, _b32(maker), true);
         vm.prank(maker);
         adManager.setSettlementSigner(lastAdId, signer);
         x = _defaultParams(lastAdId);

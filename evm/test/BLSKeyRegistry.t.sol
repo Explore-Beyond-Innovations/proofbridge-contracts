@@ -1006,6 +1006,135 @@ contract BLSKeyRegistryTest is Test {
     }
 
     // =========================================================================
+    // ApproveMaker: the signer's consent to be named by a maker
+    // =========================================================================
+
+    function makerId(string memory which) internal view returns (bytes32) {
+        return v.readBytes32(string.concat(".ownerAuth._meta.makers.", which));
+    }
+
+    /// Files `ownerAuth.<who>.<entry>` (an ApproveMaker entry) for the actor's account.
+    function fileApproval(string memory who, string memory entry) internal {
+        string memory path = oaPath(who, entry);
+        registry.approveMaker(
+            v.readBytes32(string.concat(path, ".account")),
+            v.readBytes32(string.concat(path, ".maker")),
+            v.readBool(string.concat(path, ".approved")),
+            oa(who, entry),
+            OwnerAuthVectors.legs(v, path)[0].nonce,
+            OwnerAuthVectors.deadline(v, path)
+        );
+    }
+
+    function actorAccount(string memory who) internal view returns (bytes32) {
+        return v.readBytes32(string.concat(oaPath(who, "approveMaker[0]"), ".account"));
+    }
+
+    function test_approveMaker_approveWithdrawReapprove_bothSchemes() public {
+        string[2] memory actors = ["makerOnSepolia", "bridgerOnSepolia"];
+        for (uint256 i = 0; i < 2; i++) {
+            bytes32 account = actorAccount(actors[i]);
+            bytes32 maker = makerId("approved");
+            assertFalse(registry.isApprovedMaker(account, maker));
+
+            vm.expectEmit(true, true, false, true, address(registry));
+            emit IBLSKeyRegistry.MakerApprovalSet(account, maker, true, 0);
+            fileApproval(actors[i], "approveMaker[0]");
+            assertTrue(registry.isApprovedMaker(account, maker), "approved");
+
+            fileApproval(actors[i], "approveMaker[1]");
+            assertFalse(registry.isApprovedMaker(account, maker), "withdrawn");
+
+            fileApproval(actors[i], "approveMaker[2]");
+            assertTrue(registry.isApprovedMaker(account, maker), "approved again");
+            (, uint64 nonce,) = registry.makerApprovals(account, maker);
+            assertEq(nonce, 3);
+            assertEq(registry.nonceOf(account), 0, "the account nonce is untouched");
+        }
+    }
+
+    function test_approveMaker_cannotBeReplayed() public {
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+        fileApproval("makerOnSepolia", "approveMaker[1]");
+        vm.expectRevert(IBLSKeyRegistry.BadNonce.selector);
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+        assertFalse(registry.isApprovedMaker(actorAccount("makerOnSepolia"), makerId("approved")));
+    }
+
+    function test_approveMaker_legForAnotherRegistry_isRefused() public {
+        string[2] memory actors = ["makerOnSepolia", "bridgerOnSepolia"];
+        for (uint256 i = 0; i < 2; i++) {
+            vm.expectRevert(IBLSKeyRegistry.LegMismatch.selector);
+            fileApproval(actors[i], "approveMakerOnlyStellarLeg");
+            // The signature naming this registry alone is good here.
+            fileApproval(actors[i], "approveMakerOnlySepoliaLeg");
+        }
+    }
+
+    function test_approveMaker_isPerMaker() public {
+        bytes32 account = actorAccount("bridgerOnSepolia");
+        fileApproval("bridgerOnSepolia", "approveOtherMaker");
+        assertTrue(registry.isApprovedMaker(account, makerId("other")));
+        assertFalse(registry.isApprovedMaker(account, makerId("approved")), "another maker is not approved");
+        // Each pair keeps its own nonce: the other maker's approval leaves this pair at nonce 0.
+        fileApproval("bridgerOnSepolia", "approveMaker[0]");
+        assertTrue(registry.isApprovedMaker(account, makerId("approved")));
+    }
+
+    function test_approveMaker_pauseRefusesApproval_notWithdrawal() public {
+        registry.pause();
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+        registry.unpause();
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+
+        registry.pause();
+        fileApproval("makerOnSepolia", "approveMaker[1]");
+        assertFalse(registry.isApprovedMaker(actorAccount("makerOnSepolia"), makerId("approved")), "withdrawn");
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        fileApproval("makerOnSepolia", "approveMaker[2]");
+    }
+
+    function test_approveMaker_deadline() public {
+        uint64 d = OwnerAuthVectors.deadline(v, oaPath("makerOnSepolia", "approveMaker[0]"));
+        vm.warp(d + 1);
+        vm.expectRevert(IBLSKeyRegistry.DeadlineExpired.selector);
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+        vm.warp(d - registry.MAX_REGISTER_TTL() - 1);
+        vm.expectRevert(IBLSKeyRegistry.DeadlineTooFar.selector);
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+        vm.warp(d);
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+    }
+
+    function test_approveMaker_signatureForAnotherAccount_isRefused() public {
+        string memory path = oaPath("makerOnSepolia", "approveMaker[0]");
+        vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+        registry.approveMaker(
+            actorAccount("bridgerOnSepolia"), makerId("approved"), true, oa("makerOnSepolia", "approveMaker[0]"), 0, D()
+        );
+        // The same signature read as a withdrawal does not verify either.
+        bytes32 account = v.readBytes32(string.concat(path, ".account"));
+        vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+        registry.approveMaker(account, makerId("approved"), false, oa("makerOnSepolia", "approveMaker[0]"), 0, D());
+    }
+
+    function test_revoke_dropsEveryApproval() public {
+        bytes32 account = registerMaker();
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+        assertTrue(registry.isApprovedMaker(account, makerId("approved")));
+
+        registry.revoke(account, oa("makerOnSepolia", "revoke[1]"), 1);
+        assertEq(registry.approvalGeneration(account), 1);
+        assertFalse(registry.isApprovedMaker(account, makerId("approved")), "revoke starts the account over");
+
+        // A fresh approval after the revoke counts again.
+        fileApproval("makerOnSepolia", "approveMaker[1]");
+        fileApproval("makerOnSepolia", "approveMaker[2]");
+        assertTrue(registry.isApprovedMaker(account, makerId("approved")));
+    }
+
+    // =========================================================================
     // Review D2 follow-up: cancel moves the nonce and never removes a key
     // =========================================================================
 
@@ -1075,9 +1204,10 @@ contract KeyMessagesHarness {
         bytes32 account,
         bytes32 key,
         IBLSKeyRegistry.KeyLeg[] calldata legs,
-        uint64 time
+        uint64 time,
+        bool approved
     ) external pure returns (bytes32) {
-        return KeyMessages.structHash(kind, account, key, legs, time);
+        return KeyMessages.structHash(kind, account, key, legs, time, approved);
     }
 
     function digest(
@@ -1086,9 +1216,12 @@ contract KeyMessagesHarness {
         bytes32 account,
         bytes32 key,
         IBLSKeyRegistry.KeyLeg[] calldata legs,
-        uint64 time
+        uint64 time,
+        bool approved
     ) external pure returns (bytes32) {
-        return KeyMessages.digest(KeyMessages.domainSeparator(KeyMessages.salt(env)), kind, account, key, legs, time);
+        return KeyMessages.digest(
+            KeyMessages.domainSeparator(KeyMessages.salt(env)), kind, account, key, legs, time, approved
+        );
     }
 
     function text(
@@ -1097,9 +1230,10 @@ contract KeyMessagesHarness {
         bytes32 account,
         bytes32 key,
         IBLSKeyRegistry.KeyLeg[] calldata legs,
-        uint64 time
+        uint64 time,
+        bool approved
     ) external pure returns (bytes memory) {
-        return KeyMessages.text(bytes(env), kind, account, key, legs, time);
+        return KeyMessages.text(bytes(env), kind, account, key, legs, time, approved);
     }
 
     function utc(uint256 t) external pure returns (string memory) {
@@ -1124,6 +1258,7 @@ contract KeyMessagesVectorsTest is Test {
         assertEq(KeyMessages.REVOKE_KEYS_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.revokeKeys"));
         assertEq(KeyMessages.CANCEL_PENDING_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.cancelPending"));
         assertEq(KeyMessages.RETIRE_KEY_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.retireKey"));
+        assertEq(KeyMessages.APPROVE_MAKER_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.approveMaker"));
         assertEq(KeyMessages.DOMAIN_TYPEHASH, keccak256(bytes(v.readString(".ownerAuth._meta.domainType"))));
         string[3] memory envs = ["local", "testnet", "mainnet"];
         for (uint256 i = 0; i < 3; i++) {
@@ -1204,18 +1339,28 @@ contract KeyMessagesVectorsTest is Test {
             ? KeyMessages.Kind.Register
             : kindName == keccak256("revoke")
                 ? KeyMessages.Kind.Revoke
-                : kindName == keccak256("cancel") ? KeyMessages.Kind.Cancel : KeyMessages.Kind.Retire;
+                : kindName == keccak256("cancel")
+                    ? KeyMessages.Kind.Cancel
+                    : kindName == keccak256("approveMaker") ? KeyMessages.Kind.ApproveMaker : KeyMessages.Kind.Retire;
         bool keyed = kind == KeyMessages.Kind.Register || kind == KeyMessages.Kind.Retire;
-        bytes32 key = keyed ? r32(string.concat(path, ".keyCommitment")) : bytes32(0);
+        bool approval = kind == KeyMessages.Kind.ApproveMaker;
+        bytes32 key = keyed
+            ? r32(string.concat(path, ".keyCommitment"))
+            : approval ? r32(string.concat(path, ".maker")) : bytes32(0);
+        bool approved = approval && v.readBool(string.concat(path, ".approved"));
         uint64 time = kind == KeyMessages.Kind.Retire
             ? uint64(vm.parseUint(rstr(string.concat(path, ".validUntil"))))
-            : kind == KeyMessages.Kind.Register ? uint64(vm.parseUint(rstr(string.concat(path, ".deadline")))) : 0;
+            : kind == KeyMessages.Kind.Register || approval
+                ? uint64(vm.parseUint(rstr(string.concat(path, ".deadline"))))
+                : 0;
         bytes32 account = r32(string.concat(path, ".account"));
         string memory env = rstr(string.concat(path, ".env"));
         IBLSKeyRegistry.KeyLeg[] memory legs = legsAt(path);
-        assertEq(h.structHash(kind, account, key, legs, time), r32(string.concat(path, ".structHash")), path);
-        assertEq(h.digest(env, kind, account, key, legs, time), r32(string.concat(path, ".digest")), path);
-        assertEq(string(h.text(env, kind, account, key, legs, time)), rstr(string.concat(path, ".text")), path);
+        assertEq(h.structHash(kind, account, key, legs, time, approved), r32(string.concat(path, ".structHash")), path);
+        assertEq(h.digest(env, kind, account, key, legs, time, approved), r32(string.concat(path, ".digest")), path);
+        assertEq(
+            string(h.text(env, kind, account, key, legs, time, approved)), rstr(string.concat(path, ".text")), path
+        );
     }
 
     // One test per family: each cheatcode read re-encodes the vector file, so one loop over all of
@@ -1247,6 +1392,17 @@ contract KeyMessagesVectorsTest is Test {
 
     function test_everyRetireEntryRebuildsByteForByte() public view {
         checkFamily("retire", 12);
+    }
+
+    function test_everyApproveMakerEntryRebuildsByteForByte() public view {
+        checkFamily("approveMaker", 3);
+        string[2] memory actors = ["maker", "bridger"];
+        string[3] memory named = ["approveOtherMaker", "approveMakerOnlySepoliaLeg", "approveMakerOnlyStellarLeg"];
+        for (uint256 a = 0; a < 2; a++) {
+            for (uint256 i = 0; i < named.length; i++) {
+                check(string.concat(".ownerAuth.", actors[a], ".", named[i]));
+            }
+        }
     }
 
     function test_everyNamedEntryRebuildsByteForByte() public view {

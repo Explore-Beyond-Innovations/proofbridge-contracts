@@ -84,6 +84,18 @@ registry as a simulated `setValidUntil` and listed as `current`, `stale-format` 
 older RetireKey message; collect it again), `no-slot` or `already-shorter`. Exits 1 when any row is
 stale or could not be checked.
 
+## Moving to a new key registry
+
+Pointing the AdManager at a new registry (`setKeyRegistry`, with every co-signature verifier on the same one)
+starts that registry empty. Before ads lock again, each settlement signer must:
+
+- register its key on the new registry, and
+- file its maker approvals again (`approveMaker`, one per maker that names it): a signer that is not
+  the ad's maker is refused at the lock until it has approved that maker on the registry the
+  escrow reads now.
+
+Orders locked before the move finish on their own registry epoch; only new locks need the above.
+
 ## Environment
 
 | Variable | Default | Purpose |

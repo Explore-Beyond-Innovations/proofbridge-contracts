@@ -26,6 +26,7 @@ contract AdManagerOrderV2Test is AdManagerTest {
         // which also exercises the lever with a live ad.
         if (signer != _b32(maker)) {
             keyRegistry.set(signer, true);
+            keyRegistry.approve(signer, _b32(maker), true);
             vm.prank(maker);
             adManager.setSettlementSigner(lastAdId, signer);
         }

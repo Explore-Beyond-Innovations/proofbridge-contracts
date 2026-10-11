@@ -1652,6 +1652,12 @@ fn message_of(env: &Env, e: &serde_json::Value) -> KeyMessage {
         },
         "revoke" => KeyMessage::Revoke { nonce: 0 },
         "cancel" => KeyMessage::Cancel { nonce: 0 },
+        "approveMaker" => KeyMessage::ApproveMaker {
+            maker: bn::<32>(env, &e["maker"]),
+            approved: e["approved"].as_bool().unwrap(),
+            nonce: 0,
+            deadline: e["deadline"].as_str().unwrap().parse().unwrap(),
+        },
         _ => KeyMessage::Retire {
             fingerprint: fp(),
             valid_until: e["validUntil"].as_str().unwrap().parse().unwrap(),
@@ -1665,10 +1671,20 @@ fn text_and_struct_hash_match_every_vector() {
     let mut entries = std::vec::Vec::new();
     for who in ["maker", "bridger"] {
         let a = &v["ownerAuth"][who];
-        for k in ["register", "registerLate", "revoke", "cancel", "retire"] {
+        for k in [
+            "register",
+            "registerLate",
+            "revoke",
+            "cancel",
+            "retire",
+            "approveMaker",
+        ] {
             entries.extend(a[k].as_array().unwrap().iter().cloned());
         }
         for k in [
+            "approveOtherMaker",
+            "approveMakerOnlySepoliaLeg",
+            "approveMakerOnlyStellarLeg",
             "reuseKey0AtNonce1",
             "onlySepoliaLeg",
             "onlyStellarLeg",
@@ -2590,4 +2606,183 @@ mod wallet_signatures {
     fn freighter_one_byte_flip_is_a_crypto_trap() {
         check_mutated("freighter");
     }
+}
+
+// =============================================================================
+// ApproveMaker: the signer's consent to be named by a maker
+// =============================================================================
+
+fn maker_id(env: &Env, v: &serde_json::Value, which: &str) -> BytesN<32> {
+    bn::<32>(env, &v["ownerAuth"]["_meta"]["makers"][which])
+}
+
+/// Files `ownerAuth.<who>.<entry>` (an ApproveMaker entry) for the actor's account.
+fn try_file_approval(
+    env: &Env,
+    client: &BlsKeyRegistryClient,
+    e: &serde_json::Value,
+) -> Result<(), RegistryError> {
+    let legs = legs_of(env, e);
+    let nonce = legs.get(0).unwrap().nonce;
+    match client.try_approve_maker(
+        &bn::<32>(env, &e["account"]),
+        &bn::<32>(env, &e["maker"]),
+        &e["approved"].as_bool().unwrap(),
+        &signed(env, e),
+        &nonce,
+        &DEADLINE,
+    ) {
+        Ok(Ok(())) => Ok(()),
+        Err(Ok(err)) => Err(err),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn approve_maker_approve_withdraw_reapprove_both_schemes() {
+    let (env, client, v) = setup();
+    for who in [MAKER, BRIDGER] {
+        let a = oa(&v, who);
+        let account = bn::<32>(&env, &a["account"]);
+        let maker = maker_id(&env, &v, "approved");
+        assert!(!client.is_approved_maker(&account, &maker));
+        try_file_approval(&env, &client, &a["approveMaker"][0]).unwrap();
+        assert!(client.is_approved_maker(&account, &maker), "approved");
+        try_file_approval(&env, &client, &a["approveMaker"][1]).unwrap();
+        assert!(!client.is_approved_maker(&account, &maker), "withdrawn");
+        try_file_approval(&env, &client, &a["approveMaker"][2]).unwrap();
+        assert!(client.is_approved_maker(&account, &maker), "approved again");
+        assert_eq!(client.maker_approval(&account, &maker).nonce, 3);
+        assert_eq!(
+            client.nonce_of(&account),
+            0,
+            "the account nonce is untouched"
+        );
+    }
+}
+
+#[test]
+fn approve_maker_cannot_be_replayed() {
+    let (env, client, v) = setup();
+    let a = oa(&v, MAKER);
+    try_file_approval(&env, &client, &a["approveMaker"][0]).unwrap();
+    try_file_approval(&env, &client, &a["approveMaker"][1]).unwrap();
+    assert_eq!(
+        try_file_approval(&env, &client, &a["approveMaker"][0]),
+        Err(RegistryError::BadNonce)
+    );
+}
+
+#[test]
+fn approve_maker_leg_for_another_registry_is_refused() {
+    let (env, client, v) = setup();
+    for who in [MAKER, BRIDGER] {
+        let a = oa(&v, who);
+        assert_eq!(
+            try_file_approval(&env, &client, &a["approveMakerOnlySepoliaLeg"]),
+            Err(RegistryError::LegMismatch)
+        );
+        try_file_approval(&env, &client, &a["approveMakerOnlyStellarLeg"]).unwrap();
+    }
+}
+
+#[test]
+fn approve_maker_is_per_maker() {
+    let (env, client, v) = setup();
+    let a = oa(&v, BRIDGER);
+    let account = bn::<32>(&env, &a["account"]);
+    try_file_approval(&env, &client, &a["approveOtherMaker"]).unwrap();
+    assert!(client.is_approved_maker(&account, &maker_id(&env, &v, "other")));
+    assert!(!client.is_approved_maker(&account, &maker_id(&env, &v, "approved")));
+    // Each pair keeps its own nonce.
+    try_file_approval(&env, &client, &a["approveMaker"][0]).unwrap();
+    assert!(client.is_approved_maker(&account, &maker_id(&env, &v, "approved")));
+}
+
+#[test]
+fn approve_maker_pause_refuses_approval_not_withdrawal() {
+    let (env, client, v) = setup();
+    let a = oa(&v, MAKER);
+    client.pause();
+    assert_eq!(
+        try_file_approval(&env, &client, &a["approveMaker"][0]),
+        Err(RegistryError::ContractPaused)
+    );
+    client.unpause();
+    try_file_approval(&env, &client, &a["approveMaker"][0]).unwrap();
+    client.pause();
+    try_file_approval(&env, &client, &a["approveMaker"][1]).unwrap();
+    assert_eq!(
+        try_file_approval(&env, &client, &a["approveMaker"][2]),
+        Err(RegistryError::ContractPaused)
+    );
+}
+
+#[test]
+fn approve_maker_deadline() {
+    let (env, client, v) = setup();
+    let e = &oa(&v, MAKER)["approveMaker"][0];
+    env.ledger().set_timestamp(DEADLINE + 1);
+    assert_eq!(
+        try_file_approval(&env, &client, e),
+        Err(RegistryError::DeadlineExpired)
+    );
+    env.ledger().set_timestamp(DEADLINE - MAX_TTL - 1);
+    assert_eq!(
+        try_file_approval(&env, &client, e),
+        Err(RegistryError::DeadlineTooFar)
+    );
+    env.ledger().set_timestamp(DEADLINE);
+    try_file_approval(&env, &client, e).unwrap();
+}
+
+/// An account approves as itself by `require_auth`, with no signed message (G-account or contract).
+#[test]
+fn approve_maker_by_stellar_auth() {
+    let (env, client, v) = setup();
+    let owner = maker_owner(&env, &v);
+    let account = bn::<32>(&env, &oa(&v, MAKER)["account"]);
+    let maker = maker_id(&env, &v, "approved");
+    client.approve_maker(
+        &account,
+        &maker,
+        &true,
+        &OwnerAuth::Stellar(owner),
+        &0,
+        &DEADLINE,
+    );
+    assert!(client.is_approved_maker(&account, &maker));
+    assert_eq!(
+        client.try_approve_maker(
+            &account,
+            &maker,
+            &false,
+            &OwnerAuth::Stellar(Address::generate(&env)),
+            &1,
+            &DEADLINE,
+        ),
+        Err(Ok(RegistryError::OwnerMismatch))
+    );
+}
+
+#[test]
+fn revoke_drops_every_approval() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    let a = oa(&v, MAKER);
+    try_file_approval(&env, &client, &a["approveMaker"][0]).unwrap();
+    let maker = maker_id(&env, &v, "approved");
+    assert!(client.is_approved_maker(&account, &maker));
+
+    client.revoke(&account, &signed(&env, &a["revoke"][1]), &1);
+    assert_eq!(client.approval_generation(&account), 1);
+    assert!(
+        !client.is_approved_maker(&account, &maker),
+        "revoke starts the account over"
+    );
+
+    try_file_approval(&env, &client, &a["approveMaker"][1]).unwrap();
+    try_file_approval(&env, &client, &a["approveMaker"][2]).unwrap();
+    assert!(client.is_approved_maker(&account, &maker));
 }

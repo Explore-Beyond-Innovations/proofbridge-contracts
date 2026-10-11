@@ -208,6 +208,7 @@ contract AdManagerUnlockGas is AdManagerGateTest {
         bytes32 bridgerAcct = stdJson.readBytes32(vjson, ".registration.bridgerOnSepolia.account");
         test_createAd_succeedsWhenRouteExists_emitsAndStores();
         keyRegistry.set(makerAcct, true);
+        keyRegistry.approve(makerAcct, _b32(maker), true);
         vm.prank(maker);
         adManager.setSettlementSigner(lastAdId, makerAcct);
 

@@ -27,6 +27,10 @@ const KEY_USED: Symbol = symbol_short!("used");
 /// (KEY_KEYSLOT, account, fingerprint) -> u32: the slot a key occupies, for `set_valid_until`.
 /// Outlives the slot on purpose: a stale entry names a slot that is gone, so it reads as NoSuchSlot.
 const KEY_KEYSLOT: Symbol = symbol_short!("keyslot");
+/// (KEY_APPROVAL, account, maker) -> MakerApproval: may `maker` name `account` as settlement signer.
+const KEY_APPROVAL: Symbol = symbol_short!("approval");
+/// (KEY_APPRGEN, account) -> u64: bumped by `revoke`; an approval counts only at the current one.
+const KEY_APPRGEN: Symbol = symbol_short!("apprgen");
 /// 2.1b proof-carried registration wiring (instance); absent = disabled.
 const KEY_PROOFREG: Symbol = symbol_short!("proofreg");
 
@@ -193,6 +197,41 @@ pub fn get_nonce(env: &Env, account: &BytesN<32>) -> u64 {
 pub fn set_nonce(env: &Env, account: &BytesN<32>, nonce: u64) {
     let key = (KEY_NONCE, account.clone());
     env.storage().persistent().set(&key, &nonce);
+    bump(env, &key);
+}
+
+/// One (account, maker) approval: its flag, the pair's next nonce, the account generation it was set at.
+#[contracttype]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MakerApproval {
+    pub approved: bool,
+    pub nonce: u64,
+    pub generation: u64,
+}
+
+pub fn get_approval(env: &Env, account: &BytesN<32>, maker: &BytesN<32>) -> MakerApproval {
+    env.storage()
+        .persistent()
+        .get(&(KEY_APPROVAL, account.clone(), maker.clone()))
+        .unwrap_or_default()
+}
+
+pub fn set_approval(env: &Env, account: &BytesN<32>, maker: &BytesN<32>, a: &MakerApproval) {
+    let key = (KEY_APPROVAL, account.clone(), maker.clone());
+    env.storage().persistent().set(&key, a);
+    bump(env, &key);
+}
+
+pub fn get_approval_gen(env: &Env, account: &BytesN<32>) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&(KEY_APPRGEN, account.clone()))
+        .unwrap_or(0)
+}
+
+pub fn set_approval_gen(env: &Env, account: &BytesN<32>, generation: u64) {
+    let key = (KEY_APPRGEN, account.clone());
+    env.storage().persistent().set(&key, &generation);
     bump(env, &key);
 }
 

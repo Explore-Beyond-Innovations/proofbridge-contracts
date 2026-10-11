@@ -188,6 +188,7 @@ contract NativePushTest is DisputeTest {
         test_createAd_with_native_token_success(); // wires the route
         ReentrantMaker rm = new ReentrantMaker(IAdManager(address(adManager)), NATIVE_TOKEN_ADDRESS);
         vm.deal(address(this), 10 ether);
+        keyRegistry.approve(_b32(maker), _b32(address(rm)), true); // the named signer consents
         rm.create{value: 10 ether}("rmAd", 10 ether, orderChainId, _b32(maker));
 
         rm.withdraw(4 ether);

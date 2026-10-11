@@ -43,6 +43,13 @@ interface IBLSKeyRegistry is IKeyRegistry {
         uint64 registeredAt;
     }
 
+    /// One (account, maker) approval: its flag, the pair's next nonce, the account generation it was set at.
+    struct MakerApproval {
+        bool approved;
+        uint64 nonce;
+        uint64 generation;
+    }
+
     event KeyRegistered(bytes32 indexed account, uint32 indexed slotId, bytes blsPubKey, uint256 nonce);
     event KeyRegisteredByProof(
         bytes32 indexed account, uint32 indexed slotId, bytes blsPubKey, uint64 epoch, uint256 sourceChainId
@@ -54,6 +61,8 @@ interface IBLSKeyRegistry is IKeyRegistry {
     /// Review D2: the nonce moved and no slot changed; every signature naming `nonce` here is dead.
     event RegistrationCancelled(bytes32 indexed account, uint256 nonce);
     event PositionGuardsSet(address[] guards);
+    /// The account allowed (`approved`) or stopped `maker` naming it as settlement signer, at the pair's `nonce`.
+    event MakerApprovalSet(bytes32 indexed account, bytes32 indexed maker, bool approved, uint256 nonce);
 
     error BadNonce();
     error IdentityKey();
@@ -111,10 +120,23 @@ interface IBLSKeyRegistry is IKeyRegistry {
     function setValidUntil(bytes32 account, OwnerAuth calldata owner, bytes32 keyCommitment, uint64 validUntil) external;
     function revoke(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external;
     function cancel(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external;
+    function approveMaker(
+        bytes32 account,
+        bytes32 maker,
+        bool approved,
+        OwnerAuth calldata owner,
+        uint256 nonce,
+        uint64 deadline
+    ) external;
 
     // views
     function nonceOf(bytes32 account) external view returns (uint256);
     function usedCommitment(bytes32 account, bytes32 commitment) external view returns (bool);
+    function makerApprovals(bytes32 account, bytes32 maker)
+        external
+        view
+        returns (bool approved, uint64 nonce, uint64 generation);
+    function approvalGeneration(bytes32 account) external view returns (uint64);
     function rootAnchor() external view returns (IRootAnchor);
     function proofVerifier() external view returns (IVerifier);
     function proofRegistrationEnabled() external view returns (bool);

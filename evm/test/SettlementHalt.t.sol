@@ -520,8 +520,34 @@ abstract contract RealRegistryFixture is AdManagerTest {
         // Two slots, so a kill of one leaves `hasUsableSlot` true: the state the attack needs.
         _registerSlot(0);
         _registerSlot(1);
+        _approveMaker();
         vm.prank(admin);
         adManager.setKeyRegistry(IKeyRegistry(REGISTRY));
+    }
+
+    /// The vector account signs for the fixture's maker, so it approves that maker (signer consent).
+    function _approveMaker() internal onVectorChain {
+        IBLSKeyRegistry.OwnerAuth memory auth;
+        auth.legs = new IBLSKeyRegistry.KeyLeg[](1);
+        auth.legs[0] = IBLSKeyRegistry.KeyLeg(VECTOR_CHAIN_ID, bytes32(uint256(uint160(REGISTRY))), 0);
+        uint64 deadline = uint64(block.timestamp + 1 hours);
+        bytes32 legs = keccak256(abi.encode(KeyMessages.KEY_LEG_TYPEHASH, VECTOR_CHAIN_ID, auth.legs[0].registry, 0));
+        bytes32 structHash = keccak256(
+            abi.encode(
+                KeyMessages.APPROVE_MAKER_TYPEHASH,
+                account,
+                _b32(maker),
+                true,
+                keccak256(abi.encodePacked(legs)),
+                deadline
+            )
+        );
+        (uint8 sv, bytes32 r, bytes32 ss) = vm.sign(
+            uint256(v.readBytes32(".keys.bridgerWallet.sk")),
+            keccak256(abi.encodePacked(hex"1901", keysDomain, structHash))
+        );
+        auth.sig = abi.encodePacked(r, ss, sv);
+        registry.approveMaker(account, _b32(maker), true, auth, 0, deadline);
     }
 
     /*//////////////////////////// vector helpers ////////////////////////////*/
@@ -962,7 +988,9 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         assertEq(address(adManager.registryAt(before + 1)), address(keyRegistry), "holding the new registry");
         _claim(p);
         assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "the old order waits");
+        // Keys and maker approvals are per registry: the signer files both again on the new one.
         keyRegistry.set(account, true);
+        keyRegistry.approve(account, _b32(maker), true);
         IAdManager.OrderParams memory q = _orderAs(23, 0);
         vm.prank(maker);
         adManager.lockForOrder(q); // the new order locks on the new pair

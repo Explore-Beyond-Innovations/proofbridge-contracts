@@ -23,7 +23,7 @@ use owner::{check_owner, key_fingerprint, keys_domain_separator, KeyMessage, MAX
 pub use owner::{KeyLeg, OwnerAuth, OwnerSig, SignedOwner};
 use proofbridge_core::cross_contract::{self, VerifierClient, LEAF_DOMAIN_REGISTERED};
 use proofbridge_core::eip712::contract_address_to_bytes32;
-pub use storage::KeySlot;
+pub use storage::{KeySlot, MakerApproval};
 
 /// RFC 9380 / IETF BLS proof-of-possession DST.
 pub const DST_POP: &str = "BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
@@ -401,6 +401,9 @@ impl BlsKeyRegistry {
         entry.live = Vec::new(&env);
         storage::set_entry(&env, &account, &entry);
         storage::set_nonce(&env, &account, nonce + 1);
+        // Leaving drops every maker approval: a later re-registration starts with none.
+        let generation = storage::get_approval_gen(&env, &account);
+        storage::set_approval_gen(&env, &account, generation + 1);
         proofbridge_core::ttl::extend_instance(&env);
         events::KeyRevoked { account, nonce }.publish(&env);
         Ok(())
@@ -430,7 +433,81 @@ impl BlsKeyRegistry {
         Ok(())
     }
 
+    /// Lets `maker` name `account` as an ad's settlement signer (`approved`), or withdraws that. The
+    /// pair's own nonce, never the account's, so it leaves key registrations and other makers alone.
+    /// Approving is pausable; withdrawing is not, since it only ever reduces what others can do.
+    /// `OwnerAuth::Stellar` approves by `require_auth`, so an account contract approves as itself.
+    pub fn approve_maker(
+        env: Env,
+        account: BytesN<32>,
+        maker: BytesN<32>,
+        approved: bool,
+        owner: OwnerAuth,
+        nonce: u64,
+        deadline: u64,
+    ) -> Result<(), RegistryError> {
+        if !storage::is_initialized(&env) {
+            return Err(RegistryError::NotInitialized);
+        }
+        if approved && storage::is_paused(&env) {
+            return Err(RegistryError::ContractPaused);
+        }
+        let now = env.ledger().timestamp();
+        if now > deadline {
+            return Err(RegistryError::DeadlineExpired);
+        }
+        if deadline - now > MAX_REGISTER_TTL {
+            return Err(RegistryError::DeadlineTooFar);
+        }
+        let mut a = storage::get_approval(&env, &account, &maker);
+        if nonce != a.nonce {
+            return Err(RegistryError::BadNonce);
+        }
+        check_owner(
+            &env,
+            &account,
+            owner,
+            KeyMessage::ApproveMaker {
+                maker: maker.clone(),
+                approved,
+                nonce,
+                deadline,
+            },
+        )?;
+
+        a.approved = approved;
+        a.nonce = nonce + 1;
+        a.generation = storage::get_approval_gen(&env, &account);
+        storage::set_approval(&env, &account, &maker, &a);
+        proofbridge_core::ttl::extend_instance(&env);
+        events::MakerApprovalSet {
+            account,
+            maker,
+            approved,
+            nonce,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     // ---- views ----
+
+    /// True iff `account` approved `maker` since its last `revoke` and has not withdrawn it.
+    pub fn is_approved_maker(env: Env, account: BytesN<32>, maker: BytesN<32>) -> bool {
+        proofbridge_core::ttl::extend_instance(&env);
+        let a = storage::get_approval(&env, &account, &maker);
+        a.approved && a.generation == storage::get_approval_gen(&env, &account)
+    }
+
+    /// The (account, maker) record: the flag, the nonce the next `approve_maker` must carry, and
+    /// the generation it was set at.
+    pub fn maker_approval(env: Env, account: BytesN<32>, maker: BytesN<32>) -> MakerApproval {
+        storage::get_approval(&env, &account, &maker)
+    }
+
+    pub fn approval_generation(env: Env, account: BytesN<32>) -> u64 {
+        storage::get_approval_gen(&env, &account)
+    }
 
     /// The verifier's one call: the commitment iff the slot exists and is usable now.
     pub fn commitment_at(

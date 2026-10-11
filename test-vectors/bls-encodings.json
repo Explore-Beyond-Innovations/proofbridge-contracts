@@ -605,7 +605,7 @@
         }
       },
       "deadline": {
-        "rule": "RegisterKey only: refused when chain time > deadline, or deadline > chain time + maxTtl; clients default to defaultTtl",
+        "rule": "RegisterKey and ApproveMaker: refused when chain time > deadline, or deadline > chain time + maxTtl; clients default to defaultTtl",
         "maxTtl": "604800",
         "defaultTtl": "259200",
         "register": "1700259200",
@@ -624,17 +624,23 @@
         "registerKey": "RegisterKey(bytes32 account,bytes32 keyCommitment,KeyLeg[] legs,uint64 deadline)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)",
         "revokeKeys": "RevokeKeys(bytes32 account,KeyLeg[] legs)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)",
         "cancelPending": "CancelPending(bytes32 account,KeyLeg[] legs)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)",
-        "retireKey": "RetireKey(bytes32 account,bytes32 keyCommitment,uint64 validUntil)"
+        "retireKey": "RetireKey(bytes32 account,bytes32 keyCommitment,uint64 validUntil)",
+        "approveMaker": "ApproveMaker(bytes32 account,bytes32 maker,bool approved,KeyLeg[] legs,uint64 deadline)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)"
       },
       "typehashes": {
         "keyLeg": "0xfa75af9d4f7f233233f7046e929ef40cd6d17ee3c0f579aeae91b2c8697b9599",
         "registerKey": "0x86b4f5a5d0735e9a7a9eb9dfa32f81364b1602f5098d95182da506eef7027c92",
         "revokeKeys": "0xd2cc9644d4c5bccccd706cafc58d84449d6f6d113297aa878f49d24ac672a825",
         "cancelPending": "0x3528ec7f948a36baeb9610767aa9f05922e7e14d2eabe51142e58c743778d12f",
-        "retireKey": "0x1abc6df038c182ce0998121f306e7bd9a9f4b4a010fc40d909308c8e77cb90fd"
+        "retireKey": "0x1abc6df038c182ce0998121f306e7bd9a9f4b4a010fc40d909308c8e77cb90fd",
+        "approveMaker": "0x1acb1f6ffc960ff061d0ad70e584831841b1fa26815ced608b798b3b50d0ab72"
+      },
+      "makers": {
+        "approved": "0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65",
+        "other": "0x00000000000000000000000014a4c421c7a8513686a0b291fc6077e7d9f0f68d"
       },
       "text": "lines joined by \\n, no trailing newline; SEP-53 payload = sha256(\"Stellar Signed Message:\\n\" || text)",
-      "layout": "register[i]: slots key i at nonce i on both legs (one signature, both registries), deadline _meta.deadline.register; registerLate[i]: the same with deadline _meta.deadline.registerLate; revoke[n] / cancel[n]: both legs at nonce n; retire[i*2 + (validUntil==1 ? 0 : 1)]: key i, validUntil 1 or slots.graceTs",
+      "layout": "register[i]: slots key i at nonce i on both legs (one signature, both registries), deadline _meta.deadline.register; registerLate[i]: the same with deadline _meta.deadline.registerLate; revoke[n] / cancel[n]: both legs at nonce n; retire[i*2 + (validUntil==1 ? 0 : 1)]: key i, validUntil 1 or slots.graceTs; approveMaker[n]: makers.approved at pair nonce n on both legs (approved, withdrawn, approved), deadline _meta.deadline.register; approveOtherMaker: makers.other at nonce 0",
       "sigs": "secp256k1: sig = r||s||v (65 B) on both registries. sep53: sig = the bare 64 B (Soroban), evmSig = abi.encode(r, s, edX, edY) (EVM)"
     },
     "maker": {
@@ -1466,6 +1472,160 @@
           "evmSig": "0x02ebaa183299701281720e99a353bbe8eb2d27607947689189327343ccdf6a721ec7a866833cb7f9e7a5f1e1f8e18a40a6de13c50af87fd6009731f1a6cfa407615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
         }
       ],
+      "approveMaker": [
+        {
+          "kind": "approveMaker",
+          "env": "testnet",
+          "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+          "maker": "0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65",
+          "approved": true,
+          "deadline": "1700259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "0"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "0"
+            }
+          ],
+          "structHash": "0xd179bd4ca1296887533abfeeff1da47ff0ed2bd1b36cc48dc195e1198615ee8c",
+          "digest": "0xd0c080b07c2d0cb5dbc10a11de456c2bdc0534c3416b19b24b7ba3c551a5ed35",
+          "text": "ProofBridge: allow a maker to name this account as settlement signer\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nMaker: 0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+          "sep53Payload": "0xbd278bb4dfc5cd6e16039a3037dc9534d3fb77ccb0cc1233f53ddbd3f37937d6",
+          "scheme": "sep53",
+          "sig": "0xfe2fa36ae6576c9ede055a8be805982defe31b1bbb7bb294467ba96a96206aa9123f7cf1badec73f30ad751000221ed0fc8abf4778baa9ac391cd67624f06d08",
+          "evmSig": "0xfe2fa36ae6576c9ede055a8be805982defe31b1bbb7bb294467ba96a96206aa9123f7cf1badec73f30ad751000221ed0fc8abf4778baa9ac391cd67624f06d08615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        },
+        {
+          "kind": "approveMaker",
+          "env": "testnet",
+          "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+          "maker": "0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65",
+          "approved": false,
+          "deadline": "1700259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "1"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "1"
+            }
+          ],
+          "structHash": "0xfc36870cf7c29981e9df8d5ec5ca750cfa83e5eb3af7cc4087c3f7dd4f10a924",
+          "digest": "0xbd6915edfc35eeeabe01b1c7ab49ad90afd57d85df86661fb576dc190340b842",
+          "text": "ProofBridge: withdraw a maker's permission to name this account as settlement signer\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nMaker: 0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+          "sep53Payload": "0xaf0e569ce554800219bfbc55912d8e982edc4d64a5ac78dc92ba510b8f902f9d",
+          "scheme": "sep53",
+          "sig": "0xc4f31b537cc2ce2e8e4bd24733f5458348be4de2f4c8950ed36b4db8a67e07c496166d6a504a513e7ab83b4b03b5b67c9c4f584d9c17fc5df3343a83b8cd2f0c",
+          "evmSig": "0xc4f31b537cc2ce2e8e4bd24733f5458348be4de2f4c8950ed36b4db8a67e07c496166d6a504a513e7ab83b4b03b5b67c9c4f584d9c17fc5df3343a83b8cd2f0c615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        },
+        {
+          "kind": "approveMaker",
+          "env": "testnet",
+          "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+          "maker": "0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65",
+          "approved": true,
+          "deadline": "1700259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "2"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "2"
+            }
+          ],
+          "structHash": "0x87de6078e57c90bb67c960a0390b6a7c28457a431cc272e5c2ffc56b3fe05e6a",
+          "digest": "0x7b36a45171a439c3b5e1ff199bda4666e0a89cb7391d715347a677555ff77cb0",
+          "text": "ProofBridge: allow a maker to name this account as settlement signer\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nMaker: 0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 2\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 2",
+          "sep53Payload": "0x748c61ce49ba0c91a420e1c09cd3d7d336f8abc7e6a4b3c479b7c8c09db674b5",
+          "scheme": "sep53",
+          "sig": "0x09695fee68ce55c84887b9fb8de6a5522c8b550999910feb27ba8e61dc2be83fe4e013bc80637a5bdc0a04709db3c801b38c491f712f0c31f795ee480f7d1b0b",
+          "evmSig": "0x09695fee68ce55c84887b9fb8de6a5522c8b550999910feb27ba8e61dc2be83fe4e013bc80637a5bdc0a04709db3c801b38c491f712f0c31f795ee480f7d1b0b615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+        }
+      ],
+      "approveOtherMaker": {
+        "kind": "approveMaker",
+        "env": "testnet",
+        "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+        "maker": "0x00000000000000000000000014a4c421c7a8513686a0b291fc6077e7d9f0f68d",
+        "approved": true,
+        "deadline": "1700259200",
+        "legs": [
+          {
+            "chainId": "11155111",
+            "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+            "nonce": "0"
+          },
+          {
+            "chainId": "1000002",
+            "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "nonce": "0"
+          }
+        ],
+        "structHash": "0x139a555f0a8503b8fbec9d4e4e476b807fc6fada8460f38c08479a3a792a1210",
+        "digest": "0xa6d9891c9f3d223d9cf5919e6f471210af6dba2e218eeb50df3665cf4e196ac5",
+        "text": "ProofBridge: allow a maker to name this account as settlement signer\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nMaker: 0x00000000000000000000000014a4c421c7a8513686a0b291fc6077e7d9f0f68d\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+        "sep53Payload": "0xef65084531b6d3812b7cd2a80aa6b54e0d07f2893a33b19ad44332ffe1f71cf3",
+        "scheme": "sep53",
+        "sig": "0x6d8eeb5506dce6f1b5fa2bcdb5e3a1611f5ee5c7047b11d504d66a221894c9cff8cf149fa283d599b824f4234924321769b405435a871e8b08fb22ad2ee49500",
+        "evmSig": "0x6d8eeb5506dce6f1b5fa2bcdb5e3a1611f5ee5c7047b11d504d66a221894c9cff8cf149fa283d599b824f4234924321769b405435a871e8b08fb22ad2ee49500615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+      },
+      "approveMakerOnlySepoliaLeg": {
+        "kind": "approveMaker",
+        "env": "testnet",
+        "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+        "maker": "0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65",
+        "approved": true,
+        "deadline": "1700259200",
+        "legs": [
+          {
+            "chainId": "11155111",
+            "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+            "nonce": "0"
+          }
+        ],
+        "structHash": "0x94d1241801c02c5ec91b18051b70d0098cfdc72bfc3f8f739214a4f85e8c2b6c",
+        "digest": "0xdedf9f78f8f7c662c65ba550603d63891aed386ec150b3189880059a865cc3c2",
+        "text": "ProofBridge: allow a maker to name this account as settlement signer\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nMaker: 0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0",
+        "sep53Payload": "0x525fd9b138c3372b17841ae593f07127d5b901d2c467e7b026394eea00f5b4a1",
+        "scheme": "sep53",
+        "sig": "0x2789b53be06fb3ac47f9b39c358404015c7eb6d0644b9af1c2161b5cae4b6dad7bab354b19706816d1ecd971bd01f91fbd29589efac9f21e00ad3f8affbd710d",
+        "evmSig": "0x2789b53be06fb3ac47f9b39c358404015c7eb6d0644b9af1c2161b5cae4b6dad7bab354b19706816d1ecd971bd01f91fbd29589efac9f21e00ad3f8affbd710d615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+      },
+      "approveMakerOnlyStellarLeg": {
+        "kind": "approveMaker",
+        "env": "testnet",
+        "account": "0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31",
+        "maker": "0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65",
+        "approved": true,
+        "deadline": "1700259200",
+        "legs": [
+          {
+            "chainId": "1000002",
+            "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "nonce": "0"
+          }
+        ],
+        "structHash": "0xacfca963da0c16864c1dd927d45252e928d5c278bec6fd69ac95fe232ab7c6f5",
+        "digest": "0x1d42da4d3ff916e0c5bf758132712af7615756123efa3e66d2f09fcf05db2c9f",
+        "text": "ProofBridge: allow a maker to name this account as settlement signer\n\nNetwork: testnet\nAccount: 0x690f3912c3cabb679602e30a0eecd597e773ffd097ec38102df9f0877e955c31\nMaker: 0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+        "sep53Payload": "0x6b6f5baa3dcdb35218068754a35809f89691258cedca87525ab50591ce57b9aa",
+        "scheme": "sep53",
+        "sig": "0xc98450a185f60a3d7900b8913b6ebdb7ded85ed0a461fd1d7918efcc4a1977ee22097feb1d755733683a8095a0a1d2b9300bf01766c5cd544fb924ba2ac25c02",
+        "evmSig": "0xc98450a185f60a3d7900b8913b6ebdb7ded85ed0a461fd1d7918efcc4a1977ee22097feb1d755733683a8095a0a1d2b9300bf01766c5cd544fb924ba2ac25c02615204832dbdd1dd60c22c13d0a5bc107b084154ed9ab516912ce383f1ec2a8c315c957e87f0f92d1038ec97d0ff73e797d5ec0e0ae3029667bbcac312390f69"
+      },
       "reuseKey0AtNonce1": {
         "kind": "register",
         "env": "testnet",
@@ -2492,6 +2652,154 @@
           "sig": "0x97ef86b166079443e69cdc5cb9f4037eb009e3137bd85622b292ea15ddf3719b34c3e495a57c813026339ef323de44c623ea104b21a943808394c21f016a607f1b"
         }
       ],
+      "approveMaker": [
+        {
+          "kind": "approveMaker",
+          "env": "testnet",
+          "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+          "maker": "0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65",
+          "approved": true,
+          "deadline": "1700259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "0"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "0"
+            }
+          ],
+          "structHash": "0x87b1ec8f759f904ec420820d49cb0f11ca6e23ce32623999297456ec1bcd5311",
+          "digest": "0x353aad74b8469f30012a8fdce476c25587f0099272c507c8a88df4d3ac72a477",
+          "text": "ProofBridge: allow a maker to name this account as settlement signer\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nMaker: 0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+          "sep53Payload": "0xe7f3442f8ffe9ed4ed852639027177ff74c699b8a683087eb12cabad11f1cad2",
+          "scheme": "secp256k1",
+          "sig": "0x3b25fde2ef66c323d9f4b1ea7c2e9cc087cd8b250e5b235e05ee279cca6de33820b27644a1d075a264bd9e83aedac6bece7b4bc0f17faefa5eeb19201e4374761b"
+        },
+        {
+          "kind": "approveMaker",
+          "env": "testnet",
+          "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+          "maker": "0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65",
+          "approved": false,
+          "deadline": "1700259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "1"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "1"
+            }
+          ],
+          "structHash": "0xf61e82b588ec0e1998d640fd8ef96a067c8637c6be3c3e3fc5fdd686efb474f6",
+          "digest": "0x0a90c892c9c40b8f3f6b62f38c07d97b2b05740d0de34c11ae38aafa12026e7e",
+          "text": "ProofBridge: withdraw a maker's permission to name this account as settlement signer\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nMaker: 0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 1\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 1",
+          "sep53Payload": "0x9105b915f6ebb4b73ff4796080e2e5fb518f677a46ab8cf6841aeeee9b48fabd",
+          "scheme": "secp256k1",
+          "sig": "0xe399c0cc5f0940be6bbcf14f33cc1b50a4d01dc8f98395e54d329e85a0821c9956b966cc1617bde496de247eb6d143c22c5b3a4f5955cfe472556a3dfb9d2a4b1b"
+        },
+        {
+          "kind": "approveMaker",
+          "env": "testnet",
+          "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+          "maker": "0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65",
+          "approved": true,
+          "deadline": "1700259200",
+          "legs": [
+            {
+              "chainId": "11155111",
+              "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+              "nonce": "2"
+            },
+            {
+              "chainId": "1000002",
+              "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "nonce": "2"
+            }
+          ],
+          "structHash": "0x0af4a13caab7860a238bac134f86a9e9a458b3cbbe2f32cbf906ceecf1be32fd",
+          "digest": "0x893e5921509d63f5c90fb88f609323774f6bd56dc4fdfc2f333bbfe1688bc183",
+          "text": "ProofBridge: allow a maker to name this account as settlement signer\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nMaker: 0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 2\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 2",
+          "sep53Payload": "0x27876caecaedd802af43df390bd7f3f859a1ea78069616a30531e70593c7ff69",
+          "scheme": "secp256k1",
+          "sig": "0xf79142c31b6b5d0f1fcb24a38f9f3c3ea9284d1c018b219e27e11356774ca8b5776f43e08caa9a63d5886750814dd00d7f13ebf941c67032cc49afcf7cf34bd61c"
+        }
+      ],
+      "approveOtherMaker": {
+        "kind": "approveMaker",
+        "env": "testnet",
+        "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+        "maker": "0x00000000000000000000000014a4c421c7a8513686a0b291fc6077e7d9f0f68d",
+        "approved": true,
+        "deadline": "1700259200",
+        "legs": [
+          {
+            "chainId": "11155111",
+            "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+            "nonce": "0"
+          },
+          {
+            "chainId": "1000002",
+            "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "nonce": "0"
+          }
+        ],
+        "structHash": "0xaa84bac7cd04cc9f97e23aeb5ae02bb0bf07f205d86b1db9a219e98fa50ae425",
+        "digest": "0x780ee1f7d8912776edfd481d28acd66f285c5448c7981a8552768f310a1b46fa",
+        "text": "ProofBridge: allow a maker to name this account as settlement signer\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nMaker: 0x00000000000000000000000014a4c421c7a8513686a0b291fc6077e7d9f0f68d\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+        "sep53Payload": "0xa83c11ddeb63e34f2204f18cfc99d65de993663bde45e88a50eb0784c6642b5c",
+        "scheme": "secp256k1",
+        "sig": "0x10bba7b9429092d1ac3501e68b890ef4cf65ff5801d2e81ceda6c10532cedcfa709d5cffe77d16193e52503e12e3afaf20b1e7d628eb556804b1dba5e361e6b51c"
+      },
+      "approveMakerOnlySepoliaLeg": {
+        "kind": "approveMaker",
+        "env": "testnet",
+        "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+        "maker": "0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65",
+        "approved": true,
+        "deadline": "1700259200",
+        "legs": [
+          {
+            "chainId": "11155111",
+            "registry": "0x0000000000000000000000001111111111111111111111111111111111111111",
+            "nonce": "0"
+          }
+        ],
+        "structHash": "0x52360d41bcdde99bf2c0b9c5095a69d81f240979e5560734aae98eca6bbb0d7f",
+        "digest": "0xe90ab267045e887198380d35ead3f9cb82065ccf4522233e6969e5fc6374ba26",
+        "text": "ProofBridge: allow a maker to name this account as settlement signer\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nMaker: 0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 11155111, registry 0x0000000000000000000000001111111111111111111111111111111111111111, nonce 0",
+        "sep53Payload": "0x0fd087aa74687936010496b289d21c6ea5e0d6467ebc227c6a030843caf3840f",
+        "scheme": "secp256k1",
+        "sig": "0x33e8c7b85030e3ada07a1fcd498d875ecfde61cc3ea98c253d4a885b12e92e69169438a004737d465c026e5533dd9fd9eaf79858f891b0c2e85b21db007c99da1c"
+      },
+      "approveMakerOnlyStellarLeg": {
+        "kind": "approveMaker",
+        "env": "testnet",
+        "account": "0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0",
+        "maker": "0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65",
+        "approved": true,
+        "deadline": "1700259200",
+        "legs": [
+          {
+            "chainId": "1000002",
+            "registry": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "nonce": "0"
+          }
+        ],
+        "structHash": "0x4a65c7c10c60bca2bfd4e0afac3131df14230268ba3a2e66b2287d1503a55296",
+        "digest": "0x35b8e7dac166687717ca2e1f60b14dcb9b0d3e1bd1d29bf4cf2556556db9bb3d",
+        "text": "ProofBridge: allow a maker to name this account as settlement signer\n\nNetwork: testnet\nAccount: 0x000000000000000000000000d2306c80a26fe4b63ff89fd55f736b17cd425bf0\nMaker: 0x00000000000000000000000094d0664b249d23286d62f2dd2d21f739b3707f65\nValid until: 2023-11-17 22:13:20 UTC (1700259200)\n\nChain 1000002, registry 0x2222222222222222222222222222222222222222222222222222222222222222, nonce 0",
+        "sep53Payload": "0xafee711dd6332597bd631ec5649a54e62deedec925d09ca0f5251da5d2cbe8a9",
+        "scheme": "secp256k1",
+        "sig": "0x18b7b6f33792a0e3e230d8bf2c818ddf8224b18b133c80a7a64a6db0e05b2d6f2d256b964796e111ec3ed44acde2716b21e898b51c97118d7df408581a7581ea1c"
+      },
       "reuseKey0AtNonce1": {
         "kind": "register",
         "env": "testnet",

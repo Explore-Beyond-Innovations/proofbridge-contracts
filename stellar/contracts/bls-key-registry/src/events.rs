@@ -52,6 +52,17 @@ pub struct RegistrationCancelled {
     pub nonce: u64,
 }
 
+/// The account allowed (`approved`) or stopped `maker` naming it as settlement signer, at the pair's `nonce`.
+#[contractevent(topics = ["mkr_appr"], data_format = "vec")]
+pub struct MakerApprovalSet {
+    #[topic]
+    pub account: BytesN<32>,
+    #[topic]
+    pub maker: BytesN<32>,
+    pub approved: bool,
+    pub nonce: u64,
+}
+
 #[contractevent(topics = ["guard_set"], data_format = "single-value")]
 pub struct PositionGuardsSet {
     pub guards: Vec<Address>,

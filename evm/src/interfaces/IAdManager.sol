@@ -120,6 +120,8 @@ interface IAdManager is IEscrow {
     error AdManager__NoKeyRegistry();
     error AdManager__SettlementSignerZero();
     error AdManager__SignerNotRegistered(bytes32 signer);
+    /// The settlement signer is not the maker and has not approved the maker in the key registry.
+    error AdManager__SignerNotApproved(bytes32 signer, bytes32 maker);
     error AdManager__SettlementSignerMismatch(bytes32 expected, bytes32 provided);
     /// @notice The order's maker has halted settlement; only evidence can pay this order now.
     error AdManager__Halted(address maker);

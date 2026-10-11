@@ -11,6 +11,7 @@
 
 extern crate std;
 
+use proofbridge_core::eip712::address_to_bytes32;
 use proofbridge_core::timing::{MAX_BUFFER, MAX_ORDER_WINDOW};
 use serde::Deserialize;
 use soroban_sdk::{
@@ -543,9 +544,15 @@ fn setup_opts(wire_root_verifiers: bool, wire_timing: bool) -> TestSetup<'static
 
     // 2.3c: the settlement signer must hold a usable key. A mock registry marks the fixture's
     // (split-case) signer registered; `test_t14_real_registry_gates_the_signer` uses the real one.
+    // The split-case signer also approves the maker, as a signer that is not the maker must.
     let key_registry = env.register(MockKeyRegistry, ());
-    MockKeyRegistryClient::new(&env, &key_registry)
-        .set(&bytes32_to_bytesn(&env, &tp.ad_settlement_signer), &true);
+    let keys = MockKeyRegistryClient::new(&env, &key_registry);
+    keys.set(&bytes32_to_bytesn(&env, &tp.ad_settlement_signer), &true);
+    keys.approve(
+        &bytes32_to_bytesn(&env, &tp.ad_settlement_signer),
+        &address_to_bytes32(&env, &maker_addr),
+        &true,
+    );
     ad_manager.set_key_registry(&key_registry);
 
     // --- Ad-manager: create_ad (creator wallet auth, mocked) ---
@@ -1246,6 +1253,19 @@ fn real_registry_with_vector_maker(
     BytesN<32>,
     Address,
 ) {
+    let (client, account, owner) = registered_vector_maker(s);
+    approve_fixture_maker(s, &client, &account, &owner);
+    (client, account, owner)
+}
+
+/// The real registry with the vector maker's key, and no maker approval filed.
+fn registered_vector_maker(
+    s: &TestSetup,
+) -> (
+    bls_key_registry_contract::Client<'static>,
+    BytesN<32>,
+    Address,
+) {
     let (client, account, pk, pop) = vector_registry(s);
     let vectors: serde_json::Value =
         serde_json::from_str(include_str!("../../test-vectors/bls-encodings.json")).unwrap();
@@ -1263,6 +1283,24 @@ fn real_registry_with_vector_maker(
         &(s.env.ledger().timestamp() + 3_600), // require_auth: any deadline within 7 days
     );
     (client, account, owner)
+}
+
+/// The account lets the fixture's maker name it as settlement signer, approving as itself.
+fn approve_fixture_maker(
+    s: &TestSetup,
+    client: &bls_key_registry_contract::Client,
+    account: &BytesN<32>,
+    owner: &Address,
+) {
+    let maker = address_to_bytes32(&s.env, &s.maker_addr);
+    client.approve_maker(
+        account,
+        &maker,
+        &true,
+        &bls_key_registry_contract::OwnerAuth::Stellar(owner.clone()),
+        &client.maker_approval(account, &maker).nonce,
+        &(s.env.ledger().timestamp() + 3_600),
+    );
 }
 
 #[test]
@@ -1942,6 +1980,20 @@ impl MockKeyRegistry {
             .unwrap_or(false)
     }
 
+    /// `account` lets `maker` name it as settlement signer (or withdraws that).
+    pub fn approve(env: Env, account: BytesN<32>, maker: BytesN<32>, ok: bool) {
+        env.storage()
+            .instance()
+            .set(&(soroban_sdk::symbol_short!("appr"), account, maker), &ok);
+    }
+
+    pub fn is_approved_maker(env: Env, account: BytesN<32>, maker: BytesN<32>) -> bool {
+        env.storage()
+            .instance()
+            .get(&(soroban_sdk::symbol_short!("appr"), account, maker))
+            .unwrap_or(false)
+    }
+
     /// A (fake) slot of `account` expiring at `valid_until`, for `any_slot_expired_within`.
     pub fn add_slot_expiry(env: Env, account: BytesN<32>, valid_until: u64) {
         let key = (soroban_sdk::symbol_short!("expiry"), account);
@@ -1968,8 +2020,11 @@ fn other_account(env: &Env, tag: u8) -> BytesN<32> {
     BytesN::from_array(env, &[tag; 32])
 }
 
+/// Registered, and approving the fixture maker (the escrow's consent check is not under test here).
 fn mark_usable(s: &TestSetup, account: &BytesN<32>) {
-    MockKeyRegistryClient::new(&s.env, &s.key_registry).set(account, &true);
+    let keys = MockKeyRegistryClient::new(&s.env, &s.key_registry);
+    keys.set(account, &true);
+    keys.approve(account, &address_to_bytes32(&s.env, &s.maker_addr), &true);
 }
 
 fn unlock_fixture_order(s: &TestSetup, params: &ad_manager_contract::OrderParams) {
@@ -2563,6 +2618,140 @@ fn test_t14_real_registry_gates_the_signer() {
             .try_set_settlement_signer(&ad_id, &other_account(&s.env, 0xbb)),
         Err(Ok(ad_manager_contract::AdManagerError::SignerNotRegistered))
     );
+}
+
+// --- Settlement-signer consent: a signer other than the maker approves it first --------
+
+fn approval(
+    s: &TestSetup,
+    client: &bls_key_registry_contract::Client,
+    account: &BytesN<32>,
+    owner: &Address,
+    maker: &BytesN<32>,
+    approved: bool,
+) {
+    client.approve_maker(
+        account,
+        maker,
+        &approved,
+        &bls_key_registry_contract::OwnerAuth::Stellar(owner.clone()),
+        &client.maker_approval(account, maker).nonce,
+        &(s.env.ledger().timestamp() + 3_600),
+    );
+}
+
+/// All three escrow gates refuse an unapproved signer, pass once it approves, and a withdrawal
+/// refuses the next lock while the order already open still cancels normally.
+#[test]
+fn test_consent_every_gate_needs_the_signers_approval() {
+    let s = setup();
+    let (client, account, owner) = registered_vector_maker(&s);
+    s.ad_manager.set_key_registry(&client.address);
+    let maker = address_to_bytes32(&s.env, &s.maker_addr);
+    let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
+
+    assert_eq!(
+        s.ad_manager.try_set_settlement_signer(&ad_id, &account),
+        Err(Ok(AdErr::SignerNotApproved))
+    );
+    let create = |id: &str| {
+        s.ad_manager.try_create_ad(
+            &s.maker_addr,
+            &SorobanString::from_str(&s.env, id),
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token),
+            &s.tp.amount,
+            &s.tp.order_chain_id,
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_recipient),
+            &account,
+        )
+    };
+    assert_eq!(
+        create("consent-1").map(|_| ()),
+        Err(Ok(AdErr::SignerNotApproved))
+    );
+
+    approval(&s, &client, &account, &owner, &maker, true);
+    assert!(create("consent-1").is_ok());
+    s.ad_manager.set_settlement_signer(&ad_id, &account);
+    let p = lock_signed_by(&s, &account);
+
+    approval(&s, &client, &account, &owner, &maker, false);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, s.ad_manager.cancel_finalizes_at(&p));
+    s.ad_manager.finalize_cancel(&p); // the open order exits as before
+    let mut q = ad_manager_order_params(&s.env, &s.tp);
+    q.ad_settlement_signer = account.clone();
+    q.salt = soroban_sdk::U256::from_u32(&s.env, 11);
+    q.deadline = s.env.ledger().timestamp() + 86_400;
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&q),
+        Err(Ok(AdErr::SignerNotApproved)),
+        "a withdrawn approval refuses the next lock"
+    );
+}
+
+/// The lockout cannot set up: naming a stranger is refused, so the stranger revokes freely.
+#[test]
+fn test_consent_a_stranger_cannot_be_named_and_can_still_revoke() {
+    let s = setup();
+    let (client, account, owner) = registered_vector_maker(&s);
+    client.set_position_guards(&soroban_sdk::vec![
+        &s.env,
+        s.ad_manager.address.clone(),
+        s.order_portal.address.clone()
+    ]);
+    s.ad_manager.set_key_registry(&client.address);
+    let ad_id = SorobanString::from_str(&s.env, &s.tp.ad_id);
+    assert_eq!(
+        s.ad_manager.try_set_settlement_signer(&ad_id, &account),
+        Err(Ok(AdErr::SignerNotApproved))
+    );
+    client.revoke(
+        &account,
+        &bls_key_registry_contract::OwnerAuth::Stellar(owner),
+        &1,
+    );
+    assert!(!client.has_usable_slot(&account));
+}
+
+/// The agent shape: an account contract is the maker (`creator = account`) and the key account M
+/// signs. M approves the account by `require_auth`, as itself, and the account's ad then locks.
+#[test]
+fn test_consent_agent_account_maker_with_key_account_signer() {
+    let s = setup();
+    let (client, m, m_owner) = registered_vector_maker(&s);
+    s.ad_manager.set_key_registry(&client.address);
+    let account = Address::generate(&s.env); // a contract address, as an agent account is
+    TokenContractClient::new(&s.env, &s.ad_token_addr).mint(&account, &(s.tp.amount as i128));
+    let create = || {
+        s.ad_manager.try_create_ad(
+            &account,
+            &SorobanString::from_str(&s.env, "agent-ad"),
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_chain_token),
+            &s.tp.amount,
+            &s.tp.order_chain_id,
+            &bytes32_to_bytesn(&s.env, &s.tp.ad_recipient),
+            &m,
+        )
+    };
+    assert_eq!(create().map(|_| ()), Err(Ok(AdErr::SignerNotApproved)));
+
+    approval(
+        &s,
+        &client,
+        &m,
+        &m_owner,
+        &address_to_bytes32(&s.env, &account),
+        true,
+    );
+    assert!(create().is_ok());
+    let mut p = ad_manager_order_params(&s.env, &s.tp);
+    p.ad_id = SorobanString::from_str(&s.env, "agent-ad");
+    p.ad_creator = address_to_bytes32(&s.env, &account);
+    p.ad_settlement_signer = m.clone();
+    s.ad_manager.lock_for_order(&p);
+    assert!(s.ad_manager.has_open_positions(&m));
 }
 
 // --- T-20: the settlement signer's wire form is the comparison form ----------
@@ -4468,10 +4657,18 @@ fn test_464_full_migration_new_orders_lock_old_order_waits() {
     );
     warp(&s, p.deadline + 2 * SUITE_BUFFER);
     s.ad_manager.finalize_cancel(&p); // frees the ad's liquidity
-    MockKeyRegistryClient::new(&s.env, &s.key_registry).set(&account, &true);
+                                      // Keys and maker approvals are per registry: the signer files both again on the new one.
+    let keys = MockKeyRegistryClient::new(&s.env, &s.key_registry);
+    keys.set(&account, &true);
     let mut q = ad_manager_order_params(&s.env, &s.tp);
     q.ad_settlement_signer = account.clone();
     q.salt = soroban_sdk::U256::from_u32(&s.env, 464);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&q),
+        Err(Ok(AdErr::SignerNotApproved)),
+        "an approval on the old registry does not carry over"
+    );
+    keys.approve(&account, &address_to_bytes32(&s.env, &s.maker_addr), &true);
     q.deadline = s.env.ledger().timestamp() + 86_400;
     let r = s.ad_manager.try_lock_for_order(&q);
     assert!(r.is_ok(), "a new lock is taken on the new pair: {r:?}");
@@ -6937,6 +7134,11 @@ impl AccountKeyRegistry {
     pub fn any_slot_expired_within(_env: Env, _account: BytesN<32>, _from: u64, _to: u64) -> bool {
         false
     }
+
+    /// Every account it knows approves every maker: consent is not what these tests check.
+    pub fn is_approved_maker(env: Env, account: BytesN<32>, _maker: BytesN<32>) -> bool {
+        env.storage().instance().has(&account)
+    }
 }
 
 struct CoSignAuth {
@@ -8711,6 +8913,13 @@ fn wire_real_stack(s: &TestSetup) -> Bytes {
         );
         assert_eq!(slot, 0, "the co-signature names slot 0");
     }
+    let signer = BytesN::from_array(&s.env, &s.tp.ad_settlement_signer);
+    approve_fixture_maker(
+        s,
+        &reg,
+        &signer,
+        &account_addr(s, &s.tp.ad_settlement_signer),
+    );
 
     let module = s.env.register(counterparty_verifier_contract::WASM, ());
     counterparty_verifier_contract::Client::new(&s.env, &module).initialize(&registry);

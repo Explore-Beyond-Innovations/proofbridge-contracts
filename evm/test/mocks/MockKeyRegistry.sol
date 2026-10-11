@@ -15,6 +15,17 @@ contract MockKeyRegistry is IKeyRegistry {
         return usable[account];
     }
 
+    /// `approvedMaker[account][maker]`: the account let the maker name it as settlement signer.
+    mapping(bytes32 => mapping(bytes32 => bool)) public approvedMaker;
+
+    function approve(bytes32 account, bytes32 maker, bool ok) external {
+        approvedMaker[account][maker] = ok;
+    }
+
+    function isApprovedMaker(bytes32 account, bytes32 maker) external view returns (bool) {
+        return approvedMaker[account][maker];
+    }
+
     /// Expiries of the account's (fake) slots, for `anySlotExpiredWithin`.
     mapping(bytes32 => uint64[]) internal expiries;
 
