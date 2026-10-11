@@ -585,7 +585,10 @@ contract AdManager is EscrowBase, IAdManager {
     }
 
     /// @dev The first second the co-signed unlock is refused (D2): the window's end minus the margin,
-    ///      both from the order's own timing version, so an admin retiming cannot move it.
+    ///      both from the order's own timing version, so an admin retiming cannot move it. It is also
+    ///      the inclusive `until` the denial rule passes to `anySlotExpiredWithin`, one second past the
+    ///      last accepted second: a slot expiring exactly at the cutoff still counts as a denial. That
+    ///      conservatism can only lengthen a maker's own refund (the evidence grace), never move a payout.
     function _presentationCutoff(bytes32 orderHash, OrderParams calldata p) private view returns (uint256) {
         RouteTiming.Timing storage t = _orderTiming(orderHash, p.orderChainId);
         return _windowEnd(orderHash, p.deadline, t.buffer) - t.margin;

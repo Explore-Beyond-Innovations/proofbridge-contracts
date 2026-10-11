@@ -95,7 +95,8 @@ pub enum AdManagerError {
     // Address decode errors (40-41)
     /// Recipient bytes do not decode to a valid Stellar account address
     InvalidAccountAddress = 40,
-    /// The order's deadline has passed; it can no longer be unlocked.
+    /// The co-signed unlock is at or past the presentation cutoff (the window's end minus the
+    /// margin): the first second refused, strict, so it never shares a second with finalize_cancel.
     OrderExpired = 46,
     /// No key registry is set; createAd / set_settlement_signer fail closed (2.3c D2)
     NoKeyRegistry = 47,
