@@ -67,9 +67,12 @@ impl DisputeManagerContract {
         params: DisputeParams,
     ) -> Result<(), Error> {
         Self::require_admin(&env)?;
+        // One arm per field `validate` names. A field added there without an arm here traps instead
+        // of being reported as the bond floor's error.
         dispute::validate(&params).map_err(|f| match f {
             1 => Error::InvalidChallengePeriod,
-            _ => Error::InvalidBondFloor,
+            2 => Error::InvalidBondFloor,
+            other => panic!("dispute::validate named field {other}, which has no error"),
         })?;
         storage::set_params(&env, chain_id, &params);
         events::DisputeParamsSet { chain_id, params }.publish(&env);
