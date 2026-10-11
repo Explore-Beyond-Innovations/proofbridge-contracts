@@ -5662,7 +5662,11 @@ fn test_2_3g_follower_pays_the_maker_on_a_forfeit_proof() {
         s.order_portal.try_record_settled(&p),
         Err(Ok(OpErr::SettledRecorded))
     );
-    assert_eq!(s.order_portal.get_merkle_leaf_count(), leaves, "no SETTLED leaf");
+    assert_eq!(
+        s.order_portal.get_merkle_leaf_count(),
+        leaves,
+        "no SETTLED leaf"
+    );
 }
 
 /// Filing on a `Claimed` leg ends its cancel window, so the claim record goes at the filing: while
