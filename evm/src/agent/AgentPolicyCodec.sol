@@ -7,8 +7,9 @@ pragma solidity ^0.8.34;
 ///      errors: a client holding the module's ABI alone would see an unknown selector.
 interface IAgentPolicyCodecErrors {
     error AgentPolicyCodec__BadDomain();
-    error AgentPolicyCodec__BadActionCount(uint8 count);
     error AgentPolicyCodec__BadTokenCount(uint8 count);
+    error AgentPolicyCodec__BadOrderTokenCount(uint8 count);
+    error AgentPolicyCodec__ZeroToken();
     error AgentPolicyCodec__BadAdScope();
     error AgentPolicyCodec__NotAscending();
     error AgentPolicyCodec__TrailingBytes(uint256 got, uint256 want);
@@ -22,36 +23,42 @@ interface IAgentPolicyCodecErrors {
  * @custom:security-contact security@proofbridge.xyz
  * @notice The canonical byte form of an agent policy, parsed.
  *
- *         One encoding drives both chains: Soroban stores the policy as a struct and hashes these
- *         same bytes for parity, the EVM never stores it at all. The owner hands the bytes to
- *         `setAgentPolicy`, which derives every storage row from them and keeps
+ *         One encoding for both chains: Soroban stores the policy as a struct and publishes its
+ *         fields, from which the off-chain encoder (order-params) computes these same bytes; the
+ *         EVM never stores the bytes at all. The owner hands the bytes to `setAgentPolicy`, which
+ *         derives every storage row from them and keeps
  *         `keccak256(policy)` as the policy's identity — so the two can never drift, because the
  *         rows and the fingerprint come out of the same input.
  *
  *         Layout (big-endian, no padding):
  *
  *           bytes32  domain
- *           uint8    actionCount   || uint8[] actionIds            ascending, unique
- *           uint8    tokenCount    || rows                         ascending by token
+ *           uint8    actionId                                      today only lockForOrder
+ *           uint8    adTokenCount  || rows                         ascending by token, 1..16
  *             bytes32 token, uint256 maxPerOrder, uint256 capacity, uint256 refillPerSecond
+ *           uint8    orderTokenCount || bytes32[] tokens           ascending, 1..16
  *           uint8    adScopeKind   0 = every ad this account owns, 1 = the list below
  *           uint8    adScopeCount
  *             uint16 length || utf8 bytes                          ascending, unique
  *           uint64   validUntil    0 = no expiry
  *           bytes32  settlementSigner
  *
+ *         Ad tokens carry limits because a lock spends the ad-chain token; order tokens are a plain
+ *         list, because the order-chain token is only checked for membership. A token may appear
+ *         in both lists.
+ *
  *         `revoked` is absent by design: revoking is overwriting the fingerprint, which
  *         invalidates every copy of the policy at once. The live buckets are absent for the
  *         opposite reason — they are the chain's state, not the owner's statement.
  */
 library AgentPolicyCodec {
-    bytes32 internal constant DOMAIN = keccak256("ProofBridge.AgentPolicy.v1");
+    bytes32 internal constant DOMAIN = keccak256("ProofBridge.AgentPolicy.v3");
 
     /// @notice Chain-neutral action ids. Soroban names an action with a `Symbol` and the EVM with a
     ///         4-byte selector, so neither side's spelling can be the one that gets hashed.
     uint8 internal constant ACTION_LOCK_FOR_ORDER = 1;
 
-    uint8 internal constant MAX_ALLOWED_ACTIONS = 4;
+    /// @notice Per list: at most 16 ad tokens and 16 order tokens.
     uint8 internal constant MAX_WHITELIST_TOKENS = 16;
     uint8 internal constant MAX_AD_SCOPE = 16;
     uint16 internal constant MAX_AD_ID_BYTES = 1024;
@@ -70,8 +77,9 @@ library AgentPolicyCodec {
         bytes32 settlementSigner;
         uint64 validUntil;
         bool adScopeAll;
-        uint8[] actions;
-        TokenRow[] tokens;
+        uint8 actionId;
+        TokenRow[] adTokens;
+        bytes32[] orderTokens;
         bytes32[] adScopeHashes;
     }
 
@@ -94,23 +102,25 @@ library AgentPolicyCodec {
         d.settlementSigner = v.settlementSigner;
         d.validUntil = v.validUntil;
         d.adScopeAll = v.adScopeAll;
-        d.actions = new uint8[](v.actionCount);
-        for (uint256 i = 0; i < v.actionCount; ++i) {
-            d.actions[i] = actionAt(policy, v, i);
-        }
-        d.tokens = new TokenRow[](v.tokenCount);
+        d.actionId = v.actionId;
+        d.adTokens = new TokenRow[](v.tokenCount);
         for (uint256 i = 0; i < v.tokenCount; ++i) {
-            d.tokens[i] = tokenRowAt(policy, v, i);
+            d.adTokens[i] = tokenRowAt(policy, v, i);
+        }
+        d.orderTokens = new bytes32[](v.orderTokenCount);
+        for (uint256 i = 0; i < v.orderTokenCount; ++i) {
+            d.orderTokens[i] = orderTokenAt(policy, v, i);
         }
         d.adScopeHashes = adScopeHashes(policy, v);
     }
 
     /// @notice Where each section starts, so callers walk the bytes once.
     struct View {
-        uint256 actionsAt;
-        uint8 actionCount;
+        uint8 actionId;
         uint256 tokensAt;
         uint8 tokenCount;
+        uint256 orderTokensAt;
+        uint8 orderTokenCount;
         bool adScopeAll;
         uint8 adScopeCount;
         uint256 adScopeAt;
@@ -130,22 +140,13 @@ library AgentPolicyCodec {
         }
         uint256 at = 32;
 
-        v.actionCount = uint8(policy[at]);
+        // One action, a fixed field. An id this language does not know would authorize nothing,
+        // which Soroban refuses as `BadPolicy`.
+        v.actionId = uint8(policy[at]);
         at += 1;
-        if (v.actionCount == 0 || v.actionCount > MAX_ALLOWED_ACTIONS) {
-            revert IAgentPolicyCodecErrors.AgentPolicyCodec__BadActionCount(v.actionCount);
+        if (v.actionId != ACTION_LOCK_FOR_ORDER) {
+            revert IAgentPolicyCodecErrors.AgentPolicyCodec__UnknownAction(v.actionId);
         }
-        v.actionsAt = at;
-        for (uint256 i = 0; i < v.actionCount; ++i) {
-            uint8 id = uint8(policy[at + i]);
-            // An id this language does not know installs a row nothing can ever match — a policy that
-            // authorizes nothing, which Soroban refuses as `BadPolicy`.
-            if (id != ACTION_LOCK_FOR_ORDER) revert IAgentPolicyCodecErrors.AgentPolicyCodec__UnknownAction(id);
-            if (i > 0 && id <= uint8(policy[at + i - 1])) {
-                revert IAgentPolicyCodecErrors.AgentPolicyCodec__NotAscending();
-            }
-        }
-        at += v.actionCount;
 
         v.tokenCount = uint8(policy[at]);
         at += 1;
@@ -157,7 +158,7 @@ library AgentPolicyCodec {
         for (uint256 i = 0; i < v.tokenCount; ++i) {
             uint256 rowAt = at + i * ROW_BYTES;
             uint256 token = uint256(bytes32(policy[rowAt:rowAt + 32]));
-            if (i > 0 && token <= prevToken) revert IAgentPolicyCodecErrors.AgentPolicyCodec__NotAscending();
+            _checkToken(token, prevToken, i);
             prevToken = token;
             // Soroban's limits are `u128`. The fields are 32 bytes for the EVM's convenience, but a
             // value the other chain cannot hold would make the same policy mean two things — and
@@ -169,6 +170,20 @@ library AgentPolicyCodec {
             }
         }
         at += uint256(v.tokenCount) * ROW_BYTES;
+
+        v.orderTokenCount = uint8(policy[at]);
+        at += 1;
+        if (v.orderTokenCount == 0 || v.orderTokenCount > MAX_WHITELIST_TOKENS) {
+            revert IAgentPolicyCodecErrors.AgentPolicyCodec__BadOrderTokenCount(v.orderTokenCount);
+        }
+        v.orderTokensAt = at;
+        prevToken = 0;
+        for (uint256 i = 0; i < v.orderTokenCount; ++i) {
+            uint256 token = uint256(bytes32(policy[at + i * 32:at + i * 32 + 32]));
+            _checkToken(token, prevToken, i);
+            prevToken = token;
+        }
+        at += uint256(v.orderTokenCount) * 32;
 
         uint8 kind = uint8(policy[at]);
         v.adScopeCount = uint8(policy[at + 1]);
@@ -189,13 +204,13 @@ library AgentPolicyCodec {
         for (uint256 i = 0; i < v.adScopeCount; ++i) {
             uint16 len = uint16(bytes2(policy[at:at + 2]));
             at += 2;
-            // 1024 is what Soroban's encoder can hash; a longer id would be a policy one chain
-            // accepts and the other cannot fingerprint.
+            // 1024 is Soroban's ad id bound; a longer id would be a policy one chain accepts and the
+            // other refuses.
             if (len == 0 || len > MAX_AD_ID_BYTES) revert IAgentPolicyCodecErrors.AgentPolicyCodec__BadAdScope();
-            // Strictly ascending by raw bytes, the rule actions and tokens already follow. The first
+            // Strictly ascending by raw bytes, the rule both token lists already follow. The first
             // version compared adjacent *hashes*, which catches neither an unsorted scope nor a
-            // non-adjacent repeat — and Soroban always sorts, so such bytes carried a fingerprint
-            // the other chain could never produce for what the owner thinks is the same policy.
+            // non-adjacent repeat — and the off-chain encoder always sorts, so such bytes carried a
+            // fingerprint it could never produce for what the owner thinks is the same policy.
             if (i > 0 && !_lessThan(policy[prevAt:prevAt + prevLen], policy[at:at + len])) {
                 revert IAgentPolicyCodecErrors.AgentPolicyCodec__NotAscending();
             }
@@ -214,6 +229,12 @@ library AgentPolicyCodec {
         if (at != policy.length) revert IAgentPolicyCodecErrors.AgentPolicyCodec__TrailingBytes(policy.length, at);
     }
 
+    /// @dev Non-zero, and strictly above the previous entry of the same list.
+    function _checkToken(uint256 token, uint256 prevToken, uint256 i) private pure {
+        if (token == 0) revert IAgentPolicyCodecErrors.AgentPolicyCodec__ZeroToken();
+        if (i > 0 && token <= prevToken) revert IAgentPolicyCodecErrors.AgentPolicyCodec__NotAscending();
+    }
+
     /// @dev Lexicographic by byte, a proper prefix sorting first — the order the TypeScript and Rust
     ///      encoders produce. A short final word is zero-padded by the conversion; a real zero byte
     ///      there only ties, and ties fall through to the length.
@@ -227,8 +248,9 @@ library AgentPolicyCodec {
         return a.length < b.length;
     }
 
-    function actionAt(bytes calldata policy, View memory v, uint256 i) internal pure returns (uint8) {
-        return uint8(policy[v.actionsAt + i]);
+    function orderTokenAt(bytes calldata policy, View memory v, uint256 i) internal pure returns (bytes32) {
+        uint256 at = v.orderTokensAt + i * 32;
+        return bytes32(policy[at:at + 32]);
     }
 
     function tokenRowAt(bytes calldata policy, View memory v, uint256 i) internal pure returns (TokenRow memory row) {

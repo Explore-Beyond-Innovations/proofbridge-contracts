@@ -5,9 +5,9 @@
 //!   - the **owner** (any `Address`, G or C, never this account) authorizes
 //!     `__check_auth(payload)` itself, and may do anything;
 //!   - an **agent** signs the Soroban auth payload and may only make calls that
-//!     pass `check_contract_call`: a pinned escrow, an allowed selector, and
-//!     lock args inside its policy (token whitelist, per-order cap, settlement
-//!     identity). Never guarded by open orders; `revoke_agent` is instant.
+//!     pass `check_contract_call`: a pinned escrow, the policy's action, and
+//!     lock args inside its policy (ad and order token lists, per-order cap,
+//!     settlement identity). Never guarded by open orders; `revoke_agent` is instant.
 //!
 //! The account is owner-upgradeable (`upgrade`): the owner is already sovereign
 //! over every fund movement, so code control adds no trust, and it is what lets
@@ -25,7 +25,6 @@ mod auth;
 mod errors;
 mod escrow;
 mod events;
-mod fingerprint;
 mod policy;
 
 use soroban_sdk::{
@@ -43,8 +42,8 @@ pub use auth::{AccountSig, Ed25519Sig, SecpSig};
 pub use errors::AccountError;
 pub use escrow::settlement_signer_of;
 pub use policy::{
-    lock_for_order, AccountVolume, AgentId, AgentPolicy, Schedule, Scope, MAX_AD_SCOPE,
-    MAX_ALLOWED_ACTIONS, MAX_TARGETS, MAX_WHITELIST_TOKENS, SCHEMA_VERSION,
+    lock_for_order, AccountVolume, AgentId, AgentPolicy, Schedule, Scope, MAX_AD_ID_BYTES,
+    MAX_AD_SCOPE, MAX_TARGETS, MAX_WHITELIST_TOKENS, SCHEMA_VERSION,
 };
 
 #[contract]
@@ -100,19 +99,23 @@ impl AgentAccount {
     ///
     /// While any ad is guarded, a **loosening** write needs a matured
     /// `schedule(Account, set_policy, args)` for exactly this call's arguments. Only a
-    /// write that is no wider than the live policy on every axis is instant: a new agent key, a new
-    /// action, token or ad, a wider or dropped ad scope, a higher cap, capacity or refill, a later or
-    /// removed expiry, or a changed settlement signer all count as loosening (`is_policy_tightening`).
-    /// An instant tightening keeps the agent's spent buckets rather than refilling them.
+    /// write that is no wider than the live policy on every axis is instant: a new agent key, a
+    /// changed action, a new ad token, order token or ad, a wider or dropped ad scope, a higher cap,
+    /// capacity or refill, a later or removed expiry, or a changed settlement signer all count as
+    /// loosening (`is_policy_tightening`). An instant tightening keeps the agent's spent buckets
+    /// rather than refilling them.
+    ///
+    /// `PolicySet` carries every installed field, so a watcher computes the policy's fingerprint
+    /// off chain (`@proofbridge/order-params`) without a storage read.
     pub fn set_policy(
         env: Env,
         agent_id: BytesN<32>,
-        allowed_actions: Vec<Symbol>,
-        token_whitelist: Vec<BytesN<32>>,
+        allowed_action: Symbol,
+        ad_tokens: Vec<TokenLimit>,
+        order_tokens: Vec<BytesN<32>>,
         valid_until: u64,
         settlement_signer: BytesN<32>,
         ad_scope: Option<Vec<String>>,
-        limits: Vec<TokenLimit>,
     ) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
@@ -124,21 +127,21 @@ impl AgentAccount {
         let args: Vec<Val> = vec![
             &env,
             agent_id.to_val(),
-            allowed_actions.to_val(),
-            token_whitelist.to_val(),
+            allowed_action.to_val(),
+            ad_tokens.to_val(),
+            order_tokens.to_val(),
             valid_until.into_val(&env),
             settlement_signer.to_val(),
             ad_scope.into_val(&env),
-            limits.to_val(),
         ];
         let mut p = AgentPolicy {
-            allowed_actions,
-            token_whitelist,
+            allowed_action,
+            ad_tokens,
+            order_tokens,
             valid_until,
             revoked: false,
-            settlement_signer: settlement_signer.clone(),
+            settlement_signer,
             ad_scope,
-            limits,
             buckets: Vec::new(&env),
         };
         policy::validate(&env, &p)?;
@@ -157,13 +160,15 @@ impl AgentAccount {
                 )?,
             }
         }
-        let fingerprint = fingerprint::fingerprint(&env, &p)?;
         policy::set_policy(&env, &agent_id, &p);
         events::PolicySet {
             agent_id,
-            settlement_signer,
-            valid_until,
-            fingerprint,
+            allowed_action: p.allowed_action,
+            ad_tokens: p.ad_tokens,
+            order_tokens: p.order_tokens,
+            ad_scope: p.ad_scope,
+            valid_until: p.valid_until,
+            settlement_signer: p.settlement_signer,
         }
         .publish(&env);
         Ok(())
@@ -466,17 +471,6 @@ impl AgentAccount {
         policy::guarded_ads(&env)
     }
 
-    /// The canonical fingerprint of a **live** policy — the value the EVM module stores for the same
-    /// agent — and all zeroes when there is none or it is revoked, which is what the EVM's
-    /// `fingerprintOf` answers, so a consumer comparing the chains reads "no agent here" the same
-    /// way on both. The pure hash ignores `revoked` on purpose; it is this view that must not.
-    pub fn policy_fingerprint(env: Env, agent_id: BytesN<32>) -> Result<BytesN<32>, AccountError> {
-        match policy::get_policy(&env, &agent_id) {
-            Some(p) if !p.revoked => fingerprint::fingerprint(&env, &p),
-            _ => Ok(BytesN::from_array(&env, &[0u8; 32])),
-        }
-    }
-
     /// Owner-only, instant, idempotent: the agent's next signed call fails.
     /// Orders already co-signed under the agent's BLS key still settle through
     /// the registry; retire the slot there (2.1e wires that off the event).
@@ -647,9 +641,6 @@ impl CustomAccountInterface for AgentAccount {
 
 #[cfg(test)]
 mod test;
-
-#[cfg(test)]
-mod fingerprint_test;
 
 #[cfg(test)]
 mod parity_test;
