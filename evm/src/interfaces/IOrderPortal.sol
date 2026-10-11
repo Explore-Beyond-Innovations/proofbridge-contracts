@@ -51,8 +51,6 @@ interface IOrderPortal is IEscrow {
 
     error OrderPortal__AdManagerMismatch(bytes32 expected);
     error OrderPortal__BridgerMustBeSender();
-    /// @notice The deposit went to the maker on a forfeit ruling: no trade settled, so no SETTLED leaf.
-    error OrderPortal__PaidByForfeit(bytes32 orderHash);
 
     function createOrder(OrderParams calldata params) external payable returns (bytes32 orderHash);
     /// @notice The maker's co-signed settlement: `Open` only, until `deadline − claimStagger` (the
@@ -76,11 +74,10 @@ interface IOrderPortal is IEscrow {
     ///         anchored root. No nullifier.
     function presentSettled(OrderParams calldata params, bytes32 targetRoot, bytes calldata proof) external;
     /// @notice Append the deposit's SETTLED leaf after a fill (D8). Permissionless, single-shot, its
-    ///         own transaction — the relayer batches it behind the fill. Refused for a deposit paid
-    ///         by forfeit (`OrderPortal__PaidByForfeit`): that fill settled no trade.
+    ///         own transaction — the relayer batches it behind the fill. A deposit paid by forfeit
+    ///         ({payMakerByForfeit}) is already marked recorded, so it is refused like any recorded
+    ///         order (`Escrow__SettledRecorded`): that fill settled no trade.
     function recordSettled(OrderParams calldata params) external;
-    /// @notice Whether the deposit was paid to the maker on a forfeit ruling ({payMakerByForfeit}).
-    function paidByForfeit(bytes32 orderHash) external view returns (bool);
 
     /**
      * @notice Apply a `BridgerForfeit` ruling made on the ad chain: the deposit goes to the maker.

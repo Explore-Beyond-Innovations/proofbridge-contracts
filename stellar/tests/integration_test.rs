@@ -5799,14 +5799,19 @@ fn test_2_3g_follower_pays_the_maker_on_a_forfeit_proof() {
         "the deposit went to the maker"
     );
 
-    // No trade settled, so no SETTLED leaf can follow the forfeit fill.
+    // No trade settled, so no SETTLED leaf can follow the forfeit fill: the fill marked the order
+    // recorded without appending, and `record_settled` refuses a recorded order.
     let h = bytes32_to_bytesn(&s.env, &s.tp.order_hash);
-    assert!(s.order_portal.paid_by_forfeit(&h));
+    assert!(
+        s.order_portal.is_settled_recorded(&h),
+        "the forfeit fill marks the order recorded"
+    );
+    let leaves = s.order_portal.get_merkle_leaf_count();
     assert_eq!(
         s.order_portal.try_record_settled(&p),
-        Err(Ok(OpErr::PaidByForfeit))
+        Err(Ok(OpErr::SettledRecorded))
     );
-    assert!(!s.order_portal.is_settled_recorded(&h));
+    assert_eq!(s.order_portal.get_merkle_leaf_count(), leaves, "no SETTLED leaf");
 }
 
 /// Filing on a `Claimed` leg ends its cancel window, so the claim record goes at the filing: while

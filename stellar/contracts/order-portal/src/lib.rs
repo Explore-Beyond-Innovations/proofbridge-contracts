@@ -531,7 +531,9 @@ impl OrderPortalContract {
         // No deadline read: like the cancel refund, this is the primary's decision arriving, and it
         // is valid whenever it arrives.
         Self::fill(&env, &order_hash, &params.bridger, true);
-        storage::set_paid_by_forfeit(&env, &order_hash);
+        // No trade settled, so no SETTLED leaf may follow: mark the order recorded without
+        // appending, and `record_settled` refuses it as any recorded order (`SettledRecorded`).
+        storage::set_settled_recorded(&env, &order_hash);
         Self::pay_maker(&env, &config, &params);
         // C-14: `OrderSettled` alone cannot tell a forfeit from a settle.
         events::OrderForfeited { order_hash }.publish(&env);
@@ -542,17 +544,7 @@ impl OrderPortalContract {
     pub fn record_settled(env: Env, params: OrderParams) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
-        // A forfeit fill settled no trade: a SETTLED leaf for it would tell the ad chain a trade
-        // happened that did not.
-        if storage::is_paid_by_forfeit(&env, &order_hash) {
-            return Err(OrderPortalError::PaidByForfeit);
-        }
         ops::record_settled(&env, &config.merkle_manager, &order_hash).map_err(Into::into)
-    }
-
-    /// Whether the deposit was paid to the maker on a forfeit ruling (`pay_maker_by_forfeit`).
-    pub fn paid_by_forfeit(env: Env, order_hash: BytesN<32>) -> bool {
-        storage::is_paid_by_forfeit(&env, &order_hash)
     }
 
     // =========================================================================
