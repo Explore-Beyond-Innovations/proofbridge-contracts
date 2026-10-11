@@ -606,8 +606,13 @@ contract AdManager is EscrowBase, IAdManager {
     function _coSignDenied(OrderParams calldata p, bytes32 orderHash, uint256 until) private view returns (bool) {
         address maker = _adOf(p).maker;
         if (halted[maker] || lastResumedAt[maker] >= _lockedAt(orderHash)) return true;
-        // An unwired verifier refuses every co-signed unlock, whoever unwired it: deny.
-        if (address(rootVerifier[p.orderChainId]) == address(0)) return true;
+        // An unwired verifier refuses every co-signed unlock, whoever unwired it: deny. So does a
+        // verifier changed after the lock's second (unset, rewired or repointed): the gap it opened
+        // in the co-signed path counts for the rest of the order's life, however it ended.
+        if (
+            address(rootVerifier[p.orderChainId]) == address(0)
+                || _rootVerifierChangedAt[p.orderChainId] > _lockedAt(orderHash)
+        ) return true;
         // #465: the registry the order was locked under, not the live one: a migration mid-order
         // would otherwise read a registry that never saw the kill.
         IKeyRegistry registry = registryAt[_orders[orderHash].registryEpoch];

@@ -29,6 +29,8 @@ const KEY_ROUTES: Symbol = symbol_short!("routes");
 const KEY_ORDERS: Symbol = symbol_short!("orders");
 const KEY_NULLIFIERS: Symbol = symbol_short!("nulls");
 const KEY_RVERIF: Symbol = symbol_short!("rverif");
+/// (KEY_RVCHG, chain_id) -> u64: when the route's verifier last changed (set or repointed).
+const KEY_RVCHG: Symbol = symbol_short!("rvchg");
 const KEY_WIRED: Symbol = symbol_short!("wired");
 const KEY_INFLT: Symbol = symbol_short!("inflt");
 const KEY_CLAIM: Symbol = symbol_short!("claim");
@@ -247,11 +249,25 @@ pub fn set_nullifier_used(env: &Env, nullifier_hash: &BytesN<32>) {
 // ── root verifiers ───────────────────────────────────────────────────────
 
 /// Set once per peer chain and then only read, so nothing else would ever bump it — and an unlock
-/// cannot be root-verified without it.
+/// cannot be root-verified without it. Every set stamps the change: the ad-manager's denial rule
+/// counts a verifier changed after an order's lock as a gap in the co-signed path.
 pub fn set_root_verifier(env: &Env, chain_id: u128, module: &Address) {
     let key = (KEY_RVERIF, chain_id);
     env.storage().persistent().set(&key, module);
     extend_persistent(env, &key);
+    let stamp = (KEY_RVCHG, chain_id);
+    env.storage()
+        .persistent()
+        .set(&stamp, &env.ledger().timestamp());
+    extend_persistent(env, &stamp);
+}
+
+/// When the route's verifier last changed; 0 while never set.
+pub fn get_root_verifier_changed_at(env: &Env, chain_id: u128) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&(KEY_RVCHG, chain_id))
+        .unwrap_or(0)
 }
 
 pub fn get_root_verifier(env: &Env, chain_id: u128) -> Option<Address> {
