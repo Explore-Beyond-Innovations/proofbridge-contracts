@@ -651,9 +651,9 @@ contract AdManager is EscrowBase, IAdManager {
     ///      order's pinned slot expiring at or before the payout's cutoff (`expiredAt`, plan 12 C: a
     ///      kill or a shorten of that slot counts; a rotation of any other slot does not, since no
     ///      other slot can co-sign the ad leg), or the pin moved by a re-pin (`repinOrder`: it refuses
-    ///      every pair signed under the old pin, and the slot left behind may die unseen). The lock
-    ///      refused a dead slot and a re-pin refuses to leave one, so any expiry the rule sees is
-    ///      after the lock. Every reference is one the chain stamped or the caller derives from the
+    ///      every pair signed under the old pin, and the slot left behind may be dead, so the stamp
+    ///      denies on its own). The lock refused a dead slot and a re-pin lands on a usable one, so
+    ///      any expiry the rule sees is after the lock. Every reference is one the chain stamped or the caller derives from the
     ///      signed deadline, never one the maker can choose later. No registry wired means no lever 2.
     function _coSignDenied(OrderParams calldata p, bytes32 orderHash, uint256 until) private view returns (bool) {
         address maker = _adOf(p).maker;

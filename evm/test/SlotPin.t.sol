@@ -157,23 +157,23 @@ contract SlotPinTest is AdManagerTest {
         assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Open));
     }
 
-    // ---- a re-pin is a denial, and a dead pin stays (the October review's re-pin holes) ----
+    // ---- a re-pin is a denial, and a dead pin may be moved (the October review's re-pin holes) ----
 
-    /// The pin's slot was killed: it cannot be moved away, and the kill keeps denying the payout — the
-    /// cancel waits the evidence grace (buffer 30 min, no anchor: 60 min after the deadline).
-    function test_repin_refusesLeavingAnExpiredSlot_andTheCancelWaitsTheGrace() public {
+    /// The pin's slot was killed: the consent still moves the pin (the answer to a leaked key is kill,
+    /// then re-pin), and the re-pin stamp keeps denying the payout — the cancel waits the evidence
+    /// grace (buffer 30 min, no anchor: 60 min after the deadline).
+    function test_repin_leavesAnExpiredSlot_theStampStillDenies_theCancelWaitsTheGrace() public {
         keyRegistry.setSlotExpiry(signer, 1, 0);
         (IAdManager.OrderParams memory p, bytes32 h) = _lockPinned(11, 0);
         keyRegistry.setRepin(signer, h, 0, 1);
         vm.warp(block.timestamp + 10);
         keyRegistry.setSlotExpiry(signer, 0, uint64(block.timestamp)); // the kill
-        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__SlotNotUsable.selector, signer, uint32(0)));
         adManager.repinOrder(p);
         (uint32 slot,) = _pin(h);
-        assertEq(slot, 0, "the dead pin stays");
+        assertEq(slot, 1, "the dead pin moved to the live slot");
         vm.warp(p.deadline);
         adManager.claimCancel(p);
-        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "the kill still denies");
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "the re-pin still denies");
     }
 
     /// A re-pin alone is a lever the maker's side holds (it refuses every pair signed under the old

@@ -1054,9 +1054,9 @@ impl AdManagerContract {
     /// an `Open` order's pin to another usable slot of the same signer, not past
     /// `deadline - claim_stagger` of this escrow's own route timing (the ad chain cannot read the
     /// order portal's; the two are linked from one manifest), (plan 12 D12, Q2). Permissionless; the
-    /// consent names the order and both slots. A pin whose slot has expired cannot be moved (the
-    /// kill stands and the denial rule counts it), and the order is stamped re-pinned, which the
-    /// denial rule counts from then on: a re-pin refuses every pair signed under the old pin.
+    /// consent names the order and both slots. The pin being left may have expired (the answer to a
+    /// leaked key is kill, then re-pin); the order is stamped re-pinned either way, which the denial
+    /// rule counts from then on: a re-pin refuses every pair signed under the old pin.
     pub fn repin_order(env: Env, params: OrderParams) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
@@ -1075,10 +1075,6 @@ impl AdManagerContract {
             proofbridge_core::cross_contract::repin_approval(&env, &registry, signer, &order_hash);
         if nonce == 0 || from != order.pinned_slot {
             return Err(AdManagerError::NoRepin);
-        }
-        let left = proofbridge_core::cross_contract::expired_at(&env, &registry, signer, from);
-        if left != 0 && left <= env.ledger().timestamp() {
-            return Err(AdManagerError::SlotNotUsable);
         }
         if !proofbridge_core::cross_contract::slot_usable(&env, &registry, signer, to) {
             return Err(AdManagerError::SlotNotUsable);
@@ -1474,8 +1470,9 @@ impl AdManagerContract {
     /// first second the unlock is refused, so a slot expiring exactly there still counts: one second
     /// conservative, which only lengthens the maker's own refund, never moves a payout), or the pin
     /// moved by a re-pin (`repin_order` refuses every pair signed under the old pin, and the slot
-    /// left behind may die unseen). The lock refused a dead slot and a re-pin refuses to leave one, so
-    /// any expiry the rule sees is after the lock. Every reference is one the chain stamped (the lock)
+    /// left behind may be dead, so the stamp denies on its own). The lock refused a dead slot and a
+    /// re-pin lands on a usable one, so any expiry the rule sees is after the lock. Every reference
+    /// is one the chain stamped (the lock)
     /// or the caller derives from the signed deadline, never one the maker can choose later. No
     /// registry wired means no lever 2 to read.
     fn co_sign_denied(

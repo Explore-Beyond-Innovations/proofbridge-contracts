@@ -4098,12 +4098,13 @@ fn test_slot_pin_the_ad_unlock_accepts_only_the_pinned_slot() {
     assert!(ad_unlock(&t, &q, &cosig), "the pinned slot settles");
 }
 
-// --- plan 12 C: a re-pin is a denial, and a dead pin stays ----------------------------------------
+// --- plan 12 C: a re-pin is a denial, and a dead pin may be moved ---------------------------------
 
-/// The pin's slot was killed: it cannot be moved away, and the kill keeps denying the payout — the
-/// cancel waits the evidence grace (one buffer more than ordinary timing).
+/// The pin's slot was killed: the consent still moves the pin (the answer to a leaked key is kill,
+/// then re-pin), and the re-pin stamp keeps denying the payout — the cancel waits the evidence
+/// grace (one buffer more than ordinary timing).
 #[test]
-fn test_slot_pin_repin_refuses_leaving_an_expired_slot_and_the_cancel_waits_the_grace() {
+fn test_slot_pin_repin_leaves_an_expired_slot_the_stamp_still_denies_the_cancel_waits_the_grace() {
     let s = setup();
     let keys = MockKeyRegistryClient::new(&s.env, &s.key_registry);
     keys.set_slot_expiry(&pin_signer(&s), &1, &0);
@@ -4112,22 +4113,16 @@ fn test_slot_pin_repin_refuses_leaving_an_expired_slot_and_the_cancel_waits_the_
     keys.set_repin(&pin_signer(&s), &h, &0, &1);
     warp(&s, s.env.ledger().timestamp() + 10);
     keys.set_slot_expiry(&pin_signer(&s), &0, &s.env.ledger().timestamp()); // the kill
-    assert_eq!(
-        s.ad_manager.try_repin_order(&p),
-        Err(Ok(AdErr::SlotNotUsable)),
-        "a dead pin cannot be moved away"
-    );
-    assert_eq!(
-        s.ad_manager.get_order(&h).pinned_slot,
-        0,
-        "the dead pin stays"
-    );
+    s.ad_manager.repin_order(&p);
+    let rec = s.ad_manager.get_order(&h);
+    assert_eq!(rec.pinned_slot, 1, "the dead pin moved to the live slot");
+    assert!(rec.repinned, "and the order is stamped re-pinned");
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     assert_eq!(
         s.ad_manager.cancel_finalizes_at(&p),
         p.deadline + 2 * SUITE_BUFFER,
-        "the kill still denies"
+        "the re-pin still denies"
     );
 }
 
@@ -5070,10 +5065,10 @@ fn test_422_real_registry_approve_repin_moves_the_pin_and_the_repin_denies() {
     s.ad_manager.finalize_cancel(&p);
 }
 
-/// Plan 12 C: a pin killed on the real registry cannot be moved away, consent or not — the kill
-/// stands and the cancel waits the grace.
+/// Plan 12 C: a pin killed on the real registry is moved by the consent (kill, then re-pin), and
+/// the re-pin stamp keeps the cancel on the grace, so the kill is not laundered by the move.
 #[test]
-fn test_422_real_registry_a_killed_pin_cannot_be_repinned_away() {
+fn test_422_real_registry_a_killed_pin_is_repinned_away_the_stamp_still_denies() {
     let s = setup();
     let (client, account, auth) = real_registry_signer(&s);
     let p = lock_signed_by(&s, &account);
@@ -5081,22 +5076,24 @@ fn test_422_real_registry_a_killed_pin_cannot_be_repinned_away() {
     warp(&s, s.env.ledger().timestamp() + 10);
     client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
     client.approve_repin(&account, &h, &0, &1, &auth, &0);
-    assert_eq!(
-        s.ad_manager.try_repin_order(&p),
-        Err(Ok(AdErr::SlotNotUsable))
-    );
-    assert_eq!(
-        s.ad_manager.get_order(&h).pinned_slot,
-        0,
-        "the dead pin stays"
-    );
+    s.ad_manager.repin_order(&p);
+    let rec = s.ad_manager.get_order(&h);
+    assert_eq!(rec.pinned_slot, 1, "the dead pin moved to the live slot");
+    assert!(rec.repinned, "and the order is stamped re-pinned");
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     assert_eq!(
         s.ad_manager.cancel_finalizes_at(&p),
         p.deadline + 2 * SUITE_BUFFER,
-        "the kill still denies"
+        "the re-pin still denies"
     );
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
 }
 
 /// Plan 12 C: a slot killed before the lock cannot be pinned; an order pinned to the live slot runs

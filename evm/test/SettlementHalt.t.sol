@@ -833,8 +833,9 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
     }
 
     /// Plan 12 C: the signer's consent filed on the real registry moves the pin through the escrow,
-    /// the moved order is denied for the rest of its life, and a dead pin cannot be moved at all.
-    function test_realRegistry_approveRepin_movesThePin_theRepinDenies_aDeadPinStays() public {
+    /// the moved order is denied for the rest of its life, and a dead pin moves the same way (kill,
+    /// then re-pin), the stamp keeping the denial.
+    function test_realRegistry_approveRepin_movesThePin_theRepinDenies_aDeadPinMovesToo() public {
         _realRegistry();
         IAdManager.OrderParams memory p = _lockAs(3);
         bytes32 h = adManager.hashOrderPublic(p);
@@ -851,16 +852,22 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         vm.warp(p.deadline + 60 minutes);
         adManager.finalizeCancel(p);
 
-        // A second order: kill its pin, and the consent to leave it is refused — the kill stands.
+        // A second order: kill its pin, then the consent moves it to the live slot; the re-pin stamp
+        // keeps the cancel on the grace, so the kill is not laundered by the move.
         IAdManager.OrderParams memory q = _lockAs(4);
         bytes32 hq = adManager.hashOrderPublic(q);
         vm.warp(block.timestamp + 10);
         _setValidUntil(0, true);
         _approveRepin(hq, 0, 1, 0);
-        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__SlotNotUsable.selector, account, uint32(0)));
         adManager.repinOrder(q);
         (,,, uint32 pinQ) = adManager.orders(hq);
-        assertEq(pinQ, 0, "the dead pin stays");
+        assertEq(pinQ, 1, "the dead pin moved to the live slot");
+        _claim(q);
+        vm.warp(q.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, q.deadline + 60 minutes));
+        adManager.finalizeCancel(q);
+        vm.warp(q.deadline + 60 minutes);
+        adManager.finalizeCancel(q);
     }
 
     /// Plan 12 C: a slot killed before the lock cannot be pinned; an order pinned to the live slot
