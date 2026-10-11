@@ -93,18 +93,22 @@ library ProofBridgeUtils {
         split = verifierRegistry != expected;
     }
 
-    /// The denial rule's registry half (#464, #465, plan 12 C): a re-pinned order is denied for the
-    /// rest of its life (the re-pin refused every pair under the old pin, and the slot left behind
-    /// may have died); with no registry wired nothing else denies; a verifier on another registry
-    /// denies; else the order's pinned slot expiring at or before `until` denies.
+    /// The denial rule's registry and verifier half (#464, #465, plan 12 C, plan 14 e), here for
+    /// EIP-170 headroom: an unwired verifier refuses every co-signed unlock, and one changed after the
+    /// order's lock second (`verifierChangedAt`: unset, rewired or repointed) opened a gap that counts
+    /// for the rest of the order's life; a re-pinned order is denied for the rest of its life (the
+    /// re-pin refused every pair under the old pin, and the slot left behind may have died); with no
+    /// registry wired nothing else denies; a verifier on another registry denies; else the order's
+    /// pinned slot expiring at or before `until` denies.
     function registryDenies(
         IKeyRegistry registry,
         address verifier,
+        uint64 verifierChangedAt,
         bytes32 signer,
         IEscrow.Order storage o,
         uint256 until
     ) public view returns (bool) {
-        if (o.repinned) return true;
+        if (verifier == address(0) || verifierChangedAt > o.lockedAt || o.repinned) return true;
         if (address(registry) == address(0)) return false;
         (bool split,) = registrySplit(verifier, address(registry));
         if (split) return true;

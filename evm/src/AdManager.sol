@@ -661,10 +661,6 @@ contract AdManager is EscrowBase, IAdManager {
         // An unwired verifier refuses every co-signed unlock, whoever unwired it: deny. So does a
         // verifier changed after the lock's second (unset, rewired or repointed): the gap it opened
         // in the co-signed path counts for the rest of the order's life, however it ended.
-        if (
-            address(rootVerifier[p.orderChainId]) == address(0)
-                || _rootVerifierChangedAt[p.orderChainId] > _lockedAt(orderHash)
-        ) return true;
         // #465: the registry the order was locked under, not the live one: a migration mid-order would
         // otherwise read a registry that never saw the kill. #464: a verifier on another registry
         // co-signs against keys this one never sees: deny. D16: the payout's own cutoff (the
@@ -674,7 +670,12 @@ contract AdManager is EscrowBase, IAdManager {
         // linked `ProofBridgeUtils`.
         Order storage o = _orders[orderHash];
         return ProofBridgeUtils.registryDenies(
-            registryAt[o.registryEpoch], address(rootVerifier[p.orderChainId]), p.adSettlementSigner, o, until
+            registryAt[o.registryEpoch],
+            address(rootVerifier[p.orderChainId]),
+            _rootVerifierChangedAt[p.orderChainId],
+            p.adSettlementSigner,
+            o,
+            until
         );
     }
 

@@ -2215,7 +2215,11 @@ fn lock_with(f: &Fixture, ad_token: &BytesN<32>, order_token: &BytesN<32>) -> Ve
     let mut p = params(f);
     p.ad_chain_token = ad_token.clone();
     p.order_chain_token = order_token.clone();
-    lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)])
+    lock_ctx(
+        &f.env,
+        &f.target,
+        vec![&f.env, p.into_val(&f.env), 0u32.into_val(&f.env)],
+    )
 }
 
 /// The fixture lists the ad token only as an ad token and the order token only as an order token.
@@ -2268,7 +2272,11 @@ fn a_token_in_both_lists_serves_both_sides() {
     p.salt = soroban_sdk::U256::from_u128(&f.env, 43);
     agent_check(
         &f,
-        &lock_ctx(&f.env, &f.target, vec![&f.env, p.into_val(&f.env)]),
+        &lock_ctx(
+            &f.env,
+            &f.target,
+            vec![&f.env, p.into_val(&f.env), 0u32.into_val(&f.env)],
+        ),
     )
     .unwrap();
 }
