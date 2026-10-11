@@ -95,7 +95,8 @@ pub enum OrderPortalError {
     // ==========================================================================
     /// Recipient bytes do not decode to a valid Stellar account address
     InvalidAccountAddress = 70,
-    /// The order's deadline has passed; it can no longer be unlocked.
+    /// The unlock is past the follower's cutoff, `deadline - claim_stagger` (the last second
+    /// accepted, inclusive).
     OrderExpired = 74,
 
     // ==========================================================================

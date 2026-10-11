@@ -832,14 +832,14 @@ impl AdManagerContract {
     ) -> Result<u128, AdManagerError> {
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
-        // The deadline is vouched for by the hash the caller had to reproduce; the module cannot do
-        // that itself, which is why filing starts here.
         // Only the order's two parties may file. Without this any address could dispute any live
         // order and, one short challenge period later, cancel it out from under both of them.
         // The bridger side is the same address this chain would pay, resolved the same way, so
         // "who may file" and "who gets paid" cannot drift apart.
         let ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
         Self::require_party(&env, &filer, &ad.maker, &params.order_recipient)?;
+        // The deadline is vouched for by the hash the caller had to reproduce; the module cannot do
+        // that itself, which is why filing starts here.
         let bond = ops::open_dispute(
             &env,
             &env.current_contract_address(),
@@ -1387,7 +1387,10 @@ impl AdManagerContract {
     /// or at any point since the lock (a resume stamp at or after `locked_at`), the order chain's root
     /// verifier unset (`unlock` refuses `RootVerifierNotSet`), any of the signer's registry slots
     /// expiring during the order's life as a payout, `[locked_at, until]` with `until` the payout's
-    /// own cutoff (`any_slot_expired_within`, D12/D14/D14b/D16: a kill, a near-future shorten, a
+    /// own cutoff, inclusive. For the cancel path that is the presentation cutoff, the first second
+    /// the unlock is refused, so a slot expiring exactly there still counts: one second conservative,
+    /// which only lengthens the maker's own refund, never moves a payout
+    /// (`any_slot_expired_within`, D12/D14/D14b/D16: a kill, a near-future shorten, a
     /// pre-lock shorten naming a date in the window and a re-kill after it all count; a rotation
     /// whose old slot outlives the cutoff does not). Every reference is one the chain stamped (the
     /// lock) or the caller derives from the signed deadline, never one the maker can choose later.

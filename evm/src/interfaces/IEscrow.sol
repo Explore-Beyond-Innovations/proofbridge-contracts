@@ -101,6 +101,12 @@ interface IEscrow {
     error Escrow__PeerTokenMismatch(bytes32 expected, bytes32 provided);
     error Escrow__OrderExists(bytes32 orderHash);
     error Escrow__OrderNotOpen(bytes32 orderHash);
+    /// @notice The timed door is shut. The argument names the cutoff the door checked, and its meaning
+    ///         follows the door: on the AdManager's co-signed `unlock` it is the first second refused
+    ///         (the presentation cutoff, strict, so it never shares a second with `finalizeCancel`);
+    ///         on the OrderPortal's `unlock` it is the last second accepted (inclusive, the
+    ///         follower's `deadline − claimStagger`). A display that says "expired at" is exact on the
+    ///         follower and one second early on the primary.
     error Escrow__OrderExpired(uint256 deadline);
     error Escrow__NullifierUsed(bytes32 nullifierHash);
     error Escrow__InvalidProof();
