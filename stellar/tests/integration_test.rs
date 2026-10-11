@@ -1924,10 +1924,8 @@ fn test_ad_manager_unlock_after_deadline_is_rejected() {
     s.ad_manager
         .set_root_verifier(&s.tp.order_chain_id, &module);
 
-    // 2.3e D2: the primary's co-signed unlock is the presentation — valid through the window.
-    s.env
-        .ledger()
-        .set_timestamp(params.deadline + SUITE_BUFFER + 1);
+    // 2.3e D2: the primary's co-signed unlock is the presentation — valid before the window's end.
+    s.env.ledger().set_timestamp(params.deadline + SUITE_BUFFER);
     let late = s.ad_manager.try_unlock(
         &params,
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
@@ -1940,7 +1938,9 @@ fn test_ad_manager_unlock_after_deadline_is_rejected() {
         Err(Ok(ad_manager_contract::AdManagerError::OrderExpired))
     );
 
-    s.env.ledger().set_timestamp(params.deadline + SUITE_BUFFER);
+    s.env
+        .ledger()
+        .set_timestamp(params.deadline + SUITE_BUFFER - 1);
     assert!(ad_unlock(&s, &params, &Bytes::new(&s.env)));
 }
 
@@ -3779,14 +3779,15 @@ fn test_t45a_fast_unlock_race_bridger_unlocks_inside_the_window() {
 }
 
 #[test]
-fn test_t45b_primary_unlock_valid_to_buffer_minus_margin() {
+fn test_t45b_primary_unlock_valid_before_buffer_minus_margin() {
     let s = setup();
     s.ad_manager
         .set_route_timing(&s.tp.order_chain_id, &ad_timing(120, SUITE_BUFFER, 120, 0));
     let p = locked_ad_order(&s);
     let cutoff = p.deadline + SUITE_BUFFER - 120;
 
-    warp(&s, cutoff + 1);
+    // Strict: the cutoff itself is refused.
+    warp(&s, cutoff);
     let late = s.ad_manager.try_unlock(
         &p,
         &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
@@ -3796,8 +3797,73 @@ fn test_t45b_primary_unlock_valid_to_buffer_minus_margin() {
     );
     assert_eq!(late, Err(Ok(AdErr::OrderExpired)));
 
-    warp(&s, cutoff);
+    warp(&s, cutoff - 1);
     assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+}
+
+/// With a zero margin the unlock and the cancel never share a second: one second before the
+/// window's end the unlock passes and the cancel is too early; at the end the unlock and a filing
+/// are refused and the cancel finalizes.
+#[test]
+fn test_no_shared_last_second_unlock_before_the_end_cancel_at_it() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    let end = p.deadline + SUITE_BUFFER;
+
+    warp(&s, end - 1);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+
+    warp(&s, end);
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &p,
+            &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &Bytes::new(&s.env),
+        ),
+        Err(Ok(AdErr::OrderExpired))
+    );
+    assert_eq!(
+        s.ad_manager.try_dispute(&p, &filer, &evidence(&s, 0xEE)),
+        Err(Ok(AdErr::DisputeWindowClosed))
+    );
+    s.ad_manager.finalize_cancel(&p);
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Cancelled);
+
+    // The second before the end, the unlock lands on a fresh order.
+    let t = setup();
+    let q = locked_ad_order(&t);
+    warp(&t, q.deadline);
+    t.ad_manager.claim_cancel(&q);
+    warp(&t, q.deadline + SUITE_BUFFER - 1);
+    assert!(ad_unlock(&t, &q, &Bytes::new(&t.env)));
+}
+
+/// The margin is at most half the buffer on both legs, so the bridger keeps half the window.
+#[test]
+fn test_route_timing_margin_capped_at_half_the_buffer_both_legs() {
+    let s = setup();
+    assert_eq!(
+        s.ad_manager
+            .try_set_route_timing(&s.tp.order_chain_id, &ad_timing(3_600, 3_600, 1_801, 0)),
+        Err(Ok(AdErr::InvalidTiming))
+    );
+    assert_eq!(
+        s.order_portal
+            .try_set_route_timing(&s.tp.ad_chain_id, &portal_timing(3_600, 3_600, 1_801, 0)),
+        Err(Ok(OpErr::InvalidTiming))
+    );
+    s.ad_manager
+        .set_route_timing(&s.tp.order_chain_id, &ad_timing(3_600, 3_600, 1_800, 0));
+    s.order_portal
+        .set_route_timing(&s.tp.ad_chain_id, &portal_timing(3_600, 3_600, 1_800, 0));
 }
 
 #[test]
@@ -5057,18 +5123,7 @@ fn test_t06_halted_order_stops_settling_and_still_terminates() {
         s.ad_manager.try_finalize_cancel(&p),
         Err(Ok(AdErr::TooEarly))
     );
-    // The window's last second (inclusive): still the halt that refuses; a second later the cutoff.
-    assert_eq!(
-        s.ad_manager.try_unlock(
-            &p,
-            &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
-            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
-            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
-            &empty,
-        ),
-        Err(Ok(AdErr::Halted))
-    );
-    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    // At the window's end the cutoff refuses on its own; the second before it, still the halt.
     assert_eq!(
         s.ad_manager.try_unlock(
             &p,
@@ -5078,6 +5133,17 @@ fn test_t06_halted_order_stops_settling_and_still_terminates() {
             &empty,
         ),
         Err(Ok(AdErr::OrderExpired))
+    );
+    warp(&s, p.deadline + SUITE_BUFFER - 1);
+    assert_eq!(
+        s.ad_manager.try_unlock(
+            &p,
+            &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+            &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+            &Bytes::from_slice(&s.env, PROOF_BRIDGER),
+            &empty,
+        ),
+        Err(Ok(AdErr::Halted))
     );
 
     warp(&s, p.deadline + 2 * SUITE_BUFFER);
@@ -5491,11 +5557,11 @@ fn test_pause_across_the_deadline_moves_no_window() {
     s.ad_manager.finalize_cancel(&p);
     assert_eq!(ad_status(&s), ad_manager_contract::Status::Cancelled);
 
-    // The cutoff's last second, paused or not.
+    // The last second before the cutoff, paused or not.
     let t = setup();
     let q = locked_ad_order(&t);
     t.ad_manager.pause();
-    warp(&t, q.deadline + SUITE_BUFFER);
+    warp(&t, q.deadline + SUITE_BUFFER - 1);
     t.ad_manager.unpause();
     assert!(ad_unlock(&t, &q, &Bytes::new(&t.env)));
 }
@@ -7341,24 +7407,25 @@ fn second_locked_order(s: &TestSetup) -> ad_manager_contract::OrderParams {
 
 // --- C-10: no filing after the primary's window has closed -------------------
 
-/// The last second of an `Open` leg's window still files.
+/// The last second before an `Open` leg's window end still files.
 #[test]
-fn test_c10_filing_at_the_window_end_passes() {
+fn test_c10_filing_before_the_window_end_passes() {
     let s = setup();
     let (dm, _arbiter, filer) = wire_dispute_manager(&s);
     let p = locked_ad_order(&s);
-    warp(&s, p.deadline + SUITE_BUFFER);
+    warp(&s, p.deadline + SUITE_BUFFER - 1);
     s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
     assert!(dm.is_disputed(&s.ad_manager.hash_order(&p)));
 }
 
-/// One second past it is refused, and nothing reaches the module.
+/// The window end itself is refused (it belongs to `finalize_cancel`), and nothing reaches the
+/// module.
 #[test]
-fn test_c10_filing_one_second_after_the_window_end_is_refused() {
+fn test_c10_filing_at_the_window_end_is_refused() {
     let s = setup();
     let (dm, _arbiter, filer) = wire_dispute_manager(&s);
     let p = locked_ad_order(&s);
-    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    warp(&s, p.deadline + SUITE_BUFFER);
     assert_eq!(
         s.ad_manager.try_dispute(&p, &filer, &evidence(&s, 0xEE)),
         Err(Ok(AdErr::DisputeWindowClosed))
@@ -7379,7 +7446,7 @@ fn test_c10_claimed_uses_its_own_window_end() {
     warp(&s, p.deadline);
     s.ad_manager.claim_cancel(&p);
     s.ad_manager.set_route_timing(&s.tp.order_chain_id, &raised);
-    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    warp(&s, p.deadline + SUITE_BUFFER);
     assert_eq!(
         s.ad_manager.try_dispute(&p, &filer, &evidence(&s, 0xEE)),
         Err(Ok(AdErr::DisputeWindowClosed)),
@@ -7392,25 +7459,25 @@ fn test_c10_claimed_uses_its_own_window_end() {
     warp(&t, q.deadline);
     t.ad_manager.claim_cancel(&q);
     t.ad_manager.set_route_timing(&t.tp.order_chain_id, &raised);
-    warp(&t, q.deadline + SUITE_BUFFER);
+    warp(&t, q.deadline + SUITE_BUFFER - 1);
     t.ad_manager.dispute(&q, &filer, &evidence(&t, 0xEE));
     assert!(dm.is_disputed(&t.ad_manager.hash_order(&q)));
 }
 
-/// A pause moves no filing window: the last second is the plain `deadline + buffer`, and filing
-/// works while paused.
+/// A pause moves no filing window: the end is the plain `deadline + buffer`, and filing works
+/// while paused.
 #[test]
 fn test_c10_a_pause_moves_no_filing_window() {
     let s = setup();
     let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
     let p = locked_ad_order(&s);
     s.ad_manager.pause();
-    warp(&s, p.deadline + SUITE_BUFFER + 1);
+    warp(&s, p.deadline + SUITE_BUFFER);
     assert_eq!(
         s.ad_manager.try_dispute(&p, &filer, &evidence(&s, 0xEE)),
         Err(Ok(AdErr::DisputeWindowClosed))
     );
-    warp(&s, p.deadline + SUITE_BUFFER);
+    warp(&s, p.deadline + SUITE_BUFFER - 1);
     s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
 }
 

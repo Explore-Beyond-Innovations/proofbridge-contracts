@@ -114,6 +114,14 @@ mod timing_tests {
         assert_eq!(validate(&t(0, MIN_BUFFER, 0, 0)), Ok(()));
     }
 
+    /// The margin is at most half the buffer (rounded down), so the bridger keeps half the window.
+    #[test]
+    fn margin_capped_at_half_the_buffer() {
+        assert_eq!(validate(&t(3_600, 3_600, 1_801, 0)), Err(2));
+        assert_eq!(validate(&t(3_600, 3_600, 1_800, 0)), Ok(()));
+        assert_eq!(validate(&t(3_600, 3_601, 1_801, 0)), Err(2));
+    }
+
     /// Field 3 is retired: no tuple fails with it.
     #[test]
     fn no_field_three() {

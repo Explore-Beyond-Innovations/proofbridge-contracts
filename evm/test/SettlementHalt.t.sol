@@ -372,12 +372,12 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
         adManager.finalizeCancel(p);
 
-        // At the window's last second (inclusive) the halt is still what refuses; a second later the
-        // cutoff closes the co-signed path on its own.
-        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__Halted.selector, maker));
-        _unlock(p, "N1");
-        vm.warp(p.deadline + 30 minutes + 1);
+        // At the window's end the cutoff closes the co-signed path on its own; the second before it,
+        // the halt is still what refuses.
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, p.deadline + 30 minutes));
+        _unlock(p, "N1");
+        vm.warp(p.deadline + 30 minutes - 1);
+        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__Halted.selector, maker));
         _unlock(p, "N1");
 
         vm.warp(p.deadline + 60 minutes);

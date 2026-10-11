@@ -770,20 +770,20 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
     /*//////////////// batch B (soak): filing window, module pinning, events ////////////////*/
 
-    /// C-10: filing is allowed up to and including the primary's window end.
-    function test_c10_filingAtTheWindowEndIsAllowed() public {
+    /// C-10: filing is allowed up to the last second before the primary's window end.
+    function test_c10_filingBeforeTheWindowEndIsAllowed() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(60);
-        vm.warp(p.deadline + 30 minutes);
+        vm.warp(p.deadline + 30 minutes - 1);
         _file(p, filer);
         assertTrue(dm.isDisputed(h));
     }
 
-    /// C-10: one second past the window end, filing is refused. A later dispute would run past the
-    /// point the follower's backstop may already have refunded the bridger.
-    function test_c10_filingPastTheWindowEndIsRefused() public {
+    /// C-10: at the window end, filing is refused: that second belongs to `finalizeCancel` alone, so
+    /// a filing can never race the cancel it would block.
+    function test_c10_filingAtTheWindowEndIsRefused() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(61);
         uint256 windowEnd = p.deadline + 30 minutes;
-        vm.warp(windowEnd + 1);
+        vm.warp(windowEnd);
         uint256 bond = BOND_FLOOR;
         vm.deal(filer, bond);
         vm.prank(filer);
@@ -798,13 +798,13 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         adManager.pause();
         vm.warp(block.timestamp + 1 hours);
         uint256 windowEnd = p.deadline + 30 minutes;
-        vm.warp(windowEnd + 1);
+        vm.warp(windowEnd);
         uint256 bond = BOND_FLOOR;
         vm.deal(filer, bond);
         vm.prank(filer);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeWindowClosed.selector, h, windowEnd));
         adManager.dispute{value: bond}(p, bytes32("evidence"));
-        vm.warp(windowEnd);
+        vm.warp(windowEnd - 1);
         _file(p, filer);
         assertTrue(dm.isDisputed(h));
     }
@@ -820,15 +820,15 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         vm.prank(admin);
         adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 2 hours, 0, 0));
 
-        vm.warp(claimedEnd + 1);
+        vm.warp(claimedEnd);
         uint256 bond = BOND_FLOOR;
         vm.deal(filer, bond);
         vm.prank(filer);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeWindowClosed.selector, h, claimedEnd));
         adManager.dispute{value: bond}(p, bytes32("evidence"));
 
-        // At the claimed end itself, filing still goes through.
-        vm.warp(claimedEnd);
+        // One second before the claimed end, filing still goes through.
+        vm.warp(claimedEnd - 1);
         vm.prank(filer);
         adManager.dispute{value: bond}(p, bytes32("evidence"));
         assertTrue(dm.isDisputed(h));

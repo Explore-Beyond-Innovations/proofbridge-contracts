@@ -402,8 +402,9 @@ pub fn open_dispute(
     }
     // The order's version's buffer sets the module's floor, not the live one.
     let buffer = order_timing(env, order_hash, peer_chain_id)?.buffer;
-    // No filing once the primary's window has closed. The last second of the window still files.
-    if env.ledger().timestamp() > window_end(env, order_hash, deadline, buffer) {
+    // No filing once the primary's window has closed. The window is `[deadline, end)`: its end
+    // belongs to finalize_cancel alone.
+    if env.ledger().timestamp() >= window_end(env, order_hash, deadline, buffer) {
         return Err(Fault::DisputeWindowClosed);
     }
     let manager = dispute_manager(env)?;

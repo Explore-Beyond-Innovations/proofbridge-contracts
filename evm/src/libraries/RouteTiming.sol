@@ -10,7 +10,7 @@ pragma solidity ^0.8.34;
  * @dev `minWindow` — the shortest `deadline − now` a lock/create accepts (the monotonicity
  *      precondition for `cancelNeverLocked`). `buffer` — the primary's presentation window after the
  *      deadline. `margin` — how much before the end of the window the primary stops accepting the
- *      co-signed unlock (EVM proposer skew); primary-only, the follower's unlock never runs inside a
+ *      co-signed unlock (EVM proposer skew), at most half the buffer; primary-only, the follower's unlock never runs inside a
  *      window. `claimStagger` — how much before the deadline the follower's co-signed unlock stops,
  *      so the maker's claim always leaves the watchtower time to land the bridger's leg.
  */
@@ -36,12 +36,13 @@ library RouteTiming {
     error RouteTiming__Invalid(uint8 field);
     error RouteTiming__NotSet(uint256 chainId);
 
-    /// @dev D6 rules: `MIN_BUFFER ≤ buffer ≤ MAX_BUFFER`, `margin < buffer`,
+    /// @dev D6 rules: `MIN_BUFFER ≤ buffer ≤ MAX_BUFFER`, `margin ≤ buffer / 2` (the bridger always
+    ///      keeps at least half the window for the co-signed unlock),
     ///      `claimStagger < minWindow` when the stagger is on (`0` = off, always legal),
     ///      `margin ≤ minWindow ≤ MAX_ORDER_WINDOW / 2` (the upper bounds are #453's).
     function validate(Timing calldata t) internal pure {
         if (t.buffer < MIN_BUFFER || t.buffer > MAX_BUFFER) revert RouteTiming__Invalid(1);
-        if (t.margin >= t.buffer) revert RouteTiming__Invalid(2);
+        if (t.margin > t.buffer / 2) revert RouteTiming__Invalid(2);
         if (t.claimStagger != 0 && t.claimStagger >= t.minWindow) revert RouteTiming__Invalid(4);
         if (t.minWindow < t.margin || t.minWindow > MAX_ORDER_WINDOW / 2) revert RouteTiming__Invalid(5);
     }

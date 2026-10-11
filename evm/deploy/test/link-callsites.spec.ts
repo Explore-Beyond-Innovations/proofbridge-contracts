@@ -79,6 +79,12 @@ test("A-6: link refuses a peer deployed for another env, or against another VK",
   });
 });
 
+test("link refuses a margin above half the buffer before anything is sent", async () => {
+  await withEnv({ ...CLEAN, ...CLOCKS, ROUTE_MARGIN_S: "901" }, async () => {
+    await refusesWithNoTx(() => linkA(MA, MB), /ROUTE_MARGIN_S=901 exceeds half of ROUTE_BUFFER_S=1800/);
+  });
+});
+
 const noModule = (m: any) => {
   delete m.contracts.disputeManager;
   m.disputeParams = {};

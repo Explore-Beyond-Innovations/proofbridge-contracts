@@ -449,12 +449,19 @@ function routeTimingFromEnv(env: string, vars: Record<string, string | undefined
       `link: ${name} is unset for env=${env}; set every ROUTE_*_S clock (seconds) or deploy with DEPLOY_ENV=local`,
     );
   };
-  return {
+  const timing = {
     minWindow: read("ROUTE_MIN_WINDOW_S", "0"),
     buffer: read("ROUTE_BUFFER_S", "1800"),
     margin: read("ROUTE_MARGIN_S", "0"),
     claimStagger: read("ROUTE_CLAIM_STAGGER_S", "0"),
   };
+  // The contract's margin cap (field 2): refused here, before anything is sent.
+  if (BigInt(timing.margin) > BigInt(timing.buffer) / 2n) {
+    throw new Error(
+      `link: ROUTE_MARGIN_S=${timing.margin} exceeds half of ROUTE_BUFFER_S=${timing.buffer}; the escrows refuse a margin above half the buffer`,
+    );
+  }
+  return timing;
 }
 
 

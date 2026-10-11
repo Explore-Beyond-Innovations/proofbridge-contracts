@@ -25,7 +25,7 @@ import {Dispute} from "./libraries/Dispute.sol";
  *         bridgers unlock the lock on this chain with a proof of their deposit on the order chain.
  *         This leg is the termination primary (2.3e): the only place a clock runs. After the
  *         deadline anyone may claim a cancel, which opens the window `[deadline, deadline + buffer)`;
- *         the co-signed `unlock` (accepted until `deadline + buffer − margin`) or a `presentSettled`
+ *         the co-signed `unlock` (accepted before `deadline + buffer − margin`) or a `presentSettled`
  *         proof settles it; an unchallenged window releases the lock and records the CANCEL leaf the
  *         order leg refunds against; `recordSettled` appends the SETTLED leaf after a fill.
  *         Everything not specific to ads lives in {EscrowBase}.
@@ -247,8 +247,10 @@ contract AdManager is EscrowBase, IAdManager {
         bytes calldata cosigData
     ) external nonReentrant {
         bytes32 orderHash = _orderHash(params);
-        // D2: the co-signed unlock is the presentation — valid through the window, minus the margin.
-        _requireNotPast(_presentationCutoff(orderHash, params));
+        // D2: the co-signed unlock is the presentation — valid before the window's end minus the
+        // margin. Strict, so it never shares a second with `finalizeCancel` (which needs the end reached).
+        uint256 cutoff = _presentationCutoff(orderHash, params);
+        if (block.timestamp >= cutoff) revert Escrow__OrderExpired(cutoff);
         _requireSettleable(orderHash, nullifierHash);
         // #422: the maker's halt refuses the co-signed payout; evidence (`presentSettled`) still pays.
         // One cold read of the maker's flag on the metered path (~2.4k; UnlockGas re-baselined).
@@ -411,9 +413,10 @@ contract AdManager is EscrowBase, IAdManager {
     {
         Order storage o = _orders[orderHash];
         if (o.status != Status.Open && o.status != Status.Claimed) revert Escrow__NotDisputable(orderHash, o.status);
-        // D4: no filing once the primary's window closed (claimed window end once `Claimed`).
+        // D4: no filing once the primary's window closed (claimed window end once `Claimed`). The
+        // window is `[deadline, windowEnd)`: its end belongs to `finalizeCancel` alone.
         uint256 windowEnd = _windowEnd(orderHash, deadline, buffer);
-        if (block.timestamp > windowEnd) revert Escrow__DisputeWindowClosed(orderHash, windowEnd);
+        if (block.timestamp >= windowEnd) revert Escrow__DisputeWindowClosed(orderHash, windowEnd);
 
         // Order matters, and it is the cheap half of keeping the two contracts in step. The module
         // call is the fallible step — an unset route, an underfunded bond — so it runs *before* this
@@ -572,7 +575,7 @@ contract AdManager is EscrowBase, IAdManager {
         _payOrCredit(p.orderRecipient.toAddressChecked(), ad.token, adAmount);
     }
 
-    /// @dev The last second the co-signed unlock is accepted (D2): the window's end minus the margin,
+    /// @dev The first second the co-signed unlock is refused (D2): the window's end minus the margin,
     ///      both from the order's own timing version, so an admin retiming cannot move it.
     function _presentationCutoff(bytes32 orderHash, OrderParams calldata p) private view returns (uint256) {
         RouteTiming.Timing storage t = _orderTiming(orderHash, p.orderChainId);

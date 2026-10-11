@@ -214,6 +214,15 @@ test("the dispute bond floor is required outside local; a local route goes past 
   );
 });
 
+test("link refuses a margin above half the buffer before anything is sent", async () => {
+  const local = manifest("m-l.json", 1000002n, "testnet");
+  const peer = manifest("m-p.json", 11155111n, "testnet");
+  const calls = await withFake({ ...TESTNET, ROUTE_MARGIN_S: "901" }, () =>
+    assert.rejects(linkT(local, peer), /ROUTE_MARGIN_S=901 exceeds half of ROUTE_BUFFER_S=1800/),
+  );
+  assert.deepEqual(sent(calls), []);
+});
+
 test("deploy makes the escrows MerkleManager managers and not the Registrar", async () => {
   const c = { adManager: contractId(), orderPortal: contractId(), registrar: contractId() };
   const managers = appendersAtDeploy(c);

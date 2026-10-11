@@ -368,6 +368,8 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         adManager.finalizeCancel(p);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, h, IEscrow.Status.Cancelled));
         adManager.claimCancel(p);
+        // Back inside the unlock window, so the status (not the cutoff) is what refuses.
+        vm.warp(p.deadline);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderNotOpen.selector, h));
         adManager.unlock(p, TestField.fe("C1"), bytes32(0), hex"", hex"");
         _wireAnchor();
@@ -402,17 +404,57 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         adManager.finalizeCancel(p);
     }
 
-    function test_T45b_primaryUnlock_validToBufferMinusMargin() public {
+    function test_T45b_primaryUnlock_validBeforeBufferMinusMargin() public {
         _setTiming(RouteTiming.Timing(120, 30 minutes, 120, 0));
         (IAdManager.OrderParams memory p,) = _lock(8);
         uint256 cutoff = p.deadline + 30 minutes - 120;
 
-        vm.warp(cutoff + 1);
+        // Strict: the cutoff itself is refused.
+        vm.warp(cutoff);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, cutoff));
         adManager.unlock(p, TestField.fe("M1"), bytes32(0), hex"", hex"");
 
-        vm.warp(cutoff);
+        vm.warp(cutoff - 1);
         adManager.unlock(p, TestField.fe("M1"), bytes32(0), hex"", hex"");
+    }
+
+    /// With a zero margin the unlock and the cancel never share a second: one second before the
+    /// window's end the unlock passes and the cancel is too early; at the end the unlock and a filing
+    /// are refused and the cancel finalizes.
+    function test_noSharedLastSecond_unlockBeforeTheEnd_cancelAtIt() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lock(9);
+        (IAdManager.OrderParams memory q, bytes32 hq) =
+            _openOrder(lastAdId, address(adToken), 60 ether, 10, bridger, recipient);
+        _claim(p);
+        _claim(q);
+        uint256 end = p.deadline + 30 minutes;
+
+        vm.warp(end - 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, end));
+        adManager.finalizeCancel(q);
+        adManager.unlock(q, TestField.fe("S1"), bytes32(0), hex"", hex"");
+        assertEq(uint256(statusOf(address(adManager), hq)), uint256(IEscrow.Status.Filled));
+
+        vm.warp(end);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, end));
+        adManager.unlock(p, TestField.fe("S2"), bytes32(0), hex"", hex"");
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeWindowClosed.selector, h, end));
+        vm.prank(maker);
+        adManager.dispute(p, bytes32("evidence"));
+        adManager.finalizeCancel(p);
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Cancelled));
+    }
+
+    /// The margin is at most half the buffer, so the bridger always keeps half the window.
+    function test_setRouteTiming_marginCappedAtHalfTheBuffer() public {
+        vm.startPrank(admin);
+        vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(2)));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(1 hours, 1 hours, 30 minutes + 1, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(1 hours, 1 hours, 30 minutes, 0));
+        // An odd buffer rounds the cap down.
+        vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(2)));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(1 hours, 1 hours + 1, 30 minutes + 1, 0));
+        vm.stopPrank();
     }
 
     /*//////////////////////////// T-54 / D3: presentSettled ////////////////////////////*/
@@ -576,11 +618,11 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         adManager.claimCancel(p);
         (, uint64 finalizeAt) = adManager.claims(h);
         assertEq(finalizeAt, end, "during the pause");
-        // The unlock is accepted to the cutoff, and not a second past it, while paused.
-        vm.warp(end + 1);
+        // The unlock is accepted before the cutoff, and not at it, while paused.
+        vm.warp(end);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, end));
         adManager.unlock(q, TestField.fe("W1"), bytes32(0), hex"", hex"");
-        vm.warp(end);
+        vm.warp(end - 1);
         adManager.unlock(q, TestField.fe("W1"), bytes32(0), hex"", hex"");
         assertEq(uint256(statusOf(address(adManager), hq)), uint256(IEscrow.Status.Filled));
 
@@ -631,7 +673,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         _setTiming(RouteTiming.Timing(1 hours, 2 hours, 1 hours, 50 minutes));
 
         uint256 cutoff = p.deadline + 30 minutes - 5 minutes;
-        vm.warp(cutoff + 1);
+        vm.warp(cutoff);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, cutoff));
         adManager.unlock(p, TestField.fe("G3"), bytes32(0), hex"", hex"");
         adManager.claimCancel(p);
@@ -646,10 +688,10 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         (, uint32 vq) = adManager.orders(hq);
         assertEq(vq, v + 1);
         uint256 cutoffQ = q.deadline + 2 hours - 1 hours;
-        vm.warp(cutoffQ + 1);
+        vm.warp(cutoffQ);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, cutoffQ));
         adManager.unlock(q, TestField.fe("G3b"), bytes32(0), hex"", hex"");
-        vm.warp(cutoffQ);
+        vm.warp(cutoffQ - 1);
         adManager.unlock(q, TestField.fe("G3b"), bytes32(0), hex"", hex"");
     }
 

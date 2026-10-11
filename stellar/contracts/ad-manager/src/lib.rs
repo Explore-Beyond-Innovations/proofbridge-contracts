@@ -13,7 +13,7 @@
 //!
 //! This leg is the primary: the only place a clock runs. After the deadline anyone may
 //! `claim_cancel`, which opens the window `[deadline, deadline + buffer)`; the co-signed `unlock`
-//! (accepted until `deadline + buffer - margin`) or a `present_settled` proof settles it; an
+//! (accepted before `deadline + buffer - margin`) or a `present_settled` proof settles it; an
 //! unchallenged window releases the lock and records the CANCEL leaf the order leg refunds
 //! against. Every `Filled` gets a SETTLED leaf, appended by `record_settled` in its own
 //! transaction (so the relayer batches one shape across both chains — not, as this once said, because
@@ -739,13 +739,13 @@ impl AdManagerContract {
         if storage::is_nullifier_used(&env, &nullifier_hash) {
             return Err(AdManagerError::NullifierUsed);
         }
-        // 2.3e D2: the co-signed unlock is the presentation — valid through the window, minus
-        // the margin, on the order's own timing version, so a retiming cannot move it. With
-        // margin 0 the window's last second is shared with finalize_cancel; the first wins.
+        // 2.3e D2: the co-signed unlock is the presentation — valid before the window's end minus
+        // the margin, on the order's own timing version, so a retiming cannot move it. Strict, so
+        // it never shares a second with finalize_cancel (which needs the end reached).
         let t = Self::order_timing(&env, &order_hash, params.order_chain_id)?;
         let cutoff =
             Self::window_end(&env, &order_hash, params.deadline, t.buffer).saturating_sub(t.margin);
-        if env.ledger().timestamp() > cutoff {
+        if env.ledger().timestamp() >= cutoff {
             return Err(AdManagerError::OrderExpired);
         }
         // #422: the maker's halt refuses the co-signed payout; evidence (`present_settled`) still
