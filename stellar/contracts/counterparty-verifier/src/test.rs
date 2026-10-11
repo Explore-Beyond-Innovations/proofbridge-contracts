@@ -9,9 +9,21 @@ use bls_key_registry::{
     BlsKeyRegistry, BlsKeyRegistryClient, KeyLeg, OwnerAuth, OwnerSig, SignedOwner,
 };
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::{Address as _, Ledger as _},
     Env, String as SString,
 };
+
+/// Stands in for the escrows the deploy CLI wires as registry guards: no open positions.
+#[contract]
+pub struct IdleGuard;
+
+#[contractimpl]
+impl IdleGuard {
+    pub fn has_open_positions(_env: Env, _account: BytesN<32>) -> bool {
+        false
+    }
+}
 
 const VECTORS: &str = include_str!("../../../../test-vectors/bls-encodings.json");
 
@@ -414,6 +426,7 @@ fn unregistered_account_fails() {
     let maker_pk = hexval(&s.v["keys"]["makerWallet"]["pk"]);
     let g = stellar_strkey::ed25519::PublicKey(maker_pk.clone().try_into().unwrap()).to_string();
     let owner = OwnerAuth::Stellar(Address::from_string(&SString::from_str(&s.env, &g)));
+    registry.set_position_guards(&soroban_sdk::vec![&s.env, s.env.register(IdleGuard, ())]);
     registry.revoke(
         &BytesN::from_array(&s.env, &maker_pk.try_into().unwrap()),
         &owner,
