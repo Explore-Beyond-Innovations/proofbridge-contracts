@@ -14,6 +14,7 @@ use soroban_sdk::{
 };
 
 use errors::VerifierError;
+use proofbridge_core::cross_contract::key_commitment;
 
 /// The pluggable root-authentication seam every module implements.
 #[contractclient(name = "RootVerifierClient")]
@@ -93,21 +94,27 @@ impl CounterpartyVerifier {
             return false;
         }
 
+        // One commitment per key (keccak of the EIP-2537 form): the registry stores it and the
+        // signed auth names it, so the maker's key is hashed once for both checks.
+        let signer_commitment = key_commitment(&env, &m.pk_signer);
+        // #469: the bridger signed for one maker key. The bridger's half aggregated with any other
+        // live key of the maker's is a valid pairing but not consent; only the named key settles.
+        if m.maker_key_commitment != signer_commitment {
+            return false;
+        }
         let registry: Address = env.storage().instance().get(&KEY_REGISTRY).unwrap();
         let client = KeyRegistryClient::new(&env, &registry);
         if !commitment_matches(
-            &env,
             &client,
             &m.settlement_signer,
             m.signer_slot_id,
-            &m.pk_signer,
-        ) || !commitment_matches(&env, &client, &m.bridger, m.bridger_slot_id, &m.pk_bridger)
-        {
-            return false;
-        }
-        // #469: the bridger signed for one maker key. The bridger's half aggregated with any other
-        // live key of the maker's is a valid pairing but not consent; only the named key settles.
-        if m.maker_key_commitment != settlement_key_commitment(&env, &m.pk_signer) {
+            &signer_commitment,
+        ) || !commitment_matches(
+            &client,
+            &m.bridger,
+            m.bridger_slot_id,
+            &key_commitment(&env, &m.pk_bridger),
+        ) {
             return false;
         }
 
@@ -163,38 +170,15 @@ fn arr<const N: usize>(b: &Bytes, offset: u32) -> [u8; N] {
     out
 }
 
-/// The registry stores keccak commitments; the full keys travel here. A missing,
-/// pruned or expired slot errors in the registry and fails the root here.
+/// The registry stores each key's commitment; the full key travels here and is hashed by the
+/// caller. A missing, pruned or expired slot errors in the registry and fails the root here.
 fn commitment_matches(
-    env: &Env,
     client: &KeyRegistryClient,
     account: &BytesN<32>,
     slot_id: u32,
-    pk: &BytesN<96>,
+    commitment: &BytesN<32>,
 ) -> bool {
-    match client.try_commitment_at(account, &slot_id) {
-        Ok(Ok(commitment)) => {
-            let hash: BytesN<32> = env
-                .crypto()
-                .keccak256(&Bytes::from_slice(env, &pk.to_array()))
-                .to_bytes();
-            commitment == hash
-        }
-        _ => false,
-    }
-}
-
-/// #469: the maker key named inside the signed message — keccak256 of the key's EIP-2537
-/// encoding (16 zero bytes ‖ x ‖ 16 zero bytes ‖ y), so the value is the same on every chain.
-/// The registry's own commitment here is over the 96-byte form and is not this value.
-fn settlement_key_commitment(env: &Env, pk: &BytesN<96>) -> BytesN<32> {
-    let raw = pk.to_array();
-    let mut enc = [0u8; 128];
-    enc[16..64].copy_from_slice(&raw[0..48]);
-    enc[80..128].copy_from_slice(&raw[48..96]);
-    env.crypto()
-        .keccak256(&Bytes::from_slice(env, &enc))
-        .to_bytes()
+    matches!(client.try_commitment_at(account, &slot_id), Ok(Ok(c)) if c == *commitment)
 }
 
 /// e(pkM + pkB, H(preimage)) == e(G1, aggSig)

@@ -19,9 +19,11 @@ use soroban_sdk::{
 };
 
 use errors::RegistryError;
-use owner::{check_owner, key_fingerprint, keys_domain_separator, KeyMessage, MAX_REGISTER_TTL};
+use owner::{check_owner, keys_domain_separator, KeyMessage, MAX_REGISTER_TTL};
 pub use owner::{KeyLeg, OwnerAuth, OwnerSig, SignedOwner};
-use proofbridge_core::cross_contract::{self, VerifierClient, LEAF_DOMAIN_REGISTERED};
+use proofbridge_core::cross_contract::{
+    self, key_commitment, VerifierClient, LEAF_DOMAIN_REGISTERED,
+};
 use proofbridge_core::eip712::contract_address_to_bytes32;
 pub use storage::{KeySlot, MakerApproval};
 
@@ -210,23 +212,19 @@ impl BlsKeyRegistry {
         if !verify_pop(&env, &account, &bls_pub_key, &pop, nonce) {
             return Err(RegistryError::InvalidPop);
         }
-        let fingerprint = key_fingerprint(&env, &bls_pub_key);
+        let commitment = key_commitment(&env, &bls_pub_key);
         check_owner(
             &env,
             &account,
             owner,
             KeyMessage::Register {
-                fingerprint: fingerprint.clone(),
+                key_commitment: commitment.clone(),
                 nonce,
                 deadline,
             },
         )?;
 
-        let commitment: BytesN<32> = env
-            .crypto()
-            .keccak256(&Bytes::from_slice(&env, &bls_pub_key.to_array()))
-            .to_bytes();
-        let slot_id = add_slot(&env, &account, &commitment, &fingerprint)?;
+        let slot_id = add_slot(&env, &account, &commitment)?;
         storage::set_nonce(&env, &account, nonce + 1);
         proofbridge_core::ttl::extend_instance(&env);
         events::KeyRegistered {
@@ -269,10 +267,7 @@ impl BlsKeyRegistry {
         if bls_pub_key == g1_identity(&env) {
             return Err(RegistryError::IdentityKey);
         }
-        let commitment: BytesN<32> = env
-            .crypto()
-            .keccak256(&Bytes::from_slice(&env, &bls_pub_key.to_array()))
-            .to_bytes();
+        let commitment = key_commitment(&env, &bls_pub_key);
         if storage::is_used(&env, &account, &commitment) {
             return Err(RegistryError::KeyPreviouslyUsed);
         }
@@ -305,12 +300,7 @@ impl BlsKeyRegistry {
             _ => return Err(RegistryError::InvalidLeafProof),
         }
 
-        let slot_id = add_slot(
-            &env,
-            &account,
-            &commitment,
-            &key_fingerprint(&env, &bls_pub_key),
-        )?;
+        let slot_id = add_slot(&env, &account, &commitment)?;
         proofbridge_core::ttl::extend_instance(&env);
         events::KeyRegisteredByProof {
             account,
@@ -325,8 +315,8 @@ impl BlsKeyRegistry {
 
     /// Shorten-only, nonce-free, never guarded, and not pausable: the retirement lever
     /// (D6/D9) only ever reduces authority, so a registry pause must not block it. Names the key
-    /// by its fingerprint (keccak of the EIP-2537 form), so one pre-signed `RetireKey` serves
-    /// every registry; the slot is found through the map written at registration.
+    /// by its commitment (keccak of the EIP-2537 form, the same on every chain), so one pre-signed
+    /// `RetireKey` serves every registry; the slot is found through the map written at registration.
     pub fn set_valid_until(
         env: Env,
         account: BytesN<32>,
@@ -349,7 +339,7 @@ impl BlsKeyRegistry {
             &account,
             owner,
             KeyMessage::Retire {
-                fingerprint: key_commitment,
+                key_commitment,
                 valid_until,
             },
         )?;
@@ -519,7 +509,7 @@ impl BlsKeyRegistry {
         if slot.valid_until != 0 && env.ledger().timestamp() >= slot.valid_until {
             return Err(RegistryError::SlotExpired);
         }
-        storage::touch(&env, &account, slot_id, &slot.fingerprint);
+        storage::touch(&env, &account, slot_id, &slot.commitment);
         // C-13: the verifier reads this on every unlock; an idle registry must not archive.
         proofbridge_core::ttl::extend_instance(&env);
         Ok(slot.commitment)
@@ -570,7 +560,7 @@ impl BlsKeyRegistry {
         storage::get_entry(&env, &account).next_slot_id
     }
 
-    /// The slot a key fingerprint occupies (the one `set_valid_until` acts on), while it exists.
+    /// The slot a key commitment occupies (the one `set_valid_until` acts on), while it exists.
     pub fn slot_of_key(env: Env, account: BytesN<32>, key_commitment: BytesN<32>) -> Option<u32> {
         storage::get_key_slot(&env, &account, &key_commitment)
             .filter(|id| storage::get_slot(&env, &account, *id).is_some())
@@ -654,7 +644,6 @@ fn add_slot(
     env: &Env,
     account: &BytesN<32>,
     commitment: &BytesN<32>,
-    fingerprint: &BytesN<32>,
 ) -> Result<u32, RegistryError> {
     if storage::is_used(env, account, commitment) {
         return Err(RegistryError::KeyPreviouslyUsed);
@@ -677,12 +666,11 @@ fn add_slot(
             commitment: commitment.clone(),
             valid_until: 0,
             registered_at: env.ledger().timestamp(),
-            fingerprint: fingerprint.clone(),
         },
     );
     storage::set_entry(env, account, &entry);
     storage::set_used(env, account, commitment);
-    storage::set_key_slot(env, account, fingerprint, slot_id);
+    storage::set_key_slot(env, account, commitment, slot_id);
     Ok(slot_id)
 }
 

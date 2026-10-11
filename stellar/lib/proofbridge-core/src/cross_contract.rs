@@ -254,6 +254,19 @@ pub fn build_event_public_inputs(
     inputs
 }
 
+/// The one key commitment on every chain: keccak256 of the key's EIP-2537 128-byte form, rebuilt
+/// by padding each 48-byte coordinate of the 96-byte key with 16 zero bytes. The registry stores it,
+/// owner messages name it, and the counterparty verifier compares both against it.
+pub fn key_commitment(env: &Env, pk: &BytesN<96>) -> BytesN<32> {
+    let raw = pk.to_array();
+    let mut padded = [0u8; 128];
+    padded[16..64].copy_from_slice(&raw[..48]);
+    padded[80..128].copy_from_slice(&raw[48..]);
+    env.crypto()
+        .keccak256(&Bytes::from_slice(env, &padded))
+        .to_bytes()
+}
+
 /// keccak256("ProofBridge.BLSKeyRegistry.RegistrationLeaf.v1")
 pub const REG_LEAF_TAG: [u8; 32] = [
     0x11, 0x4c, 0xb0, 0xbc, 0xa6, 0xcb, 0x0f, 0x15, 0xf0, 0x56, 0x60, 0xd6, 0x36, 0x69, 0xbc, 0x00,

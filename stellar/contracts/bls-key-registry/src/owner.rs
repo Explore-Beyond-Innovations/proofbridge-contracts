@@ -97,7 +97,7 @@ pub enum OwnerAuth {
 /// The message a state change needs signed.
 pub(crate) enum KeyMessage {
     Register {
-        fingerprint: BytesN<32>,
+        key_commitment: BytesN<32>,
         nonce: u64,
         deadline: u64,
     },
@@ -108,7 +108,7 @@ pub(crate) enum KeyMessage {
         nonce: u64,
     },
     Retire {
-        fingerprint: BytesN<32>,
+        key_commitment: BytesN<32>,
         valid_until: u64,
     },
     /// `nonce` is the (account, maker) pair's, not the account's.
@@ -154,18 +154,6 @@ pub(crate) fn keys_domain_separator(env: &Env, name: &String) -> Result<BytesN<3
     enc.extend_from_slice(&keccak(env, &Bytes::from_slice(env, b"2")));
     enc.extend_from_slice(&keccak(env, &salt_pre));
     Ok(BytesN::from_array(env, &keccak(env, &enc)))
-}
-
-/// D2: keccak256 of the key's EIP-2537 128-byte form, rebuilt by padding each 48-byte coordinate
-/// of the 96-byte key with 16 zero bytes. Same value as the EVM registry's commitment.
-pub(crate) fn key_fingerprint(env: &Env, pk: &BytesN<96>) -> BytesN<32> {
-    let raw = pk.to_array();
-    let mut padded = [0u8; 128];
-    padded[16..64].copy_from_slice(&raw[..48]);
-    padded[80..128].copy_from_slice(&raw[48..]);
-    env.crypto()
-        .keccak256(&Bytes::from_slice(env, &padded))
-        .to_bytes()
 }
 
 pub(crate) fn check_owner(
@@ -299,13 +287,13 @@ pub(crate) fn struct_hash(
     let mut enc = Bytes::new(env);
     match msg {
         KeyMessage::Register {
-            fingerprint,
+            key_commitment,
             deadline,
             ..
         } => {
             enc.extend_from_slice(&REGISTER_KEY_TYPEHASH);
             enc.extend_from_slice(&account.to_array());
-            enc.extend_from_slice(&fingerprint.to_array());
+            enc.extend_from_slice(&key_commitment.to_array());
             enc.extend_from_slice(&legs_hash(env, legs));
             enc.extend_from_slice(&abi_encode_uint256(*deadline as u128));
         }
@@ -333,12 +321,12 @@ pub(crate) fn struct_hash(
             enc.extend_from_slice(&abi_encode_uint256(*deadline as u128));
         }
         KeyMessage::Retire {
-            fingerprint,
+            key_commitment,
             valid_until,
         } => {
             enc.extend_from_slice(&RETIRE_KEY_TYPEHASH);
             enc.extend_from_slice(&account.to_array());
-            enc.extend_from_slice(&fingerprint.to_array());
+            enc.extend_from_slice(&key_commitment.to_array());
             enc.extend_from_slice(&abi_encode_uint256(*valid_until as u128));
         }
     }
@@ -368,9 +356,10 @@ pub(crate) fn text(env: &Env, account: &BytesN<32>, legs: &Vec<KeyLeg>, msg: &Ke
     t.extend_from_slice(b"\nAccount: ");
     t.extend_from_slice(&hex_0x_lower(&account.to_array()));
     match msg {
-        KeyMessage::Register { fingerprint, .. } | KeyMessage::Retire { fingerprint, .. } => {
+        KeyMessage::Register { key_commitment, .. } | KeyMessage::Retire { key_commitment, .. } => {
+            // The wallet-facing label stays "Key fingerprint"; the value is the key commitment.
             t.extend_from_slice(b"\nKey fingerprint: ");
-            t.extend_from_slice(&hex_0x_lower(&fingerprint.to_array()));
+            t.extend_from_slice(&hex_0x_lower(&key_commitment.to_array()));
         }
         KeyMessage::ApproveMaker { maker, .. } => {
             t.extend_from_slice(b"\nMaker: ");
