@@ -98,6 +98,7 @@ pub fn get_order(env: &Env, order_hash: &BytesN<32>) -> OrderRecord {
             timing_version: 0,
             anchor_delay: 0,
             pinned_slot: 0,
+            repinned: false,
         })
 }
 
@@ -125,6 +126,7 @@ pub fn open_order(
             timing_version,
             anchor_delay,
             pinned_slot,
+            repinned: false,
         },
     );
 }
@@ -137,10 +139,12 @@ pub fn set_order_status(env: &Env, order_hash: &BytesN<32>, status: Status) {
     set_order(env, order_hash, &rec);
 }
 
-/// Move an open order's co-signing pin (the ad-manager's `repin_order`, plan 12 D12).
+/// Move an open order's co-signing pin (the ad-manager's `repin_order`, plan 12 D12) and stamp the
+/// order re-pinned: the denial rule counts a re-pin for the rest of the order's life.
 pub fn set_pinned_slot(env: &Env, order_hash: &BytesN<32>, slot: u32) {
     let mut rec = get_order(env, order_hash);
     rec.pinned_slot = slot;
+    rec.repinned = true;
     set_order(env, order_hash, &rec);
 }
 

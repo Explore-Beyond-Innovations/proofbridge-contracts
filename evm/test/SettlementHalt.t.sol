@@ -723,6 +723,32 @@ abstract contract RealRegistryFixture is AdManagerTest {
         );
     }
 
+    /// Plan 12 C: the account's RepinOrder consent (`fromSlot` → `toSlot`) for `orderHash`, filed on the
+    /// real registry at the (account, order) pair's `nonce`.
+    function _approveRepin(bytes32 orderHash, uint32 fromSlot, uint32 toSlot, uint64 nonce) internal onVectorChain {
+        IBLSKeyRegistry.OwnerAuth memory auth;
+        auth.legs = new IBLSKeyRegistry.KeyLeg[](1);
+        auth.legs[0] = IBLSKeyRegistry.KeyLeg(VECTOR_CHAIN_ID, bytes32(uint256(uint160(REGISTRY))), nonce);
+        bytes32 legs =
+            keccak256(abi.encode(KeyMessages.KEY_LEG_TYPEHASH, VECTOR_CHAIN_ID, auth.legs[0].registry, nonce));
+        bytes32 structHash = keccak256(
+            abi.encode(
+                KeyMessages.REPIN_ORDER_TYPEHASH,
+                account,
+                orderHash,
+                fromSlot,
+                toSlot,
+                keccak256(abi.encodePacked(legs))
+            )
+        );
+        (uint8 sv, bytes32 r, bytes32 ss) = vm.sign(
+            uint256(v.readBytes32(".keys.bridgerWallet.sk")),
+            keccak256(abi.encodePacked(hex"1901", keysDomain, structHash))
+        );
+        auth.sig = abi.encodePacked(r, ss, sv);
+        registry.approveRepin(account, orderHash, fromSlot, toSlot, auth, nonce);
+    }
+
     function _graceTs() internal view returns (uint64) {
         return uint64(vm.parseUint(v.readString(".slots.graceTs")));
     }
@@ -779,6 +805,37 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         adManager.finalizeCancel(p);
         vm.warp(p.deadline + 60 minutes);
         adManager.finalizeCancel(p);
+    }
+
+    /// Plan 12 C: the signer's consent filed on the real registry moves the pin through the escrow,
+    /// the moved order is denied for the rest of its life, and a dead pin cannot be moved at all.
+    function test_realRegistry_approveRepin_movesThePin_theRepinDenies_aDeadPinStays() public {
+        _realRegistry();
+        IAdManager.OrderParams memory p = _lockAs(3);
+        bytes32 h = adManager.hashOrderPublic(p);
+        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__NoRepin.selector, h));
+        adManager.repinOrder(p);
+        _approveRepin(h, 0, 1, 0);
+        adManager.repinOrder(p);
+        (,,, uint32 pin) = adManager.orders(h);
+        assertEq(pin, 1, "the consent moved the pin");
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        vm.warp(p.deadline + 60 minutes);
+        adManager.finalizeCancel(p);
+
+        // A second order: kill its pin, and the consent to leave it is refused — the kill stands.
+        IAdManager.OrderParams memory q = _lockAs(4);
+        bytes32 hq = adManager.hashOrderPublic(q);
+        vm.warp(block.timestamp + 10);
+        _setValidUntil(0, true);
+        _approveRepin(hq, 0, 1, 0);
+        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__SlotNotUsable.selector, account, uint32(0)));
+        adManager.repinOrder(q);
+        (,,, uint32 pinQ) = adManager.orders(hq);
+        assertEq(pinQ, 0, "the dead pin stays");
     }
 
     /// Plan 12 C: a slot killed before the lock cannot be pinned; an order pinned to the live slot

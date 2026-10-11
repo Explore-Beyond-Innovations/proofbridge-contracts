@@ -131,7 +131,8 @@ interface IAdManager is IEscrow {
     error AdManager__NotHalted();
     /// @notice #464: the order chain's verifier checks co-signatures against a different registry.
     error AdManager__RegistrySplit(uint256 chainId, address escrowRegistry, address verifierRegistry);
-    /// @notice The slot to pin does not exist, is not usable now, or is not the signer's.
+    /// @notice The slot to pin does not exist, is not usable now, or is not the signer's; or, on a
+    ///         re-pin, the pin being left has already expired (the kill stands).
     error AdManager__SlotNotUsable(bytes32 signer, uint32 slotId);
     /// @notice No re-pin consent for this order from its current pin.
     error AdManager__NoRepin(bytes32 orderHash);

@@ -1053,8 +1053,11 @@ impl AdManagerContract {
 
     /// Apply the settlement signer's re-pin consent (`approve_repin` on the order's registry): move
     /// an `Open` order's pin to another usable slot of the same signer, not past
-    /// `deadline - claim_stagger` (plan 12 D12, Q2). Permissionless; the consent names the order and
-    /// both slots.
+    /// `deadline - claim_stagger` of this escrow's own route timing (the ad chain cannot read the
+    /// order portal's; the two are linked from one manifest), (plan 12 D12, Q2). Permissionless; the
+    /// consent names the order and both slots. A pin whose slot has expired cannot be moved (the
+    /// kill stands and the denial rule counts it), and the order is stamped re-pinned, which the
+    /// denial rule counts from then on: a re-pin refuses every pair signed under the old pin.
     pub fn repin_order(env: Env, params: OrderParams) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
@@ -1073,6 +1076,10 @@ impl AdManagerContract {
             proofbridge_core::cross_contract::repin_approval(&env, &registry, signer, &order_hash);
         if nonce == 0 || from != order.pinned_slot {
             return Err(AdManagerError::NoRepin);
+        }
+        let left = proofbridge_core::cross_contract::expired_at(&env, &registry, signer, from);
+        if left != 0 && left <= env.ledger().timestamp() {
+            return Err(AdManagerError::SlotNotUsable);
         }
         if !proofbridge_core::cross_contract::slot_usable(&env, &registry, signer, to) {
             return Err(AdManagerError::SlotNotUsable);
@@ -1448,13 +1455,14 @@ impl AdManagerContract {
 
     /// Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force now
     /// or at any point since the lock (a resume stamp at or after `locked_at`), the order chain's root
-    /// verifier unset (`unlock` refuses `RootVerifierNotSet`), any of the signer's registry slots
-    /// expiring during the order's life as a payout, `[locked_at, until]` with `until` the payout's
-    /// own cutoff (`any_slot_expired_within`, D12/D14/D14b/D16: a kill, a near-future shorten, a
-    /// pre-lock shorten naming a date in the window and a re-kill after it all count; a rotation
-    /// whose old slot outlives the cutoff does not). Every reference is one the chain stamped (the
-    /// lock) or the caller derives from the signed deadline, never one the maker can choose later.
-    /// No registry wired means no lever 2 to read.
+    /// verifier unset (`unlock` refuses `RootVerifierNotSet`), a registry split, the order's pinned
+    /// slot expiring at or before `until`, the payout's own cutoff (`expired_at`, plan 12 C: a kill
+    /// or a shorten of that slot counts, a rotation of any other slot does not, since no other slot
+    /// can co-sign the ad leg), or the pin moved by a re-pin (`repin_order` refuses every pair
+    /// signed under the old pin, and the slot left behind may die unseen). The lock refused a dead
+    /// slot and a re-pin refuses to leave one, so any expiry the rule sees is after the lock. Every
+    /// reference is one the chain stamped (the lock) or the caller derives from the signed deadline,
+    /// never one the maker can choose later. No registry wired means no lever 2 to read.
     fn co_sign_denied(
         env: &Env,
         maker: &Address,
@@ -1463,6 +1471,11 @@ impl AdManagerContract {
         until: u64,
     ) -> bool {
         let order = storage::get_order(env, order_hash);
+        // A re-pin is the maker side's lever: it refused every pair under the old pin, and the slot
+        // it left may have died since. Denied for the rest of the order's life.
+        if order.repinned {
+            return true;
+        }
         // A halt in force at any point since the lock: still on, or resumed at or after it (a halt
         // from before the lock counts too: the lock never reads it).
         if let Some(h) = storage::get_halt(env, maker) {
@@ -1487,8 +1500,8 @@ impl AdManagerContract {
         // D16: the order's life as a payout ends at the payout's own cutoff — the presentation
         // cutoff for a cancel, the challenge deadline for a dispute — which the caller passes in;
         // the bound is plain time. Plan 12 C: only the pinned slot can co-sign the ad leg, and the
-        // lock refused a dead one, so its own expiry is the one that counts; a rotation of any
-        // other slot denies nothing.
+        // lock refused a dead one (a re-pin refuses to leave one), so its own expiry is the one that
+        // counts; a rotation of any other slot denies nothing.
         let e = proofbridge_core::cross_contract::expired_at(
             env,
             &registry,

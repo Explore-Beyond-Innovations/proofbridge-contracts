@@ -393,16 +393,6 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         return false;
     }
 
-    /// @notice Did any of `account`'s slots expire in `[from, to]` (#422 D12/D14/D14b, `IKeyRegistry`).
-    function anySlotExpiredWithin(bytes32 account, uint64 from, uint64 to) external view returns (bool) {
-        RegistryEntry storage e = entries[account];
-        for (uint256 i = 0; i < e.liveSlots.length; i++) {
-            uint64 vu = _expiredAt(account, e.liveSlots[i]);
-            if (vu != 0 && vu >= from && vu <= to) return true;
-        }
-        return false;
-    }
-
     /// True iff `account` approved `maker` since its last `revoke` and has not withdrawn it.
     function isApprovedMaker(bytes32 account, bytes32 maker) external view returns (bool) {
         MakerApproval storage a = makerApprovals[account][maker];

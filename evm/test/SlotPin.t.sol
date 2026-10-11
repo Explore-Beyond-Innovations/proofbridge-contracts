@@ -5,24 +5,11 @@ import {TestField} from "test/utils/TestField.sol";
 import {statusOf} from "test/utils/OrderStatus.sol";
 import {IAdManager} from "src/interfaces/IAdManager.sol";
 import {IEscrow} from "src/interfaces/IEscrow.sol";
-import {IRootVerifier} from "src/interfaces/IRootVerifier.sol";
 import {RouteTiming} from "src/libraries/RouteTiming.sol";
 import {RootVerifierRegistry} from "src/libraries/RootVerifierRegistry.sol";
 import {AdManagerTest} from "./Admanager.t.sol";
-
-/// Accepts a root only when the envelope's pinned slot is `expected`: pins what the escrow vouches for.
-contract PinRootVerifier is IRootVerifier {
-    uint32 public immutable expected;
-
-    constructor(uint32 expected_) {
-        expected = expected_;
-    }
-
-    function isRootValid(uint256, bytes32, bytes calldata metadata) external view returns (bool) {
-        (,,, uint32 pin,,,) = abi.decode(metadata, (bytes32, bytes32, bytes32, uint32, bytes32, uint8, bytes));
-        return pin == expected;
-    }
-}
+import {MockKeyRegistry} from "./mocks/MockKeyRegistry.sol";
+import {PinRootVerifier} from "./mocks/PinRootVerifier.sol";
 
 /// 2.7 plan 12 C on the AdManager: the lock pins the settlement signer's co-signing slot, the unlock
 /// vouches for it, and the signer's consent can move it while the order is open.
@@ -168,5 +155,89 @@ contract SlotPinTest is AdManagerTest {
         vm.warp(cutoff);
         adManager.repinOrder(p);
         assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Open));
+    }
+
+    // ---- a re-pin is a denial, and a dead pin stays (the October review's re-pin holes) ----
+
+    /// The pin's slot was killed: it cannot be moved away, and the kill keeps denying the payout — the
+    /// cancel waits the evidence grace (buffer 30 min, no anchor: 60 min after the deadline).
+    function test_repin_refusesLeavingAnExpiredSlot_andTheCancelWaitsTheGrace() public {
+        keyRegistry.setSlotExpiry(signer, 1, 0);
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockPinned(11, 0);
+        keyRegistry.setRepin(signer, h, 0, 1);
+        vm.warp(block.timestamp + 10);
+        keyRegistry.setSlotExpiry(signer, 0, uint64(block.timestamp)); // the kill
+        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__SlotNotUsable.selector, signer, uint32(0)));
+        adManager.repinOrder(p);
+        (uint32 slot,) = _pin(h);
+        assertEq(slot, 0, "the dead pin stays");
+        vm.warp(p.deadline);
+        adManager.claimCancel(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "the kill still denies");
+    }
+
+    /// A re-pin alone is a lever the maker's side holds (it refuses every pair signed under the old
+    /// pin), so the cancel waits the grace although both slots are live.
+    function test_repinAlone_isADenial_theCancelWaitsTheGrace() public {
+        keyRegistry.setSlotExpiry(signer, 1, 0);
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockPinned(12, 0);
+        keyRegistry.setRepin(signer, h, 0, 1);
+        adManager.repinOrder(p);
+        vm.warp(p.deadline);
+        adManager.claimCancel(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "a re-pin denies");
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        vm.warp(p.deadline + 60 minutes);
+        adManager.finalizeCancel(p);
+    }
+
+    /// Two live slots and no re-pin: ordinary timing (the control for the case above).
+    function test_noRepin_twoLiveSlots_ordinaryTiming() public {
+        keyRegistry.setSlotExpiry(signer, 1, 0);
+        (IAdManager.OrderParams memory p,) = _lockPinned(13, 0);
+        vm.warp(p.deadline);
+        adManager.claimCancel(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 30 minutes);
+    }
+
+    /// A pin shortened to die inside the window, then moved away while still usable: the denial stays
+    /// with the order, not with the slot it left.
+    function test_shortenedPin_repinnedAway_stillWaitsTheGrace() public {
+        keyRegistry.setSlotExpiry(signer, 1, 0);
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockPinned(14, 0);
+        keyRegistry.setSlotExpiry(signer, 0, uint64(p.deadline - 10)); // a shorten naming a date inside the window
+        keyRegistry.setRepin(signer, h, 0, 1);
+        adManager.repinOrder(p); // slot 0 is still usable now
+        (uint32 slot,) = _pin(h);
+        assertEq(slot, 1);
+        vm.warp(p.deadline);
+        adManager.claimCancel(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "the shorten is not laundered");
+    }
+
+    /// The consent is read from the registry the order was locked under, whatever is wired later.
+    function test_repin_readsTheOrdersRegistry_acrossAMigration() public {
+        MockKeyRegistry second = new MockKeyRegistry();
+        second.set(signer, true);
+        second.setSlotExpiry(signer, 1, 0);
+        vm.prank(admin);
+        adManager.setKeyRegistry(second);
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockPinned(15, 0);
+        (, uint32 epoch) = _pin(h);
+        assertEq(epoch, adManager.registryEpoch(), "locked under the second registry");
+        MockKeyRegistry third = new MockKeyRegistry();
+        third.set(signer, true);
+        vm.prank(admin);
+        adManager.setKeyRegistry(third);
+        keyRegistry.setRepin(signer, h, 0, 1); // a consent on the first registry
+        third.setRepin(signer, h, 0, 1); // and on the live one: neither is the order's
+        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__NoRepin.selector, h));
+        adManager.repinOrder(p);
+        second.setRepin(signer, h, 0, 1);
+        adManager.repinOrder(p);
+        (uint32 slot,) = _pin(h);
+        assertEq(slot, 1);
     }
 }

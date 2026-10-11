@@ -92,7 +92,6 @@ pub trait RootAnchorInterface {
 #[contractclient(name = "KeyRegistryClient")]
 pub trait KeyRegistryInterface {
     fn has_usable_slot(env: Env, account: BytesN<32>) -> bool;
-    fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool;
     fn is_approved_maker(env: Env, account: BytesN<32>, maker: BytesN<32>) -> bool;
     fn commitment_at(env: Env, account: BytesN<32>, slot_id: u32) -> BytesN<32>;
     fn expired_at(env: Env, account: BytesN<32>, slot_id: u32) -> u64;
@@ -405,18 +404,6 @@ pub fn is_approved_maker(
         KeyRegistryClient::new(env, registry).try_is_approved_maker(account, maker),
         Ok(Ok(true))
     )
-}
-
-/// Did any of `account`'s slots expire in `[from, to]` (#422 D12). The escrows' cancel grace asks
-/// it over the order's life, `[locked_at, now]`.
-pub fn any_slot_expired_within(
-    env: &Env,
-    registry: &Address,
-    account: &BytesN<32>,
-    from: u64,
-    to: u64,
-) -> bool {
-    KeyRegistryClient::new(env, registry).any_slot_expired_within(account, &from, &to)
 }
 
 /// Does `slot_id` exist, belong to `account` and stand usable now (`commitment_at` answers)? A

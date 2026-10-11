@@ -13,6 +13,8 @@ import {IVerifier} from "src/Verifier.sol";
 import {IMerkleManager} from "src/MerkleManager.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
+import {PinRootVerifier} from "./mocks/PinRootVerifier.sol";
+import {RootVerifierRegistry} from "src/libraries/RootVerifierRegistry.sol";
 import {RouteTiming} from "src/libraries/RouteTiming.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
 import {AddressCast} from "src/libraries/AddressCast.sol";
@@ -629,6 +631,23 @@ contract OrderPortalTest is Test {
             balRecipientBefore + p.amount,
             "recipient not credited"
         );
+    }
+
+    /// Plan 12 C: the order leg pins no slot and sends the unpinned sentinel in the envelope — a
+    /// verifier expecting slot 0 refuses the root, one expecting the sentinel accepts it.
+    function test_unlock_sendsTheUnpinnedSentinel_notSlotZero() public {
+        test_setTokenRoute_setsAndEmits_whenSupported();
+        (IOrderPortal.OrderParams memory p,) = _openOrder(65 ether, 124);
+        address slotZero = address(new PinRootVerifier(0));
+        address unpinned = address(new PinRootVerifier(type(uint32).max));
+        vm.prank(admin);
+        portal.setRootVerifier(adChainId, slotZero);
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, bytes32(0)));
+        portal.unlock(p, TestField.fe("U"), bytes32(0), hex"", hex"");
+        vm.prank(admin);
+        portal.setRootVerifier(adChainId, unpinned);
+        portal.unlock(p, TestField.fe("U"), bytes32(0), hex"", hex"");
+        assertEq(uint256(statusOf(address(portal), portal.hashOrderPublic(p))), uint256(IEscrow.Status.Filled));
     }
 
     /*//////////////////////////////////////////////////////////////

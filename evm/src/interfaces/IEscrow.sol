@@ -51,6 +51,10 @@ interface IEscrow {
         /// On the AdManager, the settlement signer's co-signing slot the lock pinned (2.7 plan 12 C);
         /// unused on the OrderPortal.
         uint32 pinnedSlot;
+        /// On the AdManager: the pin was moved by a re-pin (`repinOrder`). A re-pin is a maker-side
+        /// lever, so the denial rule counts it for the rest of the order's life; a slot left behind
+        /// can no longer erase a kill the rule would have counted. Unused on the OrderPortal.
+        bool repinned;
     }
 
     /*//////////////////////////////////////////////////////////////

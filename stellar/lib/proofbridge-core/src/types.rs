@@ -116,6 +116,10 @@ pub struct OrderRecord {
     /// On the ad chain, the settlement signer's co-signing slot the lock pinned (2.7 plan 12 C): the
     /// one slot the co-signed unlock accepts and the denial rule reads. 0 on the order portal.
     pub pinned_slot: u32,
+    /// On the ad chain: the pin was moved by a re-pin (`repin_order`). A re-pin is a maker-side
+    /// lever, so the denial rule counts it for the rest of the order's life; a slot left behind can
+    /// no longer erase a kill the rule would have counted. False on the order portal.
+    pub repinned: bool,
 }
 
 /// The open presentation window on an order (`Claimed` ⇔ a record exists).

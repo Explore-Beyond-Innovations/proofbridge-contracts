@@ -2018,20 +2018,11 @@ impl MockKeyRegistry {
             &(soroban_sdk::symbol_short!("slotexp"), account.clone(), slot),
             &valid_until,
         );
-        let key = (soroban_sdk::symbol_short!("extra"), account.clone());
+        let key = (soroban_sdk::symbol_short!("extra"), account);
         let extra: u32 = env.storage().instance().get(&key).unwrap_or(0);
         if slot > extra {
             env.storage().instance().set(&key, &slot);
         }
-        // and in the account-wide list `any_slot_expired_within` reads, as a real registry would
-        let key = (soroban_sdk::symbol_short!("expiry"), account);
-        let mut v: soroban_sdk::Vec<u64> = env
-            .storage()
-            .instance()
-            .get(&key)
-            .unwrap_or(soroban_sdk::Vec::new(&env));
-        v.push_back(valid_until);
-        env.storage().instance().set(&key, &v);
     }
 
     pub fn expired_at(env: Env, account: BytesN<32>, slot: u32) -> u64 {
@@ -2080,26 +2071,9 @@ impl MockKeyRegistry {
     /// The pinned slot (0) expiring at `valid_until`: what the #422 cases mean by "the signer's key".
     pub fn add_slot_expiry(env: Env, account: BytesN<32>, valid_until: u64) {
         env.storage().instance().set(
-            &(soroban_sdk::symbol_short!("slotexp"), account.clone(), 0u32),
+            &(soroban_sdk::symbol_short!("slotexp"), account, 0u32),
             &valid_until,
         );
-        let key = (soroban_sdk::symbol_short!("expiry"), account);
-        let mut v: soroban_sdk::Vec<u64> = env
-            .storage()
-            .instance()
-            .get(&key)
-            .unwrap_or(soroban_sdk::Vec::new(&env));
-        v.push_back(valid_until);
-        env.storage().instance().set(&key, &v);
-    }
-
-    pub fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool {
-        let v: soroban_sdk::Vec<u64> = env
-            .storage()
-            .instance()
-            .get(&(soroban_sdk::symbol_short!("expiry"), account))
-            .unwrap_or(soroban_sdk::Vec::new(&env));
-        v.iter().any(|vu| vu != 0 && vu >= from && vu <= to)
     }
 }
 
@@ -4058,6 +4032,183 @@ fn test_slot_pin_the_ad_unlock_accepts_only_the_pinned_slot() {
     assert!(ad_unlock(&t, &q, &cosig), "the pinned slot settles");
 }
 
+// --- plan 12 C: a re-pin is a denial, and a dead pin stays ----------------------------------------
+
+/// The pin's slot was killed: it cannot be moved away, and the kill keeps denying the payout — the
+/// cancel waits the evidence grace (one buffer more than ordinary timing).
+#[test]
+fn test_slot_pin_repin_refuses_leaving_an_expired_slot_and_the_cancel_waits_the_grace() {
+    let s = setup();
+    let keys = MockKeyRegistryClient::new(&s.env, &s.key_registry);
+    keys.set_slot_expiry(&pin_signer(&s), &1, &0);
+    let p = lock_pinned(&s, 0);
+    let h = s.ad_manager.hash_order(&p);
+    keys.set_repin(&pin_signer(&s), &h, &0, &1);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    keys.set_slot_expiry(&pin_signer(&s), &0, &s.env.ledger().timestamp()); // the kill
+    assert_eq!(
+        s.ad_manager.try_repin_order(&p),
+        Err(Ok(AdErr::SlotNotUsable)),
+        "a dead pin cannot be moved away"
+    );
+    assert_eq!(
+        s.ad_manager.get_order(&h).pinned_slot,
+        0,
+        "the dead pin stays"
+    );
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER,
+        "the kill still denies"
+    );
+}
+
+/// A re-pin alone is a lever the maker's side holds (it refuses every pair signed under the old
+/// pin), so the cancel waits the grace although both slots are live.
+#[test]
+fn test_slot_pin_repin_alone_is_a_denial_the_cancel_waits_the_grace() {
+    let s = setup();
+    let keys = MockKeyRegistryClient::new(&s.env, &s.key_registry);
+    keys.set_slot_expiry(&pin_signer(&s), &1, &0);
+    let p = lock_pinned(&s, 0);
+    let h = s.ad_manager.hash_order(&p);
+    keys.set_repin(&pin_signer(&s), &h, &0, &1);
+    s.ad_manager.repin_order(&p);
+    assert!(s.ad_manager.get_order(&h).repinned);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER,
+        "a re-pin denies"
+    );
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly))
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// Two live slots and no re-pin: ordinary timing (the control for the case above).
+#[test]
+fn test_slot_pin_no_repin_two_live_slots_ordinary_timing() {
+    let s = setup();
+    MockKeyRegistryClient::new(&s.env, &s.key_registry).set_slot_expiry(&pin_signer(&s), &1, &0);
+    let p = lock_pinned(&s, 0);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + SUITE_BUFFER
+    );
+}
+
+/// A pin shortened to die inside the window, then moved away while still usable: the denial stays
+/// with the order, not with the slot it left.
+#[test]
+fn test_slot_pin_shortened_pin_repinned_away_still_waits_the_grace() {
+    let s = setup();
+    let keys = MockKeyRegistryClient::new(&s.env, &s.key_registry);
+    keys.set_slot_expiry(&pin_signer(&s), &1, &0);
+    let p = lock_pinned(&s, 0);
+    let h = s.ad_manager.hash_order(&p);
+    keys.set_slot_expiry(&pin_signer(&s), &0, &(p.deadline - 10)); // a date inside the window
+    keys.set_repin(&pin_signer(&s), &h, &0, &1);
+    s.ad_manager.repin_order(&p); // slot 0 is still usable now
+    assert_eq!(s.ad_manager.get_order(&h).pinned_slot, 1);
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER,
+        "the shorten is not laundered"
+    );
+}
+
+/// The consent is read from the registry the order was locked under, whatever is wired later.
+#[test]
+fn test_slot_pin_repin_reads_the_orders_registry_across_a_migration() {
+    let s = setup();
+    let signer = pin_signer(&s);
+    let maker = address_to_bytes32(&s.env, &s.maker_addr);
+    let second = s.env.register(MockKeyRegistry, ());
+    let second_keys = MockKeyRegistryClient::new(&s.env, &second);
+    second_keys.set(&signer, &true);
+    second_keys.approve(&signer, &maker, &true);
+    second_keys.set_slot_expiry(&signer, &1, &0);
+    s.ad_manager.set_key_registry(&second);
+    let p = lock_pinned(&s, 0);
+    let h = s.ad_manager.hash_order(&p);
+    assert_eq!(
+        s.ad_manager.get_order(&h).registry_epoch,
+        s.ad_manager.registry_epoch(),
+        "locked under the second registry"
+    );
+    let third = s.env.register(MockKeyRegistry, ());
+    let third_keys = MockKeyRegistryClient::new(&s.env, &third);
+    third_keys.set(&signer, &true);
+    third_keys.approve(&signer, &maker, &true);
+    s.ad_manager.set_key_registry(&third);
+    MockKeyRegistryClient::new(&s.env, &s.key_registry).set_repin(&signer, &h, &0, &1); // the first
+    third_keys.set_repin(&signer, &h, &0, &1); // and the live one
+    assert_eq!(s.ad_manager.try_repin_order(&p), Err(Ok(AdErr::NoRepin)));
+    second_keys.set_repin(&signer, &h, &0, &1);
+    s.ad_manager.repin_order(&p);
+    assert_eq!(s.ad_manager.get_order(&h).pinned_slot, 1);
+}
+
+/// Accepts a root only when the envelope's pinned slot (bytes 96..100, big-endian) is `expected`:
+/// pins what the escrow vouches for (the order portal: the unpinned sentinel).
+#[soroban_sdk::contract]
+pub struct PinRootVerifier;
+
+#[soroban_sdk::contractimpl]
+impl PinRootVerifier {
+    pub fn expect(env: Env, pin: u32) {
+        env.storage()
+            .instance()
+            .set(&soroban_sdk::symbol_short!("pin"), &pin);
+    }
+
+    pub fn is_root_valid(
+        env: Env,
+        _source_chain_id: u128,
+        _root: BytesN<32>,
+        metadata: Bytes,
+    ) -> bool {
+        let expected: u32 = env
+            .storage()
+            .instance()
+            .get(&soroban_sdk::symbol_short!("pin"))
+            .unwrap();
+        if metadata.len() < 100 {
+            return false;
+        }
+        let mut be = [0u8; 4];
+        metadata.slice(96..100).copy_into_slice(&mut be);
+        u32::from_be_bytes(be) == expected
+    }
+}
+
+/// Plan 12 C: the order leg pins no slot and sends the unpinned sentinel in the envelope — a
+/// verifier expecting slot 0 refuses the root, one expecting the sentinel accepts it.
+#[test]
+fn test_slot_pin_the_order_portal_sends_the_unpinned_sentinel_not_slot_zero() {
+    let s = setup();
+    let p = created_portal_order(&s);
+    let module = s.env.register(PinRootVerifier, ());
+    let pin = PinRootVerifierClient::new(&s.env, &module);
+    pin.expect(&0);
+    s.order_portal.set_root_verifier(&s.tp.ad_chain_id, &module);
+    assert_eq!(portal_unlock(&s, &p), Err(OpErr::RootNotValid));
+    pin.expect(&u32::MAX);
+    assert_eq!(portal_unlock(&s, &p), Ok(()));
+}
+
 // --- the never-locked cancel needs the deposit ------------------------------------------------------
 
 /// The proof is checked against a notarized order-chain root: no anchor wired, or a root the anchor
@@ -4787,6 +4938,63 @@ fn test_422_real_registry_kill_after_the_lock_waits_the_grace() {
     );
     warp(&s, p.deadline + 2 * SUITE_BUFFER);
     s.ad_manager.finalize_cancel(&p);
+}
+
+/// Plan 12 C: the signer's consent filed on the real registry moves the pin through the escrow, and
+/// the moved order is denied for the rest of its life.
+#[test]
+fn test_422_real_registry_approve_repin_moves_the_pin_and_the_repin_denies() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    let h = s.ad_manager.hash_order(&p);
+    assert_eq!(s.ad_manager.try_repin_order(&p), Err(Ok(AdErr::NoRepin)));
+    client.approve_repin(&account, &h, &0, &1, &auth, &0);
+    s.ad_manager.repin_order(&p);
+    assert_eq!(
+        s.ad_manager.get_order(&h).pinned_slot,
+        1,
+        "the consent moved the pin"
+    );
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    warp(&s, p.deadline + SUITE_BUFFER);
+    assert_eq!(
+        s.ad_manager.try_finalize_cancel(&p),
+        Err(Ok(AdErr::TooEarly)),
+        "the re-pin denies"
+    );
+    warp(&s, p.deadline + 2 * SUITE_BUFFER);
+    s.ad_manager.finalize_cancel(&p);
+}
+
+/// Plan 12 C: a pin killed on the real registry cannot be moved away, consent or not — the kill
+/// stands and the cancel waits the grace.
+#[test]
+fn test_422_real_registry_a_killed_pin_cannot_be_repinned_away() {
+    let s = setup();
+    let (client, account, auth) = real_registry_signer(&s);
+    let p = lock_signed_by(&s, &account);
+    let h = s.ad_manager.hash_order(&p);
+    warp(&s, s.env.ledger().timestamp() + 10);
+    client.set_valid_until(&account, &auth, &maker_fp(&s.env, 0), &1);
+    client.approve_repin(&account, &h, &0, &1, &auth, &0);
+    assert_eq!(
+        s.ad_manager.try_repin_order(&p),
+        Err(Ok(AdErr::SlotNotUsable))
+    );
+    assert_eq!(
+        s.ad_manager.get_order(&h).pinned_slot,
+        0,
+        "the dead pin stays"
+    );
+    warp(&s, p.deadline);
+    s.ad_manager.claim_cancel(&p);
+    assert_eq!(
+        s.ad_manager.cancel_finalizes_at(&p),
+        p.deadline + 2 * SUITE_BUFFER,
+        "the kill still denies"
+    );
 }
 
 /// Plan 12 C: a slot killed before the lock cannot be pinned; an order pinned to the live slot runs
@@ -5811,7 +6019,11 @@ fn test_2_3g_follower_pays_the_maker_on_a_forfeit_proof() {
         s.order_portal.try_record_settled(&p),
         Err(Ok(OpErr::SettledRecorded))
     );
-    assert_eq!(s.order_portal.get_merkle_leaf_count(), leaves, "no SETTLED leaf");
+    assert_eq!(
+        s.order_portal.get_merkle_leaf_count(),
+        leaves,
+        "no SETTLED leaf"
+    );
 }
 
 /// Filing on a `Claimed` leg ends its cancel window, so the claim record goes at the filing: while
@@ -7788,10 +8000,6 @@ impl AccountKeyRegistry {
         env.storage().instance().has(&account)
     }
 
-    pub fn any_slot_expired_within(_env: Env, _account: BytesN<32>, _from: u64, _to: u64) -> bool {
-        false
-    }
-
     /// Every account it knows approves every maker: consent is not what these tests check.
     pub fn is_approved_maker(env: Env, account: BytesN<32>, _maker: BytesN<32>) -> bool {
         env.storage().instance().has(&account)
@@ -9697,7 +9905,9 @@ fn wire_real_stack(s: &TestSetup) -> Bytes {
     )
 }
 
-/// Measured + ~10%, from the table above.
+/// Measured + ~10%, from the table above. 2026-10-11: the order record carries `pinned_slot` and
+/// `repinned` (plan 12 C), so the order-portal doors that rewrite it grew by a few write bytes
+/// (unlock 760, present_settled 628, refund_by_cancel likewise); those three ceilings moved with it.
 const fn ceil(cpu: i64, mem: i64, reads: u32, writes: u32, write_bytes: u32, events: u32) -> Ceil {
     Ceil {
         cpu,
@@ -9717,10 +9927,10 @@ const FINALIZE_CANCEL: Ceil = ceil(16_000_000, 3_550_000, 25, 9, 1_712, 515);
 const DISPUTE: Ceil = ceil(5_040_000, 2_860_000, 18, 7, 1_519, 449);
 const FINALIZE_DISPUTE: Ceil = ceil(17_800_000, 4_020_000, 31, 13, 2_033, 735);
 const CREATE_ORDER: Ceil = ceil(13_000_000, 3_160_000, 19, 9, 1_492, 863);
-const OP_UNLOCK_REAL: Ceil = ceil(141_500_000, 6_800_000, 26, 7, 753, 542);
+const OP_UNLOCK_REAL: Ceil = ceil(141_500_000, 6_800_000, 26, 7, 836, 542);
 const OP_RECORD_SETTLED: Ceil = ceil(14_400_000, 3_230_000, 13, 6, 955, 335);
-const OP_PRESENT_SETTLED: Ceil = ceil(105_500_000, 6_180_000, 15, 6, 608, 317);
-const REFUND_BY_CANCEL: Ceil = ceil(105_400_000, 6_170_000, 15, 6, 608, 515);
+const OP_PRESENT_SETTLED: Ceil = ceil(105_500_000, 6_180_000, 15, 6, 690, 317);
+const REFUND_BY_CANCEL: Ceil = ceil(105_400_000, 6_170_000, 15, 6, 690, 515);
 const PAY_MAKER_BY_FORFEIT: Ceil = ceil(105_500_000, 6_180_000, 15, 6, 780, 441);
 
 /// The primary: lock, the co-signed unlock with the real BLS gate, then its SETTLED leaf.

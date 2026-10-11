@@ -889,6 +889,41 @@ fn agent_cannot_halt_or_resume_settlement() {
     }
 }
 
+/// The argument decoder types the lock's shape on its own (plan 12 D13): one argument, three, or a
+/// slot that is not a `u32` are refused before the policy reads anything.
+#[test]
+fn lock_args_decoder_requires_params_and_a_u32_slot() {
+    let f = fixture();
+    let p = params(&f);
+    let action = lock_for_order(&f.env);
+    let one: Vec<Val> = vec![&f.env, p.clone().into_val(&f.env)];
+    assert!(matches!(
+        crate::args::decode_ad_call(&f.env, &action, &one),
+        Err(AccountError::BadArgs)
+    ));
+    let three: Vec<Val> = vec![
+        &f.env,
+        p.clone().into_val(&f.env),
+        1u32.into_val(&f.env),
+        2u32.into_val(&f.env),
+    ];
+    assert!(matches!(
+        crate::args::decode_ad_call(&f.env, &action, &three),
+        Err(AccountError::BadArgs)
+    ));
+    let not_u32: Vec<Val> = vec![
+        &f.env,
+        p.clone().into_val(&f.env),
+        p.clone().into_val(&f.env),
+    ];
+    assert!(matches!(
+        crate::args::decode_ad_call(&f.env, &action, &not_u32),
+        Err(AccountError::BadArgs)
+    ));
+    let two: Vec<Val> = vec![&f.env, p.clone().into_val(&f.env), 1u32.into_val(&f.env)];
+    assert!(crate::args::decode_ad_call(&f.env, &action, &two).is_ok());
+}
+
 #[test]
 fn bad_args_fail_closed() {
     let f = fixture();

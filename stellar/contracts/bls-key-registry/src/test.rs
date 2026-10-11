@@ -758,44 +758,6 @@ fn register_at_cap_prunes_expired_slot() {
     assert_eq!(client.next_slot_id(&account), 6);
 }
 
-/// #422 D14: our own retirement names `valid_until = 1`; the slot expired at the kill, not in 1970.
-#[test]
-fn any_slot_expired_within_a_kill_expires_at_the_kill() {
-    let (env, client, v) = setup();
-    let account = slot_account(&env, &v, MAKER);
-    register_slot(&env, &client, &v, MAKER, 0);
-    env.ledger().set_timestamp(T0 + 100);
-    set_valid_until(&env, &client, &v, MAKER, 0, true);
-    assert!(
-        client.any_slot_expired_within(&account, &(T0 + 100), &(T0 + 100)),
-        "the kill's own second"
-    );
-    assert!(client.any_slot_expired_within(&account, &(T0 + 50), &(T0 + 150)));
-    assert!(
-        !client.any_slot_expired_within(&account, &0, &(T0 + 99)),
-        "before the kill: no"
-    );
-    assert!(
-        !client.any_slot_expired_within(&account, &(T0 + 101), &u64::MAX),
-        "after it: no"
-    );
-}
-
-/// #422 D14: a shorten made before `from`, naming a date inside `[from, to]`, expires at the date.
-#[test]
-fn any_slot_expired_within_an_early_shorten_expires_at_its_date() {
-    let (env, client, v) = setup();
-    let account = slot_account(&env, &v, MAKER);
-    register_slot(&env, &client, &v, MAKER, 0);
-    set_valid_until(&env, &client, &v, MAKER, 0, false); // at T0, naming grace_ts
-    let g = grace_ts(&v);
-    assert!(
-        client.any_slot_expired_within(&account, &(T0 + 1), &g),
-        "the date, not the shorten"
-    );
-    assert!(!client.any_slot_expired_within(&account, &(T0 + 1), &(g - 1)));
-}
-
 /// While a guard reports an open position a dead slot keeps its place, past the 30-day grace if
 /// need be — an open order's cancel may still ask about it; once the position closes it is pruned.
 #[test]
@@ -877,13 +839,10 @@ fn set_valid_until_recorded_expiry_only_moves_earlier() {
     let g = grace_ts(&v);
     env.ledger().set_timestamp(g + 100);
     set_valid_until(&env, &client, &v, MAKER, 0, true); // a kill to 1, after the slot died at g
-    assert!(
-        client.any_slot_expired_within(&account, &g, &g),
-        "still died at g"
-    );
-    assert!(
-        !client.any_slot_expired_within(&account, &(g + 1), &u64::MAX),
-        "not at the re-kill"
+    assert_eq!(
+        client.expired_at(&account, &0),
+        g,
+        "still died at g, not at the re-kill"
     );
 }
 
@@ -1955,33 +1914,6 @@ fn position_guards_view_follows_set_position_guards() {
     assert_eq!(client.position_guards(), soroban_sdk::vec![&env, guard]);
 }
 
-/// #422 D12: the escrow's question, answered directly — did any slot expire in [from, to].
-#[test]
-fn any_slot_expired_within_reads_the_slots_expiries() {
-    let (env, client, v) = setup();
-    let account = slot_account(&env, &v, MAKER);
-    register_slot(&env, &client, &v, MAKER, 0);
-    assert!(
-        !client.any_slot_expired_within(&account, &0, &u64::MAX),
-        "no expiry: never"
-    );
-    set_valid_until(&env, &client, &v, MAKER, 0, false);
-    let g = grace_ts(&v);
-    assert!(
-        client.any_slot_expired_within(&account, &g, &g),
-        "the boundary is inclusive"
-    );
-    assert!(client.any_slot_expired_within(&account, &(g - 100), &(g + 100)));
-    assert!(
-        !client.any_slot_expired_within(&account, &(g + 1), &(g + 100)),
-        "after: no"
-    );
-    assert!(
-        !client.any_slot_expired_within(&account, &0, &(g - 1)),
-        "before: no"
-    );
-}
-
 /// C-13: the escrows and the verifier read this registry on every lock and unlock, so each read
 /// and write entry point keeps the instance alive. Each step ages the instance past the threshold
 /// first, so a step that stopped extending is caught by name.
@@ -2007,8 +1939,8 @@ fn read_and_write_entry_points_extend_the_instance_ttl() {
         ("has_usable_slot", &|| {
             assert!(client.has_usable_slot(&account))
         }),
-        ("any_slot_expired_within", &|| {
-            client.any_slot_expired_within(&account, &0, &T0);
+        ("expired_at", &|| {
+            client.expired_at(&account, &0);
         }),
         ("lookup", &|| assert!(client.lookup(&account, &0).is_some())),
         ("commitment_at", &|| {

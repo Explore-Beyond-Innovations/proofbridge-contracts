@@ -26,8 +26,6 @@ contract MockKeyRegistry is IKeyRegistry {
         return approvedMaker[account][maker];
     }
 
-    /// Expiries of the account's (fake) slots, for `anySlotExpiredWithin`.
-    mapping(bytes32 => uint64[]) internal expiries;
     /// Plan 12 C: per-slot expiry (`expiredAt`) and how many slots exist (`slotCount - 1` extra; slot
     /// 0 always exists for a usable account, the slot the suites pin).
     mapping(bytes32 => mapping(uint32 => uint64)) public slotExpiry;
@@ -35,23 +33,13 @@ contract MockKeyRegistry is IKeyRegistry {
 
     /// The pinned slot (0) expires at `validUntil`: what the #422 cases mean by "the signer's key".
     function addSlotExpiry(bytes32 account, uint64 validUntil) external {
-        expiries[account].push(validUntil);
         slotExpiry[account][0] = validUntil;
     }
 
     /// Another slot's expiry, not the pinned one: a rotation of a slot that never co-signed.
     function setSlotExpiry(bytes32 account, uint32 slot, uint64 validUntil) external {
-        expiries[account].push(validUntil);
         slotExpiry[account][slot] = validUntil;
         if (slot > extraSlots[account]) extraSlots[account] = slot;
-    }
-
-    function anySlotExpiredWithin(bytes32 account, uint64 from, uint64 to) external view returns (bool) {
-        uint64[] storage e = expiries[account];
-        for (uint256 i = 0; i < e.length; i++) {
-            if (e[i] != 0 && e[i] >= from && e[i] <= to) return true;
-        }
-        return false;
     }
 
     function expiredAt(bytes32 account, uint32 slot) external view returns (uint64) {

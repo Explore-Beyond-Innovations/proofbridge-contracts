@@ -647,7 +647,9 @@ contract AdManager is EscrowBase, IAdManager {
     ///      chain's root verifier unset (`unlock` reverts `NoRootVerifier`), a registry split, or the
     ///      order's pinned slot expiring at or before the payout's cutoff (`expiredAt`, plan 12 C: a
     ///      kill or a shorten of that slot counts; a rotation of any other slot does not, since no
-    ///      other slot can co-sign the ad leg). The lock refused a dead slot, so any expiry seen is
+    ///      other slot can co-sign the ad leg), or the pin moved by a re-pin (`repinOrder`: it refuses
+    ///      every pair signed under the old pin, and the slot left behind may die unseen). The lock
+    ///      refused a dead slot and a re-pin refuses to leave one, so any expiry the rule sees is
     ///      after the lock. Every reference is one the chain stamped or the caller derives from the
     ///      signed deadline, never one the maker can choose later. No registry wired means no lever 2.
     function _coSignDenied(OrderParams calldata p, bytes32 orderHash, uint256 until) private view returns (bool) {
@@ -660,14 +662,11 @@ contract AdManager is EscrowBase, IAdManager {
         // co-signs against keys this one never sees: deny. D16: the payout's own cutoff (the
         // presentation cutoff for a cancel, the challenge deadline for a dispute) bounds the life.
         // Plan 12 C: only the pinned slot can co-sign the ad leg, and the lock refused a dead one, so
-        // its own expiry is the one that counts. The body lives in the linked `ProofBridgeUtils`.
+        // its own expiry is the one that counts; a re-pin counts on its own. The body lives in the
+        // linked `ProofBridgeUtils`.
         Order storage o = _orders[orderHash];
         return ProofBridgeUtils.registryDenies(
-            registryAt[o.registryEpoch],
-            address(rootVerifier[p.orderChainId]),
-            p.adSettlementSigner,
-            o.pinnedSlot,
-            until
+            registryAt[o.registryEpoch], address(rootVerifier[p.orderChainId]), p.adSettlementSigner, o, until
         );
     }
 

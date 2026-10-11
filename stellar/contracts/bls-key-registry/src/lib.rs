@@ -581,25 +581,6 @@ impl BlsKeyRegistry {
         Ok(slot.commitment)
     }
 
-    /// Did any of `account`'s slots expire in `[from, to]` (#422 D12/D14/D14b). The escrows' cancel
-    /// grace asks it over the order's life as a payout, `[locked_at, cutoff]` (D16): a slot the order
-    /// may have been co-signed under died while the payout could still land. A slot expires at the
-    /// later of the date its shorten named and the moment of the shorten (a kill names `1`), and a
-    /// later shorten can only move that earlier, so a kill, a near-future shorten, a pre-lock shorten
-    /// naming a date inside the window and a re-kill after it all count; a rotation whose old slot
-    /// outlives the cutoff does not. A dead slot is forgotten once the account has no open positions,
-    /// or 30 days on.
-    pub fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool {
-        proofbridge_core::ttl::extend_instance(&env);
-        storage::get_entry(&env, &account)
-            .live
-            .iter()
-            .any(|slot_id| {
-                let vu = expired_at(&env, &account, slot_id);
-                vu != 0 && vu >= from && vu <= to
-            })
-    }
-
     /// True iff at least one live slot is usable now (the "is registered" check for 2.3c).
     pub fn has_usable_slot(env: Env, account: BytesN<32>) -> bool {
         proofbridge_core::ttl::extend_instance(&env);

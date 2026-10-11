@@ -49,9 +49,13 @@ library ProofBridgeUtils {
     }
 
     /// The AdManager's re-pin (2.7 plan 12 D12, Q2), here for EIP-170 headroom: the order is `Open` and
-    /// not past `deadline - claimStagger` (its own timing version), the signer's consent in the order's
-    /// registry (`registryAt[o.registryEpoch]`) names
-    /// this order and its current pin, and the new slot is usable now. Moves the pin.
+    /// not past `deadline - claimStagger` (its own timing version; the AdManager's own table, since
+    /// the ad chain cannot read the OrderPortal's, and the two are linked from one manifest), the
+    /// signer's consent in the order's registry (`registryAt[o.registryEpoch]`) names this order and
+    /// its current pin, the pin being left has not expired (a dead pin stays, and the denial rule
+    /// counts its kill), and the new slot is usable now. Moves the pin and stamps the order
+    /// re-pinned, which the denial rule counts from then on: a re-pin is a lever the maker's side
+    /// holds, and it refuses every pair signed under the old pin.
     function repin(
         IEscrow.Order storage o,
         mapping(uint32 => IKeyRegistry) storage registryAt,
@@ -67,8 +71,11 @@ library ProofBridgeUtils {
         uint32 from = o.pinnedSlot;
         (uint32 fromSlot, uint32 to, uint64 nonce) = registry.repinApproval(signer, orderHash);
         if (nonce == 0 || fromSlot != from) revert IAdManager.AdManager__NoRepin(orderHash);
+        uint64 left = registry.expiredAt(signer, from);
+        if (left != 0 && left <= block.timestamp) revert IAdManager.AdManager__SlotNotUsable(signer, from);
         _requireUsableSlot(registry, signer, to);
         o.pinnedSlot = to;
+        o.repinned = true;
         emit IAdManager.OrderRepinned(orderHash, from, to);
     }
 
@@ -86,18 +93,22 @@ library ProofBridgeUtils {
         split = verifierRegistry != expected;
     }
 
-    /// The denial rule's registry half (#464, #465, plan 12 C): with no registry wired nothing denies;
-    /// a verifier on another registry denies; else the order's pinned slot expiring at or before
-    /// `until` denies.
-    function registryDenies(IKeyRegistry registry, address verifier, bytes32 signer, uint32 slot, uint256 until)
-        public
-        view
-        returns (bool)
-    {
+    /// The denial rule's registry half (#464, #465, plan 12 C): a re-pinned order is denied for the
+    /// rest of its life (the re-pin refused every pair under the old pin, and the slot left behind
+    /// may have died); with no registry wired nothing else denies; a verifier on another registry
+    /// denies; else the order's pinned slot expiring at or before `until` denies.
+    function registryDenies(
+        IKeyRegistry registry,
+        address verifier,
+        bytes32 signer,
+        IEscrow.Order storage o,
+        uint256 until
+    ) public view returns (bool) {
+        if (o.repinned) return true;
         if (address(registry) == address(0)) return false;
         (bool split,) = registrySplit(verifier, address(registry));
         if (split) return true;
-        uint64 e = registry.expiredAt(signer, slot);
+        uint64 e = registry.expiredAt(signer, o.pinnedSlot);
         return e != 0 && e <= until;
     }
 
