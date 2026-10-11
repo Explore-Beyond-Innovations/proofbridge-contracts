@@ -362,8 +362,9 @@ impl BlsKeyRegistry {
         Ok(())
     }
 
-    /// Leaves the protocol: drops every slot, guarded (t1-design §1.8). With no slots here it only
-    /// bumps the nonce, killing every outstanding signature at this registry (2.6 review D2).
+    /// Leaves the protocol: drops every slot, guarded (t1-design §1.8), and refused while there are
+    /// slots and no guard is wired. With no slots here it only bumps the nonce, killing every
+    /// outstanding signature at this registry (2.6 review D2).
     pub fn revoke(
         env: Env,
         account: BytesN<32>,
@@ -640,7 +641,11 @@ fn prune(env: &Env, account: &BytesN<32>, entry: &mut storage::RegistryEntry) {
     entry.live = kept;
 }
 
+/// Fails closed like `prune`: with no guard to ask, an open order cannot be ruled out.
 fn require_no_open_positions(env: &Env, account: &BytesN<32>) -> Result<(), RegistryError> {
+    if storage::get_guards(env).map_or(true, |g| g.is_empty()) {
+        return Err(RegistryError::GuardsUnset);
+    }
     if has_open_positions(env, account) {
         return Err(RegistryError::AccountInFlight);
     }
