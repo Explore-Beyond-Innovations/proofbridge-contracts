@@ -9,7 +9,7 @@ import {IBLSKeyRegistry} from "../interfaces/IBLSKeyRegistry.sol";
  * @author Proofbridge
  * @custom:security-contact security@proofbridge.xyz
  * @notice The owner's key messages, shared by both registries (2.6 plan 13, D1–D4): one signature over
- *         RegisterKey / RevokeKeys / RetireKey names every registry it is for. secp256k1 owners sign the
+ *         RegisterKey / RevokeKeys / RetireKey / ApproveMaker / RepinOrder names every registry it is for. secp256k1 owners sign the
  *         EIP-712 form, ed25519 owners the fixed text (SEP-53). Byte-identical on Soroban
  *         (`bls-key-registry/src/owner.rs`) and in the bls-encodings package; pinned by the vectors.
  */
@@ -18,7 +18,9 @@ library KeyMessages {
         Register,
         Revoke,
         Retire,
-        Cancel
+        Cancel,
+        ApproveMaker,
+        Repin
     }
 
     bytes32 internal constant DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,string version,bytes32 salt)");
@@ -33,6 +35,16 @@ library KeyMessages {
         keccak256("CancelPending(bytes32 account,KeyLeg[] legs)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)");
     bytes32 internal constant RETIRE_KEY_TYPEHASH =
         keccak256("RetireKey(bytes32 account,bytes32 keyCommitment,uint64 validUntil)");
+    /// The account lets `maker` name it as an ad's settlement signer (`approved`), or withdraws that.
+    bytes32 internal constant APPROVE_MAKER_TYPEHASH = keccak256(
+        "ApproveMaker(bytes32 account,bytes32 maker,bool approved,KeyLeg[] legs,uint64 deadline)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)"
+    );
+
+    /// The settlement signer moves an open order's co-signing pin from `fromSlot` to `toSlot`
+    /// (the escrow applies it; 2.7 plan 12 D12).
+    bytes32 internal constant REPIN_ORDER_TYPEHASH = keccak256(
+        "RepinOrder(bytes32 account,bytes32 orderHash,uint32 fromSlot,uint32 toSlot,KeyLeg[] legs)KeyLeg(uint256 chainId,bytes32 registry,uint256 nonce)"
+    );
 
     /// Review D3: the salt binds the environment the registry was deployed for.
     function salt(string memory env) internal pure returns (bytes32) {
@@ -53,20 +65,31 @@ library KeyMessages {
         return keccak256(abi.encodePacked(hashes));
     }
 
-    /// `time` is the register deadline or the retirement's validUntil; revoke ignores it.
+    /// `time` is the register / approval deadline or the retirement's validUntil; revoke ignores it;
+    /// a re-pin packs `fromSlot << 32 | toSlot` into it. `subject` is the key fingerprint, the maker
+    /// for ApproveMaker, or the order hash for a re-pin; only ApproveMaker reads `approved`.
     function structHash(
         Kind kind,
         bytes32 account,
-        bytes32 keyCommitment,
+        bytes32 subject,
         IBLSKeyRegistry.KeyLeg[] calldata legs,
-        uint64 time
+        uint64 time,
+        bool approved
     ) internal pure returns (bytes32) {
+        if (kind == Kind.ApproveMaker) {
+            return keccak256(abi.encode(APPROVE_MAKER_TYPEHASH, account, subject, approved, legsHash(legs), time));
+        }
+        if (kind == Kind.Repin) {
+            return keccak256(
+                abi.encode(REPIN_ORDER_TYPEHASH, account, subject, uint32(time >> 32), uint32(time), legsHash(legs))
+            );
+        }
         if (kind == Kind.Register) {
-            return keccak256(abi.encode(REGISTER_KEY_TYPEHASH, account, keyCommitment, legsHash(legs), time));
+            return keccak256(abi.encode(REGISTER_KEY_TYPEHASH, account, subject, legsHash(legs), time));
         }
         if (kind == Kind.Revoke) return keccak256(abi.encode(REVOKE_KEYS_TYPEHASH, account, legsHash(legs)));
         if (kind == Kind.Cancel) return keccak256(abi.encode(CANCEL_PENDING_TYPEHASH, account, legsHash(legs)));
-        return keccak256(abi.encode(RETIRE_KEY_TYPEHASH, account, keyCommitment, time));
+        return keccak256(abi.encode(RETIRE_KEY_TYPEHASH, account, subject, time));
     }
 
     /// What a secp256k1 owner signs.
@@ -74,11 +97,14 @@ library KeyMessages {
         bytes32 separator,
         Kind kind,
         bytes32 account,
-        bytes32 keyCommitment,
+        bytes32 subject,
         IBLSKeyRegistry.KeyLeg[] calldata legs,
-        uint64 time
+        uint64 time,
+        bool approved
     ) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(hex"1901", separator, structHash(kind, account, keyCommitment, legs, time)));
+        return keccak256(
+            abi.encodePacked(hex"1901", separator, structHash(kind, account, subject, legs, time, approved))
+        );
     }
 
     /// What an ed25519 owner signs (D4 + review D2/D3): lines joined by "\n", no trailing newline,
@@ -87,24 +113,43 @@ library KeyMessages {
         bytes memory env,
         Kind kind,
         bytes32 account,
-        bytes32 keyCommitment,
+        bytes32 subject,
         IBLSKeyRegistry.KeyLeg[] calldata legs,
-        uint64 time
+        uint64 time,
+        bool approved
     ) internal pure returns (bytes memory t) {
-        if (kind == Kind.Register) {
+        if (kind == Kind.ApproveMaker) {
+            t = approved
+                ? bytes("ProofBridge: allow a maker to name this account as settlement signer")
+                : bytes("ProofBridge: withdraw a maker's permission to name this account as settlement signer");
+        } else if (kind == Kind.Register) {
             t = "ProofBridge: register a settlement key";
         } else if (kind == Kind.Revoke) {
             t = "ProofBridge: remove every settlement key";
         } else if (kind == Kind.Cancel) {
             t = "ProofBridge: cancel a pending key registration";
+        } else if (kind == Kind.Repin) {
+            t = "ProofBridge: move an order's settlement key to another slot";
         } else {
             t = "ProofBridge: retire a settlement key";
         }
         t = bytes.concat(t, "\n\nNetwork: ", env, "\nAccount: ", hex32(account));
         if (kind == Kind.Register || kind == Kind.Retire) {
-            t = bytes.concat(t, "\nKey fingerprint: ", hex32(keyCommitment));
+            t = bytes.concat(t, "\nKey fingerprint: ", hex32(subject));
+        } else if (kind == Kind.ApproveMaker) {
+            t = bytes.concat(t, "\nMaker: ", hex32(subject));
+        } else if (kind == Kind.Repin) {
+            t = bytes.concat(
+                t,
+                "\nOrder: ",
+                hex32(subject),
+                "\nFrom slot: ",
+                bytes(Strings.toString(uint32(time >> 32))),
+                "\nTo slot: ",
+                bytes(Strings.toString(uint32(time)))
+            );
         }
-        if (kind == Kind.Register) {
+        if (kind == Kind.Register || kind == Kind.ApproveMaker) {
             t = bytes.concat(t, "\nValid until: ", utc(time), " (", bytes(Strings.toString(time)), ")");
         }
         t = bytes.concat(t, "\n");

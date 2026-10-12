@@ -16,9 +16,12 @@ import {AdManager} from "src/AdManager.sol";
 import {OrderPortal} from "src/OrderPortal.sol";
 import {BLSKeyRegistry} from "src/BLSKeyRegistry.sol";
 import {TwoStepAdmin} from "src/libraries/TwoStepAdmin.sol";
+import {IEscrow} from "src/interfaces/IEscrow.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 contract AdManagerPauseTest is AdManagerTest {
-    function test_pause_blocksAllEntryPoints() public {
+    /// A pause stops entries only; exits are covered in `Cancellation.t.sol`.
+    function test_pause_blocksEveryEntry() public {
         test_fundAd_makerOnly();
         string memory adId = lastAdId;
 
@@ -34,14 +37,9 @@ contract AdManagerPauseTest is AdManagerTest {
         adManager.fundAd(adId, 1 ether);
 
         IAdManager.OrderParams memory p = _defaultParams(adId);
-        bytes32 orderHash = adManager.hashOrderPublic(p);
         vm.prank(maker);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        adManager.lockForOrder(p);
-
-        vm.prank(bridger);
-        vm.expectRevert(Pausable.EnforcedPause.selector);
-        adManager.unlock(p, TestField.fe("N"), bytes32(0), hex"", hex"");
+        adManager.lockForOrder(p, 0);
     }
 
     function test_unpause_restores() public {
@@ -106,7 +104,8 @@ contract AdManagerPauseTest is AdManagerTest {
 }
 
 contract OrderPortalPauseTest is OrderPortalTest {
-    function test_pause_blocksCreateAndUnlock() public {
+    /// The deposit stops; the maker's co-signed unlock of an open order does not.
+    function test_pause_blocksCreate_notUnlock() public {
         test_setTokenRoute_setsAndEmits_whenSupported();
         (IOrderPortal.OrderParams memory p, bytes32 orderHash) = _openOrder(65 ether, 321);
 
@@ -115,17 +114,12 @@ contract OrderPortalPauseTest is OrderPortalTest {
 
         IOrderPortal.OrderParams memory p2 = _defaultParams();
         p2.salt = 322;
-        bytes32 oh2 = portal.hashOrderPublic(p2);
         vm.prank(bridger);
         vm.expectRevert(Pausable.EnforcedPause.selector);
         portal.createOrder(p2);
 
-        vm.expectRevert(Pausable.EnforcedPause.selector);
         portal.unlock(p, TestField.fe("N"), bytes32(0), hex"", hex"");
-
-        vm.prank(admin);
-        portal.unpause();
-        portal.unlock(p, TestField.fe("N"), bytes32(0), hex"", hex"");
+        assertEq(uint256(statusOf(address(portal), orderHash)), uint256(IEscrow.Status.Filled));
     }
 
     function test_twoStepAdmin_transferAndAccept() public {

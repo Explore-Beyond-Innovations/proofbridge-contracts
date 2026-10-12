@@ -3,7 +3,7 @@
 //! Validates order parameters against ad configuration, chain configuration,
 //! and token routes.
 
-use soroban_sdk::{BytesN, Env};
+use soroban_sdk::{Address, BytesN, Env};
 
 use proofbridge_core::decimal_scaling;
 use proofbridge_core::escrow_ops::Fault;
@@ -93,15 +93,26 @@ pub fn validate_order(env: &Env, ad: &Ad, params: &OrderParams) -> Result<(), Ad
     Ok(())
 }
 
-/// The registry gate on every settlement-signer set (2.3c D2): fails closed with no registry,
-/// refuses the zero identity, and refuses an account with no live, unexpired key.
-pub fn require_registered(env: &Env, signer: &BytesN<32>) -> Result<(), AdManagerError> {
+/// The registry gate on every settlement-signer set and every lock (2.3c D2): fails closed with no
+/// registry, refuses the zero identity, an account with no live, unexpired key, and a signer other
+/// than the maker that has not approved the maker in the registry.
+pub fn require_registered(
+    env: &Env,
+    signer: &BytesN<32>,
+    maker: &Address,
+) -> Result<(), AdManagerError> {
     let registry = storage::get_key_registry(env).ok_or(AdManagerError::NoKeyRegistry)?;
     if auth::is_zero_bytes32(signer) {
         return Err(AdManagerError::SettlementSignerZero);
     }
     if !proofbridge_core::cross_contract::has_usable_slot(env, &registry, signer) {
         return Err(AdManagerError::SignerNotRegistered);
+    }
+    let maker = proofbridge_core::eip712::address_to_bytes32(env, maker);
+    if *signer != maker
+        && !proofbridge_core::cross_contract::is_approved_maker(env, &registry, signer, &maker)
+    {
+        return Err(AdManagerError::SignerNotApproved);
     }
     Ok(())
 }

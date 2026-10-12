@@ -7,6 +7,7 @@ import {Dispute} from "../src/libraries/Dispute.sol";
 import {IEscrow} from "../src/interfaces/IEscrow.sol";
 import {IAdManager} from "../src/interfaces/IAdManager.sol";
 import {RouteTiming} from "../src/libraries/RouteTiming.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 /// T-24 (2.3j): the EVM half of the differential harness. Interprets the
 /// shared scenario fixture — the SAME steps the Soroban driver interprets —
@@ -22,7 +23,7 @@ import {RouteTiming} from "../src/libraries/RouteTiming.sol";
 /// wei. The fixture's sha256 is pinned below; scripts/repo-checks compares
 /// it against the file so neither driver can drift alone.
 contract DisputeDifferentialTest is DisputeTest {
-    string internal constant FIXTURE_SHA256 = "81694f5b2341bf014de61495376c63f977391daa24f85cc4d28967d3fba12de0";
+    string internal constant FIXTURE_SHA256 = "db25fd031e13b0af8b54255530c3c73214c4478bc745183902652bab7ebb8a14";
 
     bytes32 private constant LEAF_TOPIC = keccak256("DepositHashAppended(uint256,bytes32,uint256,bytes32)");
 
@@ -43,17 +44,12 @@ contract DisputeDifferentialTest is DisputeTest {
         uint64 challenge = uint64(vm.parseJsonUint(v, ".header.challengePeriodS"));
         challengeS = challenge;
         uint128 floorWei = uint128(vm.parseJsonUint(v, ".header.bondFloorUnits") * scale);
-        uint16 bps = uint16(vm.parseJsonUint(v, ".header.bondBps"));
         uint256 amountWei = vm.parseJsonUint(v, ".header.orderAmountUnits") * scale;
         uint256 bondWei = vm.parseJsonUint(v, ".header.bondUnits") * scale;
-        assertEq(
-            Dispute.bondFor(amountWei, Dispute.Params(challenge, floorWei, bps)),
-            bondWei,
-            "the header's bond must be exact in chain units"
-        );
 
         vm.startPrank(admin);
-        dm.setDisputeParams(orderChainId, Dispute.Params(challenge, floorWei, bps));
+        dm.setDisputeParams(orderChainId, Dispute.Params(challenge, floorWei));
+        assertEq(dm.bondFor(orderChainId), bondWei, "the header's bond must be exact in chain units");
         // route wiring the base does inside its create test, done once here
         adManager.setPeerEscrow(orderChainId, _b32(orderPortal));
         adManager.setTokenRoute(address(adToken), orderChainId, _b32(orderToken));
@@ -68,7 +64,7 @@ contract DisputeDifferentialTest is DisputeTest {
         // computed here before any warp relies on it.
         bufferS = uint64(vm.parseJsonUint(v, ".header.bufferS"));
         vm.prank(admin);
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, bufferS, 0, 1 days, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, bufferS, 0, 0));
 
         uint256 n = vm.parseJsonUint(v, ".counts.scenarios");
         for (uint256 i = 0; i < n; i++) {
@@ -185,7 +181,7 @@ contract DisputeDifferentialTest is DisputeTest {
             string.concat(r.name, ": disputed")
         );
         assertEq(
-            uint8(adManager.orders(r.h)),
+            uint8(statusOf(address(adManager), r.h)),
             _status(vm.parseJsonString(v, string.concat(r.at, ".expect.escrowStatus"))),
             string.concat(r.name, ": escrow status")
         );

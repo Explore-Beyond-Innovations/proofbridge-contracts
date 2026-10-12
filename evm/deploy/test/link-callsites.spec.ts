@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { ethers } from "ethers";
 import { deployCore } from "../src/deploy-core.js";
 import { link } from "../src/link.js";
 import { K0, startAnvil, withEnv, type Anvil } from "./helpers/anvil.js";
@@ -14,11 +15,9 @@ const CLOCKS = {
   ROUTE_MIN_WINDOW_S: "0",
   ROUTE_BUFFER_S: "1800",
   ROUTE_MARGIN_S: "0",
-  ROUTE_LONG_BACKSTOP_S: "86400",
   ROUTE_CLAIM_STAGGER_S: "0",
   DISPUTE_CHALLENGE_PERIOD_S: "3600",
-  DISPUTE_BOND_FLOOR: "1",
-  DISPUTE_BOND_BPS: "0",
+  DISPUTE_BOND_FLOOR: "1000000000000000", // the minimum outside local (0.001 ETH)
   ANCHOR_DELAY_S: "60",
 };
 const CLEAN: Record<string, string | undefined> = {
@@ -59,8 +58,8 @@ function variant(src: string, name: string, edit: (m: any) => void): string {
   fs.writeFileSync(out, JSON.stringify(m, null, 2));
   return out;
 }
-const linkA = (localManifest: string, peerManifest: string, peerEnvFile?: string) =>
-  link({ rpcUrl: a.url, privateKey: K0, localManifest, peerManifest, peerEnvFile });
+const linkA = (localManifest: string, peerManifest: string) =>
+  link({ rpcUrl: a.url, privateKey: K0, localManifest, peerManifest });
 async function refusesWithNoTx(run: () => Promise<unknown>, re: RegExp) {
   const n0 = await a.nonce();
   await assert.rejects(run, re);
@@ -70,29 +69,19 @@ const testnet = (m: any) => {
   m.meta.env = "testnet";
 };
 
-test("A-5: a real-network route whose peer has not linked, with no --peer-env, is refused", async () => {
-  const localT = variant(MA, "a-testnet.json", testnet);
-  const peerT = variant(MB, "b-testnet.json", testnet);
-  await withEnv({ ...CLEAN, ...CLOCKS }, async () => {
-    await refusesWithNoTx(() => linkA(localT, peerT), /could not be checked in both directions/);
-    // The peer's env file describes its side: now both directions are checked and the link runs.
-    const envFile = path.join(tmp, "peer.env");
-    fs.writeFileSync(envFile, ["DEPLOY_ENV=testnet", ...Object.entries(CLOCKS).map(([k, v]) => `${k}=${v}`)].join("\n"));
-    const r = await linkA(localT, peerT, envFile);
-    assert.ok(r.chainTxs > 0);
-  });
-});
-
 test("A-6: link refuses a peer deployed for another env, or against another VK", async () => {
   await withEnv({ ...CLEAN }, async () => {
-    // The peer's side is described (its env file), so the route check passes and this one decides.
-    const envFile = path.join(tmp, "peer-a6.env");
-    fs.writeFileSync(envFile, ["DEPLOY_ENV=testnet", ...Object.entries(CLOCKS).map(([k, v]) => `${k}=${v}`)].join("\n"));
     const peerEnv = variant(MB, "b-env.json", testnet);
-    await refusesWithNoTx(() => linkA(MA, peerEnv, envFile), /cannot span environments/);
+    await refusesWithNoTx(() => linkA(MA, peerEnv), /cannot span environments/);
     const localVk = variant(MA, "a-vk.json", (m) => (m.meta.vkSha256 = "0x" + "ab".repeat(32)));
     const peerVk = variant(MB, "b-vk.json", (m) => (m.meta.vkSha256 = "0x" + "cd".repeat(32)));
     await refusesWithNoTx(() => linkA(localVk, peerVk), /refuse each other's proofs/);
+  });
+});
+
+test("link refuses a margin above half the buffer before anything is sent", async () => {
+  await withEnv({ ...CLEAN, ...CLOCKS, ROUTE_MARGIN_S: "901" }, async () => {
+    await refusesWithNoTx(() => linkA(MA, MB), /ROUTE_MARGIN_S=901 exceeds half of ROUTE_BUFFER_S=1800/);
   });
 });
 
@@ -101,16 +90,25 @@ const noModule = (m: any) => {
   m.disputeParams = {};
 };
 
-test("A-5: a route with no DisputeManager on either side links (older manifests); the clocks are still set", async () => {
+test("a route with no DisputeManager on either side links (older manifests); the clocks are still set", async () => {
   await withEnv({ ...CLEAN }, async () => {
     const r = await linkA(variant(MA, "a-nodm.json", noModule), variant(MB, "b-nodm.json", noModule));
     assert.equal(r.peerChainId, "1337");
   });
 });
 
-test("A-5: a mixed route (a module on one side only) is refused, either way round", async () => {
-  await withEnv({ ...CLEAN }, async () => {
-    await refusesWithNoTx(() => linkA(MA, variant(MB, "b-mixed.json", noModule)), /only this chain has a DisputeManager/);
-    await refusesWithNoTx(() => linkA(variant(MA, "a-mixed.json", noModule), MB), /only the peer has a DisputeManager/);
+test("the dispute bond floor is required outside local; a local route links on the default and quotes it", async () => {
+  const localT = variant(MA, "a-floor.json", testnet);
+  const peerT = variant(MB, "b-floor.json", testnet);
+  const { DISPUTE_BOND_FLOOR: _floor, ...noFloor } = CLOCKS;
+  await withEnv({ ...CLEAN, ...noFloor }, async () => {
+    await refusesWithNoTx(() => linkA(localT, peerT), /DISPUTE_BOND_FLOOR is unset for env=testnet/);
   });
+  // Local: no DISPUTE_* variable at all, and the route ends up with the smallest legal floor.
+  await withEnv({ ...CLEAN }, async () => {
+    await linkA(MA, MB);
+  });
+  const dm = JSON.parse(fs.readFileSync(MA, "utf8")).contracts.disputeManager.address;
+  const quote = new ethers.Contract(dm, ["function bondFor(uint256) view returns (uint256)"], new ethers.JsonRpcProvider(a.url));
+  assert.equal(await quote.bondFor(1337n), 1n);
 });

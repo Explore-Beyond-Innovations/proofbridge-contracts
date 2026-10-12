@@ -268,11 +268,15 @@ contract BLSKeyRegistryTest is Test {
         assertEq(registry.nextSlotId(account), 6);
     }
 
-    /// #422 D17: while a guard reports positions a dead slot keeps its place for the grace — an open
-    /// order's cancel may still ask about it — and leaves once the grace is over regardless.
-    function test_registerAtCap_deadSlotKeptWhileInFlight_prunedAfterTheGrace() public {
+    /// #422 D17: while a guard reports positions a dead slot keeps its place inside the 30-day grace (an
+    /// open order's cancel may still ask about it), and leaves at once when the positions close.
+    function test_registerAtCap_deadSlotKeptWhileInFlight_prunedOnceClosed() public {
         bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
-        busyGuard();
+        ToggleGuard guard = new ToggleGuard();
+        address[] memory guards = new address[](1);
+        guards[0] = address(guard);
+        registry.setPositionGuards(guards);
+        guard.setBusy(true);
         for (uint256 i = 0; i < 5; i++) {
             registerSlot("makerOnSepolia", i);
         }
@@ -280,8 +284,30 @@ contract BLSKeyRegistryTest is Test {
         vm.warp(T0 + 1);
         vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
         registerSlot("makerOnSepolia", 5);
+        registry.lookup(account, 2);
 
+        guard.setBusy(false);
+        assertEq(registerSlot("makerOnSepolia", 5), 5);
+        vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
+        registry.lookup(account, 2);
+    }
+
+    /// The 30 days bound the wait whatever the guards say: a dead slot goes past the grace while a
+    /// position is still open. Every finalize a kill can still touch happens inside those 30 days, so
+    /// keeping the slot longer only fills the cap of an account that always has an order in flight.
+    function test_registerAtCap_deadSlotPrunedPastTheGrace_whileStillInFlight() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        ToggleGuard guard = new ToggleGuard();
+        address[] memory guards = new address[](1);
+        guards[0] = address(guard);
+        registry.setPositionGuards(guards);
+        guard.setBusy(true);
+        for (uint256 i = 0; i < 5; i++) {
+            registerSlot("makerOnSepolia", i);
+        }
+        setValidUntil("makerOnSepolia", 2, true);
         vm.warp(graceTs()); // well past the grace; register deadlines are signed for this clock (D2)
+        assertTrue(guard.hasOpenPositions(account), "still in flight");
         assertEq(registerSlot("makerOnSepolia", 5), 5);
         vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
         registry.lookup(account, 2);
@@ -304,6 +330,29 @@ contract BLSKeyRegistryTest is Test {
         registry.lookup(account, 2);
     }
 
+    /// The grace boundary second: a dead slot is kept at exactly expiry + GRACE_PERIOD and pruned one
+    /// second later. The kill lands at graceTs - 30 d so the boundary falls on graceTs, the clock the
+    /// `registerLate` vectors are signed for (D2).
+    function test_registerAtCap_graceBoundary_keptAtExpiryPlusGrace_prunedTheSecondAfter() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        for (uint256 i = 0; i < 5; i++) {
+            registerSlot("makerOnSepolia", i);
+        }
+        uint64 g = graceTs();
+        vm.warp(g - registry.GRACE_PERIOD());
+        setValidUntil("makerOnSepolia", 2, true); // expiry recorded at the kill: graceTs - 30 d
+
+        vm.warp(g); // expiry + GRACE_PERIOD exactly: still kept
+        vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
+        registerSlot("makerOnSepolia", 5);
+        registry.lookup(account, 2);
+
+        vm.warp(g + 1); // one second past the grace: pruned
+        assertEq(registerSlot("makerOnSepolia", 5), 5);
+        vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
+        registry.lookup(account, 2);
+    }
+
     /// #422 D14b: a shorten on a slot that already died cannot move its death later — a re-kill
     /// after an order's window must not erase an expiry inside it.
     function test_setValidUntil_recordedExpiryOnlyMovesEarlier() public {
@@ -313,8 +362,7 @@ contract BLSKeyRegistryTest is Test {
         uint64 g = graceTs();
         vm.warp(g + 100);
         setValidUntil("makerOnSepolia", 0, true); // a kill to 1, after the slot died at g
-        assertTrue(registry.anySlotExpiredWithin(account, g, g), "still died at g");
-        assertFalse(registry.anySlotExpiredWithin(account, g + 1, type(uint64).max), "not at the re-kill");
+        assertEq(registry.expiredAt(account, 0), g, "still died at g, not at the re-kill");
     }
 
     /// In-grace slots still count toward the cap and are not pruned.
@@ -387,41 +435,6 @@ contract BLSKeyRegistryTest is Test {
         registry.commitmentAt(account, 0);
         assertEq(registry.lookup(account, 0).validUntil, 1); // history kept
         assertEq(registry.nonceOf(account), nonceBefore); // nonce-free
-    }
-
-    /// #422 D12: the escrow's question, answered directly — did any slot expire in [from, to].
-    function test_anySlotExpiredWithin() public {
-        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
-        registerSlot("makerOnSepolia", 0);
-        assertFalse(registry.anySlotExpiredWithin(account, 0, type(uint64).max), "no expiry: never");
-        setValidUntil("makerOnSepolia", 0, false);
-        uint64 g = graceTs();
-        assertTrue(registry.anySlotExpiredWithin(account, g, g), "the boundary is inclusive");
-        assertTrue(registry.anySlotExpiredWithin(account, g - 100, g + 100));
-        assertFalse(registry.anySlotExpiredWithin(account, g + 1, g + 100), "after it: no");
-        assertFalse(registry.anySlotExpiredWithin(account, 0, g - 1), "before it: no");
-    }
-
-    /// #422 D14: our own retirement names `validUntil = 1`; the slot expired at the kill, not in 1970.
-    function test_anySlotExpiredWithin_aKillExpiresAtTheKill() public {
-        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
-        registerSlot("makerOnSepolia", 0);
-        vm.warp(T0 + 100);
-        setValidUntil("makerOnSepolia", 0, true);
-        assertTrue(registry.anySlotExpiredWithin(account, T0 + 100, T0 + 100), "the kill's own second");
-        assertTrue(registry.anySlotExpiredWithin(account, T0 + 50, T0 + 150));
-        assertFalse(registry.anySlotExpiredWithin(account, 0, T0 + 99), "before the kill: no");
-        assertFalse(registry.anySlotExpiredWithin(account, T0 + 101, type(uint64).max), "after it: no");
-    }
-
-    /// #422 D14: a shorten made before `from`, naming a date inside `[from, to]`, expires at the date.
-    function test_anySlotExpiredWithin_anEarlyShortenExpiresAtItsDate() public {
-        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
-        registerSlot("makerOnSepolia", 0);
-        setValidUntil("makerOnSepolia", 0, false); // at T0, naming graceTs
-        uint64 g = graceTs();
-        assertTrue(registry.anySlotExpiredWithin(account, T0 + 1, g), "the date, not the shorten");
-        assertFalse(registry.anySlotExpiredWithin(account, T0 + 1, g - 1));
     }
 
     function test_setValidUntilGraceBoundary() public {
@@ -1035,6 +1048,204 @@ contract BLSKeyRegistryTest is Test {
     }
 
     // =========================================================================
+    // ApproveMaker: the signer's consent to be named by a maker
+    // =========================================================================
+
+    function makerId(string memory which) internal view returns (bytes32) {
+        return v.readBytes32(string.concat(".ownerAuth._meta.makers.", which));
+    }
+
+    /// Files `ownerAuth.<who>.<entry>` (an ApproveMaker entry) for the actor's account.
+    function fileApproval(string memory who, string memory entry) internal {
+        string memory path = oaPath(who, entry);
+        registry.approveMaker(
+            v.readBytes32(string.concat(path, ".account")),
+            v.readBytes32(string.concat(path, ".maker")),
+            v.readBool(string.concat(path, ".approved")),
+            oa(who, entry),
+            OwnerAuthVectors.legs(v, path)[0].nonce,
+            OwnerAuthVectors.deadline(v, path)
+        );
+    }
+
+    function actorAccount(string memory who) internal view returns (bytes32) {
+        return v.readBytes32(string.concat(oaPath(who, "approveMaker[0]"), ".account"));
+    }
+
+    // ---- plan 12 C: the re-pin consent and the per-slot expiry ----
+
+    /// Files `ownerAuth.<who>.repin[n]` (a RepinOrder entry) for the actor's account.
+    function fileRepin(string memory who, uint256 n) internal {
+        string memory path = oaPath(who, idx("repin", n));
+        registry.approveRepin(
+            v.readBytes32(string.concat(path, ".account")),
+            v.readBytes32(string.concat(path, ".orderHash")),
+            uint32(vm.parseUint(v.readString(string.concat(path, ".fromSlot")))),
+            uint32(vm.parseUint(v.readString(string.concat(path, ".toSlot")))),
+            oa(who, idx("repin", n)),
+            OwnerAuthVectors.legs(v, path)[0].nonce
+        );
+    }
+
+    /// Both owner schemes consent to 0 -> 1, then 1 -> 2, at the (account, order) pair's own nonce; a
+    /// replay of the first is refused.
+    function test_approveRepin_bothSchemes_inOrder_noReplay() public {
+        bytes32 order = v.readBytes32(".ownerAuth._meta.repinOrder");
+        string[2] memory actors = ["makerOnSepolia", "bridgerOnSepolia"];
+        for (uint256 i = 0; i < 2; i++) {
+            bytes32 account = actorAccount(actors[i]);
+            (,, uint64 none) = registry.repinApproval(account, order);
+            assertEq(none, 0, "nothing approved yet");
+            vm.expectEmit(true, true, false, true, address(registry));
+            emit IBLSKeyRegistry.RepinApproved(account, order, 0, 1, 0);
+            fileRepin(actors[i], 0);
+            (uint32 f, uint32 t, uint64 n) = registry.repinApproval(account, order);
+            assertEq(f, 0);
+            assertEq(t, 1);
+            assertEq(n, 1);
+            fileRepin(actors[i], 1);
+            (f, t, n) = registry.repinApproval(account, order);
+            assertEq(f, 1);
+            assertEq(t, 2);
+            assertEq(n, 2);
+            vm.expectRevert(IBLSKeyRegistry.BadNonce.selector);
+            fileRepin(actors[i], 0);
+            assertEq(registry.nonceOf(account), 0, "the account nonce is untouched");
+        }
+    }
+
+    /// One account's signed consent filed for another account is refused.
+    function test_approveRepin_wrongOwner_isRefused() public {
+        string memory path = oaPath("makerOnSepolia", "repin[0]");
+        bytes32 other = actorAccount("bridgerOnSepolia");
+        vm.expectRevert();
+        registry.approveRepin(
+            other, v.readBytes32(string.concat(path, ".orderHash")), 0, 1, oa("makerOnSepolia", "repin[0]"), 0
+        );
+        (,, uint64 n) = registry.repinApproval(other, v.readBytes32(string.concat(path, ".orderHash")));
+        assertEq(n, 0);
+    }
+
+    /// `expiredAt` reads the recorded expiry: a kill names `1` but is stamped at the kill.
+    function test_expiredAt_isTheKillStamp_notTheNamedDate() public {
+        bytes32 account = v.readBytes32(".slots.bridgerOnSepolia.account");
+        registerSlot("bridgerOnSepolia", 0);
+        registerSlot("bridgerOnSepolia", 1);
+        assertEq(registry.expiredAt(account, 0), 0, "unbounded");
+        vm.warp(block.timestamp + 100);
+        uint256 killedAt = block.timestamp;
+        setValidUntil("bridgerOnSepolia", 0, true);
+        assertEq(registry.lookup(account, 0).validUntil, 1, "the kill names 1");
+        assertEq(registry.expiredAt(account, 0), killedAt, "but expired at the kill");
+        assertEq(registry.expiredAt(account, 1), 0, "the other slot is untouched");
+    }
+
+    function test_approveMaker_approveWithdrawReapprove_bothSchemes() public {
+        string[2] memory actors = ["makerOnSepolia", "bridgerOnSepolia"];
+        for (uint256 i = 0; i < 2; i++) {
+            bytes32 account = actorAccount(actors[i]);
+            bytes32 maker = makerId("approved");
+            assertFalse(registry.isApprovedMaker(account, maker));
+
+            vm.expectEmit(true, true, false, true, address(registry));
+            emit IBLSKeyRegistry.MakerApprovalSet(account, maker, true, 0);
+            fileApproval(actors[i], "approveMaker[0]");
+            assertTrue(registry.isApprovedMaker(account, maker), "approved");
+
+            fileApproval(actors[i], "approveMaker[1]");
+            assertFalse(registry.isApprovedMaker(account, maker), "withdrawn");
+
+            fileApproval(actors[i], "approveMaker[2]");
+            assertTrue(registry.isApprovedMaker(account, maker), "approved again");
+            (, uint64 nonce,) = registry.makerApprovals(account, maker);
+            assertEq(nonce, 3);
+            assertEq(registry.nonceOf(account), 0, "the account nonce is untouched");
+        }
+    }
+
+    function test_approveMaker_cannotBeReplayed() public {
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+        fileApproval("makerOnSepolia", "approveMaker[1]");
+        vm.expectRevert(IBLSKeyRegistry.BadNonce.selector);
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+        assertFalse(registry.isApprovedMaker(actorAccount("makerOnSepolia"), makerId("approved")));
+    }
+
+    function test_approveMaker_legForAnotherRegistry_isRefused() public {
+        string[2] memory actors = ["makerOnSepolia", "bridgerOnSepolia"];
+        for (uint256 i = 0; i < 2; i++) {
+            vm.expectRevert(IBLSKeyRegistry.LegMismatch.selector);
+            fileApproval(actors[i], "approveMakerOnlyStellarLeg");
+            // The signature naming this registry alone is good here.
+            fileApproval(actors[i], "approveMakerOnlySepoliaLeg");
+        }
+    }
+
+    function test_approveMaker_isPerMaker() public {
+        bytes32 account = actorAccount("bridgerOnSepolia");
+        fileApproval("bridgerOnSepolia", "approveOtherMaker");
+        assertTrue(registry.isApprovedMaker(account, makerId("other")));
+        assertFalse(registry.isApprovedMaker(account, makerId("approved")), "another maker is not approved");
+        // Each pair keeps its own nonce: the other maker's approval leaves this pair at nonce 0.
+        fileApproval("bridgerOnSepolia", "approveMaker[0]");
+        assertTrue(registry.isApprovedMaker(account, makerId("approved")));
+    }
+
+    function test_approveMaker_pauseRefusesApproval_notWithdrawal() public {
+        registry.pause();
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+        registry.unpause();
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+
+        registry.pause();
+        fileApproval("makerOnSepolia", "approveMaker[1]");
+        assertFalse(registry.isApprovedMaker(actorAccount("makerOnSepolia"), makerId("approved")), "withdrawn");
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        fileApproval("makerOnSepolia", "approveMaker[2]");
+    }
+
+    function test_approveMaker_deadline() public {
+        uint64 d = OwnerAuthVectors.deadline(v, oaPath("makerOnSepolia", "approveMaker[0]"));
+        vm.warp(d + 1);
+        vm.expectRevert(IBLSKeyRegistry.DeadlineExpired.selector);
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+        vm.warp(d - registry.MAX_REGISTER_TTL() - 1);
+        vm.expectRevert(IBLSKeyRegistry.DeadlineTooFar.selector);
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+        vm.warp(d);
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+    }
+
+    function test_approveMaker_signatureForAnotherAccount_isRefused() public {
+        string memory path = oaPath("makerOnSepolia", "approveMaker[0]");
+        vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+        registry.approveMaker(
+            actorAccount("bridgerOnSepolia"), makerId("approved"), true, oa("makerOnSepolia", "approveMaker[0]"), 0, D()
+        );
+        // The same signature read as a withdrawal does not verify either.
+        bytes32 account = v.readBytes32(string.concat(path, ".account"));
+        vm.expectRevert(IBLSKeyRegistry.OwnerMismatch.selector);
+        registry.approveMaker(account, makerId("approved"), false, oa("makerOnSepolia", "approveMaker[0]"), 0, D());
+    }
+
+    function test_revoke_dropsEveryApproval() public {
+        idleGuard(); // a revoke with live slots asks the guards (14c)
+        bytes32 account = registerMaker();
+        fileApproval("makerOnSepolia", "approveMaker[0]");
+        assertTrue(registry.isApprovedMaker(account, makerId("approved")));
+
+        registry.revoke(account, oa("makerOnSepolia", "revoke[1]"), 1);
+        assertEq(registry.approvalGeneration(account), 1);
+        assertFalse(registry.isApprovedMaker(account, makerId("approved")), "revoke starts the account over");
+
+        // A fresh approval after the revoke counts again.
+        fileApproval("makerOnSepolia", "approveMaker[1]");
+        fileApproval("makerOnSepolia", "approveMaker[2]");
+        assertTrue(registry.isApprovedMaker(account, makerId("approved")));
+    }
+
+    // =========================================================================
     // Review D2 follow-up: cancel moves the nonce and never removes a key
     // =========================================================================
 
@@ -1105,9 +1316,10 @@ contract KeyMessagesHarness {
         bytes32 account,
         bytes32 key,
         IBLSKeyRegistry.KeyLeg[] calldata legs,
-        uint64 time
+        uint64 time,
+        bool approved
     ) external pure returns (bytes32) {
-        return KeyMessages.structHash(kind, account, key, legs, time);
+        return KeyMessages.structHash(kind, account, key, legs, time, approved);
     }
 
     function digest(
@@ -1116,9 +1328,12 @@ contract KeyMessagesHarness {
         bytes32 account,
         bytes32 key,
         IBLSKeyRegistry.KeyLeg[] calldata legs,
-        uint64 time
+        uint64 time,
+        bool approved
     ) external pure returns (bytes32) {
-        return KeyMessages.digest(KeyMessages.domainSeparator(KeyMessages.salt(env)), kind, account, key, legs, time);
+        return KeyMessages.digest(
+            KeyMessages.domainSeparator(KeyMessages.salt(env)), kind, account, key, legs, time, approved
+        );
     }
 
     function text(
@@ -1127,9 +1342,10 @@ contract KeyMessagesHarness {
         bytes32 account,
         bytes32 key,
         IBLSKeyRegistry.KeyLeg[] calldata legs,
-        uint64 time
+        uint64 time,
+        bool approved
     ) external pure returns (bytes memory) {
-        return KeyMessages.text(bytes(env), kind, account, key, legs, time);
+        return KeyMessages.text(bytes(env), kind, account, key, legs, time, approved);
     }
 
     function utc(uint256 t) external pure returns (string memory) {
@@ -1154,6 +1370,7 @@ contract KeyMessagesVectorsTest is Test {
         assertEq(KeyMessages.REVOKE_KEYS_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.revokeKeys"));
         assertEq(KeyMessages.CANCEL_PENDING_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.cancelPending"));
         assertEq(KeyMessages.RETIRE_KEY_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.retireKey"));
+        assertEq(KeyMessages.APPROVE_MAKER_TYPEHASH, v.readBytes32(".ownerAuth._meta.typehashes.approveMaker"));
         assertEq(KeyMessages.DOMAIN_TYPEHASH, keccak256(bytes(v.readString(".ownerAuth._meta.domainType"))));
         string[3] memory envs = ["local", "testnet", "mainnet"];
         for (uint256 i = 0; i < 3; i++) {
@@ -1234,18 +1451,28 @@ contract KeyMessagesVectorsTest is Test {
             ? KeyMessages.Kind.Register
             : kindName == keccak256("revoke")
                 ? KeyMessages.Kind.Revoke
-                : kindName == keccak256("cancel") ? KeyMessages.Kind.Cancel : KeyMessages.Kind.Retire;
+                : kindName == keccak256("cancel")
+                    ? KeyMessages.Kind.Cancel
+                    : kindName == keccak256("approveMaker") ? KeyMessages.Kind.ApproveMaker : KeyMessages.Kind.Retire;
         bool keyed = kind == KeyMessages.Kind.Register || kind == KeyMessages.Kind.Retire;
-        bytes32 key = keyed ? r32(string.concat(path, ".keyCommitment")) : bytes32(0);
+        bool approval = kind == KeyMessages.Kind.ApproveMaker;
+        bytes32 key = keyed
+            ? r32(string.concat(path, ".keyCommitment"))
+            : approval ? r32(string.concat(path, ".maker")) : bytes32(0);
+        bool approved = approval && v.readBool(string.concat(path, ".approved"));
         uint64 time = kind == KeyMessages.Kind.Retire
             ? uint64(vm.parseUint(rstr(string.concat(path, ".validUntil"))))
-            : kind == KeyMessages.Kind.Register ? uint64(vm.parseUint(rstr(string.concat(path, ".deadline")))) : 0;
+            : kind == KeyMessages.Kind.Register || approval
+                ? uint64(vm.parseUint(rstr(string.concat(path, ".deadline"))))
+                : 0;
         bytes32 account = r32(string.concat(path, ".account"));
         string memory env = rstr(string.concat(path, ".env"));
         IBLSKeyRegistry.KeyLeg[] memory legs = legsAt(path);
-        assertEq(h.structHash(kind, account, key, legs, time), r32(string.concat(path, ".structHash")), path);
-        assertEq(h.digest(env, kind, account, key, legs, time), r32(string.concat(path, ".digest")), path);
-        assertEq(string(h.text(env, kind, account, key, legs, time)), rstr(string.concat(path, ".text")), path);
+        assertEq(h.structHash(kind, account, key, legs, time, approved), r32(string.concat(path, ".structHash")), path);
+        assertEq(h.digest(env, kind, account, key, legs, time, approved), r32(string.concat(path, ".digest")), path);
+        assertEq(
+            string(h.text(env, kind, account, key, legs, time, approved)), rstr(string.concat(path, ".text")), path
+        );
     }
 
     // One test per family: each cheatcode read re-encodes the vector file, so one loop over all of
@@ -1277,6 +1504,17 @@ contract KeyMessagesVectorsTest is Test {
 
     function test_everyRetireEntryRebuildsByteForByte() public view {
         checkFamily("retire", 12);
+    }
+
+    function test_everyApproveMakerEntryRebuildsByteForByte() public view {
+        checkFamily("approveMaker", 3);
+        string[2] memory actors = ["maker", "bridger"];
+        string[3] memory named = ["approveOtherMaker", "approveMakerOnlySepoliaLeg", "approveMakerOnlyStellarLeg"];
+        for (uint256 a = 0; a < 2; a++) {
+            for (uint256 i = 0; i < named.length; i++) {
+                check(string.concat(".ownerAuth.", actors[a], ".", named[i]));
+            }
+        }
     }
 
     function test_everyNamedEntryRebuildsByteForByte() public view {

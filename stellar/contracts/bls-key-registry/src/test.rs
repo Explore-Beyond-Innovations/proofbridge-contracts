@@ -163,8 +163,9 @@ fn slot_commitment(env: &Env, v: &serde_json::Value, who: &str, i: usize) -> Byt
     bn::<32>(env, &slot_reg(v, who, i)["commitment"])
 }
 
-/// The fingerprint key i is named by in the owner's messages (keccak of its EIP-2537 form).
-fn fingerprint(env: &Env, v: &serde_json::Value, who: &str, i: usize) -> BytesN<32> {
+/// The commitment key i is named by in the owner's messages and stored under (keccak of its
+/// EIP-2537 form).
+fn key_commit(env: &Env, v: &serde_json::Value, who: &str, i: usize) -> BytesN<32> {
     bn::<32>(env, &oa(v, who)["register"][i]["keyCommitment"])
 }
 
@@ -192,7 +193,7 @@ fn set_valid_until(
     client.set_valid_until(
         &slot_account(env, v, who),
         &svu_owner(env, v, who, key, retire),
-        &fingerprint(env, v, who, key as usize),
+        &key_commit(env, v, who, key as usize),
         &if retire { 1 } else { grace_ts(v) },
     );
 }
@@ -546,6 +547,26 @@ impl MockGuard {
     }
 }
 
+/// A wired guard whose answer the test sets: an account's position opens and closes.
+#[contract]
+pub struct ToggleGuard;
+
+#[contractimpl]
+impl ToggleGuard {
+    pub fn has_open_positions(env: Env, _account: BytesN<32>) -> bool {
+        env.storage()
+            .instance()
+            .get(&soroban_sdk::symbol_short!("open"))
+            .unwrap_or(false)
+    }
+
+    pub fn set_open(env: Env, open: bool) {
+        env.storage()
+            .instance()
+            .set(&soroban_sdk::symbol_short!("open"), &open);
+    }
+}
+
 /// A wired guard that reports no positions.
 #[contract]
 pub struct IdleGuard;
@@ -769,68 +790,59 @@ fn register_at_cap_prunes_expired_slot() {
     assert_eq!(client.next_slot_id(&account), 6);
 }
 
-/// #422 D14: our own retirement names `valid_until = 1`; the slot expired at the kill, not in 1970.
+/// While a guard reports an open position a dead slot keeps its place inside the 30-day grace — an
+/// open order's cancel may still ask about it; once the position closes it is pruned at once.
 #[test]
-fn any_slot_expired_within_a_kill_expires_at_the_kill() {
+fn register_at_cap_keeps_a_dead_slot_while_in_flight_inside_the_grace() {
     let (env, client, v) = setup();
     let account = slot_account(&env, &v, MAKER);
-    register_slot(&env, &client, &v, MAKER, 0);
-    env.ledger().set_timestamp(T0 + 100);
-    set_valid_until(&env, &client, &v, MAKER, 0, true);
-    assert!(
-        client.any_slot_expired_within(&account, &(T0 + 100), &(T0 + 100)),
-        "the kill's own second"
-    );
-    assert!(client.any_slot_expired_within(&account, &(T0 + 50), &(T0 + 150)));
-    assert!(
-        !client.any_slot_expired_within(&account, &0, &(T0 + 99)),
-        "before the kill: no"
-    );
-    assert!(
-        !client.any_slot_expired_within(&account, &(T0 + 101), &u64::MAX),
-        "after it: no"
-    );
-}
-
-/// #422 D14: a shorten made before `from`, naming a date inside `[from, to]`, expires at the date.
-#[test]
-fn any_slot_expired_within_an_early_shorten_expires_at_its_date() {
-    let (env, client, v) = setup();
-    let account = slot_account(&env, &v, MAKER);
-    register_slot(&env, &client, &v, MAKER, 0);
-    set_valid_until(&env, &client, &v, MAKER, 0, false); // at T0, naming grace_ts
-    let g = grace_ts(&v);
-    assert!(
-        client.any_slot_expired_within(&account, &(T0 + 1), &g),
-        "the date, not the shorten"
-    );
-    assert!(!client.any_slot_expired_within(&account, &(T0 + 1), &(g - 1)));
-}
-
-/// #422 D17: while a guard reports positions a dead slot keeps its place for the grace — an open
-/// order's cancel may still ask about it — and leaves once the grace is over regardless.
-#[test]
-fn register_at_cap_keeps_a_dead_slot_while_in_flight_until_the_grace() {
-    let (env, client, v) = setup();
-    let account = slot_account(&env, &v, MAKER);
-    busy_guard(&env, &client);
+    let guard = env.register(ToggleGuard, ());
+    let toggle = ToggleGuardClient::new(&env, &guard);
+    toggle.set_open(&true);
+    client.set_position_guards(&soroban_sdk::vec![&env, guard]);
     for i in 0..5 {
         register_slot(&env, &client, &v, MAKER, i);
     }
     set_valid_until(&env, &client, &v, MAKER, 2, true);
-    env.ledger().set_timestamp(T0 + 1);
     let r = slot_reg(&v, MAKER, 5);
-    assert_eq!(
-        client.try_register(
+    let full = |c: &BlsKeyRegistryClient| {
+        let (entry, deadline) = if env.ledger().timestamp() >= grace_ts(&v) {
+            ("registerLate", LATE_DEADLINE)
+        } else {
+            ("register", DEADLINE)
+        };
+        c.try_register(
             &account,
-            &signed(&env, &oa(&v, MAKER)["register"][5]),
+            &signed(&env, &oa(&v, MAKER)[entry][5]),
             &bn::<96>(&env, &r["pkNative"]),
             &bn::<192>(&env, &r["pop"]),
             &5,
-            &DEADLINE,
-        ),
-        Err(Ok(RegistryError::RegistryFull))
-    );
+            &deadline,
+        )
+    };
+    env.ledger().set_timestamp(T0 + 1);
+    assert_eq!(full(&client), Err(Ok(RegistryError::RegistryFull)));
+    assert!(client.lookup(&account, &2).is_some());
+    toggle.set_open(&false);
+    assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
+    assert_eq!(client.lookup(&account, &2), None);
+}
+
+/// The 30 days bound the wait whatever the guards say: a dead slot goes past the grace while a
+/// position is still open. Every finalize a kill can still touch happens inside those 30 days, so
+/// keeping the slot longer only fills the cap of an account that always has an order in flight.
+#[test]
+fn register_at_cap_prunes_a_dead_slot_past_the_grace_while_still_in_flight() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    let guard = env.register(ToggleGuard, ());
+    let toggle = ToggleGuardClient::new(&env, &guard);
+    toggle.set_open(&true);
+    client.set_position_guards(&soroban_sdk::vec![&env, guard]);
+    for i in 0..5 {
+        register_slot(&env, &client, &v, MAKER, i);
+    }
+    set_valid_until(&env, &client, &v, MAKER, 2, true);
     env.ledger().set_timestamp(grace_ts(&v)); // past the 30-day grace, in registerLate's window
     assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
     assert_eq!(client.lookup(&account, &2), None);
@@ -863,6 +875,40 @@ fn register_at_cap_no_guard_wired_keeps_a_dead_slot_until_the_grace() {
     assert_eq!(client.lookup(&account, &2), None);
 }
 
+/// The grace boundary second: a dead slot is kept at exactly expiry + GRACE_PERIOD and pruned one
+/// second later. The kill lands at grace_ts - 30 d so the boundary falls on grace_ts, the clock the
+/// `registerLate` vectors are signed for (D2).
+#[test]
+fn register_at_cap_grace_boundary_kept_at_expiry_plus_grace_pruned_the_second_after() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    for i in 0..5 {
+        register_slot(&env, &client, &v, MAKER, i);
+    }
+    let g = grace_ts(&v);
+    env.ledger().set_timestamp(g - GRACE_PERIOD);
+    set_valid_until(&env, &client, &v, MAKER, 2, true); // expiry recorded at the kill: grace_ts - 30 d
+
+    env.ledger().set_timestamp(g); // expiry + GRACE_PERIOD exactly: still kept
+    let r = slot_reg(&v, MAKER, 5);
+    assert_eq!(
+        client.try_register(
+            &account,
+            &signed(&env, &oa(&v, MAKER)["registerLate"][5]),
+            &bn::<96>(&env, &r["pkNative"]),
+            &bn::<192>(&env, &r["pop"]),
+            &5,
+            &LATE_DEADLINE,
+        ),
+        Err(Ok(RegistryError::RegistryFull))
+    );
+    assert!(client.lookup(&account, &2).is_some());
+
+    env.ledger().set_timestamp(g + 1); // one second past the grace: pruned
+    assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
+    assert_eq!(client.lookup(&account, &2), None);
+}
+
 /// #422 D14b: a shorten on a slot that already died cannot move its death later — a re-kill after
 /// an order's window must not erase an expiry inside it.
 #[test]
@@ -874,13 +920,10 @@ fn set_valid_until_recorded_expiry_only_moves_earlier() {
     let g = grace_ts(&v);
     env.ledger().set_timestamp(g + 100);
     set_valid_until(&env, &client, &v, MAKER, 0, true); // a kill to 1, after the slot died at g
-    assert!(
-        client.any_slot_expired_within(&account, &g, &g),
-        "still died at g"
-    );
-    assert!(
-        !client.any_slot_expired_within(&account, &(g + 1), &u64::MAX),
-        "not at the re-kill"
+    assert_eq!(
+        client.expired_at(&account, &0),
+        g,
+        "still died at g, not at the re-kill"
     );
 }
 
@@ -1032,7 +1075,7 @@ fn set_valid_until_shorten_only_and_never_zero() {
         client.try_set_valid_until(
             &account,
             &svu_owner(&env, &v, BRIDGER, 0, true),
-            &fingerprint(&env, &v, BRIDGER, 0),
+            &key_commit(&env, &v, BRIDGER, 0),
             &0
         ),
         Err(Ok(RegistryError::BadValidUntil))
@@ -1042,7 +1085,7 @@ fn set_valid_until_shorten_only_and_never_zero() {
         client.try_set_valid_until(
             &account,
             &svu_owner(&env, &v, BRIDGER, 0, false),
-            &fingerprint(&env, &v, BRIDGER, 0),
+            &key_commit(&env, &v, BRIDGER, 0),
             &grace_ts(&v)
         ),
         Err(Ok(RegistryError::BadValidUntil))
@@ -1058,7 +1101,7 @@ fn set_valid_until_unknown_slot_rejected() {
         client.try_set_valid_until(
             &account,
             &svu_owner(&env, &v, BRIDGER, 1, true),
-            &fingerprint(&env, &v, BRIDGER, 1),
+            &key_commit(&env, &v, BRIDGER, 1),
             &1
         ),
         Err(Ok(RegistryError::NoSuchSlot))
@@ -1071,13 +1114,13 @@ fn set_valid_until_sig_bound_to_key_value_and_signer() {
     let account = slot_account(&env, &v, BRIDGER);
     register_slot(&env, &client, &v, BRIDGER, 0);
     register_slot(&env, &client, &v, BRIDGER, 1);
-    let fp0 = fingerprint(&env, &v, BRIDGER, 0);
+    let fp0 = key_commit(&env, &v, BRIDGER, 0);
     // key-0 signature replayed against key 1
     assert_eq!(
         client.try_set_valid_until(
             &account,
             &svu_owner(&env, &v, BRIDGER, 0, true),
-            &fingerprint(&env, &v, BRIDGER, 1),
+            &key_commit(&env, &v, BRIDGER, 1),
             &1
         ),
         Err(Ok(RegistryError::OwnerMismatch))
@@ -1118,7 +1161,7 @@ fn pre_signed_retirement_survives_later_writes_and_replay_is_noop() {
     set_valid_until(&env, &client, &v, BRIDGER, 1, false); // another retirement, other slot
     let nonce = client.nonce_of(&account);
 
-    let fp0 = fingerprint(&env, &v, BRIDGER, 0);
+    let fp0 = key_commit(&env, &v, BRIDGER, 0);
     client.set_valid_until(&account, &pre_signed, &fp0, &1);
     assert_eq!(
         client.try_commitment_at(&account, &0),
@@ -1261,7 +1304,7 @@ fn sep53_vector_retires_the_makers_slot() {
     client.set_valid_until(
         &account,
         &signed(&env, e),
-        &fingerprint(&env, &v, MAKER, 0),
+        &key_commit(&env, &v, MAKER, 0),
         &1,
     );
     assert_eq!(
@@ -1299,7 +1342,7 @@ fn sep53_fresh_signature_over_the_text_verifies() {
             Vec::new(&env),
             OwnerSig::Sep53(sep53_sign_text(&env, text_of(e), &sk)),
         ),
-        &fingerprint(&env, &v, MAKER, 0),
+        &key_commit(&env, &v, MAKER, 0),
         &grace_ts(&v),
     );
     assert_eq!(
@@ -1331,7 +1374,7 @@ fn sep53_wrong_key_traps_and_changes_nothing() {
             client.set_valid_until(
                 &account,
                 &signed_with(&env, Vec::new(&env), OwnerSig::Sep53(sig)),
-                &fingerprint(&env, &v, MAKER, 0),
+                &key_commit(&env, &v, MAKER, 0),
                 &1,
             );
         },
@@ -1393,7 +1436,7 @@ fn sep53_signature_bound_to_key_and_value() {
     let key0_retire = svu_owner(&env, &v, MAKER, 0, true);
     assert_crypto_trap(
         || {
-            client.set_valid_until(&account, &key0_retire, &fingerprint(&env, &v, MAKER, 1), &1);
+            client.set_valid_until(&account, &key0_retire, &key_commit(&env, &v, MAKER, 1), &1);
         },
         "key 1 under key 0's retirement",
     );
@@ -1402,7 +1445,7 @@ fn sep53_signature_bound_to_key_and_value() {
             client.set_valid_until(
                 &account,
                 &key0_retire,
-                &fingerprint(&env, &v, MAKER, 0),
+                &key_commit(&env, &v, MAKER, 0),
                 &grace_ts(&v),
             );
         },
@@ -1630,7 +1673,7 @@ fn an_ed25519_signature_on_an_evm_account_is_refused() {
         client.try_set_valid_until(
             &account,
             &signed_with(&env, Vec::new(&env), OwnerSig::Sep53(sig)),
-            &fingerprint(&env, &v, BRIDGER, 0),
+            &key_commit(&env, &v, BRIDGER, 0),
             &1
         ),
         Err(Ok(RegistryError::OwnerMismatch))
@@ -1650,7 +1693,7 @@ fn a_retirement_with_legs_is_refused() {
         sig_of(&env, e),
     );
     assert_eq!(
-        client.try_set_valid_until(&account, &auth, &fingerprint(&env, &v, BRIDGER, 0), &1),
+        client.try_set_valid_until(&account, &auth, &key_commit(&env, &v, BRIDGER, 0), &1),
         Err(Ok(RegistryError::LegMismatch))
     );
 }
@@ -1683,14 +1726,20 @@ fn message_of(env: &Env, e: &serde_json::Value) -> KeyMessage {
     let fp = || bn::<32>(env, &e["keyCommitment"]);
     match e["kind"].as_str().unwrap() {
         "register" => KeyMessage::Register {
-            fingerprint: fp(),
+            key_commitment: fp(),
             nonce: 0,
             deadline: e["deadline"].as_str().unwrap().parse().unwrap(),
         },
         "revoke" => KeyMessage::Revoke { nonce: 0 },
         "cancel" => KeyMessage::Cancel { nonce: 0 },
+        "approveMaker" => KeyMessage::ApproveMaker {
+            maker: bn::<32>(env, &e["maker"]),
+            approved: e["approved"].as_bool().unwrap(),
+            nonce: 0,
+            deadline: e["deadline"].as_str().unwrap().parse().unwrap(),
+        },
         _ => KeyMessage::Retire {
-            fingerprint: fp(),
+            key_commitment: fp(),
             valid_until: e["validUntil"].as_str().unwrap().parse().unwrap(),
         },
     }
@@ -1702,10 +1751,20 @@ fn text_and_struct_hash_match_every_vector() {
     let mut entries = std::vec::Vec::new();
     for who in ["maker", "bridger"] {
         let a = &v["ownerAuth"][who];
-        for k in ["register", "registerLate", "revoke", "cancel", "retire"] {
+        for k in [
+            "register",
+            "registerLate",
+            "revoke",
+            "cancel",
+            "retire",
+            "approveMaker",
+        ] {
             entries.extend(a[k].as_array().unwrap().iter().cloned());
         }
         for k in [
+            "approveOtherMaker",
+            "approveMakerOnlySepoliaLeg",
+            "approveMakerOnlyStellarLeg",
             "reuseKey0AtNonce1",
             "onlySepoliaLeg",
             "onlyStellarLeg",
@@ -1818,26 +1877,55 @@ fn client_domain(_env: &Env, client: &BlsKeyRegistryClient) -> std::vec::Vec<u8>
     client.domain_separator().to_array().to_vec()
 }
 
-/// D2: the padded 96-byte key hashes to the vector fingerprint, which is the EVM commitment.
+/// One key commitment: the padded 96-byte key hashes to the value the owner's messages name, the
+/// EVM slot stores and this registry stores, never to the hash of the 96-byte form.
 #[test]
-fn key_fingerprint_is_the_evm_commitment() {
-    let (env, _client, v) = setup();
+fn one_key_commitment_matches_evm_and_the_messages() {
+    let (env, client, v) = setup();
     for who in [MAKER, BRIDGER] {
         let evm = if who == MAKER {
             "makerOnSepolia"
         } else {
             "bridgerOnSepolia"
         };
-        for i in 0..6 {
+        let account = slot_account(&env, &v, who);
+        for i in 0..3 {
             let pk = bn::<96>(&env, &slot_reg(&v, who, i)["pkNative"]);
-            let fp = owner::key_fingerprint(&env, &pk);
-            assert_eq!(fp, fingerprint(&env, &v, who, i));
-            assert_eq!(fp, bn::<32>(&env, &slot_reg(&v, evm, i)["commitment"]));
-            assert_ne!(
-                fp,
-                slot_commitment(&env, &v, who, i),
-                "storage keeps the native commitment"
+            let c = cross_contract::key_commitment(&env, &pk);
+            assert_eq!(
+                c,
+                key_commit(&env, &v, who, i),
+                "the owner message names it"
             );
+            assert_eq!(
+                c,
+                bn::<32>(&env, &slot_reg(&v, evm, i)["commitment"]),
+                "EVM stores it"
+            );
+            assert_eq!(
+                c,
+                slot_commitment(&env, &v, who, i),
+                "the Soroban vector stores it"
+            );
+
+            let slot_id = register_slot(&env, &client, &v, who, i);
+            assert_eq!(
+                client.commitment_at(&account, &slot_id),
+                c,
+                "commitment_at returns it"
+            );
+            assert_eq!(client.lookup(&account, &slot_id).unwrap().commitment, c);
+            assert_eq!(client.slot_of_key(&account, &c), Some(slot_id));
+            assert!(client.is_used(&account, &c));
+            let native: BytesN<32> = env
+                .crypto()
+                .keccak256(&Bytes::from_slice(&env, &pk.to_array()))
+                .to_bytes();
+            assert!(
+                !client.is_used(&account, &native),
+                "the 96-byte hash is not stored"
+            );
+            assert_eq!(client.slot_of_key(&account, &native), None);
         }
     }
 }
@@ -1862,34 +1950,34 @@ fn a_fresh_secp256k1_signature_over_the_vector_digest_registers() {
         &DEADLINE,
     );
     assert_eq!(
-        client.slot_of_key(&account, &fingerprint(&env, &v, BRIDGER, 2)),
+        client.slot_of_key(&account, &key_commit(&env, &v, BRIDGER, 2)),
         Some(2)
     );
 }
 
-/// The fingerprint map follows the slots: a key maps to its slot, a pruned or revoked key to none.
+/// The commitment-to-slot map follows the slots: a key maps to its slot, a pruned or revoked key to none.
 #[test]
 fn slot_of_key_follows_registration_and_revoke() {
     let (env, client, v) = setup();
     idle_guard(&env, &client);
     let account = slot_account(&env, &v, MAKER);
     assert_eq!(
-        client.slot_of_key(&account, &fingerprint(&env, &v, MAKER, 0)),
+        client.slot_of_key(&account, &key_commit(&env, &v, MAKER, 0)),
         None
     );
     register_slot(&env, &client, &v, MAKER, 0);
     assert_eq!(
-        client.slot_of_key(&account, &fingerprint(&env, &v, MAKER, 0)),
+        client.slot_of_key(&account, &key_commit(&env, &v, MAKER, 0)),
         Some(0)
     );
     client.revoke(&account, &OwnerAuth::Stellar(maker_owner(&env, &v)), &1);
     assert_eq!(
-        client.slot_of_key(&account, &fingerprint(&env, &v, MAKER, 0)),
+        client.slot_of_key(&account, &key_commit(&env, &v, MAKER, 0)),
         None
     );
     assert_eq!(register_slot(&env, &client, &v, MAKER, 2), 1);
     assert_eq!(
-        client.slot_of_key(&account, &fingerprint(&env, &v, MAKER, 2)),
+        client.slot_of_key(&account, &key_commit(&env, &v, MAKER, 2)),
         Some(1)
     );
     // the retired-then-revoked key's retirement now finds no slot
@@ -1897,7 +1985,7 @@ fn slot_of_key_follows_registration_and_revoke() {
         client.try_set_valid_until(
             &account,
             &svu_owner(&env, &v, MAKER, 0, true),
-            &fingerprint(&env, &v, MAKER, 0),
+            &key_commit(&env, &v, MAKER, 0),
             &1
         ),
         Err(Ok(RegistryError::NoSuchSlot))
@@ -1911,33 +1999,6 @@ fn position_guards_view_follows_set_position_guards() {
     let guard = Address::generate(&env);
     client.set_position_guards(&soroban_sdk::vec![&env, guard.clone()]);
     assert_eq!(client.position_guards(), soroban_sdk::vec![&env, guard]);
-}
-
-/// #422 D12: the escrow's question, answered directly — did any slot expire in [from, to].
-#[test]
-fn any_slot_expired_within_reads_the_slots_expiries() {
-    let (env, client, v) = setup();
-    let account = slot_account(&env, &v, MAKER);
-    register_slot(&env, &client, &v, MAKER, 0);
-    assert!(
-        !client.any_slot_expired_within(&account, &0, &u64::MAX),
-        "no expiry: never"
-    );
-    set_valid_until(&env, &client, &v, MAKER, 0, false);
-    let g = grace_ts(&v);
-    assert!(
-        client.any_slot_expired_within(&account, &g, &g),
-        "the boundary is inclusive"
-    );
-    assert!(client.any_slot_expired_within(&account, &(g - 100), &(g + 100)));
-    assert!(
-        !client.any_slot_expired_within(&account, &(g + 1), &(g + 100)),
-        "after: no"
-    );
-    assert!(
-        !client.any_slot_expired_within(&account, &0, &(g - 1)),
-        "before: no"
-    );
 }
 
 /// C-13: the escrows and the verifier read this registry on every lock and unlock, so each read
@@ -1965,8 +2026,8 @@ fn read_and_write_entry_points_extend_the_instance_ttl() {
         ("has_usable_slot", &|| {
             assert!(client.has_usable_slot(&account))
         }),
-        ("any_slot_expired_within", &|| {
-            client.any_slot_expired_within(&account, &0, &T0);
+        ("expired_at", &|| {
+            client.expired_at(&account, &0);
         }),
         ("lookup", &|| assert!(client.lookup(&account, &0).is_some())),
         ("commitment_at", &|| {
@@ -2240,7 +2301,7 @@ fn a_registry_named_twice_is_refused_at_either_nonce() {
     }
 }
 
-/// 50-2: the unlock read keeps the fingerprint row alive with the slot, so a retirement long after
+/// 50-2: the unlock read keeps the keyslot row alive with the slot, so a retirement long after
 /// registration needs no restore.
 #[test]
 fn commitment_at_extends_the_keyslot_row() {
@@ -2248,7 +2309,7 @@ fn commitment_at_extends_the_keyslot_row() {
     let (env, client, v) = setup();
     let account = slot_account(&env, &v, MAKER);
     register_slot(&env, &client, &v, MAKER, 0);
-    let fp = fingerprint(&env, &v, MAKER, 0);
+    let fp = key_commit(&env, &v, MAKER, 0);
     let ttl = || {
         env.as_contract(&client.address, || {
             storage::key_slot_ttl(&env, &account, &fp)
@@ -2445,12 +2506,13 @@ mod wallet_signatures {
         let slot = t.register();
         let account = t.account();
         assert_eq!(t.client.nonce_of(&account), 1);
+        // the slot stores the commitment the wallet signed: one value, the EIP-2537 hash
+        let c = t.client.commitment_at(&account, &slot);
+        assert_eq!(c, bn::<32>(&t.env, &t.e("register")["keyCommitment"]));
+        let pk: [u8; 96] = hexval(&t.p[w]["sorobanPk"]).try_into().unwrap();
         assert_eq!(
-            t.client.commitment_at(&account, &slot),
-            t.env
-                .crypto()
-                .keccak256(&Bytes::from_slice(&t.env, &hexval(&t.p[w]["sorobanPk"])))
-                .to_bytes()
+            c,
+            cross_contract::key_commitment(&t.env, &BytesN::from_array(&t.env, &pk))
         );
     }
 
@@ -2546,7 +2608,7 @@ mod wallet_signatures {
             (
                 "register",
                 KeyMessage::Register {
-                    fingerprint: fp.clone(),
+                    key_commitment: fp.clone(),
                     nonce: 0,
                     deadline: t.num("register", "deadline"),
                 },
@@ -2554,7 +2616,7 @@ mod wallet_signatures {
             (
                 "retire",
                 KeyMessage::Retire {
-                    fingerprint: fp,
+                    key_commitment: fp,
                     valid_until: t.num("retire", "validUntil"),
                 },
             ),
@@ -2631,4 +2693,261 @@ mod wallet_signatures {
     fn freighter_one_byte_flip_is_a_crypto_trap() {
         check_mutated("freighter");
     }
+}
+
+// =============================================================================
+// ApproveMaker: the signer's consent to be named by a maker
+// =============================================================================
+
+fn maker_id(env: &Env, v: &serde_json::Value, which: &str) -> BytesN<32> {
+    bn::<32>(env, &v["ownerAuth"]["_meta"]["makers"][which])
+}
+
+/// Files `ownerAuth.<who>.<entry>` (an ApproveMaker entry) for the actor's account.
+fn try_file_approval(
+    env: &Env,
+    client: &BlsKeyRegistryClient,
+    e: &serde_json::Value,
+) -> Result<(), RegistryError> {
+    let legs = legs_of(env, e);
+    let nonce = legs.get(0).unwrap().nonce;
+    match client.try_approve_maker(
+        &bn::<32>(env, &e["account"]),
+        &bn::<32>(env, &e["maker"]),
+        &e["approved"].as_bool().unwrap(),
+        &signed(env, e),
+        &nonce,
+        &DEADLINE,
+    ) {
+        Ok(Ok(())) => Ok(()),
+        Err(Ok(err)) => Err(err),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn approve_maker_approve_withdraw_reapprove_both_schemes() {
+    let (env, client, v) = setup();
+    for who in [MAKER, BRIDGER] {
+        let a = oa(&v, who);
+        let account = bn::<32>(&env, &a["account"]);
+        let maker = maker_id(&env, &v, "approved");
+        assert!(!client.is_approved_maker(&account, &maker));
+        try_file_approval(&env, &client, &a["approveMaker"][0]).unwrap();
+        assert!(client.is_approved_maker(&account, &maker), "approved");
+        try_file_approval(&env, &client, &a["approveMaker"][1]).unwrap();
+        assert!(!client.is_approved_maker(&account, &maker), "withdrawn");
+        try_file_approval(&env, &client, &a["approveMaker"][2]).unwrap();
+        assert!(client.is_approved_maker(&account, &maker), "approved again");
+        assert_eq!(client.maker_approval(&account, &maker).nonce, 3);
+        assert_eq!(
+            client.nonce_of(&account),
+            0,
+            "the account nonce is untouched"
+        );
+    }
+}
+
+#[test]
+fn approve_maker_cannot_be_replayed() {
+    let (env, client, v) = setup();
+    let a = oa(&v, MAKER);
+    try_file_approval(&env, &client, &a["approveMaker"][0]).unwrap();
+    try_file_approval(&env, &client, &a["approveMaker"][1]).unwrap();
+    assert_eq!(
+        try_file_approval(&env, &client, &a["approveMaker"][0]),
+        Err(RegistryError::BadNonce)
+    );
+}
+
+#[test]
+fn approve_maker_leg_for_another_registry_is_refused() {
+    let (env, client, v) = setup();
+    for who in [MAKER, BRIDGER] {
+        let a = oa(&v, who);
+        assert_eq!(
+            try_file_approval(&env, &client, &a["approveMakerOnlySepoliaLeg"]),
+            Err(RegistryError::LegMismatch)
+        );
+        try_file_approval(&env, &client, &a["approveMakerOnlyStellarLeg"]).unwrap();
+    }
+}
+
+#[test]
+fn approve_maker_is_per_maker() {
+    let (env, client, v) = setup();
+    let a = oa(&v, BRIDGER);
+    let account = bn::<32>(&env, &a["account"]);
+    try_file_approval(&env, &client, &a["approveOtherMaker"]).unwrap();
+    assert!(client.is_approved_maker(&account, &maker_id(&env, &v, "other")));
+    assert!(!client.is_approved_maker(&account, &maker_id(&env, &v, "approved")));
+    // Each pair keeps its own nonce.
+    try_file_approval(&env, &client, &a["approveMaker"][0]).unwrap();
+    assert!(client.is_approved_maker(&account, &maker_id(&env, &v, "approved")));
+}
+
+#[test]
+fn approve_maker_pause_refuses_approval_not_withdrawal() {
+    let (env, client, v) = setup();
+    let a = oa(&v, MAKER);
+    client.pause();
+    assert_eq!(
+        try_file_approval(&env, &client, &a["approveMaker"][0]),
+        Err(RegistryError::ContractPaused)
+    );
+    client.unpause();
+    try_file_approval(&env, &client, &a["approveMaker"][0]).unwrap();
+    client.pause();
+    try_file_approval(&env, &client, &a["approveMaker"][1]).unwrap();
+    assert_eq!(
+        try_file_approval(&env, &client, &a["approveMaker"][2]),
+        Err(RegistryError::ContractPaused)
+    );
+}
+
+#[test]
+fn approve_maker_deadline() {
+    let (env, client, v) = setup();
+    let e = &oa(&v, MAKER)["approveMaker"][0];
+    env.ledger().set_timestamp(DEADLINE + 1);
+    assert_eq!(
+        try_file_approval(&env, &client, e),
+        Err(RegistryError::DeadlineExpired)
+    );
+    env.ledger().set_timestamp(DEADLINE - MAX_TTL - 1);
+    assert_eq!(
+        try_file_approval(&env, &client, e),
+        Err(RegistryError::DeadlineTooFar)
+    );
+    env.ledger().set_timestamp(DEADLINE);
+    try_file_approval(&env, &client, e).unwrap();
+}
+
+/// An account approves as itself by `require_auth`, with no signed message (G-account or contract).
+#[test]
+fn approve_maker_by_stellar_auth() {
+    let (env, client, v) = setup();
+    let owner = maker_owner(&env, &v);
+    let account = bn::<32>(&env, &oa(&v, MAKER)["account"]);
+    let maker = maker_id(&env, &v, "approved");
+    client.approve_maker(
+        &account,
+        &maker,
+        &true,
+        &OwnerAuth::Stellar(owner),
+        &0,
+        &DEADLINE,
+    );
+    assert!(client.is_approved_maker(&account, &maker));
+    assert_eq!(
+        client.try_approve_maker(
+            &account,
+            &maker,
+            &false,
+            &OwnerAuth::Stellar(Address::generate(&env)),
+            &1,
+            &DEADLINE,
+        ),
+        Err(Ok(RegistryError::OwnerMismatch))
+    );
+}
+
+#[test]
+fn revoke_drops_every_approval() {
+    let (env, client, v) = setup();
+    idle_guard(&env, &client); // a revoke with live slots asks the guards (14c)
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    let a = oa(&v, MAKER);
+    try_file_approval(&env, &client, &a["approveMaker"][0]).unwrap();
+    let maker = maker_id(&env, &v, "approved");
+    assert!(client.is_approved_maker(&account, &maker));
+
+    client.revoke(&account, &signed(&env, &a["revoke"][1]), &1);
+    assert_eq!(client.approval_generation(&account), 1);
+    assert!(
+        !client.is_approved_maker(&account, &maker),
+        "revoke starts the account over"
+    );
+
+    try_file_approval(&env, &client, &a["approveMaker"][1]).unwrap();
+    try_file_approval(&env, &client, &a["approveMaker"][2]).unwrap();
+    assert!(client.is_approved_maker(&account, &maker));
+}
+
+// ---- 2.7 plan 12 C: the re-pin consent and the per-slot expiry ----
+
+fn try_file_repin(
+    env: &Env,
+    client: &BlsKeyRegistryClient,
+    e: &serde_json::Value,
+) -> Result<(), RegistryError> {
+    let legs = legs_of(env, e);
+    let nonce = legs.get(0).unwrap().nonce;
+    let slot = |k: &str| e[k].as_str().unwrap().parse::<u32>().unwrap();
+    match client.try_approve_repin(
+        &bn::<32>(env, &e["account"]),
+        &bn::<32>(env, &e["orderHash"]),
+        &slot("fromSlot"),
+        &slot("toSlot"),
+        &signed(env, e),
+        &nonce,
+    ) {
+        Ok(Ok(())) => Ok(()),
+        Err(Ok(err)) => Err(err),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// Both owner schemes consent to 0 -> 1, then 1 -> 2, at the (account, order) pair's own nonce; the
+/// text and the EIP-712 digest are the generator's byte for byte; a replay is refused.
+#[test]
+fn approve_repin_both_schemes_in_order_no_replay() {
+    let (env, client, v) = setup();
+    let order = bn::<32>(&env, &v["ownerAuth"]["_meta"]["repinOrder"]);
+    for who in [MAKER, BRIDGER] {
+        let a = oa(&v, who);
+        let account = bn::<32>(&env, &a["account"]);
+        assert_eq!(client.repin_approval(&account, &order), (0, 0, 0));
+        try_file_repin(&env, &client, &a["repin"][0]).unwrap();
+        assert_eq!(client.repin_approval(&account, &order), (0, 1, 1));
+        try_file_repin(&env, &client, &a["repin"][1]).unwrap();
+        assert_eq!(client.repin_approval(&account, &order), (1, 2, 2));
+        assert_eq!(
+            try_file_repin(&env, &client, &a["repin"][0]),
+            Err(RegistryError::BadNonce)
+        );
+        assert_eq!(
+            client.nonce_of(&account),
+            0,
+            "the account nonce is untouched"
+        );
+    }
+}
+
+/// `expired_at` reads the recorded expiry: a kill names 1 but is stamped at the kill.
+#[test]
+fn expired_at_is_the_kill_stamp_not_the_named_date() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    register_slot(&env, &client, &v, MAKER, 0);
+    register_slot(&env, &client, &v, MAKER, 1);
+    assert_eq!(client.expired_at(&account, &0), 0, "unbounded");
+    let killed_at = env.ledger().timestamp();
+    set_valid_until(&env, &client, &v, MAKER, 0, true);
+    assert_eq!(
+        client.lookup(&account, &0).unwrap().valid_until,
+        1,
+        "the kill names 1"
+    );
+    assert_eq!(
+        client.expired_at(&account, &0),
+        killed_at,
+        "but expired at the kill"
+    );
+    assert_eq!(
+        client.expired_at(&account, &1),
+        0,
+        "the other slot is untouched"
+    );
 }

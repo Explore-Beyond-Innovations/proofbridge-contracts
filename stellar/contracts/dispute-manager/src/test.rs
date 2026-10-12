@@ -24,7 +24,6 @@ const CHALLENGE: u64 = 2 * 60 * 60;
 const DEADLINE: u64 = T0 + 7 * 24 * 60 * 60;
 const BUFFER: u64 = 30 * 60;
 const BOND_FLOOR: u128 = 1_000;
-const BOND_BPS: u32 = 100; // 1%
 
 struct F {
     env: Env,
@@ -41,29 +40,16 @@ fn params() -> DisputeParams {
     DisputeParams {
         challenge_period: CHALLENGE,
         bond_floor: BOND_FLOOR,
-        bond_bps: BOND_BPS,
     }
 }
 
-/// A stand-in escrow. The module reads one thing back off an escrow — its pause clock — so the
-/// fixture needs a real contract at that address rather than a bare one.
+/// A stand-in escrow: a real contract address the module authenticates as its caller.
 #[soroban_sdk::contract]
 pub struct MockEscrow;
 
 #[soroban_sdk::contractimpl]
 impl MockEscrow {
-    pub fn paused_seconds(env: Env) -> u64 {
-        env.storage()
-            .instance()
-            .get(&soroban_sdk::symbol_short!("paused"))
-            .unwrap_or(0)
-    }
-
-    pub fn set_paused_seconds(env: Env, v: u64) {
-        env.storage()
-            .instance()
-            .set(&soroban_sdk::symbol_short!("paused"), &v);
-    }
+    pub fn noop(_env: Env) {}
 }
 
 fn hash(env: &Env, fill: u8) -> BytesN<32> {
@@ -114,17 +100,19 @@ fn fixture() -> F {
     }
 }
 
-fn file(f: &F, h: &BytesN<32>, amount: u128) -> u128 {
+fn file(f: &F, h: &BytesN<32>) -> u128 {
+    file_at(f, h, DEADLINE)
+}
+
+fn file_at(f: &F, h: &BytesN<32>, deadline: u64) -> u128 {
     f.client.open_dispute(
         &f.escrow,
         h,
-        &amount,
         &CHAIN,
         &f.filer,
         &hash(&f.env, 0xEE),
-        &DEADLINE,
+        &deadline,
         &BUFFER,
-        &0u64,
     )
 }
 
@@ -136,17 +124,48 @@ fn warp_past_window(f: &F, h: &BytesN<32>) {
     f.env.ledger().set_timestamp(until + 1);
 }
 
-// ── the bond maths ───────────────────────────────────────────────────────
+// ── the bond ─────────────────────────────────────────────────────────────
 
 #[test]
-fn bond_is_max_of_floor_and_percentage() {
-    let p = params();
-    // The floor dominates a small order.
-    assert_eq!(proofbridge_core::dispute::bond_for(1_000, &p), BOND_FLOOR);
-    // The percentage dominates a large one.
-    assert_eq!(proofbridge_core::dispute::bond_for(1_000_000, &p), 10_000);
-    // At the crossover the floor still wins, which is what keeps a bond non-zero.
-    assert_eq!(proofbridge_core::dispute::bond_for(100_000, &p), BOND_FLOOR);
+fn bond_is_the_route_floor() {
+    assert_eq!(proofbridge_core::dispute::bond_for(&params()), BOND_FLOOR);
+    let big = DisputeParams {
+        challenge_period: CHALLENGE,
+        bond_floor: 250 * 10u128.pow(7),
+    };
+    assert_eq!(
+        proofbridge_core::dispute::bond_for(&big),
+        250 * 10u128.pow(7)
+    );
+}
+
+/// The view quotes what a filing pulls, follows a retuned floor, and fails closed on an unset route.
+#[test]
+fn bond_for_quotes_what_the_filing_pulls() {
+    let f = fixture();
+    assert_eq!(f.client.bond_for(&CHAIN), BOND_FLOOR);
+    let t = token::Client::new(&f.env, &f.token);
+    let before = t.balance(&f.filer);
+    let bond = file(&f, &hash(&f.env, 0x60));
+    assert_eq!(bond, f.client.bond_for(&CHAIN));
+    assert_eq!(
+        before - t.balance(&f.filer),
+        BOND_FLOOR as i128,
+        "the filing pulled the floor"
+    );
+
+    f.client.set_dispute_params(
+        &CHAIN,
+        &DisputeParams {
+            challenge_period: CHALLENGE,
+            bond_floor: 3 * BOND_FLOOR,
+        },
+    );
+    assert_eq!(f.client.bond_for(&CHAIN), 3 * BOND_FLOOR);
+    assert_eq!(
+        f.client.try_bond_for(&(CHAIN + 7)),
+        Err(Ok(Error::NoDisputeParams))
+    );
 }
 
 #[test]
@@ -159,7 +178,6 @@ fn params_fail_closed() {
             &DisputeParams {
                 challenge_period: 60,
                 bond_floor: BOND_FLOOR,
-                bond_bps: BOND_BPS,
             }
         ),
         Err(Ok(Error::InvalidChallengePeriod))
@@ -171,22 +189,9 @@ fn params_fail_closed() {
             &DisputeParams {
                 challenge_period: CHALLENGE,
                 bond_floor: 0,
-                bond_bps: BOND_BPS,
             }
         ),
         Err(Ok(Error::InvalidBondFloor))
-    );
-    // Above the ceiling a bond deters honest disputes as much as frivolous ones.
-    assert_eq!(
-        f.client.try_set_dispute_params(
-            &CHAIN,
-            &DisputeParams {
-                challenge_period: CHALLENGE,
-                bond_floor: BOND_FLOOR,
-                bond_bps: 2_000,
-            }
-        ),
-        Err(Ok(Error::InvalidBondBps))
     );
 }
 
@@ -206,7 +211,6 @@ fn param_validation_matches_the_shared_vector() {
         let p = DisputeParams {
             challenge_period: row["challengePeriod"].as_u64().unwrap(),
             bond_floor: row["bondFloor"].as_str().unwrap().parse().unwrap(),
-            bond_bps: row["bondBps"].as_u64().unwrap() as _,
         };
         let got = f.client.try_set_dispute_params(&CHAIN, &p);
         let label = row["label"].as_str().unwrap();
@@ -214,7 +218,6 @@ fn param_validation_matches_the_shared_vector() {
             0 => assert!(got.is_ok(), "{label}: should write"),
             1 => assert_eq!(got, Err(Ok(Error::InvalidChallengePeriod)), "{label}"),
             2 => assert_eq!(got, Err(Ok(Error::InvalidBondFloor)), "{label}"),
-            3 => assert_eq!(got, Err(Ok(Error::InvalidBondBps)), "{label}"),
             other => panic!("{label}: unknown field {other}"),
         }
     }
@@ -228,13 +231,11 @@ fn an_unconfigured_route_cannot_be_disputed() {
         f.client.try_open_dispute(
             &f.escrow,
             &h,
-            &1_000,
             &(CHAIN + 7),
             &f.filer,
             &hash(&f.env, 0),
             &DEADLINE,
-            &BUFFER,
-            &0u64
+            &BUFFER
         ),
         Err(Ok(Error::NoDisputeParams))
     );
@@ -251,13 +252,11 @@ fn only_a_registered_escrow_may_open_a_dispute() {
         f.client.try_open_dispute(
             &stranger,
             &h,
-            &1_000,
             &CHAIN,
             &f.filer,
             &hash(&f.env, 0),
             &DEADLINE,
-            &BUFFER,
-            &0u64
+            &BUFFER
         ),
         Err(Ok(Error::NotEscrow))
     );
@@ -267,7 +266,7 @@ fn only_a_registered_escrow_may_open_a_dispute() {
 fn the_bond_lands_in_the_module_not_the_escrow() {
     let f = fixture();
     let h = hash(&f.env, 3);
-    let bond = file(&f, &h, 100_000);
+    let bond = file(&f, &h);
     assert_eq!(bond, BOND_FLOOR);
     let t = token::Client::new(&f.env, &f.token);
     assert_eq!(t.balance(&f.client.address), bond as i128);
@@ -278,18 +277,16 @@ fn the_bond_lands_in_the_module_not_the_escrow() {
 fn one_dispute_per_order() {
     let f = fixture();
     let h = hash(&f.env, 4);
-    file(&f, &h, 100_000);
+    file(&f, &h);
     assert_eq!(
         f.client.try_open_dispute(
             &f.escrow,
             &h,
-            &100_000,
             &CHAIN,
             &f.filer,
             &hash(&f.env, 0),
             &DEADLINE,
-            &BUFFER,
-            &0u64
+            &BUFFER
         ),
         Err(Ok(Error::DisputeExists))
     );
@@ -301,7 +298,7 @@ fn one_dispute_per_order() {
 fn the_arbiter_can_never_rule_that_the_trade_went_through() {
     let f = fixture();
     let h = hash(&f.env, 5);
-    file(&f, &h, 100_000);
+    file(&f, &h);
     // TradeProceeds is what evidence produces; an arbiter reaching it would be arbitration
     // overruling proof.
     assert_eq!(
@@ -319,13 +316,13 @@ fn the_arbiter_can_never_rule_that_the_trade_went_through() {
 fn a_ruling_opens_a_window_it_does_not_pay() {
     let f = fixture();
     let h = hash(&f.env, 6);
-    let bond = file(&f, &h, 100_000);
+    let bond = file(&f, &h);
     f.client.resolve_dispute(&h, &DisputeOutcome::MutualRefund);
 
     // Still held: the ruling has opened a window, not moved money.
     let t = token::Client::new(&f.env, &f.token);
     assert_eq!(t.balance(&f.client.address), bond as i128);
-    let (outcome, window_over, _) = f.client.outcome_of(&h, &0u64);
+    let (outcome, window_over, _) = f.client.outcome_of(&h);
     assert_eq!(outcome, DisputeOutcome::MutualRefund);
     assert!(!window_over, "the window is still running");
 }
@@ -338,19 +335,19 @@ fn a_ruling_opens_a_window_it_does_not_pay() {
 fn the_fallback_waits_out_the_challenge_period() {
     let f = fixture();
     let h = hash(&f.env, 7);
-    file(&f, &h, 100_000);
-    let (_, window_over, _) = f.client.outcome_of(&h, &0u64);
+    file(&f, &h);
+    let (_, window_over, _) = f.client.outcome_of(&h);
     assert!(!window_over);
 
     // The challenge period alone is NOT enough: the order still has time on its own clock, and no
     // dispute path may complete before `deadline + buffer` (D3, T-50). This is the bug that let a
     // filer cancel a week-long order an hour after filing.
     f.env.ledger().with_mut(|l| l.timestamp += CHALLENGE + 1);
-    let (_, window_over, _) = f.client.outcome_of(&h, &0u64);
+    let (_, window_over, _) = f.client.outcome_of(&h);
     assert!(!window_over);
 
     warp_past_window(&f, &h);
-    let (outcome, window_over, _) = f.client.outcome_of(&h, &0u64);
+    let (outcome, window_over, _) = f.client.outcome_of(&h);
     assert!(window_over);
     assert_eq!(
         outcome,
@@ -365,34 +362,81 @@ fn the_fallback_waits_out_the_challenge_period() {
 fn the_window_floors_at_the_orders_own_deadline() {
     let f = fixture();
     let h = hash(&f.env, 30);
-    file(&f, &h, 100_000);
+    file(&f, &h);
     assert!(
         f.client.effective_challenge_deadline(&h) >= DEADLINE + BUFFER,
         "the challenge period must not outrun the order's deadline"
     );
 }
 
-/// S1: a pause on the *escrow* extends the challenge window, because a pause is what stops the
-/// parties presenting and presentation is gated by the escrow.
+/// The filing writes one deadline in plain time: `max(now + challenge, deadline + buffer)`, either
+/// arm winning.
 #[test]
-fn an_escrow_pause_extends_the_challenge_window() {
+fn the_filing_deadline_is_the_max_of_challenge_and_order_floor() {
     let f = fixture();
-    let h = hash(&f.env, 31);
-    file(&f, &h, 100_000);
-    let before = f.client.effective_challenge_deadline(&h);
-    MockEscrowClient::new(&f.env, &f.escrow).set_paused_seconds(&600);
+    let far = hash(&f.env, 31);
+    file(&f, &far);
     assert_eq!(
-        f.client.effective_challenge_deadline(&h),
-        before + 600,
-        "the escrow's paused seconds move the deadline"
+        f.client.effective_challenge_deadline(&far),
+        DEADLINE + BUFFER
     );
+    let near = hash(&f.env, 32);
+    file_at(&f, &near, T0 + 60);
+    assert_eq!(f.client.effective_challenge_deadline(&near), T0 + CHALLENGE);
+    assert_eq!(
+        f.client.challenge_deadline_of(&near),
+        T0 + CHALLENGE,
+        "the escrow's mid-call read is the same stored value"
+    );
+}
+
+/// A ruling writes `max(now, deadline) + buffer`: before the deadline it counts from the deadline.
+#[test]
+fn a_ruling_before_the_deadline_counts_from_the_deadline() {
+    let f = fixture();
+    let h = hash(&f.env, 33);
+    file(&f, &h);
+    f.client.resolve_dispute(&h, &DisputeOutcome::MutualRefund);
+    assert_eq!(f.client.effective_challenge_deadline(&h), DEADLINE + BUFFER);
+}
+
+/// After the deadline, the ruling's window counts from the ruling.
+#[test]
+fn a_ruling_after_the_deadline_counts_from_now() {
+    let f = fixture();
+    let h = hash(&f.env, 34);
+    file_at(&f, &h, T0 + 60);
+    let now = T0 + 600;
+    f.env.ledger().set_timestamp(now);
+    f.client.resolve_dispute(&h, &DisputeOutcome::MutualRefund);
+    assert_eq!(f.client.effective_challenge_deadline(&h), now + BUFFER);
+}
+
+/// `window_over` is exactly `now >= deadline`, the comparison the escrow's finalize makes, at every
+/// second around the boundary.
+#[test]
+fn window_over_is_the_deadline_comparison_at_the_boundary() {
+    let f = fixture();
+    let h = hash(&f.env, 35);
+    file(&f, &h);
+    let until = f.client.effective_challenge_deadline(&h);
+    for t in [until - 1, until, until + 1] {
+        f.env.ledger().set_timestamp(t);
+        let (_, over, _) = f.client.outcome_of(&h);
+        assert_eq!(over, t >= until, "at {t}");
+        assert_eq!(
+            f.client.effective_challenge_deadline(&h),
+            until,
+            "the deadline never moves"
+        );
+    }
 }
 
 #[test]
 fn the_arbiter_cannot_rule_after_the_challenge_period() {
     let f = fixture();
     let h = hash(&f.env, 8);
-    file(&f, &h, 100_000);
+    file(&f, &h);
     warp_past_window(&f, &h);
     assert_eq!(
         f.client
@@ -407,14 +451,14 @@ fn the_arbiter_cannot_rule_after_the_challenge_period() {
 fn a_mutual_refund_returns_the_bond_to_the_filer() {
     let f = fixture();
     let h = hash(&f.env, 9);
-    let bond = file(&f, &h, 100_000);
+    let bond = file(&f, &h);
     let t = token::Client::new(&f.env, &f.token);
     let before = t.balance(&f.filer);
 
     f.client.resolve_dispute(&h, &DisputeOutcome::MutualRefund);
     warp_past_window(&f, &h);
     f.client
-        .settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false);
+        .settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false, &false);
 
     assert_eq!(t.balance(&f.filer), before + bond as i128);
     assert!(!f.client.is_disputed(&h), "the record is closed");
@@ -424,7 +468,7 @@ fn a_mutual_refund_returns_the_bond_to_the_filer() {
 fn a_ruling_against_the_filer_forfeits_the_bond_to_the_fee_pool() {
     let f = fixture();
     let h = hash(&f.env, 10);
-    let bond = file(&f, &h, 100_000);
+    let bond = file(&f, &h);
     let t = token::Client::new(&f.env, &f.token);
 
     // The filer is the bridger, and the ruling forfeits the bridger: the filer was wrong, so the
@@ -432,8 +476,13 @@ fn a_ruling_against_the_filer_forfeits_the_bond_to_the_fee_pool() {
     f.client
         .resolve_dispute(&h, &DisputeOutcome::BridgerForfeit);
     warp_past_window(&f, &h);
-    f.client
-        .settle_bond(&f.escrow, &h, &DisputeOutcome::BridgerForfeit, &true);
+    f.client.settle_bond(
+        &f.escrow,
+        &h,
+        &DisputeOutcome::BridgerForfeit,
+        &true,
+        &false,
+    );
 
     assert_eq!(t.balance(&f.fee_pool), bond as i128);
 }
@@ -451,8 +500,8 @@ fn bond_routing_matches_the_shared_vector() {
     let rows = v["bondRouting"].as_array().unwrap();
     assert_eq!(
         rows.len(),
-        10,
-        "the table must be exhaustive: 5 outcomes x 2 arms"
+        20,
+        "the table must be exhaustive: 5 outcomes x 2 x 2 arms"
     );
     for row in rows {
         let outcome = match row["outcome"].as_str().unwrap() {
@@ -466,12 +515,14 @@ fn bond_routing_matches_the_shared_vector() {
             }
         };
         let filer_is_bridger = row["filerIsBridger"].as_bool().unwrap();
+        let return_to_filer = row["returnToFiler"].as_bool().unwrap();
         assert_eq!(
-            returns(outcome, filer_is_bridger),
+            returns(outcome, filer_is_bridger, return_to_filer),
             row["bondReturnsToFiler"].as_bool().unwrap(),
-            "routing disagrees with the shared vector for {:?} / filerIsBridger={}",
+            "routing disagrees with the shared vector for {:?} / filerIsBridger={} / returnToFiler={}",
             outcome,
-            filer_is_bridger
+            filer_is_bridger,
+            return_to_filer
         );
     }
 }
@@ -533,24 +584,32 @@ fn outcome_discriminants_match_the_shared_vector() {
     }
 }
 
-/// Bond sizing, likewise: the cases live in the vector, not in each chain's head.
+/// Bond sizing, likewise: the cases live in the vector, not in each chain's head. Each row's order
+/// amount and decimals differ; the bond is the row's floor regardless, through the library and
+/// through the module's quote.
 #[test]
 fn bond_sizing_matches_the_shared_vector() {
     let v: serde_json::Value = serde_json::from_str(DISPUTE_VECTORS).unwrap();
-    for c in v["bondSizing"].as_array().unwrap() {
+    let rows = v["bondSizing"].as_array().unwrap();
+    assert_eq!(
+        rows.len() as u64,
+        v["counts"]["bondSizing"].as_u64().unwrap()
+    );
+    let f = fixture();
+    for c in rows {
         let p = DisputeParams {
             challenge_period: CHALLENGE,
             bond_floor: c["bondFloor"].as_str().unwrap().parse().unwrap(),
-            bond_bps: c["bondBps"].as_u64().unwrap() as u32,
         };
-        let amount: u128 = c["amount"].as_str().unwrap().parse().unwrap();
         let expected: u128 = c["bond"].as_str().unwrap().parse().unwrap();
         assert_eq!(
-            proofbridge_core::dispute::bond_for(amount, &p),
+            proofbridge_core::dispute::bond_for(&p),
             expected,
             "{}",
             c["label"]
         );
+        f.client.set_dispute_params(&CHAIN, &p);
+        assert_eq!(f.client.bond_for(&CHAIN), expected, "{}", c["label"]);
     }
 }
 
@@ -560,10 +619,10 @@ fn only_the_escrow_that_opened_a_dispute_may_settle_it() {
     let other = Address::generate(&f.env);
     f.client.set_escrow(&other, &true);
     let h = hash(&f.env, 11);
-    file(&f, &h, 100_000);
+    file(&f, &h);
     assert_eq!(
         f.client
-            .try_settle_bond(&other, &h, &DisputeOutcome::MutualRefund, &false),
+            .try_settle_bond(&other, &h, &DisputeOutcome::MutualRefund, &false, &false),
         Err(Ok(Error::WrongEscrow))
     );
 }
@@ -620,7 +679,6 @@ fn with_challenge(challenge_period: u64) -> DisputeParams {
     DisputeParams {
         challenge_period,
         bond_floor: BOND_FLOOR,
-        bond_bps: BOND_BPS,
     }
 }
 
@@ -646,7 +704,7 @@ fn the_filing_event_carries_the_evidence_hash() {
     use soroban_sdk::{events::Event as _, testutils::Events as _};
     let f = fixture();
     let h = hash(&f.env, 1);
-    let bond = file(&f, &h, 1_000);
+    let bond = file(&f, &h);
     // `events().all()` holds the last invocation only, so read them before any other call.
     let got = f.env.events().all().filter_by_contract(&f.client.address);
     let d = f.client.get_dispute(&h).unwrap();
@@ -731,17 +789,12 @@ fn an_undisputed_order_is_not_disputed() {
     );
     assert_eq!(
         f.client
-            .try_settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false),
+            .try_settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false, &false),
         Err(Ok(Error::NotDisputed))
     );
     assert_eq!(
-        f.client.try_record_response(
-            &f.escrow,
-            &h,
-            &Address::generate(&f.env),
-            &hash(&f.env, 1),
-            &0
-        ),
+        f.client
+            .try_record_response(&f.escrow, &h, &Address::generate(&f.env), &hash(&f.env, 1),),
         Err(Ok(Error::NotDisputed))
     );
 }
@@ -751,10 +804,10 @@ fn an_undisputed_order_is_not_disputed() {
 fn the_filer_cannot_respond_to_their_own_dispute() {
     let f = fixture();
     let h = hash(&f.env, 41);
-    file(&f, &h, 100_000);
+    file(&f, &h);
     assert_eq!(
         f.client
-            .try_record_response(&f.escrow, &h, &f.filer, &hash(&f.env, 0x11), &0),
+            .try_record_response(&f.escrow, &h, &f.filer, &hash(&f.env, 0x11)),
         Err(Ok(Error::NotResponder))
     );
     assert_eq!(
@@ -766,7 +819,7 @@ fn the_filer_cannot_respond_to_their_own_dispute() {
     // The real counterparty still can.
     let counterparty = Address::generate(&f.env);
     f.client
-        .record_response(&f.escrow, &h, &counterparty, &hash(&f.env, 0x11), &0);
+        .record_response(&f.escrow, &h, &counterparty, &hash(&f.env, 0x11));
     assert_eq!(
         f.client.get_dispute(&h).unwrap().responder_evidence,
         hash(&f.env, 0x11)
@@ -780,15 +833,10 @@ fn a_response_through_another_escrow_is_wrong_escrow() {
     let other = f.env.register(MockEscrow, ());
     f.client.set_escrow(&other, &true);
     let h = hash(&f.env, 42);
-    file(&f, &h, 100_000);
+    file(&f, &h);
     assert_eq!(
-        f.client.try_record_response(
-            &other,
-            &h,
-            &Address::generate(&f.env),
-            &hash(&f.env, 0x11),
-            &0
-        ),
+        f.client
+            .try_record_response(&other, &h, &Address::generate(&f.env), &hash(&f.env, 0x11),),
         Err(Ok(Error::WrongEscrow))
     );
 }
@@ -815,13 +863,11 @@ fn an_unfunded_bond_is_bond_transfer_failed() {
         f.client.try_open_dispute(
             &f.escrow,
             &h,
-            &1_000,
             &CHAIN,
             &broke,
             &hash(&f.env, 0xEE),
             &DEADLINE,
             &BUFFER,
-            &0u64,
         ),
         Err(Ok(Error::BondTransferFailed))
     );
@@ -873,7 +919,7 @@ fn the_bond_credit_event_has_its_own_topic() {
     use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
     let f = fixture();
     let h = hash(&f.env, 61);
-    let bond = file(&f, &h, 1_000);
+    let bond = file(&f, &h);
     // Drain the module so the payout is refused and credited instead.
     TokenContractClient::new(&f.env, &f.token).transfer(
         &f.client.address,
@@ -881,7 +927,7 @@ fn the_bond_credit_event_has_its_own_topic() {
         &(bond as i128),
     );
     f.client
-        .settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false);
+        .settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false, &false);
     // `events().all()` holds the last invocation only, so read them before any other call.
     let got = f.env.events().all().filter_by_contract(&f.client.address);
     let firsts: std::vec::Vec<ScVal> = got
@@ -925,13 +971,13 @@ fn relayed_error_codes_match_the_shared_definitions() {
 fn d5_a_second_answer_is_refused() {
     let f = fixture();
     let h = hash(&f.env, 50);
-    file(&f, &h, 100_000);
+    file(&f, &h);
     let other = Address::generate(&f.env);
     f.client
-        .record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11), &0);
+        .record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11));
     assert_eq!(
         f.client
-            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x22), &0),
+            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x22)),
         Err(Ok(Error::AlreadyResponded))
     );
     assert_eq!(
@@ -946,13 +992,13 @@ fn d5_a_second_answer_is_refused() {
 fn d5_an_answer_after_the_ruling_is_refused() {
     let f = fixture();
     let h = hash(&f.env, 52);
-    file(&f, &h, 100_000);
+    file(&f, &h);
     f.client.resolve_dispute(&h, &DisputeOutcome::MutualRefund);
     assert!(f.env.ledger().timestamp() < f.client.effective_challenge_deadline(&h));
     let other = Address::generate(&f.env);
     assert_eq!(
         f.client
-            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11), &0),
+            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11)),
         Err(Ok(Error::AlreadyRuled))
     );
     assert_eq!(
@@ -966,18 +1012,18 @@ fn d5_an_answer_after_the_ruling_is_refused() {
 fn d5_an_answer_at_the_challenge_deadline_is_refused() {
     let f = fixture();
     let h = hash(&f.env, 51);
-    file(&f, &h, 100_000);
+    file(&f, &h);
     let until = f.client.effective_challenge_deadline(&h);
     let other = Address::generate(&f.env);
     f.env.ledger().set_timestamp(until);
     assert_eq!(
         f.client
-            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11), &0),
+            .try_record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11)),
         Err(Ok(Error::ResponseWindowClosed))
     );
     f.env.ledger().set_timestamp(until - 1);
     f.client
-        .record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11), &0);
+        .record_response(&f.escrow, &h, &other, &hash(&f.env, 0x11));
 }
 
 /// D5: an empty answer is refused, so "answered" is exactly "the slot is non-zero".
@@ -985,32 +1031,10 @@ fn d5_an_answer_at_the_challenge_deadline_is_refused() {
 fn d5_a_zero_answer_is_refused() {
     let f = fixture();
     let h = hash(&f.env, 52);
-    file(&f, &h, 100_000);
+    file(&f, &h);
     assert_eq!(
-        f.client.try_record_response(
-            &f.escrow,
-            &h,
-            &Address::generate(&f.env),
-            &hash(&f.env, 0),
-            &0
-        ),
+        f.client
+            .try_record_response(&f.escrow, &h, &Address::generate(&f.env), &hash(&f.env, 0),),
         Err(Ok(Error::ZeroResponse))
-    );
-}
-
-/// D5: the deadline is the pause-adjusted one, from the counter the escrow passes in.
-#[test]
-fn d5_the_escrows_pause_moves_the_answer_deadline() {
-    let f = fixture();
-    let h = hash(&f.env, 53);
-    file(&f, &h, 100_000);
-    let until = f.client.effective_challenge_deadline(&h);
-    f.env.ledger().set_timestamp(until);
-    f.client.record_response(
-        &f.escrow,
-        &h,
-        &Address::generate(&f.env),
-        &hash(&f.env, 0x11),
-        &3_600,
     );
 }

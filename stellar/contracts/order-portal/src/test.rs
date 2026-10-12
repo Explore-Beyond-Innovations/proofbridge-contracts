@@ -599,6 +599,7 @@ fn fault_codes_never_move() {
             NonExactDownscale => 61,
             DecimalOverflow => 62,
             InvalidAccountAddress => 70,
+            TransferShort => 106,
             ContractPaused => 71,
             NotPendingAdmin => 72,
             NothingToClaim => 73,

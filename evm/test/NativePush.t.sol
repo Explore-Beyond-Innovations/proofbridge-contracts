@@ -9,6 +9,7 @@ import {IDisputeManager} from "src/interfaces/IDisputeManager.sol";
 import {Dispute} from "src/libraries/Dispute.sol";
 import {TestField} from "test/utils/TestField.sol";
 import {DisputeTest} from "./Dispute.t.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 /// The logic behind a proxy wallet: receiving costs a delegatecall plus storage writes.
 contract WalletImpl {
@@ -107,7 +108,7 @@ contract StateProbe {
 
     receive() external payable {
         hooked = true;
-        statusSeen = uint8(escrow.orders(orderHash));
+        statusSeen = uint8(statusOf(address(escrow), orderHash));
         disputedSeen = dm.isDisputed(orderHash);
     }
 }
@@ -188,6 +189,7 @@ contract NativePushTest is DisputeTest {
         test_createAd_with_native_token_success(); // wires the route
         ReentrantMaker rm = new ReentrantMaker(IAdManager(address(adManager)), NATIVE_TOKEN_ADDRESS);
         vm.deal(address(this), 10 ether);
+        keyRegistry.approve(_b32(maker), _b32(address(rm)), true); // the named signer consents
         rm.create{value: 10 ether}("rmAd", 10 ether, orderChainId, _b32(maker));
 
         rm.withdraw(4 ether);

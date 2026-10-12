@@ -18,6 +18,7 @@ import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Posei
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 /*//////////////////////////////////////////////////////////////
        C-19 — errors no other test named, each triggered here
@@ -57,6 +58,11 @@ contract FalseReturnToken {
         return 18;
     }
 
+    /// The escrow reads its balance around every pull.
+    function balanceOf(address) external pure returns (uint256) {
+        return 0;
+    }
+
     function transferFrom(address, address, uint256) external pure returns (bool) {
         return false;
     }
@@ -74,6 +80,11 @@ contract ReentrantToken {
 
     function decimals() external pure returns (uint8) {
         return 18;
+    }
+
+    /// The escrow reads its balance around every pull.
+    function balanceOf(address) external pure returns (uint256) {
+        return 0;
     }
 
     function transferFrom(address, address, uint256) external returns (bool) {
@@ -124,7 +135,7 @@ contract AdManagerErrorCoverageTest is AdManagerTest {
         IAdManager.OrderParams memory p = _defaultParams("no-such-ad");
         vm.prank(maker);
         vm.expectRevert(IAdManager.AdManager__AdNotFound.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function test_c19_aReusedAdIdIsUsedAdId() public {
@@ -155,7 +166,7 @@ contract AdManagerErrorCoverageTest is AdManagerTest {
         vm.prank(maker);
         vm.expectRevert(IEscrow.Escrow__NoDisputeManager.selector);
         adManager.dispute(p, bytes32("evidence"));
-        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Open));
+        assertEq(uint8(statusOf(address(adManager), h)), uint8(IEscrow.Status.Open));
     }
 
     /// The signed ad-side decimals must match the token's own.
@@ -165,7 +176,7 @@ contract AdManagerErrorCoverageTest is AdManagerTest {
         p.adDecimals = 6;
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(DecimalScaling.DecimalScaling__DecimalsMismatch.selector, 18, 6));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /// A token without `decimals()` cannot be locked against: the escrow cannot check the scaling.
@@ -185,7 +196,7 @@ contract AdManagerErrorCoverageTest is AdManagerTest {
         vm.expectRevert(
             abi.encodeWithSelector(DecimalScaling.DecimalScaling__DecimalsUnavailable.selector, address(bare))
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
         vm.stopPrank();
     }
 
@@ -197,7 +208,7 @@ contract AdManagerErrorCoverageTest is AdManagerTest {
         merkleManager.setManager(address(adManager), false);
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(MerkleManager.MerkleManager__NotManager.selector, address(adManager)));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 }
 

@@ -19,6 +19,7 @@ import {KeyMessages} from "src/libraries/KeyMessages.sol";
 import {CounterpartyVerifier} from "src/CounterpartyVerifier.sol";
 import {RouteTiming} from "src/libraries/RouteTiming.sol";
 import {AdManagerTest} from "./Admanager.t.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 /*//////////////////////////////////////////////////////////////
           #422 — the maker's settlement halt (F1 residual)
@@ -57,13 +58,13 @@ contract SettlementHaltTest is AdManagerCancellationTest {
 
         vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__Halted.selector, maker));
         _unlock(p, "N1");
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Open), "nothing moved");
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Open), "nothing moved");
 
         vm.expectEmit(true, true, true, true);
         emit IAdManager.SettlementResumed(maker);
         _resume();
         _unlock(p, "N1");
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Filled));
     }
 
     function test_halt_isKeyedByMaker_someoneElsesHaltChangesNothing() public {
@@ -71,7 +72,7 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         vm.prank(bridger);
         adManager.haltSettlement();
         _unlock(p, "N1");
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Filled));
     }
 
     /// A runbook that fires the halt twice is not an error, and the second halt still refuses.
@@ -105,7 +106,7 @@ contract SettlementHaltTest is AdManagerCancellationTest {
 
         vm.warp(p.deadline + 10 minutes);
         adManager.presentSettled(p, root, hex"");
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Filled));
         assertEq(adToken.balanceOf(recipient), 60 ether, "the bridger's recipient is paid");
     }
 
@@ -159,19 +160,106 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
-    /// A halt lifted before the deadline never denied this window: ordinary timing.
-    function test_finalizeCancel_haltLiftedBeforeTheDeadline_ordinaryTiming() public {
+    /// A halt during the order's life refused the co-signed unlock while it held, so it counts even
+    /// when lifted before the deadline: the cancel waits the grace.
+    function test_finalizeCancel_haltDuringTheOrder_resumedBeforeTheDeadline_waitsTheGrace() public {
         (IAdManager.OrderParams memory p,) = _lock(6);
         _halt();
         vm.warp(p.deadline - 1);
         _resume();
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        vm.warp(p.deadline + 60 minutes);
         adManager.finalizeCancel(p);
         assertEq(_locked(), 0);
     }
 
-    /// The boundary is the deadline itself: a resume in the deadline's second counts (`>=`).
+    /// The lock never reads the halt, so a halt from before the lock, resumed before the deadline,
+    /// was in force during the order's life: denied.
+    function test_finalizeCancel_haltFromBeforeTheLock_resumedBeforeTheDeadline_waitsTheGrace() public {
+        _halt();
+        vm.warp(block.timestamp + 10);
+        (IAdManager.OrderParams memory p,) = _lock(16);
+        vm.warp(p.deadline - 1);
+        _resume();
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes);
+    }
+
+    /// A halt held and lifted entirely before the lock never touched this order: ordinary timing.
+    function test_finalizeCancel_haltAndResumeBothBeforeTheLock_ordinaryTiming() public {
+        _halt();
+        vm.warp(block.timestamp + 10);
+        _resume();
+        vm.warp(block.timestamp + 1);
+        (IAdManager.OrderParams memory p,) = _lock(17);
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        adManager.finalizeCancel(p);
+        assertEq(_locked(), 0);
+    }
+
+    /// The boundary is the lock itself: a resume in the lock's second counts (`>=`).
+    function test_finalizeCancel_resumeInTheLocksSecond_counts() public {
+        _halt();
+        vm.warp(block.timestamp + 10);
+        _resume();
+        (IAdManager.OrderParams memory p,) = _lock(18);
+        _claim(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes);
+    }
+
+    /// An unwired root verifier refuses every co-signed unlock, so it denies the payout like a halt:
+    /// the cancel waits the grace. Wired again, the gap it opened still counts: the grace stays.
+    function test_finalizeCancel_verifierUnsetAfterTheLock_waitsTheGrace_setAgainStillWaits() public {
+        (IAdManager.OrderParams memory p,) = _lock(19);
+        _claim(p);
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, address(0));
+        vm.warp(p.deadline + 30 minutes);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+
+        address verifier = address(new MockRootVerifier(true));
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, verifier);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "rewiring does not erase the gap");
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        vm.warp(p.deadline + 60 minutes);
+        adManager.finalizeCancel(p);
+        assertEq(_locked(), 0);
+    }
+
+    /// A verifier repointed after the lock is a change in the co-signed path too: the grace applies.
+    function test_finalizeCancel_verifierRepointedAfterTheLock_waitsTheGrace() public {
+        (IAdManager.OrderParams memory p,) = _lock(20);
+        address other = address(new MockRootVerifier(true));
+        vm.warp(block.timestamp + 10);
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, other);
+        _claim(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes);
+    }
+
+    /// The boundary: a verifier wired in the lock's own second is the route's set-up, not a change
+    /// after it, so the order runs ordinary timing.
+    function test_finalizeCancel_verifierSetInTheLocksSecond_ordinaryTiming() public {
+        address fresh = address(new MockRootVerifier(true));
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, fresh);
+        (IAdManager.OrderParams memory p,) = _lock(21);
+        _claim(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 30 minutes);
+    }
+
+    /// A resume at the deadline is after the lock, so it counts.
     function test_finalizeCancel_resumeInTheDeadlinesSecond_counts() public {
         (IAdManager.OrderParams memory p,) = _lock(7);
         _halt();
@@ -233,6 +321,16 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
+    /// Plan 12 C: another slot of the signer dying inside the order's life denies nothing; only the
+    /// pinned slot (0) counts.
+    function test_finalizeCancel_anotherSlotExpiringInside_ordinaryTiming() public {
+        (IAdManager.OrderParams memory p,) = _lock(22);
+        keyRegistry.setSlotExpiry(p.adSettlementSigner, 1, uint64(p.deadline - 10 minutes));
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        adManager.finalizeCancel(p);
+    }
+
     /// A rotation whose old slot outlives the deadline puts no expiry in the order's life: ordinary.
     function test_finalizeCancel_rotationOutlivingTheCancel_ordinaryTiming() public {
         (IAdManager.OrderParams memory p,) = _lock(20);
@@ -245,15 +343,22 @@ contract SettlementHaltTest is AdManagerCancellationTest {
     /// Review F5: an anchor that cannot answer `anchorDelay` refuses the denied finalize outright —
     /// a long wait, never a shorter one.
     function test_finalizeCancel_unreadableAnchor_refuses() public {
+        (IAdManager.OrderParams memory p,) = _lock(18);
         address noAnchorDelay = address(new MockRootVerifier(true));
         vm.prank(admin);
         adManager.setRootAnchor(IRootAnchor(noAnchorDelay));
-        (IAdManager.OrderParams memory p,) = _lock(18);
         _halt();
         _claim(p);
         vm.warp(p.deadline + 2 days);
         vm.expectRevert(bytes(""));
         adManager.finalizeCancel(p);
+        // The lock snapshots the delay, so a new lock under that anchor fails closed too.
+        IAdManager.OrderParams memory q = _defaultParams(lastAdId);
+        q.salt = 19;
+        q.deadline = block.timestamp + 1 days;
+        vm.prank(maker);
+        vm.expectRevert(bytes(""));
+        adManager.lockForOrder(q, 0);
     }
 
     /// The view the relayer's janitor asks: 0 before a claim, the window end after, plus the grace
@@ -287,8 +392,8 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         adManager.finalizeCancel(p);
     }
 
-    /// The grace stacks on a pause the same way the window does: paused seconds extend the end.
-    function test_finalizeCancel_grace_stacksOnAPause() public {
+    /// A pause moves no grace: the window and the grace are plain time.
+    function test_finalizeCancel_grace_aPauseMovesNothing() public {
         (IAdManager.OrderParams memory p,) = _lock(10);
         _halt();
         _claim(p);
@@ -297,11 +402,50 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         vm.warp(p.deadline + 15 minutes);
         vm.prank(admin);
         adManager.unpause();
-        // 15 min paused: window ends at +45, grace ends at +75.
-        vm.warp(p.deadline + 75 minutes - 1);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 75 minutes));
+        vm.warp(p.deadline + 60 minutes - 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
         adManager.finalizeCancel(p);
-        vm.warp(p.deadline + 75 minutes);
+        vm.warp(p.deadline + 60 minutes);
+        adManager.finalizeCancel(p);
+    }
+
+    /// Raising the order chain's anchor delay after the lock lengthens a denied order's grace: the
+    /// response to a suspected forged anchor or an anchoring outage reaches every pending cancel.
+    function test_finalizeCancel_grace_raisedDelayLengthensIt() public {
+        _wireAnchor();
+        vm.prank(admin);
+        anchor.setAnchorDelay(orderChainId, 1 hours);
+        (IAdManager.OrderParams memory p,) = _lock(24);
+        _halt();
+        _claim(p);
+        assertEq(adManager.cancelFinalizesAt(p), p.deadline + 30 minutes + 1 hours + 30 minutes);
+        vm.prank(admin);
+        anchor.setAnchorDelay(orderChainId, 3 hours);
+        uint256 end = p.deadline + 30 minutes + 3 hours + 30 minutes;
+        assertEq(adManager.cancelFinalizesAt(p), end, "the raise reaches the pending grace");
+        vm.warp(end - 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, end));
+        adManager.finalizeCancel(p);
+        vm.warp(end);
+        adManager.finalizeCancel(p);
+    }
+
+    /// Lowering the delay after the lock shortens nothing: the grace keeps the delay the lock saw.
+    function test_finalizeCancel_grace_loweredDelayShortensNothing() public {
+        _wireAnchor();
+        vm.prank(admin);
+        anchor.setAnchorDelay(orderChainId, 2 hours);
+        (IAdManager.OrderParams memory p,) = _lock(25);
+        _halt();
+        _claim(p);
+        vm.prank(admin);
+        anchor.setAnchorDelay(orderChainId, 0);
+        uint256 end = p.deadline + 30 minutes + 2 hours + 30 minutes;
+        assertEq(adManager.cancelFinalizesAt(p), end, "the cut does not reach the pending grace");
+        vm.warp(end - 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, end));
+        adManager.finalizeCancel(p);
+        vm.warp(end);
         adManager.finalizeCancel(p);
     }
 
@@ -325,17 +469,17 @@ contract SettlementHaltTest is AdManagerCancellationTest {
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
         adManager.finalizeCancel(p);
 
-        // At the window's last second (inclusive) the halt is still what refuses; a second later the
-        // cutoff closes the co-signed path on its own.
-        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__Halted.selector, maker));
-        _unlock(p, "N1");
-        vm.warp(p.deadline + 30 minutes + 1);
+        // At the window's end the cutoff closes the co-signed path on its own; the second before it,
+        // the halt is still what refuses.
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, p.deadline + 30 minutes));
+        _unlock(p, "N1");
+        vm.warp(p.deadline + 30 minutes - 1);
+        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__Halted.selector, maker));
         _unlock(p, "N1");
 
         vm.warp(p.deadline + 60 minutes);
         adManager.finalizeCancel(p);
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Cancelled));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Cancelled));
         assertEq(adManager.getMerkleLeafCount(), leaves + 1, "the CANCEL leaf");
         assertEq(_locked(), 0);
         assertEq(_balance(), balanceBefore, "the ad keeps its funds");
@@ -377,7 +521,7 @@ contract SettlementHaltDisputeTest is DisputeTest {
         adManager.finalizeDispute(p);
         vm.warp(at);
         adManager.finalizeDispute(p);
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Resolved));
         assertEq(adManager.disputeFinalizesAt(p), 0, "terminal");
     }
 
@@ -430,8 +574,8 @@ contract SettlementHaltDisputeTest is DisputeTest {
         _finalizesExactlyAt(p, h);
     }
 
-    /// D4: a pause after the filing moves the time by the paused seconds.
-    function test_d4_disputeFinalizesAt_aPauseMovesIt() public {
+    /// D4: a pause after the filing moves nothing: the time is plain.
+    function test_d4_disputeFinalizesAt_aPauseMovesNothing() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(34);
         _file(p, maker);
         uint256 before = adManager.disputeFinalizesAt(p);
@@ -440,7 +584,7 @@ contract SettlementHaltDisputeTest is DisputeTest {
         vm.warp(block.timestamp + 2 hours);
         vm.prank(admin);
         adManager.unpause();
-        assertEq(adManager.disputeFinalizesAt(p), before + 2 hours);
+        assertEq(adManager.disputeFinalizesAt(p), before);
         _finalizesExactlyAt(p, h);
     }
 
@@ -459,7 +603,7 @@ contract SettlementHaltDisputeTest is DisputeTest {
         adManager.finalizeDispute(p);
         vm.warp(until_ + 30 minutes);
         adManager.finalizeDispute(p);
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Resolved));
     }
 
     /// MakerForfeit pays the counterparty anyway, so it is the one outcome the grace does not gate:
@@ -474,7 +618,7 @@ contract SettlementHaltDisputeTest is DisputeTest {
         _warpPastWindow(h);
         uint256 before = adToken.balanceOf(recipient);
         adManager.finalizeDispute(p);
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Resolved));
         assertEq(adToken.balanceOf(recipient) - before, 60 ether, "the counterparty is paid");
     }
 
@@ -484,7 +628,7 @@ contract SettlementHaltDisputeTest is DisputeTest {
         _file(p, maker);
         _warpPastWindow(h);
         adManager.finalizeDispute(p);
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Resolved));
     }
 }
 
@@ -520,8 +664,34 @@ abstract contract RealRegistryFixture is AdManagerTest {
         // Two slots, so a kill of one leaves `hasUsableSlot` true: the state the attack needs.
         _registerSlot(0);
         _registerSlot(1);
+        _approveMaker();
         vm.prank(admin);
         adManager.setKeyRegistry(IKeyRegistry(REGISTRY));
+    }
+
+    /// The vector account signs for the fixture's maker, so it approves that maker (signer consent).
+    function _approveMaker() internal onVectorChain {
+        IBLSKeyRegistry.OwnerAuth memory auth;
+        auth.legs = new IBLSKeyRegistry.KeyLeg[](1);
+        auth.legs[0] = IBLSKeyRegistry.KeyLeg(VECTOR_CHAIN_ID, bytes32(uint256(uint160(REGISTRY))), 0);
+        uint64 deadline = uint64(block.timestamp + 1 hours);
+        bytes32 legs = keccak256(abi.encode(KeyMessages.KEY_LEG_TYPEHASH, VECTOR_CHAIN_ID, auth.legs[0].registry, 0));
+        bytes32 structHash = keccak256(
+            abi.encode(
+                KeyMessages.APPROVE_MAKER_TYPEHASH,
+                account,
+                _b32(maker),
+                true,
+                keccak256(abi.encodePacked(legs)),
+                deadline
+            )
+        );
+        (uint8 sv, bytes32 r, bytes32 ss) = vm.sign(
+            uint256(v.readBytes32(".keys.bridgerWallet.sk")),
+            keccak256(abi.encodePacked(hex"1901", keysDomain, structHash))
+        );
+        auth.sig = abi.encodePacked(r, ss, sv);
+        registry.approveMaker(account, _b32(maker), true, auth, 0, deadline);
     }
 
     /*//////////////////////////// vector helpers ////////////////////////////*/
@@ -578,6 +748,32 @@ abstract contract RealRegistryFixture is AdManagerTest {
         );
     }
 
+    /// Plan 12 C: the account's RepinOrder consent (`fromSlot` → `toSlot`) for `orderHash`, filed on the
+    /// real registry at the (account, order) pair's `nonce`.
+    function _approveRepin(bytes32 orderHash, uint32 fromSlot, uint32 toSlot, uint64 nonce) internal onVectorChain {
+        IBLSKeyRegistry.OwnerAuth memory auth;
+        auth.legs = new IBLSKeyRegistry.KeyLeg[](1);
+        auth.legs[0] = IBLSKeyRegistry.KeyLeg(VECTOR_CHAIN_ID, bytes32(uint256(uint160(REGISTRY))), nonce);
+        bytes32 legs =
+            keccak256(abi.encode(KeyMessages.KEY_LEG_TYPEHASH, VECTOR_CHAIN_ID, auth.legs[0].registry, nonce));
+        bytes32 structHash = keccak256(
+            abi.encode(
+                KeyMessages.REPIN_ORDER_TYPEHASH,
+                account,
+                orderHash,
+                fromSlot,
+                toSlot,
+                keccak256(abi.encodePacked(legs))
+            )
+        );
+        (uint8 sv, bytes32 r, bytes32 ss) = vm.sign(
+            uint256(v.readBytes32(".keys.bridgerWallet.sk")),
+            keccak256(abi.encodePacked(hex"1901", keysDomain, structHash))
+        );
+        auth.sig = abi.encodePacked(r, ss, sv);
+        registry.approveRepin(account, orderHash, fromSlot, toSlot, auth, nonce);
+    }
+
     function _graceTs() internal view returns (uint64) {
         return uint64(vm.parseUint(v.readString(".slots.graceTs")));
     }
@@ -591,7 +787,7 @@ abstract contract RealRegistryFixture is AdManagerTest {
     function _lockAsUntil(uint256 salt, uint256 deadline) internal returns (IAdManager.OrderParams memory p) {
         p = _orderAs(salt, deadline);
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /// The ad and the order params of `_lockAsUntil`, without the lock.
@@ -636,13 +832,69 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         adManager.finalizeCancel(p);
     }
 
-    /// A kill before the lock is history: the order was co-signed under the other slot.
-    function test_realRegistry_killBeforeTheLock_ordinaryTiming() public {
+    /// Plan 12 C: the signer's consent filed on the real registry moves the pin through the escrow,
+    /// the moved order is denied for the rest of its life, and a dead pin moves the same way (kill,
+    /// then re-pin), the stamp keeping the denial.
+    function test_realRegistry_approveRepin_movesThePin_theRepinDenies_aDeadPinMovesToo() public {
+        _realRegistry();
+        IAdManager.OrderParams memory p = _lockAs(3);
+        bytes32 h = adManager.hashOrderPublic(p);
+        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__NoRepin.selector, h));
+        adManager.repinOrder(p);
+        _approveRepin(h, 0, 1, 0);
+        adManager.repinOrder(p);
+        (,,, uint32 pin) = adManager.orders(h);
+        assertEq(pin, 1, "the consent moved the pin");
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
+        adManager.finalizeCancel(p);
+        vm.warp(p.deadline + 60 minutes);
+        adManager.finalizeCancel(p);
+
+        // A second order: kill its pin, then the consent moves it to the live slot; the re-pin stamp
+        // keeps the cancel on the grace, so the kill is not laundered by the move.
+        IAdManager.OrderParams memory q = _lockAs(4);
+        bytes32 hq = adManager.hashOrderPublic(q);
+        vm.warp(block.timestamp + 10);
+        _setValidUntil(0, true);
+        _approveRepin(hq, 0, 1, 0);
+        adManager.repinOrder(q);
+        (,,, uint32 pinQ) = adManager.orders(hq);
+        assertEq(pinQ, 1, "the dead pin moved to the live slot");
+        _claim(q);
+        vm.warp(q.deadline + 30 minutes);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, q.deadline + 60 minutes));
+        adManager.finalizeCancel(q);
+        vm.warp(q.deadline + 60 minutes);
+        adManager.finalizeCancel(q);
+    }
+
+    /// Plan 12 C: a slot killed before the lock cannot be pinned; an order pinned to the live slot
+    /// runs ordinary timing, the dead slot being history.
+    function test_realRegistry_killBeforeTheLock_cannotBePinned_theLiveSlotRunsOrdinary() public {
         _realRegistry();
         vm.warp(block.timestamp + 10);
         _setValidUntil(0, true);
         vm.warp(block.timestamp + 10);
-        IAdManager.OrderParams memory p = _lockAs(2);
+        IAdManager.OrderParams memory p = _orderAs(2, 0);
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__SlotNotUsable.selector, account, uint32(0)));
+        adManager.lockForOrder(p, 0);
+        vm.prank(maker);
+        adManager.lockForOrder(p, 1);
+        _claim(p);
+        vm.warp(p.deadline + 30 minutes);
+        adManager.finalizeCancel(p);
+    }
+
+    /// Plan 12 C (#436): a rotation of a slot the order is not pinned to denies nothing, even inside
+    /// the window: no other slot can co-sign the ad leg.
+    function test_realRegistry_killOfAnotherSlotInsideTheWindow_ordinaryTiming() public {
+        _realRegistry();
+        IAdManager.OrderParams memory p = _lockAs(21); // pinned to slot 0
+        vm.warp(block.timestamp + 10);
+        _setValidUntil(1, true);
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
         adManager.finalizeCancel(p);
@@ -731,7 +983,7 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
     /// cutoff's own second counts, the next second does not.
     function test_realRegistry_killAtTheCutoff_counts() public {
         _realRegistry();
-        _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 5 minutes, 1 days, 0));
+        _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 5 minutes, 0));
         IAdManager.OrderParams memory p = _lockAs(9);
         _claim(p);
         vm.warp(p.deadline + 25 minutes);
@@ -741,9 +993,10 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         adManager.finalizeCancel(p);
     }
 
-    /// D17a: a kill, an at-cap registration and a lock in the same second. The prune must not run
-    /// in the expiry's own second, or the lock's-second kill the design counts is forgotten.
-    function test_realRegistry_sameSecondKillPruneAndLock_stillWaitsTheGrace() public {
+    /// D17a, after plan 12 C: a kill, an at-cap registration and a lock in the same second. The
+    /// killed slot is dead in its own second, so the lock cannot pin it; a kill of the slot the order
+    /// is pinned to, in the lock's own second after the lock, still waits the grace.
+    function test_realRegistry_sameSecondKillPruneAndLock_deadSlotUnpinnable_pinnedKillWaits() public {
         _realRegistry();
         for (uint256 i = 2; i < 5; i++) {
             _registerSlot(i);
@@ -754,7 +1007,13 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         _setValidUntil(0, true);
         vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
         _registerSlot(5);
-        IAdManager.OrderParams memory p = _lockAs(13);
+        IAdManager.OrderParams memory p = _orderAs(13, 0);
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__SlotNotUsable.selector, account, uint32(0)));
+        adManager.lockForOrder(p, 0);
+        vm.prank(maker);
+        adManager.lockForOrder(p, 1);
+        _setValidUntil(1, true); // the pinned slot, in the lock's own second
         _claim(p);
         vm.warp(p.deadline + 30 minutes);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 60 minutes));
@@ -783,7 +1042,7 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         guards[0] = address(adManager);
         registry.setPositionGuards(guards);
         uint64 maxBuffer = RouteTiming.MAX_BUFFER;
-        _setTiming(RouteTiming.Timing(0, maxBuffer, 0, maxBuffer, 0));
+        _setTiming(RouteTiming.Timing(0, maxBuffer, 0, 0));
         _wireAnchor();
         uint64 delay = anchor.MAX_ANCHOR_DELAY();
         vm.prank(admin);
@@ -848,7 +1107,7 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
 
     function test_realRegistry_killJustPastTheCutoff_ordinaryTiming() public {
         _realRegistry();
-        _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 5 minutes, 1 days, 0));
+        _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 5 minutes, 0));
         IAdManager.OrderParams memory p = _lockAs(10);
         _claim(p);
         vm.warp(p.deadline + 25 minutes + 1);
@@ -877,7 +1136,7 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
             )
         );
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /// #465: an escrow-only swap after the lock leaves the order on the registry it locked under,
@@ -962,10 +1221,12 @@ contract SettlementHaltRealRegistryTest is RealRegistryFixture, AdManagerCancell
         assertEq(address(adManager.registryAt(before + 1)), address(keyRegistry), "holding the new registry");
         _claim(p);
         assertEq(adManager.cancelFinalizesAt(p), p.deadline + 60 minutes, "the old order waits");
+        // Keys and maker approvals are per registry: the signer files both again on the new one.
         keyRegistry.set(account, true);
+        keyRegistry.approve(account, _b32(maker), true);
         IAdManager.OrderParams memory q = _orderAs(23, 0);
         vm.prank(maker);
-        adManager.lockForOrder(q); // the new order locks on the new pair
+        adManager.lockForOrder(q, 0); // the new order locks on the new pair
     }
 }
 
@@ -992,7 +1253,7 @@ contract SettlementHaltDisputeRealRegistryTest is RealRegistryFixture, DisputeTe
         adManager.finalizeDispute(p);
         vm.warp(until_ + 30 minutes);
         adManager.finalizeDispute(p);
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Resolved));
     }
 
     /// #465 (review 46-5): the dispute door runs the same rule: a verifier swapped off the order's
@@ -1034,7 +1295,7 @@ contract SettlementHaltDisputeRealRegistryTest is RealRegistryFixture, DisputeTe
         adManager.finalizeDispute(p);
         vm.warp(until_ + 30 minutes);
         adManager.finalizeDispute(p);
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Resolved));
     }
 
     function test_realRegistry_killAfterTheChallengeDeadline_fallbackOrdinaryTiming() public {
@@ -1047,6 +1308,6 @@ contract SettlementHaltDisputeRealRegistryTest is RealRegistryFixture, DisputeTe
         vm.warp(until_ + 1);
         _setValidUntil(0, true);
         adManager.finalizeDispute(p);
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Resolved));
     }
 }

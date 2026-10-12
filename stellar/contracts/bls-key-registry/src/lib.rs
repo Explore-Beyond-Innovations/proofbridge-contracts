@@ -19,11 +19,13 @@ use soroban_sdk::{
 };
 
 use errors::RegistryError;
-use owner::{check_owner, key_fingerprint, keys_domain_separator, KeyMessage, MAX_REGISTER_TTL};
+use owner::{check_owner, keys_domain_separator, KeyMessage, MAX_REGISTER_TTL};
 pub use owner::{KeyLeg, OwnerAuth, OwnerSig, SignedOwner};
-use proofbridge_core::cross_contract::{self, VerifierClient, LEAF_DOMAIN_REGISTERED};
+use proofbridge_core::cross_contract::{
+    self, key_commitment, VerifierClient, LEAF_DOMAIN_REGISTERED,
+};
 use proofbridge_core::eip712::contract_address_to_bytes32;
-pub use storage::KeySlot;
+pub use storage::{KeySlot, MakerApproval, RepinApproval};
 
 /// RFC 9380 / IETF BLS proof-of-possession DST.
 pub const DST_POP: &str = "BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
@@ -35,7 +37,7 @@ const POP_TAG: [u8; 32] = [
 ];
 
 pub const MAX_ACTIVE_SLOTS: u32 = 5;
-/// Seconds past valid_until before a slot may be pruned.
+/// Seconds past valid_until before a dead slot may be pruned when no position guard is wired.
 pub const GRACE_PERIOD: u64 = 30 * 24 * 60 * 60;
 
 /// Escrow-side seam so revoke can refuse while the account has open positions.
@@ -210,23 +212,19 @@ impl BlsKeyRegistry {
         if !verify_pop(&env, &account, &bls_pub_key, &pop, nonce) {
             return Err(RegistryError::InvalidPop);
         }
-        let fingerprint = key_fingerprint(&env, &bls_pub_key);
+        let commitment = key_commitment(&env, &bls_pub_key);
         check_owner(
             &env,
             &account,
             owner,
             KeyMessage::Register {
-                fingerprint: fingerprint.clone(),
+                key_commitment: commitment.clone(),
                 nonce,
                 deadline,
             },
         )?;
 
-        let commitment: BytesN<32> = env
-            .crypto()
-            .keccak256(&Bytes::from_slice(&env, &bls_pub_key.to_array()))
-            .to_bytes();
-        let slot_id = add_slot(&env, &account, &commitment, &fingerprint)?;
+        let slot_id = add_slot(&env, &account, &commitment)?;
         storage::set_nonce(&env, &account, nonce + 1);
         proofbridge_core::ttl::extend_instance(&env);
         events::KeyRegistered {
@@ -269,10 +267,7 @@ impl BlsKeyRegistry {
         if bls_pub_key == g1_identity(&env) {
             return Err(RegistryError::IdentityKey);
         }
-        let commitment: BytesN<32> = env
-            .crypto()
-            .keccak256(&Bytes::from_slice(&env, &bls_pub_key.to_array()))
-            .to_bytes();
+        let commitment = key_commitment(&env, &bls_pub_key);
         if storage::is_used(&env, &account, &commitment) {
             return Err(RegistryError::KeyPreviouslyUsed);
         }
@@ -305,12 +300,7 @@ impl BlsKeyRegistry {
             _ => return Err(RegistryError::InvalidLeafProof),
         }
 
-        let slot_id = add_slot(
-            &env,
-            &account,
-            &commitment,
-            &key_fingerprint(&env, &bls_pub_key),
-        )?;
+        let slot_id = add_slot(&env, &account, &commitment)?;
         proofbridge_core::ttl::extend_instance(&env);
         events::KeyRegisteredByProof {
             account,
@@ -325,8 +315,8 @@ impl BlsKeyRegistry {
 
     /// Shorten-only, nonce-free, never guarded, and not pausable: the retirement lever
     /// (D6/D9) only ever reduces authority, so a registry pause must not block it. Names the key
-    /// by its fingerprint (keccak of the EIP-2537 form), so one pre-signed `RetireKey` serves
-    /// every registry; the slot is found through the map written at registration.
+    /// by its commitment (keccak of the EIP-2537 form, the same on every chain), so one pre-signed
+    /// `RetireKey` serves every registry; the slot is found through the map written at registration.
     pub fn set_valid_until(
         env: Env,
         account: BytesN<32>,
@@ -349,7 +339,7 @@ impl BlsKeyRegistry {
             &account,
             owner,
             KeyMessage::Retire {
-                fingerprint: key_commitment,
+                key_commitment,
                 valid_until,
             },
         )?;
@@ -402,6 +392,9 @@ impl BlsKeyRegistry {
         entry.live = Vec::new(&env);
         storage::set_entry(&env, &account, &entry);
         storage::set_nonce(&env, &account, nonce + 1);
+        // Leaving drops every maker approval: a later re-registration starts with none.
+        let generation = storage::get_approval_gen(&env, &account);
+        storage::set_approval_gen(&env, &account, generation + 1);
         proofbridge_core::ttl::extend_instance(&env);
         events::KeyRevoked { account, nonce }.publish(&env);
         Ok(())
@@ -431,7 +424,150 @@ impl BlsKeyRegistry {
         Ok(())
     }
 
+    /// Lets `maker` name `account` as an ad's settlement signer (`approved`), or withdraws that. The
+    /// pair's own nonce, never the account's, so it leaves key registrations and other makers alone.
+    /// Approving is pausable; withdrawing is not, since it only ever reduces what others can do.
+    /// `OwnerAuth::Stellar` approves by `require_auth`, so an account contract approves as itself.
+    pub fn approve_maker(
+        env: Env,
+        account: BytesN<32>,
+        maker: BytesN<32>,
+        approved: bool,
+        owner: OwnerAuth,
+        nonce: u64,
+        deadline: u64,
+    ) -> Result<(), RegistryError> {
+        if !storage::is_initialized(&env) {
+            return Err(RegistryError::NotInitialized);
+        }
+        if approved && storage::is_paused(&env) {
+            return Err(RegistryError::ContractPaused);
+        }
+        let now = env.ledger().timestamp();
+        if now > deadline {
+            return Err(RegistryError::DeadlineExpired);
+        }
+        if deadline - now > MAX_REGISTER_TTL {
+            return Err(RegistryError::DeadlineTooFar);
+        }
+        let mut a = storage::get_approval(&env, &account, &maker);
+        if nonce != a.nonce {
+            return Err(RegistryError::BadNonce);
+        }
+        check_owner(
+            &env,
+            &account,
+            owner,
+            KeyMessage::ApproveMaker {
+                maker: maker.clone(),
+                approved,
+                nonce,
+                deadline,
+            },
+        )?;
+
+        a.approved = approved;
+        a.nonce = nonce + 1;
+        a.generation = storage::get_approval_gen(&env, &account);
+        storage::set_approval(&env, &account, &maker, &a);
+        proofbridge_core::ttl::extend_instance(&env);
+        events::MakerApprovalSet {
+            account,
+            maker,
+            approved,
+            nonce,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// The settlement signer consents to move `order_hash`'s co-signing pin from `from_slot` to
+    /// `to_slot`; anyone may then apply it on the ad-manager (`repin_order`), which checks the order is
+    /// still open and `to_slot` usable. The (account, order) pair's own nonce, so a signature applies
+    /// once. Not pausable: it moves a pin off a leaked key, which only protects the order. The consent
+    /// has no deadline and `revoke` leaves it: it is withdrawn by superseding it (a consent at the next
+    /// nonce naming another slot, or the current pin), and a late-applied one can only move the pin to
+    /// a slot that is usable then and stamp the order re-pinned, which gives the bridger the grace.
+    pub fn approve_repin(
+        env: Env,
+        account: BytesN<32>,
+        order_hash: BytesN<32>,
+        from_slot: u32,
+        to_slot: u32,
+        owner: OwnerAuth,
+        nonce: u64,
+    ) -> Result<(), RegistryError> {
+        if !storage::is_initialized(&env) {
+            return Err(RegistryError::NotInitialized);
+        }
+        let mut r = storage::get_repin(&env, &account, &order_hash);
+        if nonce != r.nonce {
+            return Err(RegistryError::BadNonce);
+        }
+        check_owner(
+            &env,
+            &account,
+            owner,
+            KeyMessage::Repin {
+                order_hash: order_hash.clone(),
+                from_slot,
+                to_slot,
+                nonce,
+            },
+        )?;
+        r.from_slot = from_slot;
+        r.to_slot = to_slot;
+        r.nonce = nonce + 1;
+        storage::set_repin(&env, &account, &order_hash, &r);
+        proofbridge_core::ttl::extend_instance(&env);
+        events::RepinApproved {
+            account,
+            order_hash,
+            from_slot,
+            to_slot,
+            nonce,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     // ---- views ----
+
+    /// The latest re-pin consent for (`account`, `order_hash`), as `(from_slot, to_slot, nonce)`;
+    /// nonce 0 means none was ever given.
+    pub fn repin_approval(
+        env: Env,
+        account: BytesN<32>,
+        order_hash: BytesN<32>,
+    ) -> (u32, u32, u64) {
+        proofbridge_core::ttl::extend_instance(&env);
+        let r = storage::get_repin(&env, &account, &order_hash);
+        (r.from_slot, r.to_slot, r.nonce)
+    }
+
+    /// When the slot stopped being usable: 0 while unbounded, else the recorded expiry (a kill is
+    /// stamped at the kill, not at the `1` it names). The denial rule reads it for the pinned slot.
+    pub fn expired_at(env: Env, account: BytesN<32>, slot_id: u32) -> u64 {
+        proofbridge_core::ttl::extend_instance(&env);
+        expired_at(&env, &account, slot_id)
+    }
+
+    /// True iff `account` approved `maker` since its last `revoke` and has not withdrawn it.
+    pub fn is_approved_maker(env: Env, account: BytesN<32>, maker: BytesN<32>) -> bool {
+        proofbridge_core::ttl::extend_instance(&env);
+        let a = storage::get_approval(&env, &account, &maker);
+        a.approved && a.generation == storage::get_approval_gen(&env, &account)
+    }
+
+    /// The (account, maker) record: the flag, the nonce the next `approve_maker` must carry, and
+    /// the generation it was set at.
+    pub fn maker_approval(env: Env, account: BytesN<32>, maker: BytesN<32>) -> MakerApproval {
+        storage::get_approval(&env, &account, &maker)
+    }
+
+    pub fn approval_generation(env: Env, account: BytesN<32>) -> u64 {
+        storage::get_approval_gen(&env, &account)
+    }
 
     /// The verifier's one call: the commitment iff the slot exists and is usable now.
     pub fn commitment_at(
@@ -443,29 +579,10 @@ impl BlsKeyRegistry {
         if slot.valid_until != 0 && env.ledger().timestamp() >= slot.valid_until {
             return Err(RegistryError::SlotExpired);
         }
-        storage::touch(&env, &account, slot_id, &slot.fingerprint);
+        storage::touch(&env, &account, slot_id, &slot.commitment);
         // C-13: the verifier reads this on every unlock; an idle registry must not archive.
         proofbridge_core::ttl::extend_instance(&env);
         Ok(slot.commitment)
-    }
-
-    /// Did any of `account`'s slots expire in `[from, to]` (#422 D12/D14/D14b). The escrows' cancel
-    /// grace asks it over the order's life as a payout, `[locked_at, cutoff]` (D16): a slot the order
-    /// may have been co-signed under died while the payout could still land. A slot expires at the
-    /// later of the date its shorten named and the moment of the shorten (a kill names `1`), and a
-    /// later shorten can only move that earlier, so a kill, a near-future shorten, a pre-lock shorten
-    /// naming a date inside the window and a re-kill after it all count; a rotation whose old slot
-    /// outlives the cutoff does not. A dead slot is forgotten once the account has no open positions,
-    /// or 30 days on.
-    pub fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool {
-        proofbridge_core::ttl::extend_instance(&env);
-        storage::get_entry(&env, &account)
-            .live
-            .iter()
-            .any(|slot_id| {
-                let vu = expired_at(&env, &account, slot_id);
-                vu != 0 && vu >= from && vu <= to
-            })
     }
 
     /// True iff at least one live slot is usable now (the "is registered" check for 2.3c).
@@ -494,7 +611,7 @@ impl BlsKeyRegistry {
         storage::get_entry(&env, &account).next_slot_id
     }
 
-    /// The slot a key fingerprint occupies (the one `set_valid_until` acts on), while it exists.
+    /// The slot a key commitment occupies (the one `set_valid_until` acts on), while it exists.
     pub fn slot_of_key(env: Env, account: BytesN<32>, key_commitment: BytesN<32>) -> Option<u32> {
         storage::get_key_slot(&env, &account, &key_commitment)
             .filter(|id| storage::get_slot(&env, &account, *id).is_some())
@@ -578,7 +695,6 @@ fn add_slot(
     env: &Env,
     account: &BytesN<32>,
     commitment: &BytesN<32>,
-    fingerprint: &BytesN<32>,
 ) -> Result<u32, RegistryError> {
     if storage::is_used(env, account, commitment) {
         return Err(RegistryError::KeyPreviouslyUsed);
@@ -601,12 +717,11 @@ fn add_slot(
             commitment: commitment.clone(),
             valid_until: 0,
             registered_at: env.ledger().timestamp(),
-            fingerprint: fingerprint.clone(),
         },
     );
     storage::set_entry(env, account, &entry);
     storage::set_used(env, account, commitment);
-    storage::set_key_slot(env, account, fingerprint, slot_id);
+    storage::set_key_slot(env, account, commitment, slot_id);
     Ok(slot_id)
 }
 
@@ -621,21 +736,29 @@ fn expired_at(env: &Env, account: &BytesN<32>, slot_id: u32) -> u64 {
     }
 }
 
-/// Drops every dead slot the escrows can no longer need: past its expiry + GRACE_PERIOD, or at once
-/// when the guards are wired and none reports open positions for the account (#422 D17 — no order's
-/// cancel can still ask about its history; D17b — with no guard to ask, never at once). Not in the
-/// expiry's own second (D17a): a lock in that second still counts the kill. Order of `live` is not
-/// meaningful.
+/// Drops every dead slot the escrows can no longer need: at once when guards are wired and none
+/// reports an open position for the account (#422 D17 — no order's cancel can still ask about its
+/// history), else after expiry + GRACE_PERIOD, open positions or not. The 30 days outlast every
+/// finalize a kill can still touch: an order's life as a payout is at most the window, its buffer,
+/// the challenge period and the ruling buffer (about 16 days), plus a grace capped by the 7-day
+/// anchor delay and one buffer, so a slot kept longer protects nothing and only fills the cap. With
+/// no guard to ask, never at once (D17b). Not in the expiry's own second (D17a): a lock in that
+/// second still counts the kill. Order of `live` is not meaningful.
 fn prune(env: &Env, account: &BytesN<32>, entry: &mut storage::RegistryEntry) {
     let now = env.ledger().timestamp();
     let wired = storage::get_guards(env).map_or(false, |g| !g.is_empty());
-    let free = wired && !has_open_positions(env, account);
+    let at_once = wired && !has_open_positions(env, account);
     let mut kept = Vec::new(env);
     for slot_id in entry.live.iter() {
         let prunable = match storage::get_slot(env, account, slot_id) {
             Some(_) => {
                 let vu = expired_at(env, account, slot_id);
-                vu != 0 && (now > vu.saturating_add(GRACE_PERIOD) || (free && now > vu))
+                vu != 0
+                    && if at_once {
+                        now > vu
+                    } else {
+                        now > vu.saturating_add(GRACE_PERIOD)
+                    }
             }
             None => true,
         };

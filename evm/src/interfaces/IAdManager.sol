@@ -104,6 +104,9 @@ interface IAdManager is IEscrow {
 
     /// @notice `DecimalScaling.scale` (via the linked `ProofBridgeUtils`) reverts with this; only AdManager scales. See IEscrow.
     error DecimalScaling__NonExactDownscale(uint256 amount, uint8 fromDec, uint8 toDec);
+    /// @notice The order's co-signing pin moved (`repinOrder`).
+    event OrderRepinned(bytes32 indexed orderHash, uint32 fromSlot, uint32 toSlot);
+
     error AdManager__TokenZeroAddress();
     error AdManager__AdNotFound();
     error AdManager__NotMaker();
@@ -120,12 +123,19 @@ interface IAdManager is IEscrow {
     error AdManager__NoKeyRegistry();
     error AdManager__SettlementSignerZero();
     error AdManager__SignerNotRegistered(bytes32 signer);
+    /// The settlement signer is not the maker and has not approved the maker in the key registry.
+    error AdManager__SignerNotApproved(bytes32 signer, bytes32 maker);
     error AdManager__SettlementSignerMismatch(bytes32 expected, bytes32 provided);
     /// @notice The order's maker has halted settlement; only evidence can pay this order now.
     error AdManager__Halted(address maker);
     error AdManager__NotHalted();
     /// @notice #464: the order chain's verifier checks co-signatures against a different registry.
     error AdManager__RegistrySplit(uint256 chainId, address escrowRegistry, address verifierRegistry);
+    /// @notice The slot to pin does not exist, is not usable now, or is not the signer's; or, on a
+    ///         re-pin, the pin being left has already expired (the kill stands).
+    error AdManager__SlotNotUsable(bytes32 signer, uint32 slotId);
+    /// @notice No re-pin consent for this order from its current pin.
+    error AdManager__NoRepin(bytes32 orderHash);
 
     /*//////////////////////////////////////////////////////////////
                                  FUNCTIONS
@@ -158,19 +168,23 @@ interface IAdManager is IEscrow {
     /**
      * @notice When a claimed cancel really finalizes: the claim window's end plus the evidence grace
      *         when the co-signed payout was denied (#422). 0 when the order is not `Claimed`. The
-     *         relayer's janitor asks this instead of computing the clock itself.
-     * @dev During a pause this under-reports: paused seconds accrue at `unpause`, so the time jumps
-     *      forward then. The doors are `whenNotPaused`, so acceptance never drifts from the view, but
-     *      a caller that cached it before a pause must re-read after the unpause.
+     *         relayer's janitor asks this instead of computing the clock itself. Plain time; a
+     *         pause moves nothing. Raising the order chain's anchor delay can lengthen a denied grace.
      */
     function cancelFinalizesAt(OrderParams calldata params) external view returns (uint256);
     /// @notice `cancelFinalizesAt`'s dispute twin: when `finalizeDispute` can run, grace included; 0 off `Disputed`.
-    /// @dev Same pause caveat as `cancelFinalizesAt`: re-read after an unpause.
     function disputeFinalizesAt(OrderParams calldata params) external view returns (uint256);
     function fundAd(string calldata adId, uint256 amount) external payable;
     function withdrawFromAd(string calldata adId, uint256 amount, address to) external;
     function closeAd(string calldata adId, address to) external;
-    function lockForOrder(OrderParams calldata params) external returns (bytes32 orderHash);
+    /// @notice Lock the ad's liquidity for an order, pinning `signerSlot`: the settlement signer's
+    ///         co-signing slot in the registry the order records. The slot must exist and be usable
+    ///         now; the ad chain's co-signed unlock then accepts only that slot's key.
+    function lockForOrder(OrderParams calldata params, uint32 signerSlot) external returns (bytes32 orderHash);
+    /// @notice Apply the settlement signer's re-pin consent (`approveRepin` on the order's registry):
+    ///         move an `Open` order's pin to another usable slot of the same signer, before
+    ///         `deadline - claimStagger`. Permissionless; the consent names the order and both slots.
+    function repinOrder(OrderParams calldata params) external;
     function unlock(
         OrderParams calldata params,
         bytes32 nullifierHash,
@@ -191,7 +205,15 @@ interface IAdManager is IEscrow {
     function finalizeCancel(OrderParams calldata params) external;
     /// @notice Attest that an order the bridger deposited for was never locked here: `None` and
     ///         `now ≥ deadline` → `Cancelled` + CANCEL leaf. No funds move; nothing was counted.
-    function cancelNeverLocked(OrderParams calldata params) external;
+    /// @dev The order must be real: `proof` shows its AD leaf (the one the OrderPortal's `createOrder`
+    ///      appended) in `targetRoot`, an order-chain root the RootAnchor notarized. Any secret proves
+    ///      the leaf, so `nullifierHash` is neither checked against nor added to the used set.
+    function cancelNeverLocked(
+        OrderParams calldata params,
+        bytes32 targetRoot,
+        bytes32 nullifierHash,
+        bytes calldata proof
+    ) external;
 
     /// @notice Set the dispute module the primary reads (2.3g).
     /// @dev On the primary only. The OrderPortal is the follower and has no dispute of its own — it

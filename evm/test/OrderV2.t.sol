@@ -13,6 +13,7 @@ import {OrderPortal} from "src/OrderPortal.sol";
 import {OrderHash} from "src/libraries/OrderHash.sol";
 import {RootVerifierRegistry} from "src/libraries/RootVerifierRegistry.sol";
 import {Slot0RootVerifier} from "./mocks/Slot0RootVerifier.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 // 2.3b on the AdManager unlock path: the envelope's slot 0 is adSettlementSigner (the split case,
 // custody != settlement identity, is the only shape where a wrong slot shows), deadline, widths.
@@ -26,6 +27,7 @@ contract AdManagerOrderV2Test is AdManagerTest {
         // which also exercises the lever with a live ad.
         if (signer != _b32(maker)) {
             keyRegistry.set(signer, true);
+            keyRegistry.approve(signer, _b32(maker), true);
             vm.prank(maker);
             adManager.setSettlementSigner(lastAdId, signer);
         }
@@ -36,7 +38,7 @@ contract AdManagerOrderV2Test is AdManagerTest {
         p.orderRecipient = _b32(recipient);
         p.adSettlementSigner = signer;
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function _module(bytes32 expected) internal {
@@ -50,7 +52,7 @@ contract AdManagerOrderV2Test is AdManagerTest {
         assertTrue(p.adSettlementSigner != p.adCreator);
         _module(SIGNER);
         adManager.unlock(p, TestField.fe("S1"), ROOT, hex"", hex"");
-        assertEq(uint256(adManager.orders(adManager.hashOrderPublic(p))), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(adManager), adManager.hashOrderPublic(p))), uint256(IEscrow.Status.Filled));
     }
 
     function test_splitCase_slot0IsNotTheCustodyAddress() public {
@@ -61,14 +63,14 @@ contract AdManagerOrderV2Test is AdManagerTest {
     }
 
     /// 2.3e D2: the primary's co-signed unlock is the presentation — valid through the window.
-    function test_unlock_revertsAfterWindow_andPassesAtItsEnd() public {
+    function test_unlock_revertsAtWindowEnd_andPassesTheSecondBefore() public {
         IAdManager.OrderParams memory p = _lock(SIGNER);
         _module(SIGNER);
         uint256 cutoff = p.deadline + 30 minutes;
-        vm.warp(cutoff + 1);
+        vm.warp(cutoff);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, cutoff));
         adManager.unlock(p, TestField.fe("D1"), ROOT, hex"", hex"");
-        vm.warp(cutoff);
+        vm.warp(cutoff - 1);
         adManager.unlock(p, TestField.fe("D1"), ROOT, hex"", hex"");
     }
 
@@ -87,7 +89,7 @@ contract AdManagerOrderV2Test is AdManagerTest {
         p.amount = uint256(type(uint128).max) + 1;
         vm.prank(maker);
         vm.expectRevert(OrderHash.OrderHash__AmountTooWide.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 }
 
@@ -118,7 +120,7 @@ contract OrderPortalOrderV2Test is OrderPortalTest {
         assertTrue(p.adSettlementSigner != p.adCreator);
         _module(SIGNER);
         portal.unlock(p, TestField.fe("S1"), ROOT, hex"", hex"");
-        assertEq(uint256(portal.orders(portal.hashOrderPublic(p))), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(portal), portal.hashOrderPublic(p))), uint256(IEscrow.Status.Filled));
     }
 
     function test_splitCase_slot0IsNotTheCustodyAddress() public {

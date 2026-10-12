@@ -7,6 +7,7 @@ import {stdJson} from "forge-std/StdJson.sol";
 import {BLSKeyRegistry} from "../src/BLSKeyRegistry.sol";
 import {CounterpartyVerifier} from "../src/CounterpartyVerifier.sol";
 import {CoSign} from "test/utils/CoSign.sol";
+import {BLS} from "src/libraries/BLS.sol";
 import {OwnerAuthVectors} from "test/utils/OwnerAuthVectors.sol";
 import {IdleGuard} from "test/utils/IdleGuard.sol";
 
@@ -73,6 +74,10 @@ contract CounterpartyVerifierTest is Test {
         return v.readBytes32(".settlement.auth.orderHash");
     }
 
+    uint8 constant SIDE_ORDER = 0;
+    uint8 constant SIDE_AD = 1;
+
+    /// The ad leg's unlock (side AD, its nullifier, checked against the order chain's root).
     function metadata() internal view returns (bytes memory) {
         return metadataWith(v.readBytes(".keys.makerBls.pk.eip2537"), v.readBytes(".settlement.aggSig.eip2537"));
     }
@@ -87,18 +92,43 @@ contract CounterpartyVerifierTest is Test {
         view
         returns (bytes memory)
     {
-        CounterpartyVerifier.SettlementAuth memory auth = CounterpartyVerifier.SettlementAuth({
-            orderChainId: orderChainId,
-            adChainId: adChainId,
-            orderHash: v.readBytes32(".settlement.auth.orderHash"),
-            orderChainRoot: orderChainRoot,
-            adChainRoot: adChainRoot,
-            makerKeyCommitment: v.readBytes32(".settlement.auth.makerKeyCommitment")
-        });
-        bytes memory moduleData = abi.encode(
-            uint8(3), auth, makerSlot, bridgerSlot, pkMaker, v.readBytes(".keys.bridgerBls.pk.eip2537"), aggSig
+        return envelope(SIDE_AD, adLeg(), moduleDataOf(CoSign.vectorAuth(v), makerSlot, bridgerSlot, pkMaker, aggSig));
+    }
+
+    function moduleDataOf(
+        CounterpartyVerifier.SettlementAuth memory auth,
+        uint32 makerSlot,
+        uint32 bridgerSlot,
+        bytes memory pkMaker,
+        bytes memory aggSig
+    ) internal view returns (bytes memory) {
+        return abi.encode(
+            uint8(4), auth, makerSlot, bridgerSlot, pkMaker, v.readBytes(".keys.bridgerBls.pk.eip2537"), aggSig
         );
-        return abi.encode(maker, bridger, signedOrderHash(), moduleData);
+    }
+
+    /// The escrow's envelope for one leg: the vector's order, no pin, the nullifier it consumes.
+    function envelope(uint8 side, bytes32 nullifier, bytes memory moduleData) internal view returns (bytes memory) {
+        return abi.encode(maker, bridger, signedOrderHash(), uint32(0), nullifier, side, moduleData);
+    }
+
+    /// The vector auth's module data with the vector aggregate, keys in slot 0.
+    function vectorModuleData() internal view returns (bytes memory) {
+        return moduleDataOf(
+            CoSign.vectorAuth(v),
+            0,
+            0,
+            v.readBytes(".keys.makerBls.pk.eip2537"),
+            v.readBytes(".settlement.aggSig.eip2537")
+        );
+    }
+
+    function adLeg() internal view returns (bytes32) {
+        return v.readBytes32(".settlement.auth.adLegNullifier");
+    }
+
+    function orderLeg() internal view returns (bytes32) {
+        return v.readBytes32(".settlement.auth.orderLegNullifier");
     }
 
     // ---- maker slot helpers (slots.makerOnSepolia: sep53 owner, registrations[i] at nonce i) ----
@@ -138,8 +168,9 @@ contract CounterpartyVerifierTest is Test {
         assertTrue(verifier.isRootValid(orderChainId, orderChainRoot, metadata()));
     }
 
+    /// The order leg's unlock (side ORDER, its nullifier) is checked against the ad chain's root.
     function test_adChainRootIsValid() public view {
-        assertTrue(verifier.isRootValid(adChainId, adChainRoot, metadata()));
+        assertTrue(verifier.isRootValid(adChainId, adChainRoot, envelope(SIDE_ORDER, orderLeg(), vectorModuleData())));
     }
 
     function test_rootNotMatchingAuthFails() public view {
@@ -151,53 +182,29 @@ contract CounterpartyVerifierTest is Test {
     }
 
     function test_wrongVersionFails() public view {
-        CounterpartyVerifier.SettlementAuth memory auth = CounterpartyVerifier.SettlementAuth({
-            orderChainId: orderChainId,
-            adChainId: adChainId,
-            orderHash: v.readBytes32(".settlement.auth.orderHash"),
-            orderChainRoot: orderChainRoot,
-            adChainRoot: adChainRoot,
-            makerKeyCommitment: v.readBytes32(".settlement.auth.makerKeyCommitment")
-        });
         bytes memory moduleData = abi.encode(
             uint8(1),
-            auth,
+            CoSign.vectorAuth(v),
             uint32(0),
             uint32(0),
             v.readBytes(".keys.makerBls.pk.eip2537"),
             v.readBytes(".keys.bridgerBls.pk.eip2537"),
             v.readBytes(".settlement.aggSig.eip2537")
         );
-        assertFalse(
-            verifier.isRootValid(
-                orderChainId, orderChainRoot, abi.encode(maker, bridger, signedOrderHash(), moduleData)
-            )
-        );
+        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, envelope(SIDE_AD, adLeg(), moduleData)));
     }
 
     /// A v1-layout blob (no slot ids) must return false, not revert with empty data.
     function test_v1LayoutBlobFails() public view {
-        CounterpartyVerifier.SettlementAuth memory auth = CounterpartyVerifier.SettlementAuth({
-            orderChainId: orderChainId,
-            adChainId: adChainId,
-            orderHash: v.readBytes32(".settlement.auth.orderHash"),
-            orderChainRoot: orderChainRoot,
-            adChainRoot: adChainRoot,
-            makerKeyCommitment: v.readBytes32(".settlement.auth.makerKeyCommitment")
-        });
         bytes memory v1 = abi.encode(
             uint8(1),
-            auth,
+            CoSign.vectorAuth(v),
             v.readBytes(".keys.makerBls.pk.eip2537"),
             v.readBytes(".keys.bridgerBls.pk.eip2537"),
             v.readBytes(".settlement.aggSig.eip2537")
         );
-        assertFalse(
-            verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, signedOrderHash(), v1))
-        );
-        assertFalse(
-            verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, signedOrderHash(), hex""))
-        );
+        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, envelope(SIDE_AD, adLeg(), v1)));
+        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, envelope(SIDE_AD, adLeg(), hex"")));
     }
 
     // =========================================================================
@@ -274,28 +281,14 @@ contract CounterpartyVerifierTest is Test {
     function test_tamperedRootInAuthFails() public view {
         // aggSig was made over the real roots; a substituted root must fail the
         // pairing even though root == auth root.
-        CounterpartyVerifier.SettlementAuth memory auth = CounterpartyVerifier.SettlementAuth({
-            orderChainId: orderChainId,
-            adChainId: adChainId,
-            orderHash: v.readBytes32(".settlement.auth.orderHash"),
-            orderChainRoot: bytes32(uint256(orderChainRoot) ^ 1),
-            adChainRoot: adChainRoot,
-            makerKeyCommitment: v.readBytes32(".settlement.auth.makerKeyCommitment")
-        });
-        bytes memory moduleData = abi.encode(
-            uint8(3),
-            auth,
-            uint32(0),
-            uint32(0),
-            v.readBytes(".keys.makerBls.pk.eip2537"),
-            v.readBytes(".keys.bridgerBls.pk.eip2537"),
-            v.readBytes(".settlement.aggSig.eip2537")
+        CounterpartyVerifier.SettlementAuth memory auth = CoSign.vectorAuth(v);
+        auth.orderChainRoot = bytes32(uint256(orderChainRoot) ^ 1);
+        bytes memory moduleData = moduleDataOf(
+            auth, 0, 0, v.readBytes(".keys.makerBls.pk.eip2537"), v.readBytes(".settlement.aggSig.eip2537")
         );
         assertFalse(
             verifier.isRootValid(
-                orderChainId,
-                bytes32(uint256(orderChainRoot) ^ 1),
-                abi.encode(maker, bridger, signedOrderHash(), moduleData)
+                orderChainId, bytes32(uint256(orderChainRoot) ^ 1), envelope(SIDE_AD, adLeg(), moduleData)
             )
         );
     }
@@ -318,9 +311,7 @@ contract CounterpartyVerifierTest is Test {
             v.readBytes(".keys.bridgerBls.pk.eip2537"),
             v.readBytes(".settlement.aggSig.eip2537")
         );
-        assertFalse(
-            verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, signedOrderHash(), v2))
-        );
+        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, envelope(SIDE_AD, adLeg(), v2)));
     }
 
     /// The bridger's half aggregated with another live maker key: the pairing holds, the slot is
@@ -344,28 +335,130 @@ contract CounterpartyVerifierTest is Test {
     /// The helper the unlock fixtures use must be the real signing, not a lookalike: signed over the
     /// vector's own auth it reproduces the vector's aggregate byte for byte.
     function test_coSignHelperReproducesTheVectorAggregate() public view {
-        bytes memory agg = CoSign.aggregate(v, CoSign.authFor(v, signedOrderHash()));
+        bytes memory agg = CoSign.aggregate(v, CoSign.vectorAuth(v));
         assertEq(agg, v.readBytes(".settlement.aggSig.eip2537"));
     }
 
     /// A valid co-signature over one order is not consent to another: the envelope names the order
     /// the escrow is unlocking, and the auth must name the same one.
     function test_envelopeOrderHashDiffersFromTheAuth_fails() public view {
-        bytes memory moduleData = abi.encode(
+        bytes memory moduleData = vectorModuleData();
+        bytes32 other = keccak256("another order");
+        assertTrue(verifier.isRootValid(orderChainId, orderChainRoot, envelope(SIDE_AD, adLeg(), moduleData)));
+        assertFalse(
+            verifier.isRootValid(
+                orderChainId, orderChainRoot, abi.encode(maker, bridger, other, uint32(0), adLeg(), SIDE_AD, moduleData)
+            )
+        );
+    }
+
+    // ---- v4: the co-signed auth names each leg's nullifier ----
+
+    /// An unlock consuming any nullifier but the one co-signed for its leg is refused, even with a
+    /// valid proof for it: the parties chose this leg's nullifier, so only the real half settles it.
+    function test_otherNullifierFails() public view {
+        bytes memory moduleData = vectorModuleData();
+        assertTrue(verifier.isRootValid(orderChainId, orderChainRoot, envelope(SIDE_AD, adLeg(), moduleData)));
+        assertFalse(
+            verifier.isRootValid(orderChainId, orderChainRoot, envelope(SIDE_AD, keccak256("invented"), moduleData))
+        );
+        assertFalse(
+            verifier.isRootValid(adChainId, adChainRoot, envelope(SIDE_ORDER, keccak256("invented"), moduleData))
+        );
+    }
+
+    /// Each leg's nullifier settles only its own leg: the ad leg's on the order leg fails, and back.
+    function test_otherLegsNullifierFails() public view {
+        bytes memory moduleData = vectorModuleData();
+        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, envelope(SIDE_AD, orderLeg(), moduleData)));
+        assertFalse(verifier.isRootValid(adChainId, adChainRoot, envelope(SIDE_ORDER, adLeg(), moduleData)));
+    }
+
+    /// The side must agree with the root it names: the ad leg (side AD) is checked against the order
+    /// chain's root, so side AD against the ad chain's root fails even with the ad leg's nullifier;
+    /// side ORDER against the order chain's root fails the same way.
+    function test_sideDisagreesWithTheRootFails() public view {
+        bytes memory moduleData = vectorModuleData();
+        assertFalse(verifier.isRootValid(adChainId, adChainRoot, envelope(SIDE_AD, adLeg(), moduleData)));
+        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, envelope(SIDE_ORDER, orderLeg(), moduleData)));
+    }
+
+    function test_unknownSideFails() public view {
+        bytes memory moduleData = vectorModuleData();
+        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, envelope(2, adLeg(), moduleData)));
+        assertFalse(verifier.isRootValid(adChainId, adChainRoot, envelope(2, orderLeg(), moduleData)));
+    }
+
+    /// A genuine version-3 co-signature (six-field auth, 224-byte preimage, no nullifiers) is refused
+    /// by its version byte, under the v4 envelope an escrow now sends.
+    function test_v3AuthFails() public view {
+        bytes memory preimageV3 = bytes.concat(
+            CoSign.SETTLE_TAG,
+            bytes32(orderChainId),
+            bytes32(adChainId),
+            signedOrderHash(),
+            orderChainRoot,
+            adChainRoot,
+            v.readBytes32(".settlement.auth.makerKeyCommitment")
+        );
+        bytes memory h = BLS.hashToG2(preimageV3, bytes(CoSign.DST_SIG));
+        bytes memory aggV3 = CoSign.add(
+            CoSign.sign(h, uint256(v.readBytes32(".keys.makerBls.sk"))),
+            CoSign.sign(h, uint256(v.readBytes32(".keys.bridgerBls.sk")))
+        );
+        // The six-field auth abi-encodes as six inline words; version 3 in front.
+        bytes memory v3 = abi.encode(
             uint8(3),
-            CoSign.authFor(v, signedOrderHash()),
+            orderChainId,
+            adChainId,
+            signedOrderHash(),
+            orderChainRoot,
+            adChainRoot,
+            v.readBytes32(".settlement.auth.makerKeyCommitment"),
             uint32(0),
             uint32(0),
             v.readBytes(".keys.makerBls.pk.eip2537"),
             v.readBytes(".keys.bridgerBls.pk.eip2537"),
-            v.readBytes(".settlement.aggSig.eip2537")
+            aggV3
         );
-        bytes32 other = keccak256("another order");
+        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, envelope(SIDE_AD, adLeg(), v3)));
+        // Control: the same parties' v4 co-signature over this order verifies.
+        assertTrue(verifier.isRootValid(orderChainId, orderChainRoot, metadata()));
+    }
+
+    // ---- plan 12 C: the ad leg accepts only the pinned slot ----
+
+    function envelopePinned(uint8 side, bytes32 nullifier, uint32 pin, bytes memory moduleData)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return abi.encode(maker, bridger, signedOrderHash(), pin, nullifier, side, moduleData);
+    }
+
+    /// The co-signature names the maker key in slot 0. Pinned to 0 it settles; pinned to another live
+    /// slot of the same signer it does not, though every other check holds; the unpinned sentinel
+    /// leaves the named key as the only bind.
+    function test_adLeg_onlyThePinnedSlotSettles() public {
+        uint32 other = registerMakerSlot(1);
+        bytes memory moduleData = vectorModuleData(); // maker slot hint 0
+        assertTrue(verifier.isRootValid(orderChainId, orderChainRoot, envelopePinned(SIDE_AD, adLeg(), 0, moduleData)));
+        assertFalse(
+            verifier.isRootValid(orderChainId, orderChainRoot, envelopePinned(SIDE_AD, adLeg(), other, moduleData))
+        );
         assertTrue(
             verifier.isRootValid(
-                orderChainId, orderChainRoot, abi.encode(maker, bridger, signedOrderHash(), moduleData)
+                orderChainId, orderChainRoot, envelopePinned(SIDE_AD, adLeg(), type(uint32).max, moduleData)
             )
         );
-        assertFalse(verifier.isRootValid(orderChainId, orderChainRoot, abi.encode(maker, bridger, other, moduleData)));
+    }
+
+    /// The order leg sends the sentinel and settles under the key the auth names.
+    function test_orderLeg_unpinnedSentinelSettles() public view {
+        assertTrue(
+            verifier.isRootValid(
+                adChainId, adChainRoot, envelopePinned(SIDE_ORDER, orderLeg(), type(uint32).max, vectorModuleData())
+            )
+        );
     }
 }

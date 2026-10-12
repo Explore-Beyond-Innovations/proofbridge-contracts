@@ -44,6 +44,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
     /// Re-point the fixture ad to `other32` and lock against it: custody stays with `maker`.
     function _splitCaseLock(uint256 salt) internal returns (IAdManager.OrderParams memory p) {
         keyRegistry.set(other32, true);
+        keyRegistry.approve(other32, _b32(maker), true);
         vm.prank(maker);
         adManager.setSettlementSigner(lastAdId, other32);
 
@@ -51,7 +52,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         p.salt = salt;
         p.adSettlementSigner = other32;
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -138,7 +139,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         vm.startPrank(admin);
         bare.setPeerEscrow(orderChainId, _b32(orderPortal));
         bare.setTokenRoute(address(adToken), orderChainId, _b32(orderToken));
-        bare.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        bare.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 0));
         vm.stopPrank();
 
         vm.startPrank(maker);
@@ -156,6 +157,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         test_fundAd_makerOnly();
         _openOrder(lastAdId, address(adToken), 60 ether, 4, bridger, recipient);
         keyRegistry.set(other32, true);
+        keyRegistry.approve(other32, _b32(maker), true);
 
         vm.expectEmit(true, false, false, true);
         emit IAdManager.SettlementSignerSet(lastAdId, _b32(maker), other32);
@@ -169,6 +171,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         // An incident lever: never freezable (C2), like the registry's retirement lever.
         test_fundAd_makerOnly();
         keyRegistry.set(other32, true);
+        keyRegistry.approve(other32, _b32(maker), true);
         vm.prank(admin);
         adManager.pause();
 
@@ -180,6 +183,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
     function test_setSettlementSigner_notMaker_reverts() public {
         test_fundAd_makerOnly();
         keyRegistry.set(other32, true);
+        keyRegistry.approve(other32, _b32(maker), true);
         vm.prank(nonMaker);
         vm.expectRevert(IAdManager.AdManager__NotMaker.selector);
         adManager.setSettlementSigner(lastAdId, other32);
@@ -197,6 +201,8 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         (IAdManager.OrderParams memory p,) = _openOrder(lastAdId, address(adToken), 60 ether, 5, bridger, recipient);
 
         keyRegistry.set(other32, true);
+
+        keyRegistry.approve(other32, _b32(maker), true);
         vm.prank(maker);
         adManager.setSettlementSigner(lastAdId, other32);
 
@@ -220,7 +226,7 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         vm.expectRevert(
             abi.encodeWithSelector(IAdManager.AdManager__SettlementSignerMismatch.selector, _b32(maker), other32)
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function test_lock_afterKeyRetired_reverts() public {
@@ -233,20 +239,22 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         p.salt = 8;
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__SignerNotRegistered.selector, _b32(maker)));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
 
         // Re-pointing at a usable key re-opens the ad.
         keyRegistry.set(other32, true);
+        keyRegistry.approve(other32, _b32(maker), true);
         vm.prank(maker);
         adManager.setSettlementSigner(lastAdId, other32);
         p.adSettlementSigner = other32;
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function test_lock_afterRepoint_requiresTheNewSigner() public {
         test_fundAd_makerOnly();
         keyRegistry.set(other32, true);
+        keyRegistry.approve(other32, _b32(maker), true);
         vm.prank(maker);
         adManager.setSettlementSigner(lastAdId, other32);
 
@@ -256,11 +264,11 @@ contract EscrowBindingAdManagerTest is AdManagerTest {
         vm.expectRevert(
             abi.encodeWithSelector(IAdManager.AdManager__SettlementSignerMismatch.selector, other32, _b32(maker))
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
 
         p.adSettlementSigner = other32;
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 }
 

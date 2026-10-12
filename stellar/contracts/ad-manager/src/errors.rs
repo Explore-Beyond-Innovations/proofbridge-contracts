@@ -95,7 +95,8 @@ pub enum AdManagerError {
     // Address decode errors (40-41)
     /// Recipient bytes do not decode to a valid Stellar account address
     InvalidAccountAddress = 40,
-    /// The order's deadline has passed; it can no longer be unlocked.
+    /// The co-signed unlock is at or past the presentation cutoff (the window's end minus the
+    /// margin): the first second refused, strict, so it never shares a second with finalize_cancel.
     OrderExpired = 46,
     /// No key registry is set; createAd / set_settlement_signer fail closed (2.3c D2)
     NoKeyRegistry = 47,
@@ -171,6 +172,15 @@ pub enum AdManagerError {
     DisputeZeroResponse = 84,
     /// D5 (R1): the ruling closed the answer window.
     DisputeAlreadyRuled = 85,
+    /// The settlement signer is not the maker and has not approved the maker in the key registry.
+    SignerNotApproved = 86,
+    /// A token pull credited the escrow anything other than the amount (a fee-on-transfer token,
+    /// or one that pays a bonus on receipt).
+    TransferShort = 87,
+    /// Plan 12 C: the slot to pin does not exist, is not usable now, or is not the signer's.
+    SlotNotUsable = 88,
+    /// Plan 12 C: no re-pin consent for this order from its current pin.
+    NoRepin = 89,
 }
 
 /// The shared escrow code reports an opaque reason; this is where it becomes this contract's own
@@ -216,6 +226,7 @@ impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
             NonExactDownscale => AdManagerError::NonExactDownscale,
             DecimalOverflow => AdManagerError::DecimalOverflow,
             InvalidAccountAddress => AdManagerError::InvalidAccountAddress,
+            TransferShort => AdManagerError::TransferShort,
         }
     }
 }

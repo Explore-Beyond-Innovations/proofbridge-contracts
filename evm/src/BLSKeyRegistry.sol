@@ -65,6 +65,13 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
     mapping(bytes32 => mapping(bytes32 => bool)) public usedCommitment;
     /// 2.6 D2: the slot a key commitment occupies, plus one (0 = never); `setValidUntil` names the key.
     mapping(bytes32 => mapping(bytes32 => uint32)) private _slotOfKey;
+    /// Which makers may name the account as an ad's settlement signer, per (account, maker), each
+    /// pair with its own nonce. An approval counts only at the account's current generation.
+    mapping(bytes32 => mapping(bytes32 => MakerApproval)) public makerApprovals;
+    /// Bumped by `revoke`, so an account that leaves and comes back starts with no approvals.
+    mapping(bytes32 => uint64) public approvalGeneration;
+    /// account => orderHash => the latest re-pin consent (2.7 plan 12 D12).
+    mapping(bytes32 => mapping(bytes32 => RepinApproval)) private _repins;
 
     /// 2.1b — proof-carried registration (design 03 §3.6). Ships flagged OFF: turning it on is a
     /// configuration call, gated in T3 on the anchor writer being the 3.5 quorum, a
@@ -142,7 +149,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
 
         _requirePop(account, blsPubKey, pop, nonce);
         _requireOwnLeg(owner.legs, nonce);
-        _checkOwner(account, owner, KeyMessages.Kind.Register, commitment, deadline);
+        _checkOwner(account, owner, KeyMessages.Kind.Register, commitment, deadline, false);
 
         slotId = _addSlot(account, commitment);
         nonceOf[account] = nonce + 1;
@@ -220,7 +227,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         if (validUntil == 0 || (slot.validUntil != 0 && validUntil >= slot.validUntil)) revert BadValidUntil();
 
         if (owner.legs.length != 0) revert LegMismatch();
-        _checkOwner(account, owner, KeyMessages.Kind.Retire, keyCommitment, validUntil);
+        _checkOwner(account, owner, KeyMessages.Kind.Retire, keyCommitment, validUntil, false);
 
         slot.validUntil = validUntil;
         uint64 eff = uint64(block.timestamp) > validUntil ? uint64(block.timestamp) : validUntil;
@@ -238,7 +245,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         if (e.liveSlots.length != 0) _requireNoOpenPositions(account);
 
         _requireOwnLeg(owner.legs, nonce);
-        _checkOwner(account, owner, KeyMessages.Kind.Revoke, bytes32(0), 0);
+        _checkOwner(account, owner, KeyMessages.Kind.Revoke, bytes32(0), 0, false);
 
         for (uint256 i = 0; i < e.liveSlots.length; i++) {
             delete e.slots[e.liveSlots[i]];
@@ -246,6 +253,7 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         }
         delete e.liveSlots;
         nonceOf[account] = nonce + 1;
+        approvalGeneration[account]++;
         emit KeyRevoked(account, nonce);
     }
 
@@ -254,9 +262,60 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
     function cancel(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external whenNotPaused {
         if (nonce != nonceOf[account]) revert BadNonce();
         _requireOwnLeg(owner.legs, nonce);
-        _checkOwner(account, owner, KeyMessages.Kind.Cancel, bytes32(0), 0);
+        _checkOwner(account, owner, KeyMessages.Kind.Cancel, bytes32(0), 0, false);
         nonceOf[account] = nonce + 1;
         emit RegistrationCancelled(account, nonce);
+    }
+
+    /// Lets `maker` name `account` as an ad's settlement signer (`approved`), or withdraws that. The
+    /// pair's own nonce, never the account's, so it leaves key registrations and other makers alone.
+    /// Approving is pausable; withdrawing is not, since it only ever reduces what others can do.
+    function approveMaker(
+        bytes32 account,
+        bytes32 maker,
+        bool approved,
+        OwnerAuth calldata owner,
+        uint256 nonce,
+        uint64 deadline
+    ) external {
+        if (approved) _requireNotPaused();
+        if (block.timestamp > deadline) revert DeadlineExpired();
+        if (deadline > block.timestamp + MAX_REGISTER_TTL) revert DeadlineTooFar();
+        MakerApproval storage a = makerApprovals[account][maker];
+        if (nonce != a.nonce) revert BadNonce();
+
+        _requireOwnLeg(owner.legs, nonce);
+        _checkOwner(account, owner, KeyMessages.Kind.ApproveMaker, maker, deadline, approved);
+
+        a.approved = approved;
+        a.nonce = uint64(nonce + 1);
+        a.generation = approvalGeneration[account];
+        emit MakerApprovalSet(account, maker, approved, nonce);
+    }
+
+    /// The settlement signer consents to move `orderHash`'s co-signing pin from `fromSlot` to `toSlot`;
+    /// anyone may then apply it on the AdManager (`repinOrder`), which checks the order is still open
+    /// and `toSlot` usable. The (account, order) pair's own nonce, so a signature applies once. Not
+    /// pausable: it moves a pin off a leaked key, which only protects the order. The consent has no
+    /// deadline and `revoke` leaves it: it is withdrawn by superseding it (a consent at the next nonce
+    /// naming another slot, or the current pin), and a late-applied one can only move the pin to a
+    /// slot that is usable then and stamp the order re-pinned, which gives the bridger the grace.
+    function approveRepin(
+        bytes32 account,
+        bytes32 orderHash,
+        uint32 fromSlot,
+        uint32 toSlot,
+        OwnerAuth calldata owner,
+        uint256 nonce
+    ) external {
+        RepinApproval storage r = _repins[account][orderHash];
+        if (nonce != r.nonce) revert BadNonce();
+        _requireOwnLeg(owner.legs, nonce);
+        _checkOwner(account, owner, KeyMessages.Kind.Repin, orderHash, (uint64(fromSlot) << 32) | toSlot, false);
+        r.fromSlot = fromSlot;
+        r.toSlot = toSlot;
+        r.nonce = uint64(nonce + 1);
+        emit RepinApproved(account, orderHash, fromSlot, toSlot, nonce);
     }
 
     function _addSlot(bytes32 account, bytes32 commitment) private returns (uint32 slotId) {
@@ -281,18 +340,21 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         return at == 0 ? vu : at;
     }
 
-    /// Drops every dead slot the escrows can no longer need: past its expiry + GRACE_PERIOD, or at
-    /// once when the guards are wired and none reports open positions for the account (#422 D17 —
-    /// no order's cancel can still ask about its history; D17b — with no guard to ask, never at
-    /// once). Not in the expiry's own second (D17a): a lock in that second still counts the kill.
-    /// Swap-remove; order is not meaningful.
+    /// Drops every dead slot the escrows can no longer need: at once when guards are wired and none
+    /// reports an open position for the account (#422 D17: no order's cancel can still ask about its
+    /// history), else after its expiry + GRACE_PERIOD, open positions or not. The 30 days outlast every
+    /// finalize a kill can still touch: an order's life as a payout is at most the window, its buffer,
+    /// the challenge period and the ruling buffer (about 16 days), plus a grace capped by the 7-day
+    /// anchor delay and one buffer, so a slot kept longer protects nothing and only fills the cap.
+    /// With no guard to ask, never at once (D17b). Not in the expiry's own second (D17a): a lock in
+    /// that second still counts the kill. Swap-remove; order is not meaningful.
     function _prune(bytes32 account, RegistryEntry storage e) private {
-        bool free = positionGuards.length != 0 && !_hasOpenPositions(account);
+        bool atOnce = positionGuards.length != 0 && !_hasOpenPositions(account);
         uint256 i = 0;
         while (i < e.liveSlots.length) {
             uint32 id = e.liveSlots[i];
             uint64 vu = _expiredAt(account, id);
-            if (vu != 0 && (block.timestamp > uint256(vu) + GRACE_PERIOD || (free && block.timestamp > vu))) {
+            if (vu != 0 && block.timestamp > uint256(vu) + (atOnce ? 0 : GRACE_PERIOD)) {
                 delete e.slots[id];
                 delete expiries[account][id];
                 e.liveSlots[i] = e.liveSlots[e.liveSlots.length - 1];
@@ -339,14 +401,25 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         return false;
     }
 
-    /// @notice Did any of `account`'s slots expire in `[from, to]` (#422 D12/D14/D14b, `IKeyRegistry`).
-    function anySlotExpiredWithin(bytes32 account, uint64 from, uint64 to) external view returns (bool) {
-        RegistryEntry storage e = entries[account];
-        for (uint256 i = 0; i < e.liveSlots.length; i++) {
-            uint64 vu = _expiredAt(account, e.liveSlots[i]);
-            if (vu != 0 && vu >= from && vu <= to) return true;
-        }
-        return false;
+    /// True iff `account` approved `maker` since its last `revoke` and has not withdrawn it.
+    function isApprovedMaker(bytes32 account, bytes32 maker) external view returns (bool) {
+        MakerApproval storage a = makerApprovals[account][maker];
+        return a.approved && a.generation == approvalGeneration[account];
+    }
+
+    function repinApproval(bytes32 account, bytes32 orderHash)
+        external
+        view
+        returns (uint32 fromSlot, uint32 toSlot, uint64 nonce)
+    {
+        RepinApproval storage r = _repins[account][orderHash];
+        return (r.fromSlot, r.toSlot, r.nonce);
+    }
+
+    /// @notice When the slot stopped being usable (`IKeyRegistry`): 0 while unbounded, else the
+    ///         recorded expiry — the kill's moment, not the `1` a kill names.
+    function expiredAt(bytes32 account, uint32 slotId) external view returns (uint64) {
+        return _expiredAt(account, slotId);
     }
 
     function lookup(bytes32 account, uint32 slotId) external view returns (KeySlot memory slot) {
@@ -417,16 +490,21 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         bytes32 account,
         OwnerAuth calldata owner,
         KeyMessages.Kind kind,
-        bytes32 keyCommitment,
-        uint64 time
+        bytes32 subject,
+        uint64 time,
+        bool approved
     ) private view {
         if (owner.scheme == Scheme.Secp256k1) {
             checkSecp256k1Owner(
-                account, KeyMessages.digest(_domainSeparator, kind, account, keyCommitment, owner.legs, time), owner.sig
+                account,
+                KeyMessages.digest(_domainSeparator, kind, account, subject, owner.legs, time, approved),
+                owner.sig
             );
         } else if (owner.scheme == Scheme.Sep53) {
             checkSep53Owner(
-                account, KeyMessages.text(bytes(keysEnv()), kind, account, keyCommitment, owner.legs, time), owner.sig
+                account,
+                KeyMessages.text(bytes(keysEnv()), kind, account, subject, owner.legs, time, approved),
+                owner.sig
             );
         } else {
             revert UnknownScheme(); // unreachable today: calldata decoding rejects out-of-range enums

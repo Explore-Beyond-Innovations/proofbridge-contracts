@@ -2,7 +2,7 @@
 pragma solidity ^0.8.34;
 
 import {IwNativeToken, SafeNativeToken} from "./wNativeToken.sol";
-import {IDisputeManager, IEscrowPause} from "./interfaces/IDisputeManager.sol";
+import {IDisputeManager} from "./interfaces/IDisputeManager.sol";
 import {Dispute} from "./libraries/Dispute.sol";
 import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
 
@@ -155,20 +155,18 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     /// @inheritdoc IDisputeManager
     function openDispute(
         bytes32 orderHash,
-        uint256 amount,
         uint256 peerChainId,
         address filer,
         bytes32 evidence,
         uint64 deadline,
-        uint64 buffer,
-        uint64 escrowPausedSeconds
+        uint64 buffer
     ) external payable onlyEscrow returns (uint128 bond) {
         if (disputes[orderHash].initiator != address(0)) {
             revert DisputeManager__DisputeExists(orderHash);
         }
 
         Dispute.Params storage p = disputeParams.load(peerChainId);
-        uint256 required = Dispute.bondFor(amount, p);
+        uint256 required = Dispute.bondFor(p);
         // Exact (C-17): an over- or under-paid bond is refused, so nothing is left to refund.
         if (msg.value != required) revert DisputeManager__NativeAmountMismatch(msg.value, required);
         bond = uint128(required);
@@ -186,7 +184,6 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
             initiator: filer,
             bond: bond,
             challengeDeadline: challengeDeadline,
-            pausedAtOpen: escrowPausedSeconds,
             initiatorEvidence: evidence,
             responderEvidence: bytes32(0),
             ruling: Dispute.Outcome.None,
@@ -201,7 +198,7 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     /// @dev Keyed on `disputeEscrow[orderHash]` rather than `isEscrow`, deliberately: an escrow
     ///      de-authorised during a rotation or an incident must still be able to close the disputes
     ///      it opened, or their bonds have no exit and no admin override to give them one.
-    function settleBond(bytes32 orderHash, Dispute.Outcome outcome, bool filerIsBridger) external {
+    function settleBond(bytes32 orderHash, Dispute.Outcome outcome, bool filerIsBridger, bool returnToFiler) external {
         if (disputeEscrow[orderHash] != msg.sender) revert DisputeManager__NotEscrow();
         Dispute.Record storage d = disputes[orderHash];
         if (d.initiator == address(0)) revert DisputeManager__NotDisputed(orderHash);
@@ -212,7 +209,7 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         delete disputeEscrow[orderHash];
 
         if (bond != 0) {
-            bool toFiler = Dispute.bondReturnsToFiler(outcome, filerIsBridger);
+            bool toFiler = Dispute.bondReturnsToFiler(outcome, filerIsBridger, returnToFiler);
             address to = toFiler ? filer : protocolFeePool;
             // An unset fee pool must not strand the bond; the filer keeps it rather than this
             // contract holding it forever.
@@ -267,9 +264,6 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         // D3: a ruling opens a window, it does not pay. `max(now, deadline) + buffer` is what gives
         // the forfeited party room to present a settled-leaf proof and override it — a ruling issued
         // a second before the deadline must not become payable a second after it.
-        //
-        // Stored unadjusted: `effectiveChallengeDeadline` applies the escrow's paused seconds on
-        // read, so writing an adjusted value back here would count the same pause twice.
         d.ruling = outcome;
         uint64 base = uint64(block.timestamp) > d.orderDeadline ? uint64(block.timestamp) : d.orderDeadline;
         uint64 finalizeAt = base + d.buffer;
@@ -282,7 +276,7 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IDisputeManager
-    function outcomeOf(bytes32 orderHash, uint64 escrowPausedSeconds)
+    function outcomeOf(bytes32 orderHash)
         external
         view
         returns (Dispute.Outcome outcome, bool windowOver, address initiator)
@@ -290,15 +284,14 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         Dispute.Record storage d = disputes[orderHash];
         initiator = d.initiator;
         outcome = d.ruling;
-        uint256 until_ = uint256(d.challengeDeadline) + (escrowPausedSeconds - d.pausedAtOpen);
-        windowOver = initiator != address(0) && block.timestamp >= until_;
+        windowOver = initiator != address(0) && block.timestamp >= d.challengeDeadline;
     }
 
-    /// @notice The exact bond a filing on `peerChainId`'s route must carry for `amount` (49E-2): the
-    ///         bond is exact (C-17), so clients quote it here instead of re-deriving the formula.
+    /// @notice The exact bond a filing on `peerChainId`'s route must carry (49E-2): the bond is exact
+    ///         (C-17), so clients quote it here rather than reading the raw params.
     ///         Reverts as the filing would when the route has no params.
-    function bondFor(uint256 amount, uint256 peerChainId) external view returns (uint256) {
-        return Dispute.bondFor(amount, disputeParams.load(peerChainId));
+    function bondFor(uint256 peerChainId) external view returns (uint256) {
+        return Dispute.bondFor(disputeParams.load(peerChainId));
     }
 
     /// @inheritdoc IDisputeManager
@@ -311,21 +304,10 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         return disputes[orderHash].initiator != address(0);
     }
 
-    /**
-     * @notice The challenge deadline in real time: the recorded one plus every second the *escrow*
-     *         has been paused past the snapshot the filing carried — the order's own, from its
-     *         lock, so the floor is the escrow's window end to the second (D10, c41-J).
-     * @dev The escrow's counter, not one of this contract's own. A pause matters here for exactly
-     *      one reason — it stops the parties presenting evidence — and presentation is gated by the
-     *      escrow. A pause clock on this module would be a second, unrelated number that happened
-     *      to be called the same thing, and would leave the real failure D10 describes unfixed: the
-     *      escrow paused, nobody able to present, the challenge period running out regardless.
-     */
+    /// @notice The challenge deadline, in plain time: the filing's, or the ruling's once ruled. A pause
+    ///         stops only entries, never the parties presenting, so nothing stretches it.
     function effectiveChallengeDeadline(bytes32 orderHash) public view returns (uint256) {
-        Dispute.Record storage d = disputes[orderHash];
-        address escrow = disputeEscrow[orderHash];
-        if (escrow == address(0)) return d.challengeDeadline;
-        return uint256(d.challengeDeadline) + (IEscrowPause(escrow).pausedSeconds() - d.pausedAtOpen);
+        return disputes[orderHash].challengeDeadline;
     }
 
     /// @notice Withdraw a credited bond payout to its recipient. Permissionless.

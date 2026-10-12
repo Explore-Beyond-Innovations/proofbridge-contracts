@@ -26,7 +26,6 @@ mod storage;
 #[cfg(test)]
 mod test;
 
-use proofbridge_core::cross_contract;
 use proofbridge_core::dispute;
 use proofbridge_core::types::{DisputeOutcome, DisputeParams, DisputeRecord};
 use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env};
@@ -68,10 +67,12 @@ impl DisputeManagerContract {
         params: DisputeParams,
     ) -> Result<(), Error> {
         Self::require_admin(&env)?;
+        // One arm per field `validate` names. A field added there without an arm here traps instead
+        // of being reported as the bond floor's error.
         dispute::validate(&params).map_err(|f| match f {
             1 => Error::InvalidChallengePeriod,
             2 => Error::InvalidBondFloor,
-            _ => Error::InvalidBondBps,
+            other => panic!("dispute::validate named field {other}, which has no error"),
         })?;
         storage::set_params(&env, chain_id, &params);
         events::DisputeParamsSet { chain_id, params }.publish(&env);
@@ -123,29 +124,26 @@ impl DisputeManagerContract {
 
     /// Open a dispute on an order the escrow has already hashed and checked, taking the bond.
     ///
-    /// Escrow-only. The escrow must pass `amount` because it does not store one — an order's leg is
-    /// `{status, paused_at_open}` and the amount lives in the caller's params, validated against the
-    /// hash. So the escrow is the only party that can vouch for it, which is why filing starts there
-    /// and this contract is never the entry point.
+    /// Escrow-only: the escrow hashed the order, so it is the only party that can vouch for the
+    /// deadline it passes, which is why filing starts there and this contract is never the entry
+    /// point. The bond is the route's flat floor (`bond_for`), so no order amount is passed.
     #[allow(clippy::too_many_arguments)]
     pub fn open_dispute(
         env: Env,
         escrow: Address,
         order_hash: BytesN<32>,
-        amount: u128,
         peer_chain_id: u128,
         filer: Address,
         evidence: BytesN<32>,
         deadline: u64,
         buffer: u64,
-        escrow_paused_seconds: u64,
     ) -> Result<u128, Error> {
         Self::require_escrow(&env, &escrow)?;
         if storage::get_dispute(&env, &order_hash).is_some() {
             return Err(Error::DisputeExists);
         }
         let p = storage::get_params(&env, peer_chain_id).ok_or(Error::NoDisputeParams)?;
-        let bond = dispute::bond_for(amount, &p);
+        let bond = dispute::bond_for(&p);
 
         // The filer funds the bond directly into this contract: it never rests in the escrow, which
         // keeps "the escrow's balance is its order escrow" a single-contract invariant for 2.3h.
@@ -169,7 +167,6 @@ impl DisputeManagerContract {
                 initiator: filer.clone(),
                 bond,
                 challenge_deadline,
-                paused_at_open: escrow_paused_seconds,
                 initiator_evidence: evidence.clone(),
                 responder_evidence: BytesN::from_array(&env, &[0u8; 32]),
                 ruling: DisputeOutcome::None,
@@ -193,8 +190,10 @@ impl DisputeManagerContract {
     /// Settle the bond for a dispute the escrow has just finalized, and close the record.
     ///
     /// Escrow-only, and the one direction funds move: out of this module, never out of the escrow.
-    /// `filer_was_counterparty` is the escrow's answer, because only it knows which party it
-    /// authenticates.
+    /// `filer_is_bridger` is the escrow's answer, because only it knows which party it
+    /// authenticates. `return_to_filer` is the escrow's finding on an evidence close that the
+    /// bridger filed against a payout the maker denied; the bond then goes back to the filer and
+    /// the outcome is unchanged.
     ///
     /// Authenticated against `d.escrow` rather than the allow-list, deliberately: an escrow
     /// de-authorised during a rotation or an incident must still be able to close the disputes it
@@ -205,6 +204,7 @@ impl DisputeManagerContract {
         order_hash: BytesN<32>,
         outcome: DisputeOutcome,
         filer_is_bridger: bool,
+        return_to_filer: bool,
     ) -> Result<(), Error> {
         escrow.require_auth();
         let d = storage::get_dispute(&env, &order_hash).ok_or(Error::NotDisputed)?;
@@ -214,7 +214,8 @@ impl DisputeManagerContract {
         storage::remove_dispute(&env, &order_hash);
 
         if d.bond != 0 {
-            let to_filer = dispute::bond_returns_to_filer(outcome, filer_is_bridger);
+            let to_filer =
+                dispute::bond_returns_to_filer(outcome, filer_is_bridger, return_to_filer);
             // An unset fee pool must not strand the bond; the filer keeps it rather than this
             // contract holding it forever.
             let to = if to_filer {
@@ -238,8 +239,7 @@ impl DisputeManagerContract {
     // ── the dispute itself ───────────────────────────────────────────────
 
     /// Record the counterparty's evidence hash. Moves no funds, posts no bond. One non-zero answer,
-    /// strictly before the pause-adjusted challenge deadline (D5); the escrow passes its pause
-    /// counter because the module cannot read back into its caller.
+    /// strictly before the challenge deadline (D5).
     ///
     /// Escrow-only. `require_auth` on the responder proves *an* address consented, not that it is
     /// *the* counterparty — and the responder slot is single rather than an append, so anyone able
@@ -251,7 +251,6 @@ impl DisputeManagerContract {
         order_hash: BytesN<32>,
         responder: Address,
         evidence: BytesN<32>,
-        escrow_paused_seconds: u64,
     ) -> Result<(), Error> {
         escrow.require_auth();
         // The escrow proves the named responder is a party; only this proves the caller is them.
@@ -275,7 +274,7 @@ impl DisputeManagerContract {
         if d.ruling != DisputeOutcome::None {
             return Err(Error::AlreadyRuled);
         }
-        if env.ledger().timestamp() >= Self::deadline_at(&d, escrow_paused_seconds) {
+        if env.ledger().timestamp() >= d.challenge_deadline {
             return Err(Error::ResponseWindowClosed);
         }
         d.responder_evidence = evidence.clone();
@@ -301,13 +300,12 @@ impl DisputeManagerContract {
             return Err(Error::ArbiterCannotSettle);
         }
         let mut d = storage::get_dispute(&env, &order_hash).ok_or(Error::NotDisputed)?;
-        let until = Self::effective_challenge_deadline_of(&env, &d);
-        if env.ledger().timestamp() >= until {
+        if env.ledger().timestamp() >= d.challenge_deadline {
             return Err(Error::ChallengeClosed);
         }
         // D3: a ruling opens a window, it does not pay. `max(now, deadline) + buffer` is the room
         // the forfeited party presents in — a ruling issued a ledger before the deadline must not
-        // become payable a ledger after it. Stored unadjusted; the pause is applied on read.
+        // become payable a ledger after it.
         d.ruling = outcome;
         let finalize_at = env.ledger().timestamp().max(d.order_deadline) + d.buffer;
         d.challenge_deadline = finalize_at;
@@ -323,22 +321,13 @@ impl DisputeManagerContract {
 
     // ── views ────────────────────────────────────────────────────────────
 
-    /// How a dispute has ended, if it has: the ruling, whether its window is over in real time, and
-    /// who filed. The escrow's whole dependency on this module.
-    ///
-    /// `escrow_paused_seconds` is passed in rather than read back off the escrow, and that is not a
-    /// style choice: the escrow is the caller here, so reading back into it would be re-entrancy,
-    /// which Soroban rejects outright. The EVM twin takes the same argument so the two contracts
-    /// keep one shape.
-    pub fn outcome_of(
-        env: Env,
-        order_hash: BytesN<32>,
-        escrow_paused_seconds: u64,
-    ) -> (DisputeOutcome, bool, Option<Address>) {
+    /// How a dispute has ended, if it has: the ruling, whether its deadline has passed (the same
+    /// comparison the finalize makes), and who filed. The escrow's whole dependency on this module.
+    pub fn outcome_of(env: Env, order_hash: BytesN<32>) -> (DisputeOutcome, bool, Option<Address>) {
         match storage::get_dispute(&env, &order_hash) {
             None => (DisputeOutcome::None, false, None),
             Some(d) => {
-                let over = env.ledger().timestamp() >= Self::deadline_at(&d, escrow_paused_seconds);
+                let over = env.ledger().timestamp() >= d.challenge_deadline;
                 (d.ruling, over, Some(d.initiator))
             }
         }
@@ -354,28 +343,15 @@ impl DisputeManagerContract {
         storage::get_dispute(&env, &order_hash).is_some()
     }
 
-    /// The challenge deadline in real time from the escrow's own pause counter, for the escrow
-    /// mid-call (#422): the same arithmetic as `effective_challenge_deadline`, without reading back
-    /// into the caller.
-    pub fn challenge_deadline_of(
-        env: Env,
-        order_hash: BytesN<32>,
-        escrow_paused_seconds: u64,
-    ) -> u64 {
-        match storage::get_dispute(&env, &order_hash) {
-            None => 0,
-            Some(d) => Self::deadline_at(&d, escrow_paused_seconds),
-        }
+    /// The challenge deadline, for the escrow mid-call (#422). Same value as
+    /// `effective_challenge_deadline`; 0 when nothing is disputed.
+    pub fn challenge_deadline_of(env: Env, order_hash: BytesN<32>) -> u64 {
+        Self::effective_challenge_deadline(env, order_hash)
     }
 
-    /// The challenge deadline in real time: the recorded one plus every second the *escrow* has been
-    /// paused past the snapshot the filing carried — the order's own, from its lock, so the floor
-    /// is the escrow's window end to the second (D10, c41-J).
+    /// The one stored deadline, in real time: the filing's, or the ruling's once ruled.
     pub fn effective_challenge_deadline(env: Env, order_hash: BytesN<32>) -> u64 {
-        match storage::get_dispute(&env, &order_hash) {
-            None => 0,
-            Some(d) => Self::effective_challenge_deadline_of(&env, &d),
-        }
+        storage::get_dispute(&env, &order_hash).map_or(0, |d| d.challenge_deadline)
     }
 
     pub fn get_dispute(env: Env, order_hash: BytesN<32>) -> Option<DisputeRecord> {
@@ -408,6 +384,14 @@ impl DisputeManagerContract {
     /// the filing path treats as fail-closed.
     pub fn dispute_params(env: Env, chain_id: u128) -> Option<DisputeParams> {
         storage::get_params(&env, chain_id)
+    }
+
+    /// The exact bond a filing on `peer_chain_id`'s route pulls. Clients quote it here rather than
+    /// reading `dispute_params`, so the rule stays the contract's. Fails as the filing would when
+    /// the route has no params.
+    pub fn bond_for(env: Env, peer_chain_id: u128) -> Result<u128, Error> {
+        let p = storage::get_params(&env, peer_chain_id).ok_or(Error::NoDisputeParams)?;
+        Ok(dispute::bond_for(&p))
     }
 
     pub fn claimable(env: Env, who: Address) -> u128 {
@@ -456,21 +440,6 @@ impl DisputeManagerContract {
             return Err(Error::NotEscrow);
         }
         Ok(())
-    }
-
-    /// The *escrow's* paused seconds, not this module's. A pause matters here for exactly one
-    /// reason — it stops the parties presenting evidence — and presentation is gated by the escrow.
-    /// A pause clock on this module would be a second, unrelated number that happened to share the
-    /// name, and would leave the failure D10 describes unfixed.
-    fn effective_challenge_deadline_of(env: &Env, d: &DisputeRecord) -> u64 {
-        let escrow_paused = cross_contract::EscrowPauseClient::new(env, &d.escrow).paused_seconds();
-        Self::deadline_at(d, escrow_paused)
-    }
-
-    /// The recorded deadline plus the escrow's seconds paused past the filing's snapshot.
-    fn deadline_at(d: &DisputeRecord, escrow_paused: u64) -> u64 {
-        d.challenge_deadline
-            .saturating_add(escrow_paused.saturating_sub(d.paused_at_open))
     }
 
     /// Best effort, then credit — a recipient that cannot be paid must not brick a resolution.

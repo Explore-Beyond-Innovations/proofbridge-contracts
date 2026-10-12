@@ -970,8 +970,13 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
 
     /// @dev As `decodeBatch`, for a lock's arguments. The external call copies the arguments once
     ///      and the return copies the struct back; that replaced a byte-by-byte loop, not the copy.
-    function decodeLock(bytes calldata data) external pure returns (IAdManager.OrderParams memory) {
-        return abi.decode(data[4:], (IAdManager.OrderParams));
+    function decodeLock(bytes calldata data) external pure returns (IAdManager.OrderParams memory params) {
+        // The pinned slot is the maker's own key choice; the policy does not judge it (plan 12 D13). The
+        // arguments must be exactly `(OrderParams, uint32)`: an older or padded shape re-encodes to
+        // other bytes and is refused (the decoder alone would read the next word as the slot).
+        uint32 slot;
+        (params, slot) = abi.decode(data[4:], (IAdManager.OrderParams, uint32));
+        if (keccak256(abi.encode(params, slot)) != keccak256(data[4:])) revert();
     }
 
     function _decodeCalls(bytes calldata cd, bool hookPath) internal view returns (bool ok, Call[] memory calls) {

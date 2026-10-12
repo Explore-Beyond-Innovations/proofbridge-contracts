@@ -37,30 +37,21 @@ library Dispute {
     }
 
     /// @notice Per-peer-chain dispute parameters, admin-set and validated at the write.
-    /// @dev Separate from `RouteTiming` on purpose (D1): that five-tuple is read by the deploy CLI,
+    /// @dev Separate from `RouteTiming` on purpose (D1): that timing tuple is read by the deploy CLI,
     ///      the relayer and the manifest, and widening it would ripple through all three.
     struct Params {
-        /// @dev How long after filing the arbiter may still rule. Pause-aware at read time.
+        /// @dev How long after filing the arbiter may still rule.
         uint64 challengePeriod;
-        /// @dev The bond floor, in wrapped native. Dominates on small orders.
+        /// @dev The route's flat bond, in wrapped native. The same for every order on the route.
         uint128 bondFloor;
-        /// @dev Basis points of the order amount. Dominates on large ones.
-        uint16 bondBps;
     }
 
     /// @notice One dispute, keyed by order hash.
     struct Record {
         address initiator;
         uint128 bond;
-        /// @dev Unadjusted. Every read goes through `effectiveChallengeDeadline`, which applies the
-        ///      escrow's paused seconds once; storing an already-adjusted value here would let a
-        ///      later read adjust it twice.
+        /// @dev The one deadline, in plain time: the filing's, replaced by the ruling's when ruled.
         uint64 challengeDeadline;
-        /// @dev The *escrow's* paused-seconds counter as of the order's lock (D10, c41-J: the
-        ///      filing carries the order's own snapshot, so the deadline counts every pause the
-        ///      unlock's cutoff counts). The escrow's, not this contract's: a pause is what stops
-        ///      someone presenting, and it is the escrow that gates presentation.
-        uint64 pausedAtOpen;
         bytes32 initiatorEvidence;
         bytes32 responderEvidence;
         Outcome ruling;
@@ -79,19 +70,14 @@ library Dispute {
     /// @notice A challenge period shorter than this leaves no room to gather evidence.
     uint64 internal constant MIN_CHALLENGE_PERIOD = 1 hours;
 
-    /// @notice C-36: a longer challenge period would let a dispute outlive the follower's backstop.
+    /// @notice C-36: bounds how long a dispute can delay the other party's exit.
     uint64 internal constant MAX_CHALLENGE_PERIOD = 7 days;
-
-    /// @notice Bond ceiling: 10%. Above this the bond deters honest disputes as much as frivolous ones.
-    uint16 internal constant MAX_BOND_BPS = 1000;
-
-    uint256 private constant _BPS_DENOMINATOR = 10_000;
 
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice `field`: 1 challengePeriod, 2 bondFloor, 3 bondBps.
+    /// @notice `field`: 1 challengePeriod, 2 bondFloor. 3 is retired (the old percentage term).
     error Dispute__InvalidParams(uint8 field);
     error Dispute__NoParams(uint256 chainId);
 
@@ -107,7 +93,6 @@ library Dispute {
         }
         // No ceiling on `bondFloor`: it is in the wrapped-native token's units, so no one number fits every chain.
         if (p.bondFloor == 0) revert Dispute__InvalidParams(2);
-        if (p.bondBps > MAX_BOND_BPS) revert Dispute__InvalidParams(3);
     }
 
     /// @dev Load or fail closed. `challengePeriod` is never zero on a validated record.
@@ -117,25 +102,24 @@ library Dispute {
     }
 
     /**
-     * @notice The bond a filer must post: `max(floor, bps × amount)`.
-     * @dev Both terms are per route and admin-tuned, which is the pricing mechanism the design
-     *      allows in place of an oracle — the percentage is meaningful where the route's token
-     *      tracks native, and the floor dominates where it does not. Rounds down, so the floor is
-     *      what guarantees a non-zero bond.
+     * @notice The bond a filer must post: the route's flat floor, whatever the order's size.
+     * @dev A percentage of the order amount would mix the ad token's raw units with native ones, and
+     *      pricing it properly needs an oracle. Routes that carry large orders get a higher floor.
      */
-    function bondFor(uint256 amount, Params memory p) internal pure returns (uint256) {
-        uint256 scaled = (amount * p.bondBps) / _BPS_DENOMINATOR;
-        return scaled > p.bondFloor ? scaled : p.bondFloor;
+    function bondFor(Params memory p) internal pure returns (uint256) {
+        return p.bondFloor;
     }
 
     /**
      * @notice Whether the filer's position was vindicated, which is what routes the bond (D7).
      * @dev There is no separate "frivolous" discretion anywhere: the outcome *is* the finding. A
      *      `MutualRefund` returns the bond because neither side was shown wrong; a forfeit returns
-     *      it only when the forfeited party is the one the filer accused.
+     *      it only when the forfeited party is the one the filer accused. `returnToFiler` is the
+     *      escrow's own finding on an evidence close: the bridger filed against a co-signed payout
+     *      the maker denied, so filing was justified even though the trade then settled.
      */
-    function bondReturnsToFiler(Outcome outcome, bool filerIsBridger) internal pure returns (bool) {
-        if (outcome == Outcome.MutualRefund) return true;
+    function bondReturnsToFiler(Outcome outcome, bool filerIsBridger, bool returnToFiler) internal pure returns (bool) {
+        if (returnToFiler || outcome == Outcome.MutualRefund) return true;
         // The filer accused the other side; the ruling agreeing means that side forfeits.
         if (outcome == Outcome.MakerForfeit) return filerIsBridger;
         if (outcome == Outcome.BridgerForfeit) return !filerIsBridger;

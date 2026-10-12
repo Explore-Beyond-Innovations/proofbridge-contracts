@@ -16,14 +16,10 @@ import {MockKeyRegistry} from "./mocks/MockKeyRegistry.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
 import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
 
+/// The AdManager plus the one test hook the suite needs; kept minimal, since it sits close to the
+/// EIP-170 limit with the AdManager (the created ad's id lives in the test, not here).
 contract MockAdManager is AdManager {
     constructor(address admin, IVerifier v, IMerkleManager m, IwNativeToken t) AdManager(admin, v, m, t) {}
-
-    string public lastId;
-
-    function setLastId(string memory id) public {
-        lastId = id;
-    }
 
     function hashOrderPublic(OrderParams calldata p) external view returns (bytes32) {
         return _hashOrder(p, block.chainid, address(this));
@@ -40,6 +36,7 @@ contract MockOrderPortal is OrderPortal {
 
 contract ProofBridge is Test {
     MockAdManager internal adManager;
+    string internal lastAdId;
     MockOrderPortal internal orderPortal;
     HonkVerifier internal adChainVerifier;
     HonkVerifier internal orderChainVerifier;
@@ -153,7 +150,7 @@ contract ProofBridge is Test {
         // Root authenticity is mandatory at unlock: wire a permissive mock.
         adManager.setRootVerifier(orderChainId, address(new MockRootVerifier(true)));
         // 2.3e: timing is fail-closed; the suite's clocks (buffer 30 min, no window bound, no stagger).
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 0));
         // 2.3c: the maker is the settlement signer and must hold a usable key.
         MockKeyRegistry keyRegistry = new MockKeyRegistry();
         keyRegistry.set(_b32(maker), true);
@@ -169,8 +166,8 @@ contract ProofBridge is Test {
         adToken.approve(address(adManager), initAmt);
         // Create the ad
         adManager.createAd(adId, address(adToken), initAmt, orderChainId, _b32(adRecipient), _b32(maker));
-        // Set last id to the created ad
-        adManager.setLastId(adId);
+        // Remember the created ad
+        lastAdId = adId;
         // Approve the ad with tokens
         adToken.approve(address(adManager), fundAmt);
         // Generate request params
@@ -195,7 +192,7 @@ contract ProofBridge is Test {
         orderPortal.setPeerEscrow(adChainId, _b32(address(adManager)));
         orderPortal.setTokenRoute(address(orderToken), adChainId, _b32(address(adToken)));
         orderPortal.setRootVerifier(adChainId, address(new MockRootVerifier(true)));
-        orderPortal.setRouteTiming(adChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        orderPortal.setRouteTiming(adChainId, RouteTiming.Timing(0, 30 minutes, 0, 0));
         vm.stopPrank();
 
         vm.chainId(neutral);
@@ -248,11 +245,8 @@ contract ProofBridge is Test {
         p.adSettlementSigner = p.adCreator;
     }
 
-    function _adId() internal returns (string memory adId) {
-        uint256 prevChain = block.chainid;
-        vm.chainId(adChainId);
-        adId = adManager.lastId();
-        vm.chainId(prevChain);
+    function _adId() internal view returns (string memory) {
+        return lastAdId;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -485,7 +479,7 @@ contract ProofBridge is Test {
         // Lock order on ad chain
         vm.chainId(adChainId);
         vm.startPrank(maker);
-        adManager.lockForOrder(adChainParams);
+        adManager.lockForOrder(adChainParams, 0);
         vm.stopPrank();
 
         // Get Merkle tree state from ad chain
@@ -546,7 +540,7 @@ contract ProofBridge is Test {
         // Lock order on ad chain
         vm.chainId(adChainId);
         vm.startPrank(maker);
-        adManager.lockForOrder(adChainParams);
+        adManager.lockForOrder(adChainParams, 0);
         vm.stopPrank();
 
         vm.chainId(neutral);
@@ -629,7 +623,7 @@ contract ProofBridge is Test {
         // Lock order on ad chain
         vm.chainId(adChainId);
         vm.startPrank(maker);
-        adManager.lockForOrder(adChainParams);
+        adManager.lockForOrder(adChainParams, 0);
         vm.stopPrank();
 
         // Generate proof
@@ -677,7 +671,7 @@ contract ProofBridge is Test {
         // Lock order on ad chain
         vm.chainId(adChainId);
         vm.startPrank(maker);
-        adManager.lockForOrder(adChainParams);
+        adManager.lockForOrder(adChainParams, 0);
         vm.stopPrank();
 
         // Get Merkle tree state from ad chain
@@ -725,7 +719,7 @@ contract ProofBridge is Test {
         // Lock order on ad chain
         vm.chainId(adChainId);
         vm.startPrank(maker);
-        adManager.lockForOrder(adChainParams);
+        adManager.lockForOrder(adChainParams, 0);
         vm.stopPrank();
 
         // Get Merkle tree state from ad chain
@@ -781,7 +775,7 @@ contract ProofBridge is Test {
         // Lock order on ad chain
         vm.chainId(adChainId);
         vm.startPrank(maker);
-        adManager.lockForOrder(adChainParams);
+        adManager.lockForOrder(adChainParams, 0);
         vm.stopPrank();
 
         // Generate proof

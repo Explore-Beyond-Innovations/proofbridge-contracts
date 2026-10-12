@@ -30,9 +30,11 @@ const VECTORS: &str = include_str!("../../../../test-vectors/bls-encodings.json"
 const REGISTRY_ID: [u8; 32] = [0x22; 32];
 const CHAIN_ID: u128 = 1_000_002;
 const T0: u64 = 1_700_000_000;
-const METADATA_LEN: usize = 649;
-/// The layout before #469: no maker key commitment in the auth.
-const V2_METADATA_LEN: usize = 617;
+const METADATA_LEN: usize = 750;
+/// The envelope before v4 (signer, bridger, order hash) and v3's module data (no leg nullifiers).
+const V3_METADATA_LEN: usize = 649;
+const SIDE_ORDER: u8 = 0;
+const SIDE_AD: u8 = 1;
 
 fn vectors() -> serde_json::Value {
     serde_json::from_str(VECTORS).unwrap()
@@ -127,6 +129,7 @@ fn setup() -> Setup {
 }
 
 impl Setup {
+    /// The ad leg's unlock: side AD, its nullifier, checked against the order chain's root.
     fn metadata(&self) -> Bytes {
         self.metadata_with(
             &hexval(&self.v["keys"]["makerBls"]["pk"]["uncompressed"]),
@@ -139,7 +142,6 @@ impl Setup {
     }
 
     /// Both parties' settlement keys sit in slot 0; the slot hints are calldata, not hash-bound.
-    /// The envelope's order hash is the vector auth's own: the order the escrow would be unlocking.
     fn metadata_slots(
         &self,
         maker_slot: u32,
@@ -147,29 +149,28 @@ impl Setup {
         pk_maker: &[u8],
         agg_sig: &[u8],
     ) -> Bytes {
-        let order_hash = hexval(&self.v["settlement"]["auth"]["orderHash"]);
-        let out = self.raw_metadata(
-            maker_slot,
-            bridger_slot,
-            pk_maker,
-            agg_sig,
-            Some(&order_hash),
-        );
+        let mut out = self.envelope(SIDE_AD, &self.ad_leg());
+        out.extend_from_slice(&self.module_data(maker_slot, bridger_slot, pk_maker, agg_sig));
         assert_eq!(out.len(), METADATA_LEN);
         Bytes::from_slice(&self.env, &out)
     }
 
-    /// The envelope and module data as raw bytes; `envelope_order_hash: None` is the pre-#433 layout.
-    fn raw_metadata(
-        &self,
-        maker_slot: u32,
-        bridger_slot: u32,
-        pk_maker: &[u8],
-        agg_sig: &[u8],
-        envelope_order_hash: Option<&[u8]>,
-    ) -> std::vec::Vec<u8> {
+    /// One leg's unlock under the vector aggregate: `side` and the nullifier the escrow consumes.
+    fn metadata_leg(&self, side: u8, nullifier: &[u8]) -> Bytes {
+        let mut out = self.envelope(side, nullifier);
+        out.extend_from_slice(&self.module_data(
+            0,
+            0,
+            &hexval(&self.v["keys"]["makerBls"]["pk"]["uncompressed"]),
+            &hexval(&self.v["settlement"]["aggSig"]["uncompressed"]),
+        ));
+        Bytes::from_slice(&self.env, &out)
+    }
+
+    /// What the escrow vouches for: the vector parties, the vector auth's own order (the order the
+    /// escrow would be unlocking), no pin, the nullifier it consumes and its side.
+    fn envelope(&self, side: u8, nullifier: &[u8]) -> std::vec::Vec<u8> {
         let v = &self.v;
-        let auth = &v["settlement"]["auth"];
         let mut out = std::vec::Vec::new();
         out.extend_from_slice(&hexval(
             &v["registration"]["makerOnStellarTestnet"]["account"],
@@ -177,22 +178,46 @@ impl Setup {
         out.extend_from_slice(&hexval(
             &v["registration"]["bridgerOnStellarTestnet"]["account"],
         ));
-        if let Some(h) = envelope_order_hash {
-            out.extend_from_slice(h);
-        }
-        out.push(3u8);
+        out.extend_from_slice(&hexval(&v["settlement"]["auth"]["orderHash"]));
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(nullifier);
+        out.push(side);
+        out
+    }
+
+    /// The v4 module data over the vector auth.
+    fn module_data(
+        &self,
+        maker_slot: u32,
+        bridger_slot: u32,
+        pk_maker: &[u8],
+        agg_sig: &[u8],
+    ) -> std::vec::Vec<u8> {
+        let v = &self.v;
+        let auth = &v["settlement"]["auth"];
+        let mut out = std::vec![4u8];
         out.extend_from_slice(&self.order_chain_id.to_be_bytes());
         out.extend_from_slice(&self.ad_chain_id.to_be_bytes());
         out.extend_from_slice(&hexval(&auth["orderHash"]));
         out.extend_from_slice(&hexval(&auth["orderChainRoot"]));
         out.extend_from_slice(&hexval(&auth["adChainRoot"]));
         out.extend_from_slice(&hexval(&auth["makerKeyCommitment"]));
+        out.extend_from_slice(&self.ad_leg());
+        out.extend_from_slice(&self.order_leg());
         out.extend_from_slice(&maker_slot.to_be_bytes());
         out.extend_from_slice(&bridger_slot.to_be_bytes());
         out.extend_from_slice(pk_maker);
         out.extend_from_slice(&hexval(&v["keys"]["bridgerBls"]["pk"]["uncompressed"]));
         out.extend_from_slice(agg_sig);
         out
+    }
+
+    fn ad_leg(&self) -> std::vec::Vec<u8> {
+        hexval(&self.v["settlement"]["auth"]["adLegNullifier"])
+    }
+
+    fn order_leg(&self) -> std::vec::Vec<u8> {
+        hexval(&self.v["settlement"]["auth"]["orderLegNullifier"])
     }
 
     fn registry(&self) -> BlsKeyRegistryClient<'static> {
@@ -273,12 +298,15 @@ fn order_chain_root_is_valid() {
         .is_root_valid(&s.order_chain_id, &s.order_chain_root, &s.metadata()));
 }
 
+/// The order leg's unlock (side ORDER, its nullifier) is checked against the ad chain's root.
 #[test]
 fn ad_chain_root_is_valid() {
     let s = setup();
-    assert!(s
-        .verifier
-        .is_root_valid(&s.ad_chain_id, &s.ad_chain_root, &s.metadata()));
+    assert!(s.verifier.is_root_valid(
+        &s.ad_chain_id,
+        &s.ad_chain_root,
+        &s.metadata_leg(SIDE_ORDER, &s.order_leg())
+    ));
 }
 
 #[test]
@@ -303,16 +331,13 @@ fn wrong_version_fails() {
     let m = s.metadata();
     let mut raw = [0u8; METADATA_LEN];
     m.copy_into_slice(&mut raw);
-    raw[96] = 1; // the retired v1 layout
-    let m2 = Bytes::from_slice(&s.env, &raw);
-    assert!(!s
-        .verifier
-        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &m2));
-    raw[96] = 2; // v2: an auth that does not name the maker key (#469)
-    let m3 = Bytes::from_slice(&s.env, &raw);
-    assert!(!s
-        .verifier
-        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &m3));
+    for old in [1u8, 2, 3] {
+        raw[133] = old; // a retired version byte on the current layout
+        let m2 = Bytes::from_slice(&s.env, &raw);
+        assert!(!s
+            .verifier
+            .is_root_valid(&s.order_chain_id, &s.order_chain_root, &m2));
+    }
 }
 
 /// #433: the co-signature names one order. An escrow unlocking any other order puts that order's
@@ -338,13 +363,10 @@ fn envelope_order_hash_not_the_signed_one_fails() {
 #[test]
 fn old_layout_without_the_order_hash_fails() {
     let s = setup();
-    let raw = s.raw_metadata(
-        0,
-        0,
-        &hexval(&s.v["keys"]["makerBls"]["pk"]["uncompressed"]),
-        &hexval(&s.v["settlement"]["aggSig"]["uncompressed"]),
-        None,
-    );
+    let m = s.metadata();
+    let mut raw = std::vec![0u8; METADATA_LEN];
+    m.copy_into_slice(&mut raw);
+    raw.drain(64..96);
     assert_eq!(raw.len(), METADATA_LEN - 32);
     let m = Bytes::from_slice(&s.env, &raw);
     assert!(!s
@@ -352,27 +374,118 @@ fn old_layout_without_the_order_hash_fails() {
         .is_root_valid(&s.order_chain_id, &s.order_chain_root, &m));
 }
 
-/// #469: the v2 layout (envelope, but no maker key commitment in the auth) is refused by length,
-/// never misread as v3 with shifted fields. Built from the v3 blob: drop the 32-byte field at
-/// offset 225 and stamp the v2 version byte.
+/// The version-3 layout (the three-field envelope, an auth without leg nullifiers) is refused by
+/// length, never misread as v4 with shifted fields — with the v3 version byte, or the v4 one.
 #[test]
-fn v2_layout_without_the_maker_key_fails() {
+fn v3_layout_without_the_leg_nullifiers_fails() {
     let s = setup();
-    let mut raw = s.raw_metadata(
+    let mut raw = s.envelope(SIDE_AD, &s.ad_leg());
+    raw.truncate(96); // signer, bridger, order hash
+    let mut module = s.module_data(
         0,
         0,
         &hexval(&s.v["keys"]["makerBls"]["pk"]["uncompressed"]),
         &hexval(&s.v["settlement"]["aggSig"]["uncompressed"]),
-        Some(&hexval(&s.v["settlement"]["auth"]["orderHash"])),
     );
-    assert_eq!(raw.len(), METADATA_LEN);
-    raw.drain(225..257);
-    raw[96] -= 1;
-    assert_eq!(raw.len(), V2_METADATA_LEN);
-    let m = Bytes::from_slice(&s.env, &raw);
-    assert!(!s
-        .verifier
-        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &m));
+    module.drain(161..225); // the two leg nullifiers
+    module[0] = 3;
+    raw.extend_from_slice(&module);
+    assert_eq!(raw.len(), V3_METADATA_LEN);
+    for version in [3u8, 4] {
+        raw[96] = version;
+        let m = Bytes::from_slice(&s.env, &raw);
+        assert!(!s
+            .verifier
+            .is_root_valid(&s.order_chain_id, &s.order_chain_root, &m));
+    }
+}
+
+// ---- v4: the co-signed auth names each leg's nullifier ----
+
+/// An unlock consuming any nullifier but the one co-signed for its leg is refused.
+#[test]
+fn other_nullifier_fails() {
+    let s = setup();
+    let invented = [0x42u8; 32];
+    assert!(s.verifier.is_root_valid(
+        &s.order_chain_id,
+        &s.order_chain_root,
+        &s.metadata_leg(SIDE_AD, &s.ad_leg())
+    ));
+    assert!(!s.verifier.is_root_valid(
+        &s.order_chain_id,
+        &s.order_chain_root,
+        &s.metadata_leg(SIDE_AD, &invented)
+    ));
+    assert!(!s.verifier.is_root_valid(
+        &s.ad_chain_id,
+        &s.ad_chain_root,
+        &s.metadata_leg(SIDE_ORDER, &invented)
+    ));
+}
+
+/// Each leg's nullifier settles only its own leg.
+#[test]
+fn other_legs_nullifier_fails() {
+    let s = setup();
+    assert!(!s.verifier.is_root_valid(
+        &s.order_chain_id,
+        &s.order_chain_root,
+        &s.metadata_leg(SIDE_AD, &s.order_leg())
+    ));
+    assert!(!s.verifier.is_root_valid(
+        &s.ad_chain_id,
+        &s.ad_chain_root,
+        &s.metadata_leg(SIDE_ORDER, &s.ad_leg())
+    ));
+}
+
+/// The side must agree with the root it names: side AD against the ad chain's root fails even
+/// with the ad leg's nullifier, and side ORDER against the order chain's root.
+#[test]
+fn side_disagrees_with_the_root_fails() {
+    let s = setup();
+    assert!(!s.verifier.is_root_valid(
+        &s.ad_chain_id,
+        &s.ad_chain_root,
+        &s.metadata_leg(SIDE_AD, &s.ad_leg())
+    ));
+    assert!(!s.verifier.is_root_valid(
+        &s.order_chain_id,
+        &s.order_chain_root,
+        &s.metadata_leg(SIDE_ORDER, &s.order_leg())
+    ));
+}
+
+#[test]
+fn unknown_side_fails() {
+    let s = setup();
+    assert!(!s.verifier.is_root_valid(
+        &s.order_chain_id,
+        &s.order_chain_root,
+        &s.metadata_leg(2, &s.ad_leg())
+    ));
+}
+
+/// The vector's v4 Soroban metadata (both entries) verifies here byte for byte: the envelope, the
+/// offsets and the 288-byte preimage agree with the generator.
+#[test]
+fn metadata_v4_vectors_verify() {
+    let s = setup();
+    for e in s.v["settlement"]["metadataV4"].as_array().unwrap() {
+        if e["makerSlotId"] != "0" || e["bridgerSlotId"] != "0" {
+            continue; // the asymmetric hints name slots this registry does not hold
+        }
+        let side: u8 = e["side"].as_str().unwrap().parse().unwrap();
+        let (chain, root) = if side == SIDE_AD {
+            (s.order_chain_id, s.order_chain_root.clone())
+        } else {
+            (s.ad_chain_id, s.ad_chain_root.clone())
+        };
+        let m = Bytes::from_slice(&s.env, &hexval(&e["sorobanMetadata"]));
+        assert_eq!(m.len() as usize, METADATA_LEN);
+        assert!(s.verifier.is_root_valid(&chain, &root, &m));
+    }
 }
 
 /// #469: the bridger's half aggregated with another live maker key. The pairing holds, the slot is
@@ -456,10 +569,10 @@ fn tampered_root_in_auth_fails() {
     let m = s.metadata();
     let mut raw = [0u8; METADATA_LEN];
     m.copy_into_slice(&mut raw);
-    raw[192] ^= 0x01; // last byte of order_chain_root (offset 161..193)
+    raw[229] ^= 0x01; // last byte of order_chain_root (offset 198..230)
     let m2 = Bytes::from_slice(&s.env, &raw);
     let mut tampered = [0u8; 32];
-    tampered.copy_from_slice(&raw[161..193]);
+    tampered.copy_from_slice(&raw[198..230]);
     let tampered_root = BytesN::from_array(&s.env, &tampered);
     // root matches the (tampered) auth, but the aggSig was made over the real one
     assert!(!s
@@ -581,4 +694,114 @@ fn initialize_twice_is_already_initialized() {
         Err(Ok(VerifierError::AlreadyInitialized))
     );
     assert_eq!(s.verifier.registry(), before);
+}
+
+/// A registry that answers `commitment_at` with whatever the test stored for the account, so the
+/// verifier's slot check can be shown a value the real registry no longer writes.
+mod stub_registry {
+    use soroban_sdk::{contract, contractimpl, BytesN, Env};
+
+    #[contract]
+    pub struct StubRegistry;
+
+    #[contractimpl]
+    impl StubRegistry {
+        pub fn set(env: Env, account: BytesN<32>, commitment: BytesN<32>) {
+            env.storage().instance().set(&account, &commitment);
+        }
+
+        pub fn commitment_at(env: Env, account: BytesN<32>, _slot_id: u32) -> BytesN<32> {
+            env.storage().instance().get(&account).unwrap()
+        }
+    }
+}
+
+/// The stub-backed verifier and the two accounts' 96-byte keys.
+fn stub_setup(
+    s: &Setup,
+) -> (
+    CounterpartyVerifierClient<'static>,
+    stub_registry::StubRegistryClient<'static>,
+) {
+    let stub_addr = s.env.register(stub_registry::StubRegistry, ());
+    let stub = stub_registry::StubRegistryClient::new(&s.env, &stub_addr);
+    let verifier_addr = s.env.register(CounterpartyVerifier, ());
+    let verifier = CounterpartyVerifierClient::new(&s.env, &verifier_addr);
+    verifier.initialize(&stub_addr);
+    (verifier, stub)
+}
+
+fn party(s: &Setup, who: &str) -> (BytesN<32>, BytesN<96>) {
+    let r = &s.v["registration"][std::format!("{who}OnStellarTestnet")];
+    (
+        bn::<32>(&s.env, &r["account"]),
+        bn::<96>(&s.env, &r["pkNative"]),
+    )
+}
+
+fn keccak96(env: &Env, pk: &BytesN<96>) -> BytesN<32> {
+    env.crypto()
+        .keccak256(&Bytes::from_slice(env, &pk.to_array()))
+        .to_bytes()
+}
+
+/// One key commitment: a slot holding keccak of the EIP-2537 form settles; the same slot holding
+/// the hash of the 96-byte form (the old Soroban storage) does not, for either party.
+#[test]
+fn slot_check_reads_the_eip2537_commitment_not_the_96_byte_hash() {
+    let s = setup();
+    let (verifier, stub) = stub_setup(&s);
+    let (maker, pk_maker) = party(&s, "maker");
+    let (bridger, pk_bridger) = party(&s, "bridger");
+    let valid = || verifier.is_root_valid(&s.order_chain_id, &s.order_chain_root, &s.metadata());
+
+    stub.set(&maker, &key_commitment(&s.env, &pk_maker));
+    stub.set(&bridger, &key_commitment(&s.env, &pk_bridger));
+    assert!(valid(), "the EIP-2537 commitment settles");
+
+    stub.set(&maker, &keccak96(&s.env, &pk_maker));
+    assert!(!valid(), "a maker slot holding the 96-byte hash fails");
+
+    stub.set(&maker, &key_commitment(&s.env, &pk_maker));
+    stub.set(&bridger, &keccak96(&s.env, &pk_bridger));
+    assert!(!valid(), "a bridger slot holding the 96-byte hash fails");
+}
+
+/// The slot's commitment, the auth's maker key and the registry vector are one value.
+#[test]
+fn the_slot_commitment_is_the_auths_maker_key() {
+    let s = setup();
+    let (maker, pk_maker) = party(&s, "maker");
+    let registry = BlsKeyRegistryClient::new(&s.env, &s.verifier.registry());
+    let stored = registry.commitment_at(&maker, &0);
+    assert_eq!(stored, key_commitment(&s.env, &pk_maker));
+    assert_eq!(
+        stored,
+        bn::<32>(&s.env, &s.v["settlement"]["auth"]["makerKeyCommitment"])
+    );
+}
+
+// ---- plan 12 C: the ad leg accepts only the pinned slot ----
+
+/// The co-signature's maker slot hint is 0. Pinned to 0 it settles; pinned to another slot it does
+/// not, though every other check holds; the unpinned sentinel leaves the named key as the bind.
+#[test]
+fn ad_leg_only_the_pinned_slot_settles() {
+    let s = setup();
+    let mut raw = [0u8; METADATA_LEN];
+    s.metadata().copy_into_slice(&mut raw);
+    let with_pin = |pin: u32| {
+        let mut r = raw;
+        r[96..100].copy_from_slice(&pin.to_be_bytes());
+        Bytes::from_slice(&s.env, &r)
+    };
+    assert!(s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &with_pin(0)));
+    assert!(!s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &with_pin(1)));
+    assert!(s
+        .verifier
+        .is_root_valid(&s.order_chain_id, &s.order_chain_root, &with_pin(u32::MAX)));
 }

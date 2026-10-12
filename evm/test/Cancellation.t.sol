@@ -10,14 +10,14 @@ import {IRootAnchor} from "src/interfaces/IRootAnchor.sol";
 import {IVerifier} from "src/interfaces/IVerifier.sol";
 import {IMerkleManager} from "src/interfaces/IMerkleManager.sol";
 import {IwNativeToken} from "src/wNativeToken.sol";
-import {HonkVerifier} from "src/Verifier.sol";
+import {HonkVerifier, BaseHonkVerifier} from "src/Verifier.sol";
 import {RootAnchor} from "src/RootAnchor.sol";
 import {LeafDomain} from "src/libraries/LeafDomain.sol";
 import {RouteTiming} from "src/libraries/RouteTiming.sol";
-import {Termination} from "src/libraries/Termination.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {AdManagerTest, MockAdManager} from "./Admanager.t.sol";
 import {OrderPortalTest} from "./OrderPortal.t.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 /*//////////////////////////////////////////////////////////////
                   2.3e — the termination primitive
@@ -42,7 +42,7 @@ abstract contract CancellationHarness {
 
 contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
     RootAnchor internal anchor;
-    RouteTiming.Timing internal baseTiming = RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0);
+    RouteTiming.Timing internal baseTiming = RouteTiming.Timing(0, 30 minutes, 0, 0);
 
     function setUp() public virtual override {
         super.setUp();
@@ -54,6 +54,20 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
     function _wireAnchor() internal {
         vm.prank(admin);
         adManager.setRootAnchor(IRootAnchor(address(anchor)));
+    }
+
+    /// An order-chain root holding the order's AD leaf, as the never-locked cancel proves against.
+    bytes32 internal constant NEVER_LOCKED_ROOT = bytes32(uint256(0xa11));
+    bytes32 internal immutable NL = TestField.fe("NL");
+
+    /// The anchor wired and `NEVER_LOCKED_ROOT` notarized for the order chain.
+    function _anchorNeverLockedRoot() internal {
+        _wireAnchor();
+        _anchorRoot(NEVER_LOCKED_ROOT);
+    }
+
+    function _cancelNeverLocked(IAdManager.OrderParams memory p) internal {
+        adManager.cancelNeverLocked(p, NEVER_LOCKED_ROOT, NL, hex"");
     }
 
     function _anchorRoot(bytes32 root) internal {
@@ -104,32 +118,41 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
 
     function test_setRouteTiming_validationMatrix() public {
         vm.startPrank(admin);
+        // Field 3 is retired with the follower's backstop: a tuple only it refused is accepted now.
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 2 hours, 0, 0));
         vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(1)));
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 29 minutes, 0, 1 days, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 29 minutes, 0, 0));
         vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(2)));
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(1 hours, 1 hours, 1 hours, 1 days, 0));
-        vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(3)));
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 2 hours, 0, 1 hours, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(1 hours, 1 hours, 1 hours, 0));
         vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(4)));
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(30 minutes, 1 hours, 0, 1 days, 30 minutes));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(30 minutes, 1 hours, 0, 30 minutes));
         vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(5)));
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(1 minutes, 1 hours, 2 minutes, 1 days, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(1 minutes, 1 hours, 2 minutes, 0));
 
-        // The D6 defaults, and the stagger switched off with a zero window.
-        RouteTiming.Timing memory live = RouteTiming.Timing(1 hours, 2 hours, 120, 3 days, 30 minutes);
+        // The D6 defaults, and the stagger switched off with a zero window. Each write is a new
+        // version; setUp wrote version 1.
+        uint32 v1 = adManager.timingVersion(orderChainId);
+        RouteTiming.Timing memory live = RouteTiming.Timing(1 hours, 2 hours, 120, 30 minutes);
         vm.expectEmit(true, true, true, true);
-        emit IEscrow.RouteTimingSet(orderChainId, live);
+        emit IEscrow.RouteTimingSet(orderChainId, v1 + 1, live);
         adManager.setRouteTiming(orderChainId, live);
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 30 minutes, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 0));
         vm.stopPrank();
 
-        (uint64 minWindow, uint64 buffer, uint64 margin, uint64 longBackstop, uint64 stagger) =
-            adManager.routeTiming(orderChainId);
+        assertEq(adManager.timingVersion(orderChainId), v1 + 2);
+        (uint64 minWindow, uint64 buffer, uint64 margin, uint64 stagger) = adManager.routeTimingAt(orderChainId, v1 + 2);
         assertEq(minWindow, 0);
         assertEq(buffer, 30 minutes);
         assertEq(margin, 0);
-        assertEq(longBackstop, 30 minutes);
         assertEq(stagger, 0);
+        // The earlier version is never edited in place.
+        (minWindow, buffer, margin, stagger) = adManager.routeTimingAt(orderChainId, v1 + 1);
+        assertEq(minWindow, 1 hours);
+        assertEq(buffer, 2 hours);
+        assertEq(margin, 120);
+        assertEq(stagger, 30 minutes);
+        (, buffer,,) = adManager.routeTimingAt(orderChainId, 0);
+        assertEq(buffer, 0, "version 0 is unset");
 
         vm.prank(nonAdmin);
         vm.expectRevert();
@@ -172,12 +195,12 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         bare.createAd("bare", address(adToken), initAmt, orderChainId, _b32(adRecipient), _b32(maker));
         IAdManager.OrderParams memory p = _defaultParams("bare");
         vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__NotSet.selector, orderChainId));
-        bare.lockForOrder(p);
+        bare.lockForOrder(p, 0);
         vm.stopPrank();
 
         vm.warp(p.deadline);
         vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__NotSet.selector, orderChainId));
-        bare.cancelNeverLocked(p);
+        bare.cancelNeverLocked(p, NEVER_LOCKED_ROOT, NL, hex"");
     }
 
     /// The two evidence paths fail closed with no anchor; settlement never reads it.
@@ -192,7 +215,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
     /*//////////////////////////// T-45: the window bound + never-locked ////////////////////////////*/
 
     function test_T45_lock_refusesDeadlineInsideMinWindow() public {
-        _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 0, 1 days, 0));
+        _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 0, 0));
         test_fundAd_makerOnly();
         IAdManager.OrderParams memory p = _defaultParams(lastAdId);
         p.deadline = block.timestamp + 30 minutes;
@@ -200,11 +223,11 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.expectRevert(
             abi.encodeWithSelector(IEscrow.Escrow__DeadlineTooSoon.selector, p.deadline, block.timestamp + 1 hours)
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
 
         p.deadline = block.timestamp + 1 hours;
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /// #453: a lock accepts a deadline at most `MAX_ORDER_WINDOW` out, to the second.
@@ -215,11 +238,11 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         p.deadline = maxAllowed + 1;
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DeadlineTooFar.selector, p.deadline, maxAllowed));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
 
         p.deadline = maxAllowed;
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /// #453: the buffer and the minimum window have ceilings; each cap itself is accepted.
@@ -228,16 +251,17 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         uint64 maxWindow = RouteTiming.MAX_ORDER_WINDOW;
         vm.startPrank(admin);
         vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(1)));
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, maxBuffer + 1, 0, maxBuffer + 1, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, maxBuffer + 1, 0, 0));
         vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(5)));
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(maxWindow / 2 + 1, 1 hours, 0, 1 days, 0));
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, maxBuffer, 0, maxBuffer, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(maxWindow / 2 + 1, 1 hours, 0, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, maxBuffer, 0, 0));
         // #457-2: at most half the order window, so a deadline at twice it still fits the cap.
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(maxWindow / 2, 1 hours, 0, 1 days, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(maxWindow / 2, 1 hours, 0, 0));
         vm.stopPrank();
     }
 
     function test_T45_cancelNeverLocked_onlyNoneAtDeadline_appendsLeaf() public {
+        _anchorNeverLockedRoot();
         test_fundAd_makerOnly();
         IAdManager.OrderParams memory p = _defaultParams(lastAdId);
         bytes32 h = adManager.hashOrderPublic(p);
@@ -245,23 +269,23 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
 
         vm.warp(p.deadline - 1);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline));
-        adManager.cancelNeverLocked(p);
+        _cancelNeverLocked(p);
         assertEq(adManager.getMerkleLeafCount(), leaves, "no leaf before the deadline");
 
         vm.warp(p.deadline);
         vm.expectEmit(true, true, true, true);
         emit IEscrow.OrderCancelled(h, false);
-        adManager.cancelNeverLocked(p);
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Cancelled));
+        _cancelNeverLocked(p);
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Cancelled));
         assertEq(adManager.getMerkleLeafCount(), leaves + 1, "the cancel leaf");
         assertEq(adManager.inFlightOf(p.adSettlementSigner), 0, "nothing was counted");
 
         // Single-shot, and a lock can never follow it.
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, h, IEscrow.Status.Cancelled));
-        adManager.cancelNeverLocked(p);
+        _cancelNeverLocked(p);
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExists.selector, h));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function test_T45_cancelNeverLocked_unsupportedChain_reverts() public {
@@ -269,14 +293,116 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         p.orderChainId = unsupportedChainId;
         vm.warp(p.deadline);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__ChainNotSupported.selector, unsupportedChainId));
-        adManager.cancelNeverLocked(p);
+        _cancelNeverLocked(p);
     }
 
     function test_cancelNeverLocked_refusesAnOpenLock() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lock(2);
         vm.warp(p.deadline);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, h, IEscrow.Status.Open));
-        adManager.cancelNeverLocked(p);
+        _cancelNeverLocked(p);
+    }
+
+    /*//////////////////////////// the never-locked cancel needs the deposit ////////////////////////////*/
+
+    /// The proof is checked against a notarized order-chain root: no anchor wired, or a root the
+    /// anchor never notarized, refuses before any proof is read.
+    function test_cancelNeverLocked_unanchoredRoot_reverts() public {
+        test_fundAd_makerOnly();
+        IAdManager.OrderParams memory p = _defaultParams(lastAdId);
+        vm.warp(p.deadline);
+        vm.expectRevert(IEscrow.Escrow__NoRootAnchor.selector);
+        _cancelNeverLocked(p);
+
+        _wireAnchor();
+        vm.expectRevert(
+            abi.encodeWithSelector(IEscrow.Escrow__RootNotAnchored.selector, orderChainId, NEVER_LOCKED_ROOT)
+        );
+        _cancelNeverLocked(p);
+        assertEq(uint256(statusOf(address(adManager), adManager.hashOrderPublic(p))), uint256(IEscrow.Status.None));
+    }
+
+    /// A proof the verifier rejects (an order with no AD leaf in the root) appends nothing.
+    function test_cancelNeverLocked_invalidProof_reverts() public {
+        _anchorNeverLockedRoot();
+        test_fundAd_makerOnly();
+        IAdManager.OrderParams memory p = _defaultParams(lastAdId);
+        uint256 leaves = adManager.getMerkleLeafCount();
+        vm.warp(p.deadline);
+        verifier.setResult(false);
+        vm.expectRevert(IEscrow.Escrow__InvalidProof.selector);
+        _cancelNeverLocked(p);
+        assertEq(adManager.getMerkleLeafCount(), leaves, "no cancel leaf");
+    }
+
+    /// Nothing settles, so the nullifier is not consumed: a later unlock under the same value is not
+    /// blocked by it.
+    function test_cancelNeverLocked_leavesTheNullifierUnused() public {
+        _anchorNeverLockedRoot();
+        test_fundAd_makerOnly();
+        IAdManager.OrderParams memory p = _defaultParams(lastAdId);
+        vm.warp(p.deadline);
+        _cancelNeverLocked(p);
+        assertFalse(adManager.nullifierUsed(NL), "the never-locked cancel consumed no nullifier");
+    }
+
+    /// The order's AD leaf (domain 1) in a one-leaf order-chain tree, proven by the events circuit.
+    function _adLeafProof(bytes32 orderHash, bool adSide)
+        internal
+        returns (bytes memory proof, bytes32 root, bytes32 n)
+    {
+        string[] memory a = new string[](4);
+        a[0] = "npx";
+        a[1] = "tsx";
+        a[2] = "js-scripts/deposits/getNullifierHash.ts";
+        a[3] = vm.toString(orderHash);
+        (bytes32 orderLeg, bytes32 adLeg, bytes32 secret) = abi.decode(vm.ffi(a), (bytes32, bytes32, bytes32));
+        n = adSide ? adLeg : orderLeg;
+        string[] memory g = new string[](8);
+        g[0] = "npx";
+        g[1] = "tsx";
+        g[2] = "js-scripts/deposits/generateProof.ts";
+        g[3] = vm.toString(n);
+        g[4] = vm.toString(orderHash);
+        g[5] = adSide ? "true" : "false";
+        g[6] = vm.toString(secret);
+        g[7] = vm.toString(orderHash);
+        bytes32[] memory pub;
+        (proof, pub) = abi.decode(vm.ffi(g), (bytes, bytes32[]));
+        root = pub[2];
+    }
+
+    /// The real circuit: a never-locked order whose AD leaf is in a notarized order-chain root is
+    /// cancelled; a made-up order (no leaf) and a proof of the order's other domain are refused.
+    function test_cancelNeverLocked_realProof_onlyARealOrderCancels() public {
+        _wireAnchor();
+        test_fundAd_makerOnly();
+        IAdManager.OrderParams memory p = _defaultParams(lastAdId);
+        bytes32 h = adManager.hashOrderPublic(p);
+        (bytes memory proof, bytes32 root, bytes32 n) = _adLeafProof(h, true);
+        (bytes memory orderLeafProof, bytes32 orderLeafRoot, bytes32 n0) = _adLeafProof(h, false);
+        _anchorRoot(root);
+        _anchorRoot(orderLeafRoot);
+        _useRealVerifier();
+        vm.warp(p.deadline);
+
+        // A made-up order: the same proof names an order hash with no leaf. The Honk verifier
+        // reverts on a proof of other public inputs rather than returning false.
+        IAdManager.OrderParams memory madeUp = _defaultParams(lastAdId); // a copy, not an alias of p
+        madeUp.salt = p.salt + 1;
+        madeUp.deadline = p.deadline;
+        vm.expectPartialRevert(BaseHonkVerifier.SumcheckFailed.selector);
+        adManager.cancelNeverLocked(madeUp, root, n, proof);
+        // The order's ORDER leaf (domain 0) is not its AD leaf.
+        vm.expectPartialRevert(BaseHonkVerifier.SumcheckFailed.selector);
+        adManager.cancelNeverLocked(p, orderLeafRoot, n0, orderLeafProof);
+        assertEq(uint256(statusOf(address(adManager), adManager.hashOrderPublic(madeUp))), 0, "made-up order");
+
+        vm.expectEmit(true, true, true, true);
+        emit IEscrow.OrderCancelled(h, false);
+        adManager.cancelNeverLocked(p, root, n, proof);
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Cancelled));
+        assertFalse(adManager.nullifierUsed(n), "no nullifier consumed");
     }
 
     /*//////////////////////////// claim → window → finalize ////////////////////////////*/
@@ -291,14 +417,13 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
 
         vm.warp(p.deadline);
         vm.expectEmit(true, true, true, true);
-        emit IEscrow.ClaimOpened(h, Termination.ClaimEntry.Deadline, uint64(p.deadline + 30 minutes));
+        emit IEscrow.ClaimOpened(h, uint64(p.deadline + 30 minutes));
         adManager.claimCancel(p);
 
-        (uint64 openedAt, uint64 finalizeAt,, Termination.ClaimEntry entry) = adManager.claims(h);
+        (uint64 openedAt, uint64 finalizeAt) = adManager.claims(h);
         assertEq(openedAt, p.deadline);
         assertEq(finalizeAt, p.deadline + 30 minutes, "deadline-anchored");
-        assertEq(uint256(entry), uint256(Termination.ClaimEntry.Deadline));
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Claimed));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Claimed));
         assertEq(_locked(), lockedBefore, "a claim moves nothing");
         assertEq(adManager.inFlightOf(p.adSettlementSigner), 1, "still in flight");
 
@@ -311,7 +436,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         (IAdManager.OrderParams memory p, bytes32 h) = _lock(4);
         vm.warp(p.deadline + 25 minutes);
         adManager.claimCancel(p);
-        (, uint64 finalizeAt,,) = adManager.claims(h);
+        (, uint64 finalizeAt) = adManager.claims(h);
         assertEq(finalizeAt, p.deadline + 30 minutes);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 30 minutes));
         adManager.finalizeCancel(p);
@@ -347,12 +472,12 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         emit IAdManager.LockCancelled(lastAdId, h, 60 ether);
         adManager.finalizeCancel(p);
 
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Cancelled));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Cancelled));
         assertEq(_locked(), 0, "lock released");
         assertEq(_balance(), balanceBefore, "the ad keeps its funds");
         assertEq(adManager.getMerkleLeafCount(), leaves + 1, "the CANCEL leaf");
         assertEq(adManager.inFlightOf(p.adSettlementSigner), 0, "T-44");
-        (, uint64 finalizeAt,,) = adManager.claims(h);
+        (, uint64 finalizeAt) = adManager.claims(h);
         assertEq(finalizeAt, 0, "claim record cleared");
 
         // Terminal: nothing else appends or moves.
@@ -360,6 +485,8 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         adManager.finalizeCancel(p);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, h, IEscrow.Status.Cancelled));
         adManager.claimCancel(p);
+        // Back inside the unlock window, so the status (not the cutoff) is what refuses.
+        vm.warp(p.deadline);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderNotOpen.selector, h));
         adManager.unlock(p, TestField.fe("C1"), bytes32(0), hex"", hex"");
         _wireAnchor();
@@ -381,11 +508,11 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         emit IEscrow.OrderSettled(h, false);
         adManager.unlock(p, TestField.fe("R1"), bytes32(uint256(1)), hex"", hex"");
 
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Filled));
         assertEq(adManager.getMerkleLeafCount(), leaves, "the fill itself appends nothing");
         adManager.recordSettled(p);
         assertEq(adManager.getMerkleLeafCount(), leaves + 1, "T-59: the SETTLED leaf, no cancel leaf");
-        (, uint64 finalizeAt,,) = adManager.claims(h);
+        (, uint64 finalizeAt) = adManager.claims(h);
         assertEq(finalizeAt, 0, "window closed");
         assertEq(adManager.inFlightOf(p.adSettlementSigner), 0);
 
@@ -394,17 +521,57 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         adManager.finalizeCancel(p);
     }
 
-    function test_T45b_primaryUnlock_validToBufferMinusMargin() public {
-        _setTiming(RouteTiming.Timing(120, 30 minutes, 120, 1 days, 0));
+    function test_T45b_primaryUnlock_validBeforeBufferMinusMargin() public {
+        _setTiming(RouteTiming.Timing(120, 30 minutes, 120, 0));
         (IAdManager.OrderParams memory p,) = _lock(8);
         uint256 cutoff = p.deadline + 30 minutes - 120;
 
-        vm.warp(cutoff + 1);
+        // Strict: the cutoff itself is refused.
+        vm.warp(cutoff);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, cutoff));
         adManager.unlock(p, TestField.fe("M1"), bytes32(0), hex"", hex"");
 
-        vm.warp(cutoff);
+        vm.warp(cutoff - 1);
         adManager.unlock(p, TestField.fe("M1"), bytes32(0), hex"", hex"");
+    }
+
+    /// With a zero margin the unlock and the cancel never share a second: one second before the
+    /// window's end the unlock passes and the cancel is too early; at the end the unlock and a filing
+    /// are refused and the cancel finalizes.
+    function test_noSharedLastSecond_unlockBeforeTheEnd_cancelAtIt() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lock(9);
+        (IAdManager.OrderParams memory q, bytes32 hq) =
+            _openOrder(lastAdId, address(adToken), 60 ether, 10, bridger, recipient);
+        _claim(p);
+        _claim(q);
+        uint256 end = p.deadline + 30 minutes;
+
+        vm.warp(end - 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, end));
+        adManager.finalizeCancel(q);
+        adManager.unlock(q, TestField.fe("S1"), bytes32(0), hex"", hex"");
+        assertEq(uint256(statusOf(address(adManager), hq)), uint256(IEscrow.Status.Filled));
+
+        vm.warp(end);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, end));
+        adManager.unlock(p, TestField.fe("S2"), bytes32(0), hex"", hex"");
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeWindowClosed.selector, h, end));
+        vm.prank(maker);
+        adManager.dispute(p, bytes32("evidence"));
+        adManager.finalizeCancel(p);
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Cancelled));
+    }
+
+    /// The margin is at most half the buffer, so the bridger always keeps half the window.
+    function test_setRouteTiming_marginCappedAtHalfTheBuffer() public {
+        vm.startPrank(admin);
+        vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(2)));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(1 hours, 1 hours, 30 minutes + 1, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(1 hours, 1 hours, 30 minutes, 0));
+        // An odd buffer rounds the cap down.
+        vm.expectRevert(abi.encodeWithSelector(RouteTiming.RouteTiming__Invalid.selector, uint8(2)));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(1 hours, 1 hours + 1, 30 minutes + 1, 0));
+        vm.stopPrank();
     }
 
     /*//////////////////////////// T-54 / D3: presentSettled ////////////////////////////*/
@@ -423,7 +590,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         emit IEscrow.OrderSettled(h, true);
         adManager.presentSettled(p, root, hex"");
 
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Filled));
         assertEq(adToken.balanceOf(recipient), 60 ether, "the bridger's recipient is paid");
         assertEq(_balance(), balanceBefore - 60 ether);
         assertEq(_locked(), 0);
@@ -445,7 +612,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         (IAdManager.OrderParams memory p, bytes32 h) = _lock(10);
         _anchorRoot(bytes32(uint256(2)));
         adManager.presentSettled(p, bytes32(uint256(2)), hex"");
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Filled));
     }
 
     function test_presentSettled_rootNotAnchored_orInsideDelay_reverts() public {
@@ -489,29 +656,100 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimed.selector, h));
         adManager.finalizeCancel(p);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, h, IEscrow.Status.Filled));
-        adManager.cancelNeverLocked(p);
+        _cancelNeverLocked(p);
         assertEq(adManager.getMerkleLeafCount(), leaves, "no cancel leaf");
     }
 
-    /*//////////////////////////// D10: pause ////////////////////////////*/
+    /*//////////////////////////// pause: entries only ////////////////////////////*/
 
-    function test_pause_gatesEveryTerminationPath() public {
-        _wireAnchor();
-        (IAdManager.OrderParams memory p,) = _lock(14);
-        vm.warp(p.deadline);
+    /// Each entry refuses while paused.
+    function test_pause_refusesEveryEntry() public {
+        test_fundAd_makerOnly();
+        IAdManager.OrderParams memory p = _defaultParams(lastAdId);
         vm.prank(admin);
         adManager.pause();
 
+        vm.startPrank(maker);
         vm.expectRevert(Pausable.EnforcedPause.selector);
+        adManager.createAd("paused", address(adToken), 1 ether, orderChainId, _b32(adRecipient), _b32(maker));
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        adManager.fundAd(lastAdId, 1 ether);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        adManager.lockForOrder(p, 0);
+        vm.stopPrank();
+
+        vm.prank(admin);
+        adManager.unpause();
+        vm.prank(maker);
+        adManager.lockForOrder(p, 0);
+    }
+
+    /// Every exit works while paused, the maker's free liquidity included.
+    function test_pause_leavesEveryExitOpen() public {
+        _wireAnchor();
+        (IAdManager.OrderParams memory a, bytes32 ha) = _lock(30);
+        (IAdManager.OrderParams memory b, bytes32 hb) =
+            _openOrder(lastAdId, address(adToken), 60 ether, 31, bridger, recipient);
+        (IAdManager.OrderParams memory c, bytes32 hc) =
+            _openOrder(lastAdId, address(adToken), 60 ether, 32, bridger, recipient);
+        IAdManager.OrderParams memory d = _defaultParams(lastAdId);
+        d.salt = 33;
+        bytes32 root = bytes32(uint256(0xbeef));
+        _anchorRoot(root);
+        vm.prank(admin);
+        adManager.pause();
+
+        adManager.unlock(a, TestField.fe("X1"), bytes32(uint256(1)), hex"", hex"");
+        adManager.recordSettled(a);
+        adManager.presentSettled(b, root, hex"");
+        vm.warp(c.deadline);
+        adManager.claimCancel(c);
+        adManager.cancelNeverLocked(d, root, NL, hex"");
+        vm.warp(c.deadline + 30 minutes);
+        adManager.finalizeCancel(c);
+        assertEq(uint256(statusOf(address(adManager), ha)), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(adManager), hb)), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(adManager), hc)), uint256(IEscrow.Status.Cancelled));
+        assertEq(uint256(statusOf(address(adManager), adManager.hashOrderPublic(d))), uint256(IEscrow.Status.Cancelled));
+
+        // No trade holds the maker's free liquidity, so it leaves during a pause too.
+        vm.startPrank(maker);
+        adManager.withdrawFromAd(lastAdId, 1 ether, maker);
+        adManager.closeAd(lastAdId, maker);
+        vm.stopPrank();
+        assertEq(_balance(), 0);
+    }
+
+    /// A pause across the deadline moves no window: the co-signed unlock cutoff and the cancel window
+    /// read the same before, during and after it.
+    function test_pause_acrossTheDeadline_movesNoWindow() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lock(34);
+        (IAdManager.OrderParams memory q, bytes32 hq) =
+            _openOrder(lastAdId, address(adToken), 60 ether, 35, bridger, recipient);
+        uint256 end = p.deadline + 30 minutes;
+
+        vm.warp(p.deadline - 5 minutes);
+        vm.prank(admin);
+        adManager.pause();
+        vm.warp(p.deadline);
         adManager.claimCancel(p);
-        vm.expectRevert(Pausable.EnforcedPause.selector);
+        (, uint64 finalizeAt) = adManager.claims(h);
+        assertEq(finalizeAt, end, "during the pause");
+        // The unlock is accepted before the cutoff, and not at it, while paused.
+        vm.warp(end);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, end));
+        adManager.unlock(q, TestField.fe("W1"), bytes32(0), hex"", hex"");
+        vm.warp(end - 1);
+        adManager.unlock(q, TestField.fe("W1"), bytes32(0), hex"", hex"");
+        assertEq(uint256(statusOf(address(adManager), hq)), uint256(IEscrow.Status.Filled));
+
+        vm.warp(end + 1 hours);
+        vm.prank(admin);
+        adManager.unpause();
+        assertEq(adManager.cancelFinalizesAt(p), end, "after the pause");
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, end));
+        adManager.unlock(p, TestField.fe("W2"), bytes32(0), hex"", hex"");
         adManager.finalizeCancel(p);
-        vm.expectRevert(Pausable.EnforcedPause.selector);
-        adManager.cancelNeverLocked(p);
-        vm.expectRevert(Pausable.EnforcedPause.selector);
-        adManager.presentSettled(p, bytes32(0), hex"");
-        vm.expectRevert(Pausable.EnforcedPause.selector);
-        adManager.recordSettled(p);
     }
 
     /// T-59: the SETTLED leaf is recordable exactly once, only for `Filled`, never after a cancel.
@@ -536,171 +774,42 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         q.salt = 18;
         bytes32 hq = adManager.hashOrderPublic(q);
         vm.warp(q.deadline);
-        adManager.cancelNeverLocked(q);
+        _anchorNeverLockedRoot();
+        _cancelNeverLocked(q);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotFilled.selector, hq));
         adManager.recordSettled(q);
         assertEq(adManager.getMerkleLeafCount(), 3, "the CANCEL leaf only");
     }
 
-    /// G2: a pause freezes evidence, so it stops the clocks. A window open when the pause began ends
-    /// later by exactly the pause; the unlock is valid again for what was left of it.
-    function test_pause_acrossTheWindow_evidenceGetsTheRestOfItsWindowAfterUnpause() public {
-        (IAdManager.OrderParams memory p, bytes32 h) = _lock(19);
-        _claim(p);
-        vm.warp(p.deadline + 10 minutes);
-        vm.prank(admin);
-        adManager.pause();
-        vm.warp(p.deadline + 30 minutes + 1 hours);
-        vm.prank(admin);
-        adManager.unpause();
-        // 20 minutes were left when the pause began; 20 minutes remain after it.
-        uint256 reopened = block.timestamp + 20 minutes;
-        assertEq(adManager.pausedSeconds(), 1 hours + 20 minutes);
+    /// A retiming moves no locked order: buffer, margin and stagger change together, and the order
+    /// keeps its own version's cutoff and window; a lock after the retiming reads the new version.
+    function test_retiming_movesNoLockedOrder() public {
+        _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 5 minutes, 30 minutes));
+        (IAdManager.OrderParams memory p, bytes32 h) = _lock(40);
+        (, uint32 v,,) = adManager.orders(h);
+        assertEq(v, adManager.timingVersion(orderChainId), "the lock keeps the current version");
+        _setTiming(RouteTiming.Timing(1 hours, 2 hours, 1 hours, 50 minutes));
 
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, reopened));
-        adManager.finalizeCancel(p);
-        vm.warp(reopened - 1);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, reopened));
-        adManager.finalizeCancel(p);
-        // The bridger's co-signed unlock is valid through the reopened window.
-        adManager.unlock(p, TestField.fe("P1"), bytes32(0), hex"", hex"");
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Filled));
-    }
-
-    function test_pause_acrossTheWindow_thenSilence_finalizesAtTheReopenedEnd() public {
-        (IAdManager.OrderParams memory p, bytes32 h) = _lock(20);
-        // Paused while still Open, from 5 minutes before the deadline across the whole buffer:
-        // the clock is measured from the lock, so all 1h35 count.
-        vm.warp(p.deadline - 5 minutes);
-        vm.prank(admin);
-        adManager.pause();
-        vm.warp(p.deadline + 30 minutes + 1 hours);
-        vm.prank(admin);
-        adManager.unpause();
-        uint256 reopened = block.timestamp + 35 minutes;
-
-        adManager.claimCancel(p);
-        (, uint64 finalizeAt,,) = adManager.claims(h);
-        assertEq(finalizeAt, reopened, "the record carries the pause that fell inside the window");
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, reopened));
-        adManager.finalizeCancel(p);
-        vm.warp(reopened + 1);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, reopened));
-        adManager.unlock(p, TestField.fe("P2"), bytes32(0), hex"", hex"");
-        adManager.finalizeCancel(p);
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Cancelled));
-    }
-
-    /// P1: a pause never reopens a window that had already closed — claimed or not — and a pause
-    /// that ended before the deadline touches nothing.
-    function test_pause_afterTheWindowClosed_doesNotReopenIt() public {
-        // Claimed, closed ten days ago, never finalized.
-        (IAdManager.OrderParams memory p,) = _lock(23);
-        _claim(p);
-        vm.warp(p.deadline + 30 minutes + 10 days);
-        vm.prank(admin);
-        adManager.pause();
-        vm.warp(block.timestamp + 1 hours);
-        vm.prank(admin);
-        adManager.unpause();
-        vm.expectRevert(
-            abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, p.deadline + 30 minutes + 1 hours)
-        );
-        adManager.unlock(p, TestField.fe("P3"), bytes32(0), hex"", hex"");
-        adManager.finalizeCancel(p);
-
-        // Never claimed, closed ten days ago: the claim lands and finalizes at once.
-        (IAdManager.OrderParams memory q, bytes32 hq) =
-            _openOrder(lastAdId, address(adToken), 60 ether, 24, bridger, recipient);
-        vm.warp(q.deadline + 30 minutes + 10 days);
-        vm.prank(admin);
-        adManager.pause();
-        vm.warp(block.timestamp + 1 hours);
-        vm.prank(admin);
-        adManager.unpause();
-        vm.expectRevert(
-            abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, q.deadline + 30 minutes + 1 hours)
-        );
-        adManager.unlock(q, TestField.fe("P4"), bytes32(0), hex"", hex"");
-        adManager.claimCancel(q);
-        (, uint64 finalizeAt,,) = adManager.claims(hq);
-        assertEq(finalizeAt, q.deadline + 30 minutes + 1 hours);
-        adManager.finalizeCancel(q);
-
-        // A pause between the lock and the deadline extends the window too (the chosen behaviour:
-        // the clock runs from the lock, and that pause froze both unlocks).
-        (IAdManager.OrderParams memory r,) = _openOrder(lastAdId, address(adToken), 60 ether, 25, bridger, recipient);
-        vm.prank(admin);
-        adManager.pause();
-        vm.warp(block.timestamp + 1 hours);
-        vm.prank(admin);
-        adManager.unpause();
-        vm.warp(r.deadline + 30 minutes + 1 hours + 1);
-        vm.expectRevert(
-            abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, r.deadline + 30 minutes + 1 hours)
-        );
-        adManager.unlock(r, TestField.fe("P5"), bytes32(0), hex"", hex"");
-        vm.warp(r.deadline + 30 minutes + 1 hours);
-        adManager.unlock(r, TestField.fe("P5"), bytes32(0), hex"", hex"");
-    }
-
-    /// Two pauses on one still-unclaimed lock, a long one then a short one, both count: the window
-    /// is measured from the lock's pause-counter snapshot, exact over any number of pauses. A lock
-    /// taken after a pause does not inherit it.
-    function test_pause_everyPauseSinceTheLockCounts() public {
-        (IAdManager.OrderParams memory p, bytes32 h) = _lock(26);
-        vm.warp(p.deadline + 1 minutes);
-        vm.prank(admin);
-        adManager.pause();
-        vm.warp(p.deadline + 11 minutes);
-        vm.prank(admin);
-        adManager.unpause();
-        vm.warp(p.deadline + 15 minutes);
-        vm.prank(admin);
-        adManager.pause();
-        vm.warp(p.deadline + 20 minutes);
-        vm.prank(admin);
-        adManager.unpause();
-        uint256 end = p.deadline + 30 minutes + 15 minutes;
-
-        vm.warp(end + 1);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, end));
-        adManager.unlock(p, TestField.fe("H1"), bytes32(0), hex"", hex"");
-        adManager.claimCancel(p);
-        (, uint64 finalizeAt,,) = adManager.claims(h);
-        assertEq(finalizeAt, end, "the claim materializes every pause");
-        adManager.finalizeCancel(p);
-
-        assertEq(adManager.pausedSeconds(), 15 minutes);
-        assertEq(adManager.orderPausedAtOpen(h), 0);
-
-        // A lock taken now starts its clock at the current counter: those pauses are not its own.
-        (IAdManager.OrderParams memory q, bytes32 hq) =
-            _openOrder(lastAdId, address(adToken), 60 ether, 27, bridger, recipient);
-        assertEq(adManager.orderPausedAtOpen(hq), 15 minutes);
-        vm.warp(q.deadline + 30 minutes + 1);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, q.deadline + 30 minutes));
-        adManager.unlock(q, TestField.fe("H2"), bytes32(0), hex"", hex"");
-    }
-
-    /// G3: once claimed, the cutoff is the claim's frozen end; an admin retiming cannot move it.
-    function test_G3_retimingDuringAClaimDoesNotMoveTheCutoff() public {
-        (IAdManager.OrderParams memory p,) = _lock(21);
-        _claim(p);
-        _setTiming(RouteTiming.Timing(0, 2 hours, 0, 1 days, 0));
-        vm.warp(p.deadline + 30 minutes + 1);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, p.deadline + 30 minutes));
+        uint256 cutoff = p.deadline + 30 minutes - 5 minutes;
+        vm.warp(cutoff);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, cutoff));
         adManager.unlock(p, TestField.fe("G3"), bytes32(0), hex"", hex"");
+        adManager.claimCancel(p);
+        (, uint64 finalizeAt) = adManager.claims(h);
+        assertEq(finalizeAt, p.deadline + 30 minutes, "the window is the order's own");
+        vm.warp(p.deadline + 30 minutes);
         adManager.finalizeCancel(p);
 
-        // And lowered: the window stays open as long as the claim said.
-        _setTiming(RouteTiming.Timing(0, 2 hours, 0, 1 days, 0));
-        (IAdManager.OrderParams memory q,) = _openOrder(lastAdId, address(adToken), 60 ether, 22, bridger, recipient);
-        _claim(q);
-        _setTiming(RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
-        vm.warp(q.deadline + 1 hours);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, q.deadline + 2 hours));
-        adManager.finalizeCancel(q);
+        // A lock after the retiming reads the new version: a 2-hour window, a 1-hour margin.
+        (IAdManager.OrderParams memory q, bytes32 hq) =
+            _openOrder(lastAdId, address(adToken), 60 ether, 41, bridger, recipient);
+        (, uint32 vq,,) = adManager.orders(hq);
+        assertEq(vq, v + 1);
+        uint256 cutoffQ = q.deadline + 2 hours - 1 hours;
+        vm.warp(cutoffQ);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, cutoffQ));
+        adManager.unlock(q, TestField.fe("G3b"), bytes32(0), hex"", hex"");
+        vm.warp(cutoffQ - 1);
         adManager.unlock(q, TestField.fe("G3b"), bytes32(0), hex"", hex"");
     }
 
@@ -717,7 +826,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         _anchorRoot(root);
         vm.warp(p.deadline + 10 minutes);
         adManager.presentSettled(p, root, proof);
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Filled));
         assertEq(adToken.balanceOf(recipient), 60 ether);
     }
 
@@ -731,7 +840,7 @@ contract AdManagerCancellationTest is AdManagerTest, CancellationHarness {
         _anchorRoot(root);
         vm.expectRevert();
         adManager.presentSettled(p, root, proof);
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Open), "the unwind stands");
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Open), "the unwind stands");
     }
 }
 
@@ -801,7 +910,7 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
     /*//////////////////////////// T-45 / T-45b: the bounds on this leg ////////////////////////////*/
 
     function test_T45_create_refusesDeadlineInsideMinWindow() public {
-        _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 0, 1 days, 0));
+        _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 0, 0));
         _wireRoute();
         IOrderPortal.OrderParams memory p = _defaultParams();
         p.deadline = block.timestamp + 30 minutes;
@@ -831,7 +940,7 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
     }
 
     function test_T45b_followerUnlock_stopsAtDeadlineMinusStagger() public {
-        _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 0, 1 days, 30 minutes));
+        _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 0, 30 minutes));
         (IOrderPortal.OrderParams memory p,) = _create(1);
         uint256 cutoff = p.deadline - 30 minutes;
 
@@ -867,7 +976,7 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         vm.expectEmit(true, true, true, true);
         emit IOrderPortal.OrderRefunded(ha, a.bridger, a.amount);
         portal.refundByCancel(a, root, hex"");
-        assertEq(uint256(portal.orders(ha)), uint256(IEscrow.Status.Cancelled));
+        assertEq(uint256(statusOf(address(portal), ha)), uint256(IEscrow.Status.Cancelled));
         assertEq(orderToken.balanceOf(bridger), before + a.amount, "deposit back");
         assertEq(portal.inFlightOf(a.bridger), 0, "T-44");
 
@@ -875,7 +984,7 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         (IOrderPortal.OrderParams memory b, bytes32 hb) = _create(4);
         vm.warp(b.deadline + 30 days);
         portal.refundByCancel(b, root, hex"");
-        assertEq(uint256(portal.orders(hb)), uint256(IEscrow.Status.Cancelled));
+        assertEq(uint256(statusOf(address(portal), hb)), uint256(IEscrow.Status.Cancelled));
 
         // Terminal.
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, ha, IEscrow.Status.Cancelled));
@@ -885,19 +994,6 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, ha, IEscrow.Status.Cancelled));
         portal.presentSettled(a, root, hex"");
         assertEq(portal.getMerkleLeafCount(), 2, "the follower appends no leaf of its own on cancel");
-    }
-
-    /// A cancel proof beats an open backstop window (recorded decision: both Open and Claimed accepted).
-    function test_refundByCancel_fromABackstopWindow() public {
-        _wireAnchor();
-        (IOrderPortal.OrderParams memory p, bytes32 h) = _create(5);
-        vm.warp(p.deadline + 1 days);
-        portal.claimBackstop(p);
-        _anchorRoot(bytes32(uint256(6)));
-        portal.refundByCancel(p, bytes32(uint256(6)), hex"");
-        assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Cancelled));
-        (, uint64 finalizeAt,,) = portal.claims(h);
-        assertEq(finalizeAt, 0);
     }
 
     function test_refundByCancel_anchorGates() public {
@@ -920,98 +1016,92 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         portal.refundByCancel(p, root, hex"");
     }
 
-    /*//////////////////////////// T-43: the backstop ////////////////////////////*/
+    /*//////////////////////////// the follower only follows ////////////////////////////*/
 
-    function test_T43_claimBackstop_onlyAfterLongBackstop_opensClaimAnchoredWindow() public {
+    /// No clock on this leg runs after the deadline: long past it nothing refunds, the backstop doors
+    /// are gone from the ABI, and the leader's leaf still decides the leg whenever it arrives.
+    function test_follower_hasNoClockOfItsOwn() public {
+        _wireAnchor();
         (IOrderPortal.OrderParams memory p, bytes32 h) = _create(7);
         uint256 before = orderToken.balanceOf(bridger);
+        vm.warp(p.deadline + 30 days);
 
-        vm.warp(p.deadline + 1 days - 1);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, p.deadline + 1 days));
-        portal.claimBackstop(p);
-
-        vm.warp(p.deadline + 1 days + 5 hours);
-        uint64 finalizeAt = uint64(block.timestamp + 30 minutes);
-        vm.expectEmit(true, true, true, true);
-        emit IEscrow.ClaimOpened(h, Termination.ClaimEntry.Backstop, finalizeAt);
-        portal.claimBackstop(p);
-
-        (uint64 openedAt, uint64 fAt,, Termination.ClaimEntry entry) = portal.claims(h);
-        assertEq(openedAt, block.timestamp);
-        assertEq(fAt, finalizeAt, "claim-anchored");
-        assertEq(uint256(entry), uint256(Termination.ClaimEntry.Backstop));
-        assertEq(orderToken.balanceOf(bridger), before, "no funds move on a claim");
+        bytes memory args = abi.encode(p);
+        (bool ok,) = address(portal)
+            .call(
+                abi.encodePacked(
+                    bytes4(
+                        keccak256(
+                            "claimBackstop((bytes32,bytes32,uint256,bytes32,bytes32,uint256,bytes32,string,bytes32,bytes32,uint256,uint8,uint8,uint256,bytes32))"
+                        )
+                    ),
+                    args
+                )
+            );
+        assertFalse(ok, "no backstop claim");
+        (ok,) = address(portal)
+            .call(
+                abi.encodePacked(
+                    bytes4(
+                        keccak256(
+                            "finalizeBackstop((bytes32,bytes32,uint256,bytes32,bytes32,uint256,bytes32,string,bytes32,bytes32,uint256,uint8,uint8,uint256,bytes32))"
+                        )
+                    ),
+                    args
+                )
+            );
+        assertFalse(ok, "no backstop finalize");
+        assertEq(uint256(statusOf(address(portal), h)), uint256(IEscrow.Status.Open), "silence refunds nothing");
+        assertEq(orderToken.balanceOf(bridger), before);
         assertEq(portal.inFlightOf(p.bridger), 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, p.deadline));
+        portal.unlock(p, TestField.fe("B1"), bytes32(0), hex"", hex"");
 
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, h, IEscrow.Status.Claimed));
-        portal.claimBackstop(p);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, finalizeAt));
-        portal.finalizeBackstop(p);
-    }
-
-    function test_T43_presentSettled_insideTheBackstopWindow_paysTheMaker() public {
-        _wireAnchor();
-        (IOrderPortal.OrderParams memory p, bytes32 h) = _create(8);
-        vm.warp(p.deadline + 1 days);
-        portal.claimBackstop(p);
-        uint256 leaves = portal.getMerkleLeafCount();
+        // A late SETTLED root still settles it to the maker.
         _anchorRoot(bytes32(uint256(8)));
-
-        vm.warp(block.timestamp + 29 minutes);
-        vm.expectEmit(true, true, true, true);
-        emit IEscrow.OrderSettled(h, true);
         portal.presentSettled(p, bytes32(uint256(8)), hex"");
-
-        assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(portal), h)), uint256(IEscrow.Status.Filled));
         assertEq(orderToken.balanceOf(adRecipient), p.amount, "the maker's recipient is paid");
-        portal.recordSettled(p);
-        assertEq(portal.getMerkleLeafCount(), leaves + 1, "T-59: SETTLED appended");
-        assertEq(portal.inFlightOf(p.bridger), 0, "T-44");
-
-        vm.warp(block.timestamp + 1 minutes);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimed.selector, h));
-        portal.finalizeBackstop(p);
     }
 
-    /// The documented residual: only silence through claim + window reaches the refund.
-    function test_T43_unchallengedBackstop_refundsAfterTheWindow() public {
+    /// The bridger's refund on silence is the leader's CANCEL leaf, however late it is anchored.
+    function test_follower_refundWaitsForTheCancelLeaf() public {
+        _wireAnchor();
         (IOrderPortal.OrderParams memory p, bytes32 h) = _create(9);
         uint256 before = orderToken.balanceOf(bridger);
-        vm.warp(p.deadline + 1 days);
-        portal.claimBackstop(p);
-
-        vm.warp(block.timestamp + 30 minutes - 1);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, block.timestamp + 1));
-        portal.finalizeBackstop(p);
-
-        vm.warp(block.timestamp + 1);
-        vm.expectEmit(true, true, true, true);
-        emit IEscrow.OrderCancelled(h, false);
-        portal.finalizeBackstop(p);
-        assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Cancelled));
+        vm.warp(p.deadline + 10 days);
+        assertEq(uint256(statusOf(address(portal), h)), uint256(IEscrow.Status.Open));
+        _anchorRoot(bytes32(uint256(9)));
+        portal.refundByCancel(p, bytes32(uint256(9)), hex"");
+        assertEq(uint256(statusOf(address(portal), h)), uint256(IEscrow.Status.Cancelled));
         assertEq(orderToken.balanceOf(bridger), before + p.amount);
         assertEq(portal.inFlightOf(p.bridger), 0, "T-44");
         assertEq(portal.getMerkleLeafCount(), 1, "no leaf on a follower cancel");
-
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimed.selector, h));
-        portal.finalizeBackstop(p);
     }
 
-    /// The co-signed unlock is refused inside a backstop window: the package proves the lock, not
-    /// the ad leg's outcome. Only outcome evidence settles or refunds there.
-    function test_unlock_refusedInsideBackstopWindow() public {
-        _wireAnchor();
+    /// A retiming moves no created order: the maker's unlock keeps the order's own stagger.
+    function test_retiming_movesNoCreatedOrder() public {
+        _setTiming(RouteTiming.Timing(1 hours, 30 minutes, 0, 30 minutes));
         (IOrderPortal.OrderParams memory p, bytes32 h) = _create(10);
-        vm.warp(p.deadline + 1 days);
-        portal.claimBackstop(p);
+        (, uint32 v,,) = portal.orders(h);
+        assertEq(v, portal.timingVersion(adChainId));
+        _setTiming(RouteTiming.Timing(2 hours, 2 hours, 1 hours, 90 minutes));
 
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderNotOpen.selector, h));
-        portal.unlock(p, TestField.fe("B1"), bytes32(0), hex"", hex"");
-        assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Claimed));
-        // A settled-leaf proof does settle it.
-        _anchorRoot(bytes32(uint256(10)));
-        portal.presentSettled(p, bytes32(uint256(10)), hex"");
-        assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Filled));
+        uint256 cutoff = p.deadline - 30 minutes;
+        vm.warp(cutoff + 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, cutoff));
+        portal.unlock(p, TestField.fe("RT1"), bytes32(0), hex"", hex"");
+
+        // An order created after the retiming reads the new stagger.
+        (IOrderPortal.OrderParams memory q, bytes32 hq) = _create(15);
+        (, uint32 vq,,) = portal.orders(hq);
+        assertEq(vq, v + 1);
+        uint256 cutoffQ = q.deadline - 90 minutes;
+        vm.warp(cutoffQ + 1);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExpired.selector, cutoffQ));
+        portal.unlock(q, TestField.fe("RT2"), bytes32(0), hex"", hex"");
+        vm.warp(cutoffQ);
+        portal.unlock(q, TestField.fe("RT2"), bytes32(0), hex"", hex"");
     }
 
     /*//////////////////////////// T-59: the settled leaf on this leg ////////////////////////////*/
@@ -1032,9 +1122,6 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         _anchorRoot(bytes32(uint256(11)));
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, h, IEscrow.Status.Filled));
         portal.refundByCancel(p, bytes32(uint256(11)), hex"");
-        vm.warp(p.deadline + 2 days);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotClaimable.selector, h, IEscrow.Status.Filled));
-        portal.claimBackstop(p);
     }
 
     function test_T59_noSettledProof_theUnwindStands() public {
@@ -1044,78 +1131,40 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         verifier.setResult(false);
         vm.expectRevert(IEscrow.Escrow__InvalidProof.selector);
         portal.presentSettled(p, bytes32(uint256(12)), hex"");
-        assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Open));
+        assertEq(uint256(statusOf(address(portal), h)), uint256(IEscrow.Status.Open));
     }
 
-    /*//////////////////////////// D10: pause ////////////////////////////*/
+    /*//////////////////////////// pause: entries only ////////////////////////////*/
 
-    function test_pause_gatesEveryTerminationPath() public {
+    /// The deposit refuses while paused; every exit on this leg works while paused.
+    function test_pause_refusesTheEntry_leavesEveryExitOpen() public {
         _wireAnchor();
-        (IOrderPortal.OrderParams memory p,) = _create(13);
+        (IOrderPortal.OrderParams memory a, bytes32 ha) = _create(13);
+        (IOrderPortal.OrderParams memory b, bytes32 hb) = _create(16);
+        (IOrderPortal.OrderParams memory c, bytes32 hc) = _create(17);
+        (IOrderPortal.OrderParams memory d, bytes32 hd) = _create(21);
+        bytes32 root = bytes32(uint256(0xbeef));
+        _anchorRoot(root);
         vm.prank(admin);
         portal.pause();
-        vm.expectRevert(Pausable.EnforcedPause.selector);
-        portal.refundByCancel(p, bytes32(0), hex"");
-        vm.expectRevert(Pausable.EnforcedPause.selector);
-        portal.presentSettled(p, bytes32(0), hex"");
-        vm.expectRevert(Pausable.EnforcedPause.selector);
-        portal.claimBackstop(p);
-        vm.expectRevert(Pausable.EnforcedPause.selector);
-        portal.finalizeBackstop(p);
-        vm.expectRevert(Pausable.EnforcedPause.selector);
-        portal.recordSettled(p);
-    }
 
-    /// G2 on the follower: a pause inside a backstop window moves its end by the pause; a pause
-    /// after it closed does not reopen it.
-    function test_pause_acrossBackstopWindow_evidenceGetsTheRestOfItsWindowAfterUnpause() public {
-        _wireAnchor();
-        (IOrderPortal.OrderParams memory p, bytes32 h) = _create(18);
-        vm.warp(p.deadline + 1 days);
-        portal.claimBackstop(p);
-        vm.prank(admin);
-        portal.pause();
-        vm.warp(block.timestamp + 30 minutes + 1 hours);
-        vm.prank(admin);
-        portal.unpause();
-        uint256 reopened = block.timestamp + 30 minutes;
+        IOrderPortal.OrderParams memory e = _defaultParams();
+        e.salt = 22;
+        vm.startPrank(bridger);
+        orderToken.approve(address(portal), e.amount);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        portal.createOrder(e);
+        vm.stopPrank();
 
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, reopened));
-        portal.finalizeBackstop(p);
-        _anchorRoot(bytes32(uint256(18)));
-        portal.presentSettled(p, bytes32(uint256(18)), hex"");
-        assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Filled));
-
-        (IOrderPortal.OrderParams memory q, bytes32 hq) = _create(19);
-        vm.warp(q.deadline + 1 days);
-        portal.claimBackstop(q);
-        vm.prank(admin);
-        portal.pause();
-        vm.warp(block.timestamp + 2 hours);
-        vm.prank(admin);
-        portal.unpause();
-        uint256 reopened2 = block.timestamp + 30 minutes;
-        vm.warp(reopened2 - 1);
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__TooEarly.selector, reopened2));
-        portal.finalizeBackstop(q);
-        _anchorRoot(bytes32(uint256(19)));
-        portal.presentSettled(q, bytes32(uint256(19)), hex"");
-        assertEq(uint256(portal.orders(hq)), uint256(IEscrow.Status.Filled));
-
-        // Closed ten days ago: a later pause reopens nothing (P1).
-        (IOrderPortal.OrderParams memory r, bytes32 hr) = _create(20);
-        vm.warp(r.deadline + 1 days);
-        portal.claimBackstop(r);
-        vm.warp(block.timestamp + 30 minutes + 10 days);
-        vm.prank(admin);
-        portal.pause();
-        vm.warp(block.timestamp + 1 hours);
-        vm.prank(admin);
-        portal.unpause();
-        _anchorRoot(bytes32(uint256(20)));
-        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderNotOpen.selector, hr));
-        portal.unlock(r, TestField.fe("PC"), bytes32(0), hex"", hex"");
-        portal.finalizeBackstop(r);
+        portal.unlock(a, TestField.fe("PX"), bytes32(0), hex"", hex"");
+        portal.recordSettled(a);
+        portal.presentSettled(b, root, hex"");
+        portal.refundByCancel(c, root, hex"");
+        portal.payMakerByForfeit(d, root, hex"");
+        assertEq(uint256(statusOf(address(portal), ha)), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(portal), hb)), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(portal), hc)), uint256(IEscrow.Status.Cancelled));
+        assertEq(uint256(statusOf(address(portal), hd)), uint256(IEscrow.Status.Filled));
     }
 
     /*//////////////////////////// T-40 with the real verifier ////////////////////////////*/
@@ -1138,7 +1187,7 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         vm.warp(block.timestamp + 600);
         uint256 before = orderToken.balanceOf(bridger);
         portal.refundByCancel(p, root, proof);
-        assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Cancelled));
+        assertEq(uint256(statusOf(address(portal), h)), uint256(IEscrow.Status.Cancelled));
         assertEq(orderToken.balanceOf(bridger), before + p.amount);
     }
 
@@ -1162,8 +1211,16 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         emit IOrderPortal.OrderForfeited(h);
         portal.payMakerByForfeit(p, root, proof);
 
-        assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Filled), "the deposit was paid out");
+        assertEq(uint256(statusOf(address(portal), h)), uint256(IEscrow.Status.Filled), "the deposit was paid out");
         assertEq(orderToken.balanceOf(adRecipient), before + p.amount, "and it went to the maker");
+
+        // No trade settled, so no SETTLED leaf can follow the forfeit fill: the fill marked the order
+        // recorded without appending, and `recordSettled` refuses a recorded order.
+        assertTrue(portal.settledRecorded(h), "the forfeit fill marks the order recorded");
+        uint256 leaves = portal.getMerkleLeafCount();
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__SettledRecorded.selector, h));
+        portal.recordSettled(p);
+        assertEq(portal.getMerkleLeafCount(), leaves, "no SETTLED leaf");
     }
 
     /// The domains must not be interchangeable: a CANCEL leaf means "refund the bridger" and can
@@ -1216,10 +1273,10 @@ contract OrderPortalCancellationTest is OrderPortalTest, CancellationHarness {
         _anchorRoot(root);
         vm.expectRevert();
         portal.refundByCancel(p, root, proof);
-        assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Open));
+        assertEq(uint256(statusOf(address(portal), h)), uint256(IEscrow.Status.Open));
         // ...but it does settle this leg (T-59): the maker is paid.
         portal.presentSettled(p, root, proof);
-        assertEq(uint256(portal.orders(h)), uint256(IEscrow.Status.Filled));
+        assertEq(uint256(statusOf(address(portal), h)), uint256(IEscrow.Status.Filled));
         assertEq(orderToken.balanceOf(adRecipient), p.amount);
     }
 

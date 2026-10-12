@@ -22,6 +22,12 @@ Writes/updates the manifest.
 A rerun refuses, before sending anything, a manifest whose MerkleManager
 predates the manager list (no `isManager`), or whose AdManager, OrderPortal
 or Registrar is bound to a different MerkleManager. Deploy fresh instead.
+It also refuses (as does `link`) an AdManager and DisputeManager that do not
+agree with this build on `settleBond`: the escrow calls the module by that
+selector, and it changed when the bond-return flag was added, so the two must
+come from one build. The check reads both contracts' code for the bundle's
+selector (`PUSH4`); redeploy the one that differs, or run the bundle both came
+from.
 
 ```bash
 pnpm --filter @proofbridge/evm-deploy cli deploy
@@ -84,6 +90,18 @@ registry as a simulated `setValidUntil` and listed as `current`, `stale-format` 
 older RetireKey message; collect it again), `no-slot` or `already-shorter`. Exits 1 when any row is
 stale or could not be checked.
 
+## Moving to a new key registry
+
+Pointing the AdManager at a new registry (`setKeyRegistry`, with every co-signature verifier on the same one)
+starts that registry empty. Before ads lock again, each settlement signer must:
+
+- register its key on the new registry, and
+- file its maker approvals again (`approveMaker`, one per maker that names it): a signer that is not
+  the ad's maker is refused at the lock until it has approved that maker on the registry the
+  escrow reads now.
+
+Orders locked before the move finish on their own registry epoch; only new locks need the above.
+
 ## Environment
 
 | Variable | Default | Purpose |
@@ -103,5 +121,5 @@ stale or could not be checked.
 | `DISPUTE_ARBITER` | admin (`local` only) | The only account that may rule a dispute (2.3g). Must not be the admin outside `local`: its whole containment is that it holds no escrow powers |
 | `DISPUTE_FEE_POOL` | admin (`local` only) | Where forfeited bonds go. Unset, every forfeited bond returns to the filer |
 | `DISPUTE_CHALLENGE_PERIOD_S` | `3600` (`local` only) | How long the arbiter has to rule. A floor, never a licence to finish early — no dispute completes before the order's own `deadline + buffer` |
-| `DISPUTE_BOND_FLOOR` | `1` (`local` only) | Bond floor in wrapped-native base units. Must be ≥ 1; the contract rejects zero |
-| `DISPUTE_BOND_BPS` | `0` (`local` only) | Bond as basis points of the order amount, capped at 1000 (10%) |
+| `DISPUTE_BOND_FLOOR` | `1` (`local` only) | The route's dispute bond, flat for every order, in wrapped-native base units. Must be ≥ 1; the contract rejects zero. No default outside `local`, and there it must be at least `1000000000000000` (0.001 ETH): the floor is the whole bond, so a dust floor would make disputes free. A sanity bound, not the tuned value (the operating rules size each route) |
+| `DISPUTE_BOND_BPS` | — | Removed: the bond is the flat floor. `link` refuses to run while it is still set |

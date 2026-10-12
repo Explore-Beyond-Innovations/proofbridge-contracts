@@ -147,7 +147,7 @@ contract AdManagerLibraryGuards is AdManagerTest {
         p.adDecimals = 6; // the ad token has 18
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.DecimalScaling__DecimalsMismatch.selector, 18, 6));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function test_lock_rejects_decimalsOutOfRange() public {
@@ -156,7 +156,7 @@ contract AdManagerLibraryGuards is AdManagerTest {
         p.orderDecimals = 31;
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.DecimalScaling__DecimalsOutOfRange.selector, 31));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 }
 

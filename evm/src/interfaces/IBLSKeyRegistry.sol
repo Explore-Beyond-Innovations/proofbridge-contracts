@@ -43,6 +43,21 @@ interface IBLSKeyRegistry is IKeyRegistry {
         uint64 registeredAt;
     }
 
+    /// The settlement signer's consent to move one order's co-signing pin (`fromSlot` → `toSlot`); `nonce`
+    /// is the (account, order) pair's next nonce, 0 while nothing was ever approved.
+    struct RepinApproval {
+        uint32 fromSlot;
+        uint32 toSlot;
+        uint64 nonce;
+    }
+
+    /// One (account, maker) approval: its flag, the pair's next nonce, the account generation it was set at.
+    struct MakerApproval {
+        bool approved;
+        uint64 nonce;
+        uint64 generation;
+    }
+
     event KeyRegistered(bytes32 indexed account, uint32 indexed slotId, bytes blsPubKey, uint256 nonce);
     event KeyRegisteredByProof(
         bytes32 indexed account, uint32 indexed slotId, bytes blsPubKey, uint64 epoch, uint256 sourceChainId
@@ -54,6 +69,12 @@ interface IBLSKeyRegistry is IKeyRegistry {
     /// Review D2: the nonce moved and no slot changed; every signature naming `nonce` here is dead.
     event RegistrationCancelled(bytes32 indexed account, uint256 nonce);
     event PositionGuardsSet(address[] guards);
+    /// The account allowed (`approved`) or stopped `maker` naming it as settlement signer, at the pair's `nonce`.
+    event MakerApprovalSet(bytes32 indexed account, bytes32 indexed maker, bool approved, uint256 nonce);
+    /// The account consented to move `orderHash`'s pin from `fromSlot` to `toSlot`, at the pair's `nonce`.
+    event RepinApproved(
+        bytes32 indexed account, bytes32 indexed orderHash, uint32 fromSlot, uint32 toSlot, uint256 nonce
+    );
 
     error BadNonce();
     error IdentityKey();
@@ -114,10 +135,39 @@ interface IBLSKeyRegistry is IKeyRegistry {
     function setValidUntil(bytes32 account, OwnerAuth calldata owner, bytes32 keyCommitment, uint64 validUntil) external;
     function revoke(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external;
     function cancel(bytes32 account, OwnerAuth calldata owner, uint256 nonce) external;
+    function approveMaker(
+        bytes32 account,
+        bytes32 maker,
+        bool approved,
+        OwnerAuth calldata owner,
+        uint256 nonce,
+        uint64 deadline
+    ) external;
+
+    /// The settlement signer consents to move an open order's pin; the AdManager's `repinOrder` applies it.
+    function approveRepin(
+        bytes32 account,
+        bytes32 orderHash,
+        uint32 fromSlot,
+        uint32 toSlot,
+        OwnerAuth calldata owner,
+        uint256 nonce
+    ) external;
 
     // views
+    function repinApproval(bytes32 account, bytes32 orderHash)
+        external
+        view
+        returns (uint32 fromSlot, uint32 toSlot, uint64 nonce);
+    /// When the slot stopped being usable: 0 while unbounded, else its recorded expiry.
+    function expiredAt(bytes32 account, uint32 slotId) external view returns (uint64);
     function nonceOf(bytes32 account) external view returns (uint256);
     function usedCommitment(bytes32 account, bytes32 commitment) external view returns (bool);
+    function makerApprovals(bytes32 account, bytes32 maker)
+        external
+        view
+        returns (bool approved, uint64 nonce, uint64 generation);
+    function approvalGeneration(bytes32 account) external view returns (uint64);
     function rootAnchor() external view returns (IRootAnchor);
     function proofVerifier() external view returns (IVerifier);
     function proofRegistrationEnabled() external view returns (bool);

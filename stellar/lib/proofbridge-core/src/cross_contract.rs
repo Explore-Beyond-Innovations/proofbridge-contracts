@@ -33,13 +33,11 @@ pub trait DisputeManagerInterface {
         env: Env,
         escrow: Address,
         order_hash: BytesN<32>,
-        amount: u128,
         peer_chain_id: u128,
         filer: Address,
         evidence: BytesN<32>,
         deadline: u64,
         buffer: u64,
-        escrow_paused_seconds: u64,
     ) -> u128;
     fn settle_bond(
         env: Env,
@@ -47,6 +45,7 @@ pub trait DisputeManagerInterface {
         order_hash: BytesN<32>,
         outcome: crate::types::DisputeOutcome,
         filer_is_bridger: bool,
+        return_to_filer: bool,
     );
     fn record_response(
         env: Env,
@@ -54,25 +53,13 @@ pub trait DisputeManagerInterface {
         order_hash: BytesN<32>,
         responder: Address,
         evidence: BytesN<32>,
-        escrow_paused_seconds: u64,
     );
     fn outcome_of(
         env: Env,
         order_hash: BytesN<32>,
-        escrow_paused_seconds: u64,
     ) -> (crate::types::DisputeOutcome, bool, Option<Address>);
     fn initiator_of(env: Env, order_hash: BytesN<32>) -> Option<Address>;
-    fn challenge_deadline_of(env: Env, order_hash: BytesN<32>, escrow_paused_seconds: u64) -> u64;
-}
-
-/// The one thing the dispute module reads back off an escrow: its pause clock (2.3g D10).
-///
-/// Its own interface rather than a full escrow client, deliberately — the module depends on exactly
-/// this much, and saying so keeps the dependency visible and hard to widen by accident.
-#[allow(dead_code)]
-#[contractclient(name = "EscrowPauseClient")]
-pub trait EscrowPauseInterface {
-    fn paused_seconds(env: Env) -> u64;
+    fn challenge_deadline_of(env: Env, order_hash: BytesN<32>) -> u64;
 }
 
 /// Typed interface for cross-contract calls to the Verifier contract.
@@ -105,7 +92,10 @@ pub trait RootAnchorInterface {
 #[contractclient(name = "KeyRegistryClient")]
 pub trait KeyRegistryInterface {
     fn has_usable_slot(env: Env, account: BytesN<32>) -> bool;
-    fn any_slot_expired_within(env: Env, account: BytesN<32>, from: u64, to: u64) -> bool;
+    fn is_approved_maker(env: Env, account: BytesN<32>, maker: BytesN<32>) -> bool;
+    fn commitment_at(env: Env, account: BytesN<32>, slot_id: u32) -> BytesN<32>;
+    fn expired_at(env: Env, account: BytesN<32>, slot_id: u32) -> u64;
+    fn repin_approval(env: Env, account: BytesN<32>, order_hash: BytesN<32>) -> (u32, u32, u64);
 }
 
 // =============================================================================
@@ -230,13 +220,13 @@ pub fn field_mod(data: &BytesN<32>) -> BytesN<32> {
 /// no second copy of the prime anywhere on this side. The EVM twin re-exports the MMR library's
 /// constant for the same reason.
 ///
-/// Defence in depth. Both shipped verifiers already reject a non-canonical public input — the
-/// transcript hashes inputs as given, so `n` and `n + r` produce different challenges, which
-/// `verifier-negative.json`'s `deposit/public-input-ge-r` vector pins on both chains.
-///
-/// It earns its place by not depending on verifier internals: the escrow's nullifier ledger keys on
-/// raw bytes, so a verifier that *reduced* instead of rejecting would turn one proof into
-/// unboundedly many nullifiers. Checking here makes that guarantee the escrow's own.
+/// Refuses a malformed public input by name, before the verifier runs. It closes no hole: both
+/// shipped verifiers already reject a non-canonical input (the transcript hashes inputs as given,
+/// pinned by `verifier-negative.json`'s `deposit/public-input-ge-r` vector), and on the co-signed
+/// unlock (metadata v4) the root verifier has already required the nullifier to equal the value
+/// both parties signed for that leg, so an alias `n + r` fails there. The never-locked cancel
+/// consumes no nullifier. What it keeps is every input the escrows hand a verifier canonical, should
+/// one ever reduce instead of rejecting.
 pub fn is_canonical(value: &BytesN<32>) -> bool {
     field_mod(value) == *value
 }
@@ -264,6 +254,19 @@ pub fn build_event_public_inputs(
     inputs.append(&Bytes::from_slice(env, &target_root.to_array()));
     inputs.append(&Bytes::from_slice(env, &domain_word));
     inputs
+}
+
+/// The one key commitment on every chain: keccak256 of the key's EIP-2537 128-byte form, rebuilt
+/// by padding each 48-byte coordinate of the 96-byte key with 16 zero bytes. The registry stores it,
+/// owner messages name it, and the counterparty verifier compares both against it.
+pub fn key_commitment(env: &Env, pk: &BytesN<96>) -> BytesN<32> {
+    let raw = pk.to_array();
+    let mut padded = [0u8; 128];
+    padded[16..64].copy_from_slice(&raw[..48]);
+    padded[80..128].copy_from_slice(&raw[48..]);
+    env.crypto()
+        .keccak256(&Bytes::from_slice(env, &padded))
+        .to_bytes()
 }
 
 /// keccak256("ProofBridge.BLSKeyRegistry.RegistrationLeaf.v1")
@@ -304,10 +307,20 @@ pub fn registration_subject(
 // RootVerifier Helpers
 // =============================================================================
 
+/// The escrow's leg in the root verifier's envelope: the order portal consumes the ORDER leaf's
+/// nullifier, the ad manager the AD leaf's.
+pub const ENVELOPE_SIDE_ORDER: u8 = 0;
+pub const ENVELOPE_SIDE_AD: u8 = 1;
+/// The order leg's envelope pin: no slot pinned there, the auth's named maker key binds it.
+pub const UNPINNED: u32 = u32::MAX;
+
 /// The root verifier's envelope: `settlement_signer(32) || bridger(32) || order_hash(32) ||
-/// cosig_data`, what the escrow vouches for. Slot 0 is the account whose settlement key the verifier
-/// resolves (the order's `ad_settlement_signer`); `order_hash` is the order being unlocked, which the
-/// co-signed auth must name (#433).
+/// pinned_slot(4) || nullifier_hash(32) || side(1) || cosig_data`, what the escrow vouches for.
+/// Slot 0 is the account whose settlement key the verifier resolves (the order's
+/// `ad_settlement_signer`); `order_hash` is the order being unlocked, which the co-signed auth must
+/// name (#433); `nullifier_hash` and `side` are the nullifier the escrow is about to consume and
+/// its leg, which the auth must have signed for that leg. `pinned_slot` is the maker's co-signing
+/// slot the ad-chain order pinned at lock; the order leg passes `UNPINNED`.
 #[allow(clippy::too_many_arguments)]
 pub fn is_root_valid(
     env: &Env,
@@ -317,11 +330,17 @@ pub fn is_root_valid(
     settlement_signer: &BytesN<32>,
     bridger: &BytesN<32>,
     order_hash: &BytesN<32>,
+    pinned_slot: u32,
+    nullifier_hash: &BytesN<32>,
+    side: u8,
     cosig_data: &Bytes,
 ) -> bool {
     let mut metadata = Bytes::from_slice(env, &settlement_signer.to_array());
     metadata.extend_from_slice(&bridger.to_array());
     metadata.extend_from_slice(&order_hash.to_array());
+    metadata.extend_from_slice(&pinned_slot.to_be_bytes());
+    metadata.extend_from_slice(&nullifier_hash.to_array());
+    metadata.push_back(side);
     metadata.append(cosig_data);
     RootVerifierClient::new(env, module).is_root_valid(&source_chain_id, root, &metadata)
 }
@@ -373,27 +392,46 @@ pub fn has_usable_slot(env: &Env, registry: &Address, account: &BytesN<32>) -> b
     KeyRegistryClient::new(env, registry).has_usable_slot(account)
 }
 
-/// Did any of `account`'s slots expire in `[from, to]` (#422 D12). The escrows' cancel grace asks
-/// it over the order's life, `[locked_at, now]`.
-pub fn any_slot_expired_within(
+/// Did `account` approve `maker` to name it as an ad's settlement signer. A failed call (a registry
+/// without the entry point, a trap) is a typed `false`, so the escrow's gate fails closed.
+pub fn is_approved_maker(
     env: &Env,
     registry: &Address,
     account: &BytesN<32>,
-    from: u64,
-    to: u64,
+    maker: &BytesN<32>,
 ) -> bool {
-    KeyRegistryClient::new(env, registry).any_slot_expired_within(account, &from, &to)
+    matches!(
+        KeyRegistryClient::new(env, registry).try_is_approved_maker(account, maker),
+        Ok(Ok(true))
+    )
 }
 
-/// The dispute's challenge deadline in real time (#422: the cancel grace counts from it). The
-/// escrow passes its own pause counter, as for `outcome_of`: the module cannot read back into the
-/// escrow that is calling it.
-pub fn challenge_deadline_of(
+/// Does `slot_id` exist, belong to `account` and stand usable now (`commitment_at` answers)? A
+/// failed call is a typed `false`, so the lock and a re-pin fail closed (2.7 plan 12 D7).
+pub fn slot_usable(env: &Env, registry: &Address, account: &BytesN<32>, slot_id: u32) -> bool {
+    matches!(
+        KeyRegistryClient::new(env, registry).try_commitment_at(account, &slot_id),
+        Ok(Ok(_))
+    )
+}
+
+/// When `account`'s slot stopped being usable: 0 while unbounded, else its recorded expiry. The
+/// denial rule reads it for the order's pinned slot (plan 12 D9/D10).
+pub fn expired_at(env: &Env, registry: &Address, account: &BytesN<32>, slot_id: u32) -> u64 {
+    KeyRegistryClient::new(env, registry).expired_at(account, &slot_id)
+}
+
+/// The settlement signer's latest re-pin consent for an order: `(from_slot, to_slot, nonce)`.
+pub fn repin_approval(
     env: &Env,
-    manager: &Address,
+    registry: &Address,
+    account: &BytesN<32>,
     order_hash: &BytesN<32>,
-    escrow_paused_seconds: u64,
-) -> u64 {
-    DisputeManagerClient::new(env, manager)
-        .challenge_deadline_of(order_hash, &escrow_paused_seconds)
+) -> (u32, u32, u64) {
+    KeyRegistryClient::new(env, registry).repin_approval(account, order_hash)
+}
+
+/// The dispute's challenge deadline (#422: the cancel grace counts from it).
+pub fn challenge_deadline_of(env: &Env, manager: &Address, order_hash: &BytesN<32>) -> u64 {
+    DisputeManagerClient::new(env, manager).challenge_deadline_of(order_hash)
 }

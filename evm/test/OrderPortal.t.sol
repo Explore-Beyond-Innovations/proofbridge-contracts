@@ -13,10 +13,13 @@ import {IVerifier} from "src/Verifier.sol";
 import {IMerkleManager} from "src/MerkleManager.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
+import {PinRootVerifier} from "./mocks/PinRootVerifier.sol";
+import {RootVerifierRegistry} from "src/libraries/RootVerifierRegistry.sol";
 import {RouteTiming} from "src/libraries/RouteTiming.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
 import {AddressCast} from "src/libraries/AddressCast.sol";
 import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 // Expose internal hash for assertions
 contract MockOrderPortal is OrderPortal {
@@ -80,7 +83,7 @@ contract OrderPortalTest is Test {
         merkleManager.setManager(address(portal), true);
         portal.setRootVerifier(adChainId, address(new MockRootVerifier(true)));
         // 2.3e: timing is fail-closed; the suite's clocks (buffer 30 min, no window bound, no stagger).
-        portal.setRouteTiming(adChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        portal.setRouteTiming(adChainId, RouteTiming.Timing(0, 30 minutes, 0, 0));
         vm.stopPrank();
 
         orderToken = new ERC20Mock();
@@ -383,7 +386,7 @@ contract OrderPortalTest is Test {
         assertEq(orderHash, expectedHash, "orderHash mismatch");
 
         // Status is Open
-        (IEscrow.Status status) = portal.orders(orderHash);
+        (IEscrow.Status status) = statusOf(address(portal), orderHash);
         assertEq(uint256(status), uint256(IEscrow.Status.Open), "status not Open");
 
         // Funds moved
@@ -433,7 +436,7 @@ contract OrderPortalTest is Test {
         assertEq(orderHash, expectedHash, "orderHash mismatch");
 
         // Status is Open
-        (IEscrow.Status status) = portal.orders(orderHash);
+        (IEscrow.Status status) = statusOf(address(portal), orderHash);
         assertEq(uint256(status), uint256(IEscrow.Status.Open), "status not Open");
 
         // Funds moved
@@ -585,7 +588,7 @@ contract OrderPortalTest is Test {
         portal.unlock(p, TestField.fe("X"), t_root, hex"", hex"");
 
         // Status & balances unchanged
-        (IEscrow.Status status) = portal.orders(orderHash);
+        (IEscrow.Status status) = statusOf(address(portal), orderHash);
         assertEq(uint256(status), uint256(IEscrow.Status.Open), "status changed unexpectedly");
 
         assertEq(orderToken.balanceOf(address(portal)), balPortalBefore, "portal balance changed");
@@ -618,7 +621,7 @@ contract OrderPortalTest is Test {
         portal.unlock(p, nullifier, t_root, proof, hex"");
 
         // Status moved to Filled
-        (IEscrow.Status status) = portal.orders(orderHash);
+        (IEscrow.Status status) = statusOf(address(portal), orderHash);
         assertEq(uint256(status), uint256(IEscrow.Status.Filled), "status not Filled");
 
         // Funds transferred from portal to dstRecipient
@@ -628,6 +631,23 @@ contract OrderPortalTest is Test {
             balRecipientBefore + p.amount,
             "recipient not credited"
         );
+    }
+
+    /// Plan 12 C: the order leg pins no slot and sends the unpinned sentinel in the envelope — a
+    /// verifier expecting slot 0 refuses the root, one expecting the sentinel accepts it.
+    function test_unlock_sendsTheUnpinnedSentinel_notSlotZero() public {
+        test_setTokenRoute_setsAndEmits_whenSupported();
+        (IOrderPortal.OrderParams memory p,) = _openOrder(65 ether, 124);
+        address slotZero = address(new PinRootVerifier(0));
+        address unpinned = address(new PinRootVerifier(type(uint32).max));
+        vm.prank(admin);
+        portal.setRootVerifier(adChainId, slotZero);
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, bytes32(0)));
+        portal.unlock(p, TestField.fe("U"), bytes32(0), hex"", hex"");
+        vm.prank(admin);
+        portal.setRootVerifier(adChainId, unpinned);
+        portal.unlock(p, TestField.fe("U"), bytes32(0), hex"", hex"");
+        assertEq(uint256(statusOf(address(portal), portal.hashOrderPublic(p))), uint256(IEscrow.Status.Filled));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -666,7 +686,7 @@ contract OrderPortalTest is Test {
         portal.unlock(p, nullifier, t_root, proof, hex"");
 
         // Status moved to Filled
-        (IEscrow.Status status) = portal.orders(orderHash);
+        (IEscrow.Status status) = statusOf(address(portal), orderHash);
         assertEq(uint256(status), uint256(IEscrow.Status.Filled), "status not Filled");
 
         // Funds transferred from portal to dstRecipient

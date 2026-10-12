@@ -1,5 +1,5 @@
 //! The owner's key messages, shared with the EVM registry (2.6 plan 13, D1–D5): one signature over
-//! RegisterKey / RevokeKeys / CancelPending / RetireKey names every registry it is for. secp256k1 owners sign the
+//! RegisterKey / RevokeKeys / CancelPending / RetireKey / ApproveMaker / RepinOrder names every registry it is for. secp256k1 owners sign the
 //! EIP-712 form, ed25519 owners the fixed text (SEP-53). Pinned by bls-encodings.json `ownerAuth`.
 
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String, Vec};
@@ -37,6 +37,18 @@ pub(crate) const RETIRE_KEY_TYPEHASH: [u8; 32] = [
     0xa9, 0xf4, 0xb4, 0xa0, 0x10, 0xfc, 0x40, 0xd9, 0x09, 0x30, 0x8c, 0x8e, 0x77, 0xcb, 0x90, 0xfd,
 ];
 
+/// keccak256("ApproveMaker(bytes32 account,bytes32 maker,bool approved,KeyLeg[] legs,uint64 deadline)KeyLeg(...)")
+pub(crate) const APPROVE_MAKER_TYPEHASH: [u8; 32] = [
+    0x1a, 0xcb, 0x1f, 0x6f, 0xfc, 0x96, 0x0f, 0xf0, 0x61, 0xd0, 0xad, 0x70, 0xe5, 0x84, 0x83, 0x18,
+    0x41, 0xb1, 0xfa, 0x26, 0x81, 0x5c, 0xed, 0x60, 0x8b, 0x79, 0x8b, 0x3b, 0x50, 0xd0, 0xab, 0x72,
+];
+
+/// keccak256("RepinOrder(bytes32 account,bytes32 orderHash,uint32 fromSlot,uint32 toSlot,KeyLeg[] legs)KeyLeg(...)")
+pub(crate) const REPIN_ORDER_TYPEHASH: [u8; 32] = [
+    0xf4, 0x1d, 0xf3, 0xe8, 0xe1, 0x0a, 0x8c, 0x2c, 0x53, 0x47, 0xb1, 0x0a, 0x39, 0x8e, 0xa5, 0x76,
+    0x04, 0x5b, 0x4b, 0x3f, 0x01, 0xc4, 0x32, 0x33, 0x85, 0x83, 0x69, 0xdb, 0x38, 0xd5, 0x12, 0xc5,
+];
+
 const SEP53_PREFIX: &[u8; 24] = b"Stellar Signed Message:\n";
 /// D2: a RegisterKey deadline may sit at most this far past ledger time.
 pub(crate) const MAX_REGISTER_TTL: u64 = 7 * 24 * 3600;
@@ -46,6 +58,11 @@ const REGISTER_HEADING: &[u8] = b"ProofBridge: register a settlement key";
 const REVOKE_HEADING: &[u8] = b"ProofBridge: remove every settlement key";
 const CANCEL_HEADING: &[u8] = b"ProofBridge: cancel a pending key registration";
 const RETIRE_HEADING: &[u8] = b"ProofBridge: retire a settlement key";
+const APPROVE_MAKER_HEADING: &[u8] =
+    b"ProofBridge: allow a maker to name this account as settlement signer";
+const WITHDRAW_MAKER_HEADING: &[u8] =
+    b"ProofBridge: withdraw a maker's permission to name this account as settlement signer";
+const REPIN_HEADING: &[u8] = b"ProofBridge: move an order's settlement key to another slot";
 
 /// One registry a signature is for: its chain, its 32-byte id and its nonce for the account.
 #[contracttype]
@@ -87,7 +104,7 @@ pub enum OwnerAuth {
 /// The message a state change needs signed.
 pub(crate) enum KeyMessage {
     Register {
-        fingerprint: BytesN<32>,
+        key_commitment: BytesN<32>,
         nonce: u64,
         deadline: u64,
     },
@@ -98,8 +115,22 @@ pub(crate) enum KeyMessage {
         nonce: u64,
     },
     Retire {
-        fingerprint: BytesN<32>,
+        key_commitment: BytesN<32>,
         valid_until: u64,
+    },
+    /// `nonce` is the (account, maker) pair's, not the account's.
+    ApproveMaker {
+        maker: BytesN<32>,
+        approved: bool,
+        nonce: u64,
+        deadline: u64,
+    },
+    /// `nonce` is the (account, order) pair's (2.7 plan 12 D12).
+    Repin {
+        order_hash: BytesN<32>,
+        from_slot: u32,
+        to_slot: u32,
+        nonce: u64,
     },
 }
 
@@ -139,18 +170,6 @@ pub(crate) fn keys_domain_separator(env: &Env, name: &String) -> Result<BytesN<3
     Ok(BytesN::from_array(env, &keccak(env, &enc)))
 }
 
-/// D2: keccak256 of the key's EIP-2537 128-byte form, rebuilt by padding each 48-byte coordinate
-/// of the 96-byte key with 16 zero bytes. Same value as the EVM registry's commitment.
-pub(crate) fn key_fingerprint(env: &Env, pk: &BytesN<96>) -> BytesN<32> {
-    let raw = pk.to_array();
-    let mut padded = [0u8; 128];
-    padded[16..64].copy_from_slice(&raw[..48]);
-    padded[80..128].copy_from_slice(&raw[48..]);
-    env.crypto()
-        .keccak256(&Bytes::from_slice(env, &padded))
-        .to_bytes()
-}
-
 pub(crate) fn check_owner(
     env: &Env,
     account: &BytesN<32>,
@@ -181,7 +200,9 @@ fn check_legs(env: &Env, legs: &Vec<KeyLeg>, msg: &KeyMessage) -> Result<(), Reg
     let nonce = match msg {
         KeyMessage::Register { nonce, .. }
         | KeyMessage::Revoke { nonce }
-        | KeyMessage::Cancel { nonce } => *nonce,
+        | KeyMessage::Cancel { nonce }
+        | KeyMessage::ApproveMaker { nonce, .. }
+        | KeyMessage::Repin { nonce, .. } => *nonce,
         KeyMessage::Retire { .. } => {
             return if legs.is_empty() {
                 Ok(())
@@ -281,13 +302,13 @@ pub(crate) fn struct_hash(
     let mut enc = Bytes::new(env);
     match msg {
         KeyMessage::Register {
-            fingerprint,
+            key_commitment,
             deadline,
             ..
         } => {
             enc.extend_from_slice(&REGISTER_KEY_TYPEHASH);
             enc.extend_from_slice(&account.to_array());
-            enc.extend_from_slice(&fingerprint.to_array());
+            enc.extend_from_slice(&key_commitment.to_array());
             enc.extend_from_slice(&legs_hash(env, legs));
             enc.extend_from_slice(&abi_encode_uint256(*deadline as u128));
         }
@@ -301,13 +322,39 @@ pub(crate) fn struct_hash(
             enc.extend_from_slice(&account.to_array());
             enc.extend_from_slice(&legs_hash(env, legs));
         }
+        KeyMessage::ApproveMaker {
+            maker,
+            approved,
+            deadline,
+            ..
+        } => {
+            enc.extend_from_slice(&APPROVE_MAKER_TYPEHASH);
+            enc.extend_from_slice(&account.to_array());
+            enc.extend_from_slice(&maker.to_array());
+            enc.extend_from_slice(&abi_encode_uint256(*approved as u128));
+            enc.extend_from_slice(&legs_hash(env, legs));
+            enc.extend_from_slice(&abi_encode_uint256(*deadline as u128));
+        }
+        KeyMessage::Repin {
+            order_hash,
+            from_slot,
+            to_slot,
+            ..
+        } => {
+            enc.extend_from_slice(&REPIN_ORDER_TYPEHASH);
+            enc.extend_from_slice(&account.to_array());
+            enc.extend_from_slice(&order_hash.to_array());
+            enc.extend_from_slice(&abi_encode_uint256(*from_slot as u128));
+            enc.extend_from_slice(&abi_encode_uint256(*to_slot as u128));
+            enc.extend_from_slice(&legs_hash(env, legs));
+        }
         KeyMessage::Retire {
-            fingerprint,
+            key_commitment,
             valid_until,
         } => {
             enc.extend_from_slice(&RETIRE_KEY_TYPEHASH);
             enc.extend_from_slice(&account.to_array());
-            enc.extend_from_slice(&fingerprint.to_array());
+            enc.extend_from_slice(&key_commitment.to_array());
             enc.extend_from_slice(&abi_encode_uint256(*valid_until as u128));
         }
     }
@@ -324,6 +371,11 @@ pub(crate) fn text(env: &Env, account: &BytesN<32>, legs: &Vec<KeyLeg>, msg: &Ke
         KeyMessage::Revoke { .. } => REVOKE_HEADING,
         KeyMessage::Cancel { .. } => CANCEL_HEADING,
         KeyMessage::Retire { .. } => RETIRE_HEADING,
+        KeyMessage::ApproveMaker { approved: true, .. } => APPROVE_MAKER_HEADING,
+        KeyMessage::ApproveMaker {
+            approved: false, ..
+        } => WITHDRAW_MAKER_HEADING,
+        KeyMessage::Repin { .. } => REPIN_HEADING,
     };
     t.extend_from_slice(heading);
     t.extend_from_slice(b"\n\nNetwork: ");
@@ -333,13 +385,31 @@ pub(crate) fn text(env: &Env, account: &BytesN<32>, legs: &Vec<KeyLeg>, msg: &Ke
     t.extend_from_slice(b"\nAccount: ");
     t.extend_from_slice(&hex_0x_lower(&account.to_array()));
     match msg {
-        KeyMessage::Register { fingerprint, .. } | KeyMessage::Retire { fingerprint, .. } => {
+        KeyMessage::Register { key_commitment, .. } | KeyMessage::Retire { key_commitment, .. } => {
+            // The wallet-facing label stays "Key fingerprint"; the value is the key commitment.
             t.extend_from_slice(b"\nKey fingerprint: ");
-            t.extend_from_slice(&hex_0x_lower(&fingerprint.to_array()));
+            t.extend_from_slice(&hex_0x_lower(&key_commitment.to_array()));
+        }
+        KeyMessage::ApproveMaker { maker, .. } => {
+            t.extend_from_slice(b"\nMaker: ");
+            t.extend_from_slice(&hex_0x_lower(&maker.to_array()));
+        }
+        KeyMessage::Repin {
+            order_hash,
+            from_slot,
+            to_slot,
+            ..
+        } => {
+            t.extend_from_slice(b"\nOrder: ");
+            t.extend_from_slice(&hex_0x_lower(&order_hash.to_array()));
+            t.extend_from_slice(b"\nFrom slot: ");
+            push_decimal(&mut t, *from_slot as u128);
+            t.extend_from_slice(b"\nTo slot: ");
+            push_decimal(&mut t, *to_slot as u128);
         }
         KeyMessage::Revoke { .. } | KeyMessage::Cancel { .. } => {}
     }
-    if let KeyMessage::Register { deadline, .. } = msg {
+    if let KeyMessage::Register { deadline, .. } | KeyMessage::ApproveMaker { deadline, .. } = msg {
         t.extend_from_slice(b"\nValid until: ");
         push_utc(&mut t, *deadline);
         t.extend_from_slice(b" (");

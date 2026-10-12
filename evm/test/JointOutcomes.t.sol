@@ -26,6 +26,7 @@ import {MockOrderPortal} from "./OrderPortal.t.sol";
 import {MockVerifier} from "./mocks/MockVerifier.sol";
 import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
 import {MockKeyRegistry} from "./mocks/MockKeyRegistry.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 /// 2.5c (T-41/T-45a/T-50/T-55/T-56/T-61): the EVM half of the JOINT-outcome
 /// sweep. Both legs of one logical trade live in this one world — the
@@ -45,7 +46,7 @@ import {MockKeyRegistry} from "./mocks/MockKeyRegistry.sol";
 /// scenario's negatives are proof-semantic (wrong domain, foreign order),
 /// mock elsewhere (deposit-proof unlocks stay mock territory).
 contract JointOutcomesTest is Test {
-    string internal constant FIXTURE_SHA256 = "8dc63f3fcacaeee13be175e96afb49f21fa61c8a62b302fdd9dc320664476097";
+    string internal constant FIXTURE_SHA256 = "660f36e5127ea10241607af848850758ec1e475309e2e83d65ee4bc35cd2b726";
 
     bytes32 private constant LEAF_TOPIC = keccak256("DepositHashAppended(uint256,bytes32,uint256,bytes32)");
 
@@ -75,12 +76,12 @@ contract JointOutcomesTest is Test {
     ERC20Mock internal orderToken;
 
     uint64 internal constant BUFFER = 30 minutes;
-    uint64 internal constant LONG_BACKSTOP = 1 days;
     uint64 internal nextSeq = 1;
 
     // fixture-scaled params
     uint256 internal scale;
     uint64 internal challenge;
+    uint256 internal farPastDeadline;
     uint256 internal amountWei;
     uint256 internal bondWei;
 
@@ -110,12 +111,12 @@ contract JointOutcomesTest is Test {
         string memory v = _fixture();
         scale = 10 ** vm.parseJsonUint(v, ".header.evmScaleExp");
         challenge = uint64(vm.parseJsonUint(v, ".header.challengePeriodS"));
+        farPastDeadline = vm.parseJsonUint(v, ".header.farPastDeadlineS");
         // r4 (F3): the route buffer below is the fixture's, not a free constant
         assertEq(vm.parseJsonUint(v, ".header.bufferS"), BUFFER, "fixture bufferS must be the configured buffer");
         amountWei = vm.parseJsonUint(v, ".header.orderAmountUnits") * scale;
         bondWei = vm.parseJsonUint(v, ".header.bondUnits") * scale;
         uint128 floorWei = uint128(vm.parseJsonUint(v, ".header.bondFloorUnits") * scale);
-        uint16 bps = uint16(vm.parseJsonUint(v, ".header.bondBps"));
 
         dm = new DisputeManager(admin, IwNativeToken(address(wnat)));
         anchorP = _anchorOf();
@@ -128,13 +129,13 @@ contract JointOutcomesTest is Test {
         mmF.setManager(address(portal), true);
         adManager.setRootVerifier(block.chainid, address(new MockRootVerifier(true)));
         portal.setRootVerifier(block.chainid, address(new MockRootVerifier(true)));
-        adManager.setRouteTiming(block.chainid, RouteTiming.Timing(0, BUFFER, 0, LONG_BACKSTOP, 0));
-        portal.setRouteTiming(block.chainid, RouteTiming.Timing(0, BUFFER, 0, LONG_BACKSTOP, 0));
+        adManager.setRouteTiming(block.chainid, RouteTiming.Timing(0, BUFFER, 0, 0));
+        portal.setRouteTiming(block.chainid, RouteTiming.Timing(0, BUFFER, 0, 0));
         adManager.setKeyRegistry(keyRegistry);
         dm.setEscrow(address(adManager), true);
         dm.setArbiter(arbiter);
         dm.setProtocolFeePool(feePool);
-        dm.setDisputeParams(block.chainid, Dispute.Params(challenge, floorWei, bps));
+        dm.setDisputeParams(block.chainid, Dispute.Params(challenge, floorWei));
         adManager.setDisputeManager(IDisputeManager(address(dm)));
         adManager.setRootAnchor(IRootAnchor(address(anchorP)));
         portal.setRootAnchor(IRootAnchor(address(anchorF)));
@@ -287,7 +288,7 @@ contract JointOutcomesTest is Test {
         portal.createOrder(w.pF);
         vm.stopPrank();
         vm.prank(maker);
-        adManager.lockForOrder(w.pP);
+        adManager.lockForOrder(w.pP, 0);
     }
 
     // ── the step interpreter ─────────────────────────────────────────────
@@ -388,15 +389,8 @@ contract JointOutcomesTest is Test {
                 if (neg) _expectNamedRevert(reason, w);
                 portal.presentSettled(w.pF, w.rootOnF, w.proofOnF);
             }
-        } else if (_eq(action, "warpPastLongBackstop")) {
-            if (block.timestamp <= w.pF.deadline + LONG_BACKSTOP) vm.warp(w.pF.deadline + LONG_BACKSTOP + 1);
-        } else if (_eq(action, "claimBackstop")) {
-            portal.claimBackstop(w.pF);
-        } else if (_eq(action, "warpPastBackstopWindow")) {
-            vm.warp(block.timestamp + BUFFER + 1);
-        } else if (_eq(action, "finalizeBackstop")) {
-            if (neg) _expectNamedRevert(reason, w);
-            portal.finalizeBackstop(w.pF);
+        } else if (_eq(action, "warpFarPastDeadline")) {
+            vm.warp(w.pF.deadline + farPastDeadline);
         } else {
             revert(string.concat("unknown step: ", action));
         }
@@ -483,12 +477,12 @@ contract JointOutcomesTest is Test {
 
     function _assertRecord(string memory v, World memory w) internal {
         assertEq(
-            uint8(adManager.orders(w.h)),
+            uint8(statusOf(address(adManager), w.h)),
             _status(vm.parseJsonString(v, string.concat(w.at, ".expect.primaryStatus"))),
             string.concat(w.name, ": primary status")
         );
         assertEq(
-            uint8(portal.orders(w.h)),
+            uint8(statusOf(address(portal), w.h)),
             _status(vm.parseJsonString(v, string.concat(w.at, ".expect.followerStatus"))),
             string.concat(w.name, ": follower status")
         );

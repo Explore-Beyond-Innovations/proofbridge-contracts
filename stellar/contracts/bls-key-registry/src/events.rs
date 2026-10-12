@@ -52,6 +52,29 @@ pub struct RegistrationCancelled {
     pub nonce: u64,
 }
 
+/// The account consented to move `order_hash`'s co-signing pin from `from_slot` to `to_slot`.
+#[contractevent(topics = ["repin_ok"], data_format = "vec")]
+pub struct RepinApproved {
+    #[topic]
+    pub account: BytesN<32>,
+    #[topic]
+    pub order_hash: BytesN<32>,
+    pub from_slot: u32,
+    pub to_slot: u32,
+    pub nonce: u64,
+}
+
+/// The account allowed (`approved`) or stopped `maker` naming it as settlement signer, at the pair's `nonce`.
+#[contractevent(topics = ["mkr_appr"], data_format = "vec")]
+pub struct MakerApprovalSet {
+    #[topic]
+    pub account: BytesN<32>,
+    #[topic]
+    pub maker: BytesN<32>,
+    pub approved: bool,
+    pub nonce: u64,
+}
+
 #[contractevent(topics = ["guard_set"], data_format = "single-value")]
 pub struct PositionGuardsSet {
     pub guards: Vec<Address>,

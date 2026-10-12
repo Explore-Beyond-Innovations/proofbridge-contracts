@@ -31,7 +31,7 @@ import {CoSign} from "test/utils/CoSign.sol";
 library RealUnlock {
     Vm internal constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
 
-    /// (makerNullifier, bridgerNullifier, secret) for `orderHash`, from the deposit script.
+    /// (order-leg nullifier, ad-leg nullifier, secret) for `orderHash`, from the deposit script.
     function nullifiers(bytes32 orderHash) internal returns (bytes32, bytes32, bytes32) {
         string[] memory a = new string[](4);
         a[0] = "npx";
@@ -62,20 +62,17 @@ library RealUnlock {
         root = pub[2];
     }
 
-    /// Module data v3: the vector parties co-sign `orderHash` with `root` on both legs.
-    function cosigOverRoot(string memory vjson, bytes32 orderHash, bytes32 root) internal view returns (bytes memory) {
-        CounterpartyVerifier.SettlementAuth memory auth = CoSign.authFor(vjson, orderHash);
+    /// Module data v4: the vector parties co-sign `orderHash` with `root` on both legs and the two
+    /// leg nullifiers.
+    function cosigOverRoot(string memory vjson, bytes32 orderHash, bytes32 root, bytes32 adLeg, bytes32 orderLeg)
+        internal
+        view
+        returns (bytes memory)
+    {
+        CounterpartyVerifier.SettlementAuth memory auth = CoSign.authFor(vjson, orderHash, adLeg, orderLeg);
         auth.orderChainRoot = root;
         auth.adChainRoot = root;
-        return abi.encode(
-            uint8(3),
-            auth,
-            uint32(0),
-            uint32(0),
-            stdJson.readBytes(vjson, ".keys.makerBls.pk.eip2537"),
-            stdJson.readBytes(vjson, ".keys.bridgerBls.pk.eip2537"),
-            CoSign.aggregate(vjson, auth)
-        );
+        return CoSign.moduleData(vjson, auth);
     }
 
     /// Calldata gas of a byte string at EIP-2028 prices, for the table's context column.
@@ -93,11 +90,11 @@ contract OrderPortalUnlockGas is OrderPortalGateTest {
     // aggregate-verify (EIP-2537 pairing) that dominates the cosig path. This is the
     // canonical baseline for the shared verify cost on both escrows.
     function test_orderPortalUnlockGas() public {
-        _prepareUnlock(address(cVerifier), vOrderRoot);
-        bytes memory cosig = _cosigFor(gp);
+        _prepareUnlock(address(cVerifier), vAdRoot);
+        bytes memory cosig = _cosigFor(gp, TestField.fe("NG"));
 
         uint256 g0 = gasleft();
-        portal.unlock(gp, TestField.fe("NG"), vOrderRoot, hex"", cosig);
+        portal.unlock(gp, TestField.fe("NG"), vAdRoot, hex"", cosig);
         uint256 used = g0 - gasleft();
 
         console2.log("OrderPortal.unlock gas (full, real BLS verify):", used);
@@ -118,9 +115,9 @@ contract OrderPortalUnlockGas is OrderPortalGateTest {
     function test_orderPortalUnlockGas_realProof() public {
         _prepareUnlock(address(cVerifier), bytes32(0));
         bytes32 orderHash = portal.hashOrderPublic(gp);
-        (bytes32 nullifier,, bytes32 secret) = RealUnlock.nullifiers(orderHash);
+        (bytes32 nullifier, bytes32 adLeg, bytes32 secret) = RealUnlock.nullifiers(orderHash);
         (bytes memory proof, bytes32 root) = RealUnlock.depositProof(orderHash, nullifier, secret, false);
-        bytes memory cosig = RealUnlock.cosigOverRoot(vjson, orderHash, root);
+        bytes memory cosig = RealUnlock.cosigOverRoot(vjson, orderHash, root, adLeg, nullifier);
         vm.etch(address(verifier), address(new HonkVerifier()).code);
 
         // The verify alone, for the table.
@@ -208,6 +205,7 @@ contract AdManagerUnlockGas is AdManagerGateTest {
         bytes32 bridgerAcct = stdJson.readBytes32(vjson, ".registration.bridgerOnSepolia.account");
         test_createAd_succeedsWhenRouteExists_emitsAndStores();
         keyRegistry.set(makerAcct, true);
+        keyRegistry.approve(makerAcct, _b32(maker), true);
         vm.prank(maker);
         adManager.setSettlementSigner(lastAdId, makerAcct);
 
@@ -217,14 +215,14 @@ contract AdManagerUnlockGas is AdManagerGateTest {
         p.bridger = bridgerAcct;
         p.adSettlementSigner = makerAcct;
         vm.prank(maker);
-        bytes32 orderHash = adManager.lockForOrder(p);
+        bytes32 orderHash = adManager.lockForOrder(p, 0);
         // Wired after the lock, as `_prepareUnlock` does: the real module reads REGISTRY (#464).
         vm.prank(admin);
         adManager.setRootVerifier(orderChainId, address(cVerifier));
 
-        (, bytes32 nullifier, bytes32 secret) = RealUnlock.nullifiers(orderHash);
+        (bytes32 orderLeg, bytes32 nullifier, bytes32 secret) = RealUnlock.nullifiers(orderHash);
         (bytes memory proof, bytes32 root) = RealUnlock.depositProof(orderHash, nullifier, secret, true);
-        bytes memory cosig = RealUnlock.cosigOverRoot(vjson, orderHash, root);
+        bytes memory cosig = RealUnlock.cosigOverRoot(vjson, orderHash, root, nullifier, orderLeg);
         vm.etch(address(verifier), address(new HonkVerifier()).code);
 
         address[7] memory cold = [

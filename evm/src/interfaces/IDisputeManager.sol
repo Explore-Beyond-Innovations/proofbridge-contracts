@@ -14,14 +14,10 @@ interface IDisputeManager {
      * @notice How a dispute on `orderHash` has ended, if it has.
      * @return outcome The ruling, or the mutual refund the fallback applies. `None` while the
      *         dispute is still running.
-     * @return windowOver Whether the presentation window the ruling (or the fallback) opened has
-     *         closed, in real time — paused seconds included.
+     * @return windowOver Whether the record's one deadline has passed (`now ≥ effectiveChallengeDeadline`).
      * @return initiator Who filed. The escrow needs this to know which side to pay.
      */
-    /// @dev `escrowPausedSeconds` is passed in rather than read back off the escrow. Not a style
-    ///      choice: the escrow is the caller, so reading back into it is re-entrancy, which Soroban
-    ///      rejects outright — and the two contracts keep one shape.
-    function outcomeOf(bytes32 orderHash, uint64 escrowPausedSeconds)
+    function outcomeOf(bytes32 orderHash)
         external
         view
         returns (Dispute.Outcome outcome, bool windowOver, address initiator);
@@ -29,9 +25,9 @@ interface IDisputeManager {
     /// @notice Who filed, if anyone. Reads no clock, so the escrow can call it mid-transaction.
     function initiatorOf(bytes32 orderHash) external view returns (address);
 
-    /// @notice The challenge deadline in real time (the recorded one plus the escrow's paused
-    ///         seconds past the order's lock-time snapshot, c41-J). The escrow's cancel grace counts
-    ///         from it (#422).
+    /// @notice The record's one deadline, in plain time: `max(filedAt + challengePeriod, orderDeadline
+    ///         + buffer)` at filing, `max(ruledAt, orderDeadline) + buffer` once ruled. The escrow's
+    ///         cancel grace counts from it (#422).
     function effectiveChallengeDeadline(bytes32 orderHash) external view returns (uint256);
 
     /// @notice Whether a dispute is open on this order at all.
@@ -40,26 +36,21 @@ interface IDisputeManager {
     /**
      * @notice Open a dispute on an order the escrow has already hashed and checked, taking the bond.
      * @dev Escrow-only, and payable: the bond arrives with the call rather than sitting in the
-     *      escrow. The escrow must pass `amount` because it does not store one — an order's leg is
-     *      `{status, pausedAtOpen}` and the amount lives in the caller's `OrderParams`, validated
-     *      against the hash. So the escrow is the only party that can vouch for it.
+     *      escrow. The bond is the route's flat floor (`bondFor(peerChainId)`), so no order amount
+     *      is passed.
      *
-     *      The same goes for every other value here. `deadline` and `buffer` are what stop a short
-     *      challenge period finalizing a dispute before the order's own deadline (D3, T-50), and
-     *      `escrowPausedSeconds` is the escrow's counter as of the order's lock (c41-J: the same
-     *      snapshot the unlock's cutoff counts from) — the module has no pause of its own, because
-     *      the pause that stops someone presenting is the escrow's.
+     *      The escrow vouches for every value here. `deadline` and `buffer` (the order's own timing
+     *      version's) are what stop a short challenge period finalizing a dispute before the order's
+     *      own deadline (D3, T-50).
      * @return bond The bond actually required and taken.
      */
     function openDispute(
         bytes32 orderHash,
-        uint256 amount,
         uint256 peerChainId,
         address filer,
         bytes32 evidence,
         uint64 deadline,
-        uint64 buffer,
-        uint64 escrowPausedSeconds
+        uint64 buffer
     ) external payable returns (uint128 bond);
 
     /**
@@ -87,14 +78,11 @@ interface IDisputeManager {
      *        so "the filer is my counterparty" means opposite things on the two escrows — phrasing
      *        it that way inverted the bond routing on the follower leg, returning a forfeited bond
      *        and forfeiting a vindicated one. The escrow answers the same question either way.
+     * @param returnToFiler True when the bond goes back to the filer whatever `outcome` says: set
+     *        by the escrow on an evidence close when the bridger filed and the maker had denied the
+     *        co-signed payout (a halt, an unwired verifier, a killed key). The record's outcome
+     *        stays `TradeProceeds`; only the bond's recipient changes.
      */
-    function settleBond(bytes32 orderHash, Dispute.Outcome outcome, bool filerIsBridger) external;
+    function settleBond(bytes32 orderHash, Dispute.Outcome outcome, bool filerIsBridger, bool returnToFiler) external;
 }
 
-/// @notice The one thing the module reads back off an escrow: its pause clock (2.3g D10).
-/// @dev Deliberately its own interface rather than `IEscrow`. The module depends on exactly this
-///      much of the escrow, and saying so keeps the dependency visible and impossible to widen by
-///      accident.
-interface IEscrowPause {
-    function pausedSeconds() external view returns (uint64);
-}

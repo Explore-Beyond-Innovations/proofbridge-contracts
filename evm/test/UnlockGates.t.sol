@@ -17,6 +17,8 @@ import {CounterpartyVerifier} from "src/CounterpartyVerifier.sol";
 import {RootVerifierRegistry} from "src/libraries/RootVerifierRegistry.sol";
 import {MockRootVerifier} from "./mocks/MockRootVerifier.sol";
 import {CoSign} from "test/utils/CoSign.sol";
+import {IEscrow} from "src/interfaces/IEscrow.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 abstract contract GateVectors {
     uint256 constant VECTOR_CHAIN_ID = 11155111;
@@ -128,13 +130,14 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         bytes32 signer = vjson.readBytes32(".registration.makerOnSepolia.account");
         test_fundAd_makerOnly();
         keyRegistry.set(signer, true);
+        keyRegistry.approve(signer, _b32(maker), true);
         vm.prank(maker);
         adManager.setSettlementSigner(lastAdId, signer);
         IAdManager.OrderParams memory p = _defaultParams(lastAdId);
         p.salt = 4244;
         p.adSettlementSigner = signer;
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
 
         assertTrue(adManager.hasOpenPositions(signer));
         assertFalse(adManager.hasOpenPositions(_b32(maker)), "custody is not counted");
@@ -156,6 +159,7 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         bytes32 signer = vjson.readBytes32(".registration.makerOnSepolia.account");
         test_fundAd_makerOnly();
         keyRegistry.set(signer, true);
+        keyRegistry.approve(signer, _b32(maker), true);
         vm.prank(maker);
         adManager.setSettlementSigner(lastAdId, signer);
         x = _defaultParams(lastAdId);
@@ -169,8 +173,8 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
         y.adSettlementSigner = signer;
         y.bridger = x.bridger;
         vm.startPrank(maker);
-        adManager.lockForOrder(x);
-        adManager.lockForOrder(y);
+        adManager.lockForOrder(x, 0);
+        adManager.lockForOrder(y, 0);
         vm.stopPrank();
         // After the locks, as in `_prepareUnlock` (#464).
         vm.prank(admin);
@@ -181,10 +185,30 @@ contract AdManagerGateTest is AdManagerTest, GateVectors {
     /// X is not consent to Y: `unlock(Y)` is refused, `unlock(X)` settles.
     function test_433_cosigOverAnotherOrder_isRefused() public {
         (IAdManager.OrderParams memory x, IAdManager.OrderParams memory y) = _lockTwoVectorOrders();
-        bytes memory cosigX = CoSign.moduleDataFor(vjson, adManager.hashOrderPublic(x));
+        bytes memory cosigX =
+            CoSign.moduleDataFor(vjson, adManager.hashOrderPublic(x), TestField.fe("NX"), TestField.fe("OX"));
+        // the co-signed nullifier, so only the order differs
         vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, orderChainId, vOrderRoot));
-        adManager.unlock(y, TestField.fe("NY"), vOrderRoot, hex"", cosigX);
+        adManager.unlock(y, TestField.fe("NX"), vOrderRoot, hex"", cosigX);
         adManager.unlock(x, TestField.fe("NX"), vOrderRoot, hex"", cosigX);
+    }
+
+    /// v4: the ad leg settles only with the nullifier both parties signed for it. Another nullifier
+    /// (a valid proof for it is assumed: the mock ZK verifier accepts) or the order leg's nullifier
+    /// is refused at the root check, and nothing moves.
+    function test_onlyTheCoSignedAdLegNullifierSettles() public {
+        (IAdManager.OrderParams memory x,) = _lockTwoVectorOrders();
+        bytes32 h = adManager.hashOrderPublic(x);
+        bytes memory cosig = CoSign.moduleDataFor(vjson, h, TestField.fe("AD"), TestField.fe("OR"));
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, orderChainId, vOrderRoot));
+        adManager.unlock(x, TestField.fe("ZZ"), vOrderRoot, hex"", cosig);
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, orderChainId, vOrderRoot));
+        adManager.unlock(x, TestField.fe("OR"), vOrderRoot, hex"", cosig);
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Open), "nothing settled");
+
+        adManager.unlock(x, TestField.fe("AD"), vOrderRoot, hex"", cosig);
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Filled));
+        assertTrue(adManager.nullifierUsed(TestField.fe("AD")));
     }
 
     function test_inFlight_tracksLockAndUnlock() public {
@@ -212,16 +236,20 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
     string vjson;
     CounterpartyVerifier cVerifier;
     bytes32 vOrderRoot;
+    bytes32 vAdRoot;
     bytes32 makerAcct;
     bytes32 bridgerAcct;
     address vBridger;
 
     function setUp() public override {
         vm.chainId(VECTOR_CHAIN_ID);
+        // The vector auth's ad chain: the order leg is checked against its root (side ORDER).
+        adChainId = 1_000_002;
         super.setUp();
 
         vjson = vm.readFile("../test-vectors/bls-encodings.json");
         vOrderRoot = vjson.readBytes32(".settlement.auth.orderChainRoot");
+        vAdRoot = vjson.readBytes32(".settlement.auth.adChainRoot");
         makerAcct = vjson.readBytes32(".registration.makerOnSepolia.account");
         bridgerAcct = vjson.readBytes32(".registration.bridgerOnSepolia.account");
         vBridger = address(uint160(uint256(bridgerAcct)));
@@ -266,20 +294,21 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
         portal.unlock(gp, TestField.fe("NG"), targetRoot, hex"", cosig);
     }
 
-    /// Both vector parties' co-signature over `p` itself (#433: the auth must name this order).
-    function _cosigFor(IOrderPortal.OrderParams memory p) internal view returns (bytes memory) {
-        return CoSign.moduleDataFor(vjson, portal.hashOrderPublic(p));
+    /// Both vector parties' co-signature over `p` itself (#433: the auth must name this order), with
+    /// `orderLeg` as the order leg's nullifier.
+    function _cosigFor(IOrderPortal.OrderParams memory p, bytes32 orderLeg) internal view returns (bytes memory) {
+        return CoSign.moduleDataFor(vjson, portal.hashOrderPublic(p), TestField.fe("AD"), orderLeg);
     }
 
     function test_gate2_realModule_fullCosig_unlocks() public {
-        _prepareUnlock(address(cVerifier), vOrderRoot);
-        portal.unlock(gp, TestField.fe("NG"), vOrderRoot, hex"", _cosigFor(gp));
+        _prepareUnlock(address(cVerifier), vAdRoot);
+        portal.unlock(gp, TestField.fe("NG"), vAdRoot, hex"", _cosigFor(gp, TestField.fe("NG")));
     }
 
     /// #433: two orders between the same parties under the same signed roots. A co-signature over
     /// X is not consent to Y: `unlock(Y)` is refused, `unlock(X)` settles.
     function test_433_cosigOverAnotherOrder_isRefused() public {
-        _prepareUnlock(address(cVerifier), vOrderRoot);
+        _prepareUnlock(address(cVerifier), vAdRoot);
         IOrderPortal.OrderParams memory x = gp;
         IOrderPortal.OrderParams memory y = gp; // a second copy, not an alias of x
         y.salt = x.salt + 1;
@@ -289,10 +318,23 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
         portal.createOrder(y);
         vm.stopPrank();
 
-        bytes memory cosigX = _cosigFor(x);
-        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, vOrderRoot));
-        portal.unlock(y, TestField.fe("NY"), vOrderRoot, hex"", cosigX);
-        portal.unlock(x, TestField.fe("NX"), vOrderRoot, hex"", cosigX);
+        bytes memory cosigX = _cosigFor(x, TestField.fe("NX"));
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, vAdRoot));
+        portal.unlock(y, TestField.fe("NX"), vAdRoot, hex"", cosigX);
+        portal.unlock(x, TestField.fe("NX"), vAdRoot, hex"", cosigX);
+    }
+
+    /// v4: the order leg settles only with the nullifier signed for it; another one, or the ad leg's,
+    /// is refused at the root check.
+    function test_onlyTheCoSignedOrderLegNullifierSettles() public {
+        _prepareUnlock(address(cVerifier), vAdRoot);
+        bytes memory cosig = _cosigFor(gp, TestField.fe("OR"));
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, vAdRoot));
+        portal.unlock(gp, TestField.fe("ZZ"), vAdRoot, hex"", cosig);
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, vAdRoot));
+        portal.unlock(gp, TestField.fe("AD"), vAdRoot, hex"", cosig);
+        portal.unlock(gp, TestField.fe("OR"), vAdRoot, hex"", cosig);
+        assertTrue(portal.nullifierUsed(TestField.fe("OR")));
     }
 
     function test_gate2_mockFalse_reverts() public {
@@ -309,26 +351,21 @@ contract OrderPortalGateTest is OrderPortalTest, GateVectors {
     }
 
     function test_gate2_singleSigNotAggregate_reverts() public {
-        CounterpartyVerifier.SettlementAuth memory auth = CounterpartyVerifier.SettlementAuth({
-            orderChainId: VECTOR_CHAIN_ID,
-            adChainId: 1_000_002,
-            orderHash: vjson.readBytes32(".settlement.auth.orderHash"),
-            orderChainRoot: vOrderRoot,
-            adChainRoot: vjson.readBytes32(".settlement.auth.adChainRoot"),
-            makerKeyCommitment: vjson.readBytes32(".settlement.auth.makerKeyCommitment")
-        });
+        _prepareUnlock(address(cVerifier), vAdRoot);
+        CounterpartyVerifier.SettlementAuth memory auth =
+            CoSign.authFor(vjson, portal.hashOrderPublic(gp), TestField.fe("AD"), TestField.fe("NG"));
+        bytes memory h = CoSign.messagePoint(auth);
         bytes memory cosig = abi.encode(
-            uint8(3),
+            uint8(4),
             auth,
             uint32(0),
             uint32(0),
             vjson.readBytes(".keys.makerBls.pk.eip2537"),
             vjson.readBytes(".keys.bridgerBls.pk.eip2537"),
-            vjson.readBytes(".settlement.sigMaker.eip2537")
+            CoSign.sign(h, uint256(vjson.readBytes32(".keys.makerBls.sk")))
         );
-        _prepareUnlock(address(cVerifier), vOrderRoot);
-        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, vOrderRoot));
-        portal.unlock(gp, TestField.fe("NG"), vOrderRoot, hex"", cosig);
+        vm.expectRevert(abi.encodeWithSelector(RootVerifierRegistry.RootNotValid.selector, adChainId, vAdRoot));
+        portal.unlock(gp, TestField.fe("NG"), vAdRoot, hex"", cosig);
     }
 
     function test_gate2_garbageCosig_reverts() public {
@@ -394,18 +431,10 @@ function _registerOne(string memory vjson, string memory who, bool maker) {
 }
 
 function _vectorCosig(string memory vjson) view returns (bytes memory) {
-    CounterpartyVerifier.SettlementAuth memory auth = CounterpartyVerifier.SettlementAuth({
-        orderChainId: 11155111,
-        adChainId: 1_000_002,
-        orderHash: stdJson.readBytes32(vjson, ".settlement.auth.orderHash"),
-        orderChainRoot: stdJson.readBytes32(vjson, ".settlement.auth.orderChainRoot"),
-        adChainRoot: stdJson.readBytes32(vjson, ".settlement.auth.adChainRoot"),
-        makerKeyCommitment: stdJson.readBytes32(vjson, ".settlement.auth.makerKeyCommitment")
-    });
-    // metadata v3: both settlement keys sit in slot 0 of the registry
+    // metadata v4 over the vector's own auth: both settlement keys sit in slot 0 of the registry
     return abi.encode(
-        uint8(3),
-        auth,
+        uint8(4),
+        CoSign.vectorAuth(vjson),
         uint32(0),
         uint32(0),
         stdJson.readBytes(vjson, ".keys.makerBls.pk.eip2537"),

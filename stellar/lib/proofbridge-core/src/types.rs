@@ -33,31 +33,19 @@ pub enum Status {
 // =============================================================================
 
 /// The per-peer-chain clocks the termination primitive reads (2.3e D6), in seconds. Admin-set per
-/// route, validated once at write time (`timing::validate`), fail-closed when unset.
+/// route, validated once at write time (`timing::validate`), fail-closed when unset. Versioned: each
+/// set writes a new version and every order reads the version it opened under.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RouteTiming {
     /// Shortest `deadline - now` a lock/create accepts.
     pub min_window: u64,
-    /// The primary's presentation window after the deadline; the follower's backstop window after its claim.
+    /// The primary's presentation window after the deadline.
     pub buffer: u64,
     /// How much before the window's end the primary stops accepting the co-signed unlock.
     pub margin: u64,
-    /// How long after the deadline the follower may open a backstop claim.
-    pub long_backstop: u64,
     /// How much before the deadline the follower's co-signed unlock stops (0 = off).
     pub claim_stagger: u64,
-}
-
-/// Which clock opened a presentation window; 2.3g's dispute entry hangs off the same record.
-#[contracttype]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum ClaimEntry {
-    None = 0,
-    Deadline = 1,
-    Backstop = 2,
-    Dispute = 3,
 }
 
 /// How a dispute ended (2.3g).
@@ -78,17 +66,15 @@ pub enum DisputeOutcome {
 
 /// Per-peer-chain dispute parameters, admin-set and validated at the write.
 ///
-/// Deliberately not more fields on `RouteTiming`: that five-tuple is read by the deploy CLI, the
+/// Deliberately not more fields on `RouteTiming`: that tuple is read by the deploy CLI, the
 /// relayer and the manifest, and widening it would ripple through all three.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisputeParams {
-    /// How long after filing the arbiter may still rule. Pause-aware at read time.
+    /// How long after filing the arbiter may still rule.
     pub challenge_period: u64,
-    /// The bond floor, in the wrapped native token. Dominates on small orders.
+    /// The route's flat bond, in the wrapped native token. The same for every order on the route.
     pub bond_floor: u128,
-    /// Basis points of the order amount. Dominates on large ones.
-    pub bond_bps: u32,
 }
 
 /// One dispute, keyed by order hash.
@@ -97,14 +83,8 @@ pub struct DisputeParams {
 pub struct DisputeRecord {
     pub initiator: Address,
     pub bond: u128,
-    /// Unadjusted. Every read goes through `effective_challenge_deadline`, which applies the
-    /// escrow's paused seconds once; storing an already-adjusted value here would double-count.
+    /// The one deadline, in real time: the filing's, then the ruling's.
     pub challenge_deadline: u64,
-    /// The *escrow's* paused-seconds counter as of the order's lock (c41-J: the filing carries the
-    /// order's own snapshot, so the deadline counts every pause the unlock's cutoff counts). The
-    /// escrow's, not this module's: a pause matters because it stops the parties presenting, and
-    /// presentation is gated by the escrow.
-    pub paused_at_open: u64,
     pub initiator_evidence: BytesN<32>,
     pub responder_evidence: BytesN<32>,
     pub ruling: DisputeOutcome,
@@ -117,31 +97,37 @@ pub struct DisputeRecord {
     pub buffer: u64,
 }
 
-/// The order's leg on this chain: its status and the escrow's paused-seconds counter when the leg
-/// opened (a pause stops the window's clock; the window is measured from this snapshot).
+/// The order's leg on this chain.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OrderRecord {
     pub status: Status,
-    pub paused_at_open: u64,
     /// When the leg opened (#422): a registry kill of the signer since then is a denied payout.
     pub locked_at: u64,
     /// On the ad chain, the key-registry epoch the order was locked under (#465): the denied rule
     /// reads that registry, so a later migration cannot erase a kill. 0 on the order portal.
     pub registry_epoch: u32,
+    /// The route-timing version the leg opened under; every window reads it, so a retiming moves no
+    /// live order.
+    pub timing_version: u32,
+    /// On the ad chain, the order chain's anchor delay at the lock; the evidence grace reads
+    /// `max(this, current)`. 0 on the order portal and with no anchor wired.
+    pub anchor_delay: u32,
+    /// On the ad chain, the settlement signer's co-signing slot the lock pinned (2.7 plan 12 C): the
+    /// one slot the co-signed unlock accepts and the denial rule reads. 0 on the order portal.
+    pub pinned_slot: u32,
+    /// On the ad chain: the pin was moved by a re-pin (`repin_order`). A re-pin is a maker-side
+    /// lever, so the denial rule counts it for the rest of the order's life; a slot left behind can
+    /// no longer erase a kill the rule would have counted. False on the order portal.
+    pub repinned: bool,
 }
 
-/// The open presentation window on an order (`Claimed` ⇔ a record exists). `paused_at_open` is
-/// the escrow's paused-seconds counter when the window opened: the window's real end is
-/// `finalize_at` plus whatever the escrow has been paused since (a pause stops the clocks, it
-/// never reopens a closed window).
+/// The open presentation window on an order (`Claimed` ⇔ a record exists).
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClaimRecord {
     pub opened_at: u64,
     pub finalize_at: u64,
-    pub paused_at_open: u64,
-    pub entry: ClaimEntry,
 }
 
 impl Default for Status {

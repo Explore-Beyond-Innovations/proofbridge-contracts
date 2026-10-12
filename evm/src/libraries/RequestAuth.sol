@@ -16,6 +16,10 @@ import {FieldElement} from "./FieldElement.sol";
  *         message, enforced via the root-verifier gate.
  */
 library RequestAuth {
+    /// @notice The envelope's pin on the order leg: no slot is pinned there, the verifier checks the
+    ///         maker key the co-signed auth names instead (2.7 plan 12 D11).
+    uint32 internal constant UNPINNED = type(uint32).max;
+
     /**
      * @notice Assemble the 4-element public-input vector for the zk verifier.
      * @dev Pure, like {buildEventInputs}: the reduction is the MMR library's own, the same one the
@@ -32,16 +36,13 @@ library RequestAuth {
         pure
         returns (bytes32[] memory inputs)
     {
-        // Defence in depth, not a hole being closed: both shipped verifiers already reject a
-        // non-canonical public input, because the transcript hashes inputs as given. This fails
-        // earlier, locally, with a named error, and keeps holding if the verifier is ever ported to
-        // one that reduces — see `FieldElement`.
-        //
-        // The nullifier and only the nullifier. The root is validated *before* this runs on every
-        // path — `_requireRootValid` against the co-signed root, `_requireAnchored` against the
-        // notary's — and both compare against known-good stored data. The nullifier has no such
-        // comparison: it is a *write* key, which is why it is the one worth guarding. The order hash
-        // is reduced below; the side flag is a contract constant.
+        // A malformed nullifier is refused here, by name, before the verifier runs. It is not what
+        // keeps a nullifier unique: on the co-signed unlock the root verifier has already required it
+        // to equal the value both parties signed for this leg (an alias `n + p` fails that), and the
+        // never-locked cancel consumes none. Both shipped verifiers reject a non-canonical input too;
+        // see `FieldElement`. The root is checked against stored data before this runs on every path
+        // (`_requireRootValid`, `_requireAnchored`), the order hash is reduced below, and the side
+        // flag is a contract constant.
         FieldElement.requireCanonical(nullifierHash);
 
         inputs = new bytes32[](4);
@@ -52,17 +53,25 @@ library RequestAuth {
     }
 
     /**
-     * @notice The root verifier's envelope: `(settlementSigner, bridger, orderHash, cosigData)`: what the
+     * @notice The root verifier's envelope:
+     *         `(settlementSigner, bridger, orderHash, pinnedSlot, nullifierHash, side, cosigData)`: what the
      *         escrow vouches for. Slot 0 is the account whose settlement key the verifier resolves
      *         (`params.adSettlementSigner`, never `adCreator`); `orderHash` is the order the escrow is
-     *         unlocking, which the co-signed auth must name (#433).
+     *         unlocking, which the co-signed auth must name (#433); `nullifierHash` is the nullifier the
+     *         escrow is about to consume and `side` its leg, which the auth must have signed for that leg.
+     *         `pinnedSlot` is the maker's co-signing slot the ad-chain order pinned at lock; the order leg
+     *         passes `UNPINNED`.
      */
-    function rootEnvelope(bytes32 settlementSigner, bytes32 bridger, bytes32 orderHash, bytes memory cosigData)
-        internal
-        pure
-        returns (bytes memory)
-    {
-        return abi.encode(settlementSigner, bridger, orderHash, cosigData);
+    function rootEnvelope(
+        bytes32 settlementSigner,
+        bytes32 bridger,
+        bytes32 orderHash,
+        uint32 pinnedSlot,
+        bytes32 nullifierHash,
+        uint8 side,
+        bytes memory cosigData
+    ) internal pure returns (bytes memory) {
+        return abi.encode(settlementSigner, bridger, orderHash, pinnedSlot, nullifierHash, side, cosigData);
     }
 
     /**

@@ -10,22 +10,19 @@
 //!
 //! ## Termination (2.3e)
 //!
-//! This leg is the follower: it refunds only against a proof of the ad leg's CANCEL leaf under an
-//! anchored root, never on a clock; the maker's co-signed `unlock` stops `claim_stagger` before
-//! the deadline, in every state, so a cancel claim always leaves time to land it — the package
-//! proves the lock, not the outcome; and a far backstop (`deadline + long_backstop`) opens a
-//! window in which only outcome evidence counts (a settled-leaf proof pays the maker, a cancel-leaf
-//! proof refunds the bridger, silence refunds the bridger), never a bare refund. Every `Filled` gets a
+//! This leg is the follower and has no clock of its own after the deadline: it refunds only against
+//! a proof of the ad leg's CANCEL leaf, pays the maker on its SETTLED or FORFEIT leaf, each under an
+//! anchored root; the maker's co-signed `unlock` stops `claim_stagger` before the deadline, so a
+//! cancel claim always leaves time to land it. While no root is anchored, refunds wait. Every `Filled` gets a
 //! SETTLED leaf, appended by `record_settled` in its own transaction (to match the EVM leg so the
 //! relayer batches one shape — not Soroban's per-tx budget, which is 400M on the network and was
 //! misread as the harness default of 100M;
 //! EVM appends it inside the fill). The same state machine as EVM:
 //!
 //! ```text
-//!   None ──create──▶ Open ──claim_backstop──▶ Claimed ──finalize_backstop──▶ Cancelled (refund)
-//!                     │                         │
-//!                     ├──refund_by_cancel (proof, no clock)──┘──▶ Cancelled (refund)
-//!                     └──unlock / present_settled──┘──▶ Filled ──record_settled──▶ (+ SETTLED leaf)
+//!   None ──create──▶ Open ──refund_by_cancel (proof, no clock)──▶ Cancelled (refund)
+//!                     ├──unlock / present_settled / pay_maker_by_forfeit──▶ Filled
+//!                     │                                    └──record_settled──▶ (+ SETTLED leaf)
 //! ```
 
 #![no_std]
@@ -50,8 +47,8 @@ use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env};
 
 pub use errors::OrderPortalError;
 pub use types::{
-    ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, OrderParams, OrderRecord, RouteTiming,
-    Status, NATIVE_TOKEN_ADDRESS,
+    ChainInfo, ClaimRecord, ContractConfig, OrderParams, OrderRecord, RouteTiming, Status,
+    NATIVE_TOKEN_ADDRESS,
 };
 
 // =============================================================================
@@ -295,6 +292,7 @@ impl OrderPortalContract {
     /// Bridger deposits tokens and creates an order that can be unlocked
     /// by a maker with a ZK proof on this chain.
     pub fn create_order(env: Env, params: OrderParams) -> Result<BytesN<32>, OrderPortalError> {
+        // The one entry here: a pause stops new orders, never exits.
         if storage::is_paused(&env) {
             return Err(OrderPortalError::ContractPaused);
         }
@@ -305,7 +303,7 @@ impl OrderPortalContract {
         // Verify signed orderDecimals matches on-chain token decimals.
         Self::assert_order_decimals(&env, &params, &config.w_native_token)?;
         // 2.3e D5: the window bound.
-        Self::require_min_window(&env, params.ad_chain_id, params.deadline)?;
+        let timing_version = Self::require_min_window(&env, params.ad_chain_id, params.deadline)?;
 
         let order_hash = Self::order_hash(&env, &config, &params);
 
@@ -337,7 +335,7 @@ impl OrderPortalContract {
             LEAF_DOMAIN_AD,
         )?;
 
-        storage::open_order(&env, &order_hash, 0);
+        storage::open_order(&env, &order_hash, timing_version, 0, 0, 0);
         // 2.3c D1: count only the party this escrow authenticated (the bridger). The maker is
         // counted by the ad-manager that authenticated them.
         storage::set_in_flight(
@@ -380,9 +378,6 @@ impl OrderPortalContract {
         proof: Bytes,
         cosig_data: Bytes,
     ) -> Result<(), OrderPortalError> {
-        if storage::is_paused(&env) {
-            return Err(OrderPortalError::ContractPaused);
-        }
         let config = storage::get_config(&env)?;
 
         // Permissionless (EVM parity): the recipient is hash-bound, so anyone may submit. Decimals
@@ -390,8 +385,7 @@ impl OrderPortalContract {
 
         let order_hash = Self::order_hash(&env, &config, &params);
 
-        // `Open` only: after the deadline the co-signed package says nothing about the ad leg's
-        // outcome, so a backstop window (`Claimed`) never reopens it.
+        // `Open` only: the co-signed package proves the lock, not the outcome.
         if storage::get_order_status(&env, &order_hash) != Status::Open {
             return Err(OrderPortalError::OrderNotOpen);
         }
@@ -399,8 +393,8 @@ impl OrderPortalContract {
             return Err(OrderPortalError::NullifierUsed);
         }
         // D2: stop `claim_stagger` before the deadline so the maker's cancel claim on the ad chain
-        // always leaves the watchtower time to land this leg.
-        let t = Self::timing(&env, params.ad_chain_id)?;
+        // always leaves the watchtower time to land this leg. The order's own timing version.
+        let t = ops::order_timing(&env, &order_hash, params.ad_chain_id)?;
         if env.ledger().timestamp() > params.deadline.saturating_sub(t.claim_stagger) {
             return Err(OrderPortalError::OrderExpired);
         }
@@ -419,6 +413,9 @@ impl OrderPortalContract {
             &params.ad_settlement_signer,
             &params.bridger,
             &order_hash,
+            proofbridge_core::cross_contract::UNPINNED,
+            &nullifier_hash,
+            proofbridge_core::cross_contract::ENVELOPE_SIDE_ORDER,
             &cosig_data,
         ) {
             return Err(OrderPortalError::RootNotValid);
@@ -446,14 +443,13 @@ impl OrderPortalContract {
     // =========================================================================
 
     /// Refund the bridger against a proof of the primary's CANCEL leaf under an anchored root.
-    /// Reads no clock (D4). `Open` or `Claimed`: a cancel proof beats a backstop window.
+    /// Reads no clock (D4): the only refund this leg has.
     pub fn refund_by_cancel(
         env: Env,
         params: OrderParams,
         target_root: BytesN<32>,
         proof: Bytes,
     ) -> Result<(), OrderPortalError> {
-        Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
         Self::require_presentable(&env, &order_hash)?;
@@ -474,14 +470,13 @@ impl OrderPortalContract {
     }
 
     /// Settle the deposit to the maker on a proof of the ad leg's SETTLED leaf under an anchored
-    /// root. `Open` or `Claimed`; not window-gated (D3); no nullifier.
+    /// root. Not window-gated (D3); no nullifier.
     pub fn present_settled(
         env: Env,
         params: OrderParams,
         target_root: BytesN<32>,
         proof: Bytes,
     ) -> Result<(), OrderPortalError> {
-        Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
         Self::require_presentable(&env, &order_hash)?;
@@ -501,28 +496,6 @@ impl OrderPortalContract {
         Ok(())
     }
 
-    /// Open the backstop window at `now >= deadline + long_backstop` (an anchor outage). The
-    /// window is claim-anchored (D1: this clock starts days late; no evidence race straddles it)
-    /// and may be finalized at `now + buffer`. Permissionless.
-    pub fn claim_backstop(env: Env, params: OrderParams) -> Result<(), OrderPortalError> {
-        Self::require_not_paused(&env)?;
-        let config = storage::get_config(&env)?;
-        let order_hash = Self::order_hash(&env, &config, &params);
-        Self::require_status(&env, &order_hash, Status::Open)?;
-        let t = Self::timing(&env, params.ad_chain_id)?;
-        Self::require_reached(&env, params.deadline.saturating_add(t.long_backstop))?;
-        let now = env.ledger().timestamp();
-        Self::open_claim(
-            &env,
-            &order_hash,
-            ClaimEntry::Backstop,
-            now.saturating_add(t.buffer),
-        );
-        storage::extend_instance_ttl(&env);
-        Ok(())
-    }
-
-    /// After an unchallenged backstop window: refund the bridger.
     // =========================================================================
     // Disputes (2.3g) — the follower's entire part, and it is proof-only
     // =========================================================================
@@ -542,7 +515,6 @@ impl OrderPortalContract {
         target_root: BytesN<32>,
         proof: Bytes,
     ) -> Result<(), OrderPortalError> {
-        Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
         Self::require_presentable(&env, &order_hash)?;
@@ -559,6 +531,9 @@ impl OrderPortalContract {
         // No deadline read: like the cancel refund, this is the primary's decision arriving, and it
         // is valid whenever it arrives.
         Self::fill(&env, &order_hash, &params.bridger, true);
+        // No trade settled, so no SETTLED leaf may follow: mark the order recorded without
+        // appending, and `record_settled` refuses it as any recorded order (`SettledRecorded`).
+        storage::set_settled_recorded(&env, &order_hash);
         Self::pay_maker(&env, &config, &params);
         // C-14: `OrderSettled` alone cannot tell a forfeit from a settle.
         events::OrderForfeited { order_hash }.publish(&env);
@@ -566,20 +541,7 @@ impl OrderPortalContract {
         Ok(())
     }
 
-    pub fn finalize_backstop(env: Env, params: OrderParams) -> Result<(), OrderPortalError> {
-        Self::require_not_paused(&env)?;
-        let config = storage::get_config(&env)?;
-        let order_hash = Self::order_hash(&env, &config, &params);
-        let buffer = Self::timing(&env, params.ad_chain_id)?.buffer;
-        Self::require_finalizable(&env, &order_hash, buffer)?;
-        Self::cancel(&env, &order_hash, &params.bridger, false);
-        Self::refund_bridger(&env, &config, &order_hash, &params);
-        storage::extend_instance_ttl(&env);
-        Ok(())
-    }
-
     pub fn record_settled(env: Env, params: OrderParams) -> Result<(), OrderPortalError> {
-        Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
         ops::record_settled(&env, &config.merkle_manager, &order_hash).map_err(Into::into)
@@ -605,11 +567,8 @@ impl OrderPortalContract {
 
     /// Withdraw a credited balance. Permissionless: funds can only go to the credited recipient.
     ///
-    /// Deliberately not pause-gated, and the only entry point here that is not. A pause is the
-    /// mass-incident brake: it stops orders moving while something is wrong. This call moves no
-    /// order state and creates no credit — it hands an already-credited balance to the account that
-    /// already owns it. Freezing it does not contain an incident, it only holds honest users' money
-    /// hostage while one is investigated (2.3h D1, 03 F9).
+    /// Not pause-gated: a pause stops entries only, and this hands an already-credited balance to
+    /// the account that owns it.
     pub fn claim(
         env: Env,
         recipient: BytesN<32>,
@@ -681,9 +640,14 @@ impl OrderPortalContract {
         storage::get_order_status(&env, &order_hash)
     }
 
-    /// The termination clocks for a peer chain, if set.
-    pub fn get_route_timing(env: Env, chain_id: u128) -> Option<RouteTiming> {
-        storage::get_route_timing(&env, chain_id)
+    /// The route's current timing version (0 = unset).
+    pub fn timing_version(env: Env, chain_id: u128) -> u32 {
+        storage::get_timing_version(&env, chain_id)
+    }
+
+    /// Any version's clocks; an order's own is `route_timing_at(chain, get_order(h).timing_version)`.
+    pub fn route_timing_at(env: Env, chain_id: u128, version: u32) -> Option<RouteTiming> {
+        storage::get_route_timing_at(&env, chain_id, version)
     }
 
     /// The notary the evidence paths read, if set.
@@ -691,19 +655,14 @@ impl OrderPortalContract {
         storage::get_root_anchor(&env)
     }
 
-    /// The open presentation window on an order, if any.
+    /// The open presentation window on an order, if any (none on this leg since it has no clock).
     pub fn get_claim(env: Env, order_hash: BytesN<32>) -> Option<ClaimRecord> {
         storage::get_claim(&env, &order_hash)
     }
 
-    /// The order's leg: status plus the pause-counter snapshot its window is measured from.
+    /// The order's leg: status, open time and the timing version its windows read.
     pub fn get_order(env: Env, order_hash: BytesN<32>) -> OrderRecord {
         storage::get_order(&env, &order_hash)
-    }
-
-    /// Seconds the escrow has spent paused in total.
-    pub fn paused_seconds(env: Env) -> u64 {
-        storage::get_paused_seconds(&env)
     }
 
     /// Whether the order's SETTLED leaf is in the MMR.
@@ -735,10 +694,6 @@ impl OrderPortalContract {
     // =========================================================================
     // Internal Helpers
     // =========================================================================
-
-    fn require_not_paused(env: &Env) -> Result<(), OrderPortalError> {
-        Ok(ops::require_not_paused(env)?)
-    }
 
     /// The canonical 17-field order hash from this leg's params plus the order-chain context.
     fn order_hash(env: &Env, config: &ContractConfig, params: &OrderParams) -> BytesN<32> {
@@ -781,41 +736,16 @@ impl OrderPortalContract {
 
     // ---- termination core (2.3e), mirrored by the ad-manager ----
 
-    /// The route's clocks, or `NoRouteTiming` (the `RootVerifierNotSet` posture).
-    fn timing(env: &Env, chain_id: u128) -> Result<RouteTiming, OrderPortalError> {
-        Ok(ops::timing(env, chain_id)?)
-    }
-
     fn require_min_window(
         env: &Env,
         chain_id: u128,
         deadline: u64,
-    ) -> Result<(), OrderPortalError> {
+    ) -> Result<u32, OrderPortalError> {
         Ok(ops::require_min_window(env, chain_id, deadline)?)
-    }
-
-    fn require_reached(env: &Env, at: u64) -> Result<(), OrderPortalError> {
-        Ok(ops::require_reached(env, at)?)
-    }
-
-    fn require_status(
-        env: &Env,
-        order_hash: &BytesN<32>,
-        expected: Status,
-    ) -> Result<(), OrderPortalError> {
-        Ok(ops::require_status(env, order_hash, expected)?)
     }
 
     fn require_presentable(env: &Env, order_hash: &BytesN<32>) -> Result<(), OrderPortalError> {
         Ok(ops::require_presentable(env, order_hash)?)
-    }
-
-    fn require_finalizable(
-        env: &Env,
-        order_hash: &BytesN<32>,
-        buffer: u64,
-    ) -> Result<(), OrderPortalError> {
-        Ok(ops::require_finalizable(env, order_hash, buffer)?)
     }
 
     fn require_anchored(
@@ -824,10 +754,6 @@ impl OrderPortalContract {
         root: &BytesN<32>,
     ) -> Result<(), OrderPortalError> {
         Ok(ops::require_anchored(env, chain_id, root)?)
-    }
-
-    fn open_claim(env: &Env, order_hash: &BytesN<32>, entry: ClaimEntry, finalize_at: u64) {
-        ops::open_claim(env, order_hash, entry, finalize_at)
     }
 
     fn fill(env: &Env, order_hash: &BytesN<32>, account: &BytesN<32>, by_evidence: bool) {

@@ -13,7 +13,7 @@
 //!
 //! This leg is the primary: the only place a clock runs. After the deadline anyone may
 //! `claim_cancel`, which opens the window `[deadline, deadline + buffer)`; the co-signed `unlock`
-//! (accepted until `deadline + buffer - margin`) or a `present_settled` proof settles it; an
+//! (accepted before `deadline + buffer - margin`) or a `present_settled` proof settles it; an
 //! unchallenged window releases the lock and records the CANCEL leaf the order leg refunds
 //! against. Every `Filled` gets a SETTLED leaf, appended by `record_settled` in its own
 //! transaction (so the relayer batches one shape across both chains — not, as this once said, because
@@ -50,8 +50,8 @@ use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String};
 
 pub use errors::AdManagerError;
 pub use types::{
-    Ad, ChainInfo, ClaimEntry, ClaimRecord, ContractConfig, DisputeOutcome, Halt, OrderParams,
-    OrderRecord, RouteTiming, Status, NATIVE_TOKEN_ADDRESS,
+    Ad, ChainInfo, ClaimRecord, ContractConfig, DisputeOutcome, Halt, OrderParams, OrderRecord,
+    RouteTiming, Status, NATIVE_TOKEN_ADDRESS,
 };
 
 // =============================================================================
@@ -352,7 +352,7 @@ impl AdManagerContract {
 
         // Creator authorizes the call (and the downstream SAC transfer).
         creator.require_auth();
-        validation::require_registered(&env, &settlement_signer)?;
+        validation::require_registered(&env, &settlement_signer, &creator)?;
 
         token::transfer_from_user_bytes32(
             &env,
@@ -459,7 +459,7 @@ impl AdManagerContract {
         if storage::get_order_status(&env, &order_hash) != Status::Claimed {
             return Ok(0);
         }
-        let t = Self::timing(&env, params.order_chain_id)?;
+        let t = Self::order_timing(&env, &order_hash, params.order_chain_id)?;
         let ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
         Self::cancel_end(&env, &ad.maker, &params, &order_hash, &t)
     }
@@ -476,7 +476,7 @@ impl AdManagerContract {
         // freezable, and unpause re-enables locks in the same instant it would re-enable this.
         let mut ad = storage::get_ad(&env, &ad_id).ok_or(AdManagerError::AdNotFound)?;
         ad.maker.require_auth();
-        validation::require_registered(&env, &identity)?;
+        validation::require_registered(&env, &identity, &ad.maker)?;
 
         let previous = ad.settlement_signer.clone();
         ad.settlement_signer = identity.clone();
@@ -541,9 +541,7 @@ impl AdManagerContract {
         amount: u128,
         to: Address,
     ) -> Result<(), AdManagerError> {
-        if storage::is_paused(&env) {
-            return Err(AdManagerError::ContractPaused);
-        }
+        // An exit: free liquidity no trade holds, so a pause never freezes it.
         let config = storage::get_config(&env)?;
 
         let mut ad = storage::get_ad(&env, &ad_id).ok_or(AdManagerError::AdNotFound)?;
@@ -578,9 +576,7 @@ impl AdManagerContract {
 
     /// Close an ad and withdraw all remaining funds.
     pub fn close_ad(env: Env, ad_id: String, to: Address) -> Result<(), AdManagerError> {
-        if storage::is_paused(&env) {
-            return Err(AdManagerError::ContractPaused);
-        }
+        // An exit, like `withdraw_from_ad`: never paused.
         let config = storage::get_config(&env)?;
 
         let mut ad = storage::get_ad(&env, &ad_id).ok_or(AdManagerError::AdNotFound)?;
@@ -624,7 +620,14 @@ impl AdManagerContract {
     // =========================================================================
 
     /// Lock liquidity for an order.
-    pub fn lock_for_order(env: Env, params: OrderParams) -> Result<BytesN<32>, AdManagerError> {
+    /// Lock the ad's liquidity for an order, pinning `signer_slot`: the settlement signer's co-signing
+    /// slot in the registry the order records (plan 12 D7). The slot must exist and be usable now;
+    /// the ad chain's co-signed unlock then accepts only that slot's key.
+    pub fn lock_for_order(
+        env: Env,
+        params: OrderParams,
+        signer_slot: u32,
+    ) -> Result<BytesN<32>, AdManagerError> {
         if storage::is_paused(&env) {
             return Err(AdManagerError::ContractPaused);
         }
@@ -635,11 +638,24 @@ impl AdManagerContract {
         validation::validate_order(&env, &ad, &params)?;
         // A key retired after the ad was pointed at it (set_valid_until, a watchtower retirement)
         // must not take new locks: the bridger's deposit could never be unlocked (2.3c D2).
-        validation::require_registered(&env, &ad.settlement_signer)?;
+        validation::require_registered(&env, &ad.settlement_signer, &ad.maker)?;
+        // Plan 12 C: the slot the lock pins is the signer's and usable now, in the registry the
+        // order records (the current one; require_registered refused none being wired).
+        if let Some(registry) = storage::get_key_registry(&env) {
+            if !proofbridge_core::cross_contract::slot_usable(
+                &env,
+                &registry,
+                &ad.settlement_signer,
+                signer_slot,
+            ) {
+                return Err(AdManagerError::SlotNotUsable);
+            }
+        }
         Self::assert_ad_decimals(&env, &params, &config.w_native_token)?;
         // 2.3e D5: the window bound that makes cancel_never_locked's "no lock can follow the
         // deadline" hold.
-        Self::require_min_window(&env, params.order_chain_id, params.deadline)?;
+        let timing_version =
+            Self::require_min_window(&env, params.order_chain_id, params.deadline)?;
         // #464: no new order while the order chain's verifier reads another key registry.
         if Self::registry_split(
             &env,
@@ -668,12 +684,22 @@ impl AdManagerContract {
             return Err(AdManagerError::OrderExists);
         }
 
+        // D10: the order chain's anchor delay now; the grace reads max(this, current) later.
+        let anchor_delay = Self::anchor_delay_now(&env, params.order_chain_id)?;
         let maker = ad.maker.clone();
         let ad_token = ad.token.clone();
         ad.locked += ad_amount;
         storage::set_ad(&env, &params.ad_id, &ad);
-        // #465: the registry this order is judged against, whatever is wired later.
-        storage::open_order(&env, &order_hash, storage::get_registry_epoch(&env));
+        // The timing version every window of this order reads, and (#465) the registry it is
+        // judged against, whatever is wired later.
+        storage::open_order(
+            &env,
+            &order_hash,
+            timing_version,
+            storage::get_registry_epoch(&env),
+            u32::try_from(anchor_delay).unwrap_or(u32::MAX),
+            signer_slot,
+        );
         // 2.3c D1: count the settlement identity this escrow's unlock will verify — the ad's
         // signer, asserted equal to `params.ad_settlement_signer` in validate_order (and owned by
         // the maker we authenticated). The custody address needs no counter: no unlock resolves
@@ -721,9 +747,6 @@ impl AdManagerContract {
         proof: Bytes,
         cosig_data: Bytes,
     ) -> Result<(), AdManagerError> {
-        if storage::is_paused(&env) {
-            return Err(AdManagerError::ContractPaused);
-        }
         let config = storage::get_config(&env)?;
 
         // Permissionless (EVM parity): the recipient is hash-bound, so anyone may submit. Decimals
@@ -736,14 +759,12 @@ impl AdManagerContract {
         if storage::is_nullifier_used(&env, &nullifier_hash) {
             return Err(AdManagerError::NullifierUsed);
         }
-        // 2.3e D2: the co-signed unlock is the presentation — valid through the window, minus
-        // the margin. Once claimed the end is the claim's frozen `finalize_at`, so a retiming
-        // cannot move the cutoff across it. With margin 0 the window's last second is shared
-        // with finalize_cancel; the first transaction wins.
-        let t = Self::timing(&env, params.order_chain_id)?;
-        let cutoff =
-            Self::window_end(&env, &order_hash, params.deadline, t.buffer).saturating_sub(t.margin);
-        if env.ledger().timestamp() > cutoff {
+        // 2.3e D2: the co-signed unlock is the presentation — valid before the window's end minus
+        // the margin, on the order's own timing version, so a retiming cannot move it. Strict, so
+        // it never shares a second with finalize_cancel (which needs the end reached).
+        let t = Self::order_timing(&env, &order_hash, params.order_chain_id)?;
+        let cutoff = Self::presentation_cutoff(&env, &order_hash, &params, &t);
+        if env.ledger().timestamp() >= cutoff {
             return Err(AdManagerError::OrderExpired);
         }
         // #422: the maker's halt refuses the co-signed payout; evidence (`present_settled`) still
@@ -766,6 +787,9 @@ impl AdManagerContract {
             &params.ad_settlement_signer,
             &params.bridger,
             &order_hash,
+            storage::get_order(&env, &order_hash).pinned_slot, // plan 12 C: the one slot accepted
+            &nullifier_hash,
+            proofbridge_core::cross_contract::ENVELOPE_SIDE_AD,
             &cosig_data,
         ) {
             return Err(AdManagerError::RootNotValid);
@@ -801,15 +825,14 @@ impl AdManagerContract {
     /// Deadline-anchored (D1): finalizable at `deadline + buffer` whenever the claim lands, so a
     /// late claim cannot shorten the window the fast unlock relies on.
     pub fn claim_cancel(env: Env, params: OrderParams) -> Result<(), AdManagerError> {
-        Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
         Self::require_status(&env, &order_hash, Status::Open)?;
         Self::require_reached(&env, params.deadline)?;
-        // Deadline-anchored (D1); a pause that fell inside the window already extended it.
-        let t = Self::timing(&env, params.order_chain_id)?;
+        // Deadline-anchored (D1), on the order's timing version.
+        let t = Self::order_timing(&env, &order_hash, params.order_chain_id)?;
         let finalize_at = Self::window_end(&env, &order_hash, params.deadline, t.buffer);
-        Self::open_claim(&env, &order_hash, ClaimEntry::Deadline, finalize_at);
+        Self::open_claim(&env, &order_hash, finalize_at);
         storage::extend_instance_ttl(&env);
         Ok(())
     }
@@ -830,29 +853,24 @@ impl AdManagerContract {
         filer: Address,
         evidence: BytesN<32>,
     ) -> Result<u128, AdManagerError> {
-        Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
-        // The amount is vouched for by the hash the caller had to reproduce; the module cannot do
-        // that itself, which is why filing starts here.
-        let amount = Self::ad_amount(&params)?;
         // Only the order's two parties may file. Without this any address could dispute any live
         // order and, one short challenge period later, cancel it out from under both of them.
         // The bridger side is the same address this chain would pay, resolved the same way, so
         // "who may file" and "who gets paid" cannot drift apart.
         let ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
         Self::require_party(&env, &filer, &ad.maker, &params.order_recipient)?;
-        let timing = Self::timing(&env, params.order_chain_id)?;
+        // The deadline is vouched for by the hash the caller had to reproduce; the module cannot do
+        // that itself, which is why filing starts here.
         let bond = ops::open_dispute(
             &env,
             &env.current_contract_address(),
             &order_hash,
-            amount,
             params.order_chain_id,
             &filer,
             &evidence,
             params.deadline,
-            timing.buffer,
         )?;
         storage::extend_instance_ttl(&env);
         Ok(bond)
@@ -869,7 +887,6 @@ impl AdManagerContract {
         responder: Address,
         evidence: BytesN<32>,
     ) -> Result<(), AdManagerError> {
-        Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
         Self::require_status(&env, &order_hash, Status::Disputed)?;
@@ -888,7 +905,6 @@ impl AdManagerContract {
 
     /// Apply the module's outcome once its window is over, and settle the bond.
     pub fn finalize_dispute(env: Env, params: OrderParams) -> Result<(), AdManagerError> {
-        Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
         Self::require_status(&env, &order_hash, Status::Disputed)?;
@@ -956,10 +972,9 @@ impl AdManagerContract {
     }
 
     pub fn finalize_cancel(env: Env, params: OrderParams) -> Result<(), AdManagerError> {
-        Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
-        let t = Self::timing(&env, params.order_chain_id)?;
+        let t = Self::order_timing(&env, &order_hash, params.order_chain_id)?;
         let buffer = t.buffer;
         Self::require_finalizable(&env, &order_hash, buffer)?;
 
@@ -994,16 +1009,30 @@ impl AdManagerContract {
     }
 
     /// Attest that an order the bridger deposited for was never locked here: `None` and
-    /// `now >= deadline` → `Cancelled` + CANCEL leaf. No funds move; nothing was counted.
-    pub fn cancel_never_locked(env: Env, params: OrderParams) -> Result<(), AdManagerError> {
-        Self::require_not_paused(&env)?;
+    /// `now >= deadline` → `Cancelled` + CANCEL leaf. No funds move; nothing was counted. The order
+    /// must be real: `proof` shows its AD leaf (the one the order portal's `create_order` appended)
+    /// in `target_root`, an order-chain root the anchor notarized. Any secret proves the leaf, so
+    /// `nullifier_hash` is neither checked against nor added to the used set.
+    pub fn cancel_never_locked(
+        env: Env,
+        params: OrderParams,
+        target_root: BytesN<32>,
+        nullifier_hash: BytesN<32>,
+        proof: Bytes,
+    ) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
         Self::require_status(&env, &order_hash, Status::None)?;
         Self::require_reached(&env, params.deadline)?;
         // D5: a lock needs `deadline >= now + min_window`, so past the deadline none can follow.
         storage::get_chain(&env, params.order_chain_id).ok_or(AdManagerError::ChainNotSupported)?;
-        Self::timing(&env, params.order_chain_id)?;
+        ops::current_timing(&env, params.order_chain_id)?;
+        // The order is real: its AD leaf is in a notarized order-chain root. Nothing settles, so
+        // the nullifier is not consumed.
+        Self::require_anchored(&env, params.order_chain_id, &target_root)?;
+        let public_inputs =
+            cross_contract::build_public_inputs(&env, &nullifier_hash, &target_root, &order_hash)?;
+        cross_contract::verify_proof(&env, &config.verifier, &public_inputs, &proof)?;
 
         storage::set_order_status(&env, &order_hash, Status::Cancelled);
         cross_contract::append_to_merkle(
@@ -1021,6 +1050,46 @@ impl AdManagerContract {
         Ok(())
     }
 
+    /// Apply the settlement signer's re-pin consent (`approve_repin` on the order's registry): move
+    /// an `Open` order's pin to another usable slot of the same signer, not past
+    /// `deadline - claim_stagger` of this escrow's own route timing (the ad chain cannot read the
+    /// order portal's; the two are linked from one manifest), (plan 12 D12, Q2). Permissionless; the
+    /// consent names the order and both slots. The pin being left may have expired (the answer to a
+    /// leaked key is kill, then re-pin); the order is stamped re-pinned either way, which the denial
+    /// rule counts from then on: a re-pin refuses every pair signed under the old pin.
+    pub fn repin_order(env: Env, params: OrderParams) -> Result<(), AdManagerError> {
+        let config = storage::get_config(&env)?;
+        let order_hash = Self::order_hash(&env, &config, &params);
+        let order = storage::get_order(&env, &order_hash);
+        if order.status != Status::Open {
+            return Err(AdManagerError::OrderNotOpen);
+        }
+        let t = Self::order_timing(&env, &order_hash, params.order_chain_id)?;
+        if env.ledger().timestamp() > params.deadline.saturating_sub(t.claim_stagger) {
+            return Err(AdManagerError::OrderExpired);
+        }
+        let registry = storage::get_registry_at(&env, order.registry_epoch)
+            .ok_or(AdManagerError::NoKeyRegistry)?;
+        let signer = &params.ad_settlement_signer;
+        let (from, to, nonce) =
+            proofbridge_core::cross_contract::repin_approval(&env, &registry, signer, &order_hash);
+        if nonce == 0 || from != order.pinned_slot {
+            return Err(AdManagerError::NoRepin);
+        }
+        if !proofbridge_core::cross_contract::slot_usable(&env, &registry, signer, to) {
+            return Err(AdManagerError::SlotNotUsable);
+        }
+        storage::set_pinned_slot(&env, &order_hash, to);
+        events::OrderRepinned {
+            order_hash,
+            from_slot: from,
+            to_slot: to,
+        }
+        .publish(&env);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
     /// Settle the lock on a secret-free proof that the order leg already paid the maker (its
     /// SETTLED leaf under a root the anchor notarized). `Open` or `Claimed`; not window-gated
     /// (D3); consumes no nullifier — the terminal status is the replay guard.
@@ -1030,7 +1099,6 @@ impl AdManagerContract {
         target_root: BytesN<32>,
         proof: Bytes,
     ) -> Result<(), AdManagerError> {
-        Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
         Self::require_presentable(&env, &order_hash)?;
@@ -1054,7 +1122,6 @@ impl AdManagerContract {
     }
 
     pub fn record_settled(env: Env, params: OrderParams) -> Result<(), AdManagerError> {
-        Self::require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let order_hash = Self::order_hash(&env, &config, &params);
         ops::record_settled(&env, &config.merkle_manager, &order_hash).map_err(Into::into)
@@ -1079,11 +1146,8 @@ impl AdManagerContract {
 
     /// Withdraw a credited balance. Permissionless: funds can only go to the credited recipient.
     ///
-    /// Deliberately not pause-gated, and the only entry point here that is not. A pause is the
-    /// mass-incident brake: it stops orders moving while something is wrong. This call moves no
-    /// order state and creates no credit — it hands an already-credited balance to the account that
-    /// already owns it. Freezing it does not contain an incident, it only holds honest users' money
-    /// hostage while one is investigated (2.3h D1, 03 F9).
+    /// Not pause-gated: a pause stops entries only, and this hands an already-credited balance to
+    /// the account that owns it.
     pub fn claim(env: Env, recipient: BytesN<32>, token: BytesN<32>) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
         ops::claim(&env, &config, recipient, token).map_err(Into::into)
@@ -1181,8 +1245,13 @@ impl AdManagerContract {
     }
 
     /// The termination clocks for a peer chain, if set.
-    pub fn get_route_timing(env: Env, chain_id: u128) -> Option<RouteTiming> {
-        storage::get_route_timing(&env, chain_id)
+    pub fn timing_version(env: Env, chain_id: u128) -> u32 {
+        storage::get_timing_version(&env, chain_id)
+    }
+
+    /// Any version's clocks; an order's own is `route_timing_at(chain, get_order(h).timing_version)`.
+    pub fn route_timing_at(env: Env, chain_id: u128, version: u32) -> Option<RouteTiming> {
+        storage::get_route_timing_at(&env, chain_id, version)
     }
 
     /// The notary the evidence paths read, if set.
@@ -1205,12 +1274,6 @@ impl AdManagerContract {
         storage::get_order(&env, &order_hash)
     }
 
-    /// Seconds the escrow has spent paused in total.
-    pub fn paused_seconds(env: Env) -> u64 {
-        storage::get_paused_seconds(&env)
-    }
-
-    /// Whether the order's SETTLED leaf is in the MMR.
     pub fn is_settled_recorded(env: Env, order_hash: BytesN<32>) -> bool {
         storage::is_settled_recorded(&env, &order_hash)
     }
@@ -1235,10 +1298,6 @@ impl AdManagerContract {
     // =========================================================================
     // Internal Helpers
     // =========================================================================
-
-    fn require_not_paused(env: &Env) -> Result<(), AdManagerError> {
-        Ok(ops::require_not_paused(env)?)
-    }
 
     /// The canonical 17-field order hash from this leg's params plus the ad-chain context.
     fn order_hash(env: &Env, config: &ContractConfig, params: &OrderParams) -> BytesN<32> {
@@ -1283,6 +1342,8 @@ impl AdManagerContract {
     /// Close any dispute this evidence path has just overridden. A no-op when nothing was
     /// disputed — but every path that admits `Disputed` must call it, or the status leaves
     /// `Disputed`, `finalize_dispute` can never run again, and the bond is stranded for good.
+    /// A bridger who filed while the maker denied the co-signed payout (the denial rule at the
+    /// presentation cutoff) gets its bond back.
     fn close_dispute(
         env: &Env,
         order_hash: &BytesN<32>,
@@ -1295,6 +1356,11 @@ impl AdManagerContract {
             order_hash,
             outcome,
             || storage::get_ad(env, &params.ad_id).map(|ad| ad.maker),
+            |maker| {
+                let t = ops::order_timing(env, order_hash, params.order_chain_id)?;
+                let cutoff = Self::presentation_cutoff(env, order_hash, params, &t);
+                Ok(Self::co_sign_denied(env, maker, params, order_hash, cutoff))
+            },
         )?;
         Ok(())
     }
@@ -1322,12 +1388,16 @@ impl AdManagerContract {
         Err(AdManagerError::NotAParty)
     }
 
-    /// The route's clocks, or `NoRouteTiming` (the `RootVerifierNotSet` posture).
-    fn timing(env: &Env, chain_id: u128) -> Result<RouteTiming, AdManagerError> {
-        Ok(ops::timing(env, chain_id)?)
+    /// The clocks of the version the order was locked under.
+    fn order_timing(
+        env: &Env,
+        order_hash: &BytesN<32>,
+        chain_id: u128,
+    ) -> Result<RouteTiming, AdManagerError> {
+        Ok(ops::order_timing(env, order_hash, chain_id)?)
     }
 
-    fn require_min_window(env: &Env, chain_id: u128, deadline: u64) -> Result<(), AdManagerError> {
+    fn require_min_window(env: &Env, chain_id: u128, deadline: u64) -> Result<u32, AdManagerError> {
         Ok(ops::require_min_window(env, chain_id, deadline)?)
     }
 
@@ -1360,18 +1430,25 @@ impl AdManagerContract {
         ops::window_end(env, order_hash, deadline, buffer)
     }
 
+    /// The first second the co-signed unlock is refused (2.3e D2): the window's end minus the
+    /// margin, both from the order's own timing version `t`. The one formula behind the unlock's
+    /// cutoff, the evidence close's bond rule and the cancel clock's denial read, so the three
+    /// cannot drift. Once the order is `Claimed` the window's end is the claim's, and the deadline
+    /// is not consulted.
+    fn presentation_cutoff(
+        env: &Env,
+        order_hash: &BytesN<32>,
+        params: &OrderParams,
+        t: &RouteTiming,
+    ) -> u64 {
+        Self::window_end(env, order_hash, params.deadline, t.buffer).saturating_sub(t.margin)
+    }
+
     /// Is the maker's halt in force.
     fn is_halted(env: &Env, maker: &Address) -> bool {
         storage::get_halt(env, maker).map_or(false, |h| h.halted)
     }
 
-    /// Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force now
-    /// or at any point at or after the order's deadline (a resume stamp at or after it), any of the
-    /// signer's registry slots expiring during the order's life as a payout, `[locked_at, until]`
-    /// with `until` the payout's own cutoff (`any_slot_expired_within`, D12/D14/D14b/D16: a kill, a
-    /// near-future shorten, a pre-lock shorten naming a date in the window and a re-kill after it
-    /// all count; a rotation whose old slot outlives the cutoff does not). Every reference is one the maker signed (the deadline) or the chain stamped (the
-    /// lock), never one the maker can choose later. No registry wired means no lever 2 to read.
     /// #464: does the order chain's root verifier read a key registry other than this escrow's?
     /// A verifier that does not answer `registry()` is not a BLS co-signature verifier: no split.
     fn registry_split(env: &Env, order_chain_id: u128, expected: Option<&Address>) -> bool {
@@ -1384,6 +1461,20 @@ impl AdManagerContract {
         }
     }
 
+    /// Was this order's co-signed payout denied by a maker-side lever: the maker's halt in force now
+    /// or at any point since the lock (a resume stamp at or after `locked_at`), the order chain's root
+    /// verifier unset (`unlock` refuses `RootVerifierNotSet`), a registry split, the order's pinned
+    /// slot expiring at or before `until`, the payout's own cutoff, inclusive (`expired_at`, plan 12 C:
+    /// a kill or a shorten of that slot counts, a rotation of any other slot does not, since no other
+    /// slot can co-sign the ad leg; for the cancel path the cutoff is the presentation cutoff, the
+    /// first second the unlock is refused, so a slot expiring exactly there still counts: one second
+    /// conservative, which only lengthens the maker's own refund, never moves a payout), or the pin
+    /// moved by a re-pin (`repin_order` refuses every pair signed under the old pin, and the slot
+    /// left behind may be dead, so the stamp denies on its own). The lock refused a dead slot and a
+    /// re-pin lands on a usable one, so any expiry the rule sees is after the lock. Every reference
+    /// is one the chain stamped (the lock)
+    /// or the caller derives from the signed deadline, never one the maker can choose later. No
+    /// registry wired means no lever 2 to read.
     fn co_sign_denied(
         env: &Env,
         maker: &Address,
@@ -1391,14 +1482,29 @@ impl AdManagerContract {
         order_hash: &BytesN<32>,
         until: u64,
     ) -> bool {
+        let order = storage::get_order(env, order_hash);
+        // A re-pin is the maker side's lever: it refused every pair under the old pin, and the slot
+        // it left may have died since. Denied for the rest of the order's life.
+        if order.repinned {
+            return true;
+        }
+        // A halt in force at any point since the lock: still on, or resumed at or after it (a halt
+        // from before the lock counts too: the lock never reads it).
         if let Some(h) = storage::get_halt(env, maker) {
-            if h.halted || h.last_resumed_at >= params.deadline {
+            if h.halted || h.last_resumed_at >= order.locked_at {
                 return true;
             }
         }
+        // An unset verifier refuses every co-signed unlock: deny. So does a verifier changed after
+        // the lock's second (set or repointed): the gap it opened in the co-signed path counts for
+        // the rest of the order's life, however it ended.
+        if storage::get_root_verifier(env, params.order_chain_id).is_none()
+            || storage::get_root_verifier_changed_at(env, params.order_chain_id) > order.locked_at
+        {
+            return true;
+        }
         // #465: the registry the order was locked under, not the live one: a migration mid-order
         // would otherwise read a registry that never saw the kill.
-        let order = storage::get_order(env, order_hash);
         let Some(registry) = storage::get_registry_at(env, order.registry_epoch) else {
             return false;
         };
@@ -1406,16 +1512,18 @@ impl AdManagerContract {
         if Self::registry_split(env, params.order_chain_id, Some(&registry)) {
             return true;
         }
-        let signer = &params.ad_settlement_signer;
-        let locked_at = order.locked_at;
         // D16: the order's life as a payout ends at the payout's own cutoff — the presentation
-        // cutoff for a cancel, the challenge deadline for a dispute — which the caller passes in.
-        // An expiry past it denied nothing; the bound moves only with a pause, which delays
-        // finalize as much. #461: no "no usable slot" term — the lock required one, so losing it
-        // by the cutoff is an expiry in the interval already.
-        proofbridge_core::cross_contract::any_slot_expired_within(
-            env, &registry, signer, locked_at, until,
-        )
+        // cutoff for a cancel, the challenge deadline for a dispute — which the caller passes in;
+        // the bound is plain time. Plan 12 C: only the pinned slot can co-sign the ad leg, and the
+        // lock refused a dead one (a re-pin refuses to leave one), so its own expiry is the one that
+        // counts; a rotation of any other slot denies nothing.
+        let e = proofbridge_core::cross_contract::expired_at(
+            env,
+            &registry,
+            &params.ad_settlement_signer,
+            order.pinned_slot,
+        );
+        e != 0 && e <= until
     }
 
     /// The one cancel clock `finalize_cancel` waits on and `cancel_finalizes_at` reports: the claim
@@ -1427,11 +1535,13 @@ impl AdManagerContract {
         order_hash: &BytesN<32>,
         t: &RouteTiming,
     ) -> Result<u64, AdManagerError> {
-        let end = Self::window_end(env, order_hash, 0, t.buffer);
-        if !Self::co_sign_denied(env, maker, params, order_hash, end.saturating_sub(t.margin)) {
+        // Only reached while `Claimed`, so the window's end is the claim's own `finalize_at`.
+        let end = Self::window_end(env, order_hash, params.deadline, t.buffer);
+        let cutoff = Self::presentation_cutoff(env, order_hash, params, t);
+        if !Self::co_sign_denied(env, maker, params, order_hash, cutoff) {
             return Ok(end);
         }
-        let grace = Self::evidence_grace(env, params.order_chain_id, t.buffer)?;
+        let grace = Self::evidence_grace(env, order_hash, params.order_chain_id, t.buffer)?;
         Ok(end.saturating_add(grace))
     }
 
@@ -1449,23 +1559,35 @@ impl AdManagerContract {
         {
             return Ok(until);
         }
-        let buffer = Self::timing(env, params.order_chain_id)?.buffer;
-        let grace = Self::evidence_grace(env, params.order_chain_id, buffer)?;
+        let buffer = Self::order_timing(env, order_hash, params.order_chain_id)?.buffer;
+        let grace = Self::evidence_grace(env, order_hash, params.order_chain_id, buffer)?;
         Ok(until.saturating_add(grace))
     }
 
     /// How long a denied order's cancel waits past its window: the order chain's anchor delay (the
     /// floor before a SETTLED root from there is usable here) plus the route's buffer (the allowance
     /// the route already gives a presenter for anchor cadence and submission). With no anchor wired
-    /// there is no evidence path either; the buffer alone then bounds the wait. An anchor that does
-    /// not answer is a refusal, as on EVM, never a shorter wait (review F5).
-    fn evidence_grace(env: &Env, order_chain_id: u128, buffer: u64) -> Result<u64, AdManagerError> {
-        let delay = match storage::get_root_anchor(env) {
-            None => 0,
-            Some(a) => proofbridge_core::cross_contract::anchor_delay(env, &a, order_chain_id)
-                .ok_or(AdManagerError::AnchorDelayUnreadable)?,
-        };
+    /// there is no evidence path either; the buffer alone then bounds the wait. The delay is
+    /// `max(at lock, current)`: raising it lengthens every pending grace, lowering it shortens none.
+    fn evidence_grace(
+        env: &Env,
+        order_hash: &BytesN<32>,
+        order_chain_id: u128,
+        buffer: u64,
+    ) -> Result<u64, AdManagerError> {
+        let snapshot = u64::from(storage::get_order(env, order_hash).anchor_delay);
+        let delay = Self::anchor_delay_now(env, order_chain_id)?.max(snapshot);
         Ok(delay.saturating_add(buffer))
+    }
+
+    /// The order chain's anchor delay as wired now (0 with no anchor). An anchor that does not
+    /// answer is a refusal, as on EVM, never a shorter wait.
+    fn anchor_delay_now(env: &Env, order_chain_id: u128) -> Result<u64, AdManagerError> {
+        match storage::get_root_anchor(env) {
+            None => Ok(0),
+            Some(a) => proofbridge_core::cross_contract::anchor_delay(env, &a, order_chain_id)
+                .ok_or(AdManagerError::AnchorDelayUnreadable),
+        }
     }
 
     fn require_finalizable(
@@ -1484,8 +1606,8 @@ impl AdManagerContract {
         Ok(ops::require_anchored(env, chain_id, root)?)
     }
 
-    fn open_claim(env: &Env, order_hash: &BytesN<32>, entry: ClaimEntry, finalize_at: u64) {
-        ops::open_claim(env, order_hash, entry, finalize_at)
+    fn open_claim(env: &Env, order_hash: &BytesN<32>, finalize_at: u64) {
+        ops::open_claim(env, order_hash, finalize_at)
     }
 
     fn fill(env: &Env, order_hash: &BytesN<32>, account: &BytesN<32>, by_evidence: bool) {

@@ -130,6 +130,15 @@ pub struct AdClosed {
 // Order Events
 // =============================================================================
 
+/// The order's co-signing pin moved (`repin_order`, plan 12 D12).
+#[contractevent(topics = ["ord_repin"], data_format = "vec")]
+pub struct OrderRepinned {
+    #[topic]
+    pub order_hash: BytesN<32>,
+    pub from_slot: u32,
+    pub to_slot: u32,
+}
+
 #[contractevent(topics = ["ord_lock"], data_format = "vec")]
 pub struct OrderLocked {
     #[topic]

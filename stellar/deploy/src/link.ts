@@ -1,5 +1,3 @@
-import * as fs from "fs";
-import { assertDisputeFitsBackstop } from "./dispute-fit.js";
 import { requireDeployEnv, stellarChainIdOrLocal } from "./deploy-env.js";
 import {
   readManifest,
@@ -19,12 +17,6 @@ export interface StellarLinkOptions {
   localManifest?: string;
   /** Path to the peer chain's manifest. Required. */
   peerManifest: string;
-  /**
-   * A-5: the peer chain's deploy env file. On a fresh deploy the peer has not linked yet, so its
-   * manifest carries no clocks or dispute params for this route; they are derived from its env
-   * file instead, so the first link can check both directions before sending its own values.
-   */
-  peerEnvFile?: string;
   /** Override local chain id (else STELLAR_CHAIN_ID, else the local id 1000001). */
   localChainId?: bigint;
   /**
@@ -75,32 +67,9 @@ export async function link(
 
   const peerChainId = peer.chain.chainId;
 
-  // C-10: before anything on this route is sent, the follower's backstop must outlast the primary's
-  // worst-case dispute, both ways. The peer's side is read from its manifest; unset there, its link checks.
-  {
-    const localKey = String(local.chain.chainId);
-    const peerKey = String(peerChainId);
-    const checked = assertDisputeFitsBackstop(
-      {
-        disputeModule: !!local.contracts.disputeManager,
-        timing: routeTimingFromEnv(local.meta.env),
-        dispute: local.contracts.disputeManager ? disputeParamsFromEnv(local.meta.env) : undefined,
-        anchorDelay: process.env.ANCHOR_DELAY_S ?? "0",
-      },
-      peerSide(peer, localKey, opts.peerEnvFile),
-      "link",
-    );
-    // A-5: nothing this link sends may go unchecked. If the peer's side is not recorded and no env
-    // file was given for it, refuse rather than leave "the peer's link will check" — by then a too
-    // short backstop would already be on this chain.
-    if (checked.length < 2) {
-      throw new Error(
-        `link: the route to ${peerKey} could not be checked in both directions (checked: ${checked.join(", ") || "none"}). ` +
-          `The peer has not linked yet; pass --peer-env <the peer chain's env file> so its clocks and dispute params can be derived, or link the peer first.`,
-      );
-    }
-    console.log(`  [check] dispute fits the follower's backstop (${peerKey}): ${checked.join(", ")}`);
-  }
+  // Every clock and dispute param is read before anything is sent: a missing one refuses the link up front.
+  routeTimingFromEnv(local.meta.env);
+  if (local.contracts.disputeManager) disputeParamsFromEnv(local.meta.env);
   assertPeerCompatible(local, peer);
 
   const registryOf = (v: string): string => readView(v, "registry") as string;
@@ -224,7 +193,7 @@ export async function link(
   }
 
   // ── Termination clocks + notary reference for the peer route (2.3e) ──
-  // ROUTE_{MIN_WINDOW,BUFFER,MARGIN,LONG_BACKSTOP,CLAIM_STAGGER}_S. Local deploys default to
+  // ROUTE_{MIN_WINDOW,BUFFER,MARGIN,CLAIM_STAGGER}_S. Local deploys default to
   // the smallest legal clocks; anywhere else every variable must be set explicitly, like the
   // anchor delay — a forgotten clock must not ship a default and record it as intended.
   {
@@ -242,21 +211,26 @@ export async function link(
       min_window: u64("ROUTE_MIN_WINDOW_S", timing.minWindow),
       buffer: u64("ROUTE_BUFFER_S", timing.buffer),
       margin: u64("ROUTE_MARGIN_S", timing.margin),
-      long_backstop: u64("ROUTE_LONG_BACKSTOP_S", timing.longBackstop),
       claim_stagger: u64("ROUTE_CLAIM_STAGGER_S", timing.claimStagger),
     });
+    // Each set writes a new version (the first creates version 1); compare the current one.
+    const lastJson = (out: string) => JSON.parse(out.split("\n").filter(Boolean).pop() ?? "null");
     const timingAlreadySet = (escrow: string): boolean => {
       try {
-        const out = invokeContract(escrow, "get_route_timing", ["--chain_id", peerChainId], {
-          send: false,
-        });
-        const parsed = JSON.parse(out.split("\n").filter(Boolean).pop() ?? "null");
+        const version = lastJson(
+          invokeContract(escrow, "timing_version", ["--chain_id", peerChainId], { send: false }),
+        );
+        if (!version) return false;
+        const parsed = lastJson(
+          invokeContract(escrow, "route_timing_at", ["--chain_id", peerChainId, "--version", String(version)], {
+            send: false,
+          }),
+        );
         return (
           !!parsed &&
           BigInt(parsed.min_window) === BigInt(timing.minWindow) &&
           BigInt(parsed.buffer) === BigInt(timing.buffer) &&
           BigInt(parsed.margin) === BigInt(timing.margin) &&
-          BigInt(parsed.long_backstop) === BigInt(timing.longBackstop) &&
           BigInt(parsed.claim_stagger) === BigInt(timing.claimStagger)
         );
       } catch {
@@ -273,7 +247,7 @@ export async function link(
         continue;
       }
       if (acting.call(escrow, name, "set_route_timing", ["--chain_id", peerChainId, "--timing", timingArg],
-        `${name}.set_route_timing(${peerChainId}, minWindow=${timing.minWindow}s buffer=${timing.buffer}s margin=${timing.margin}s longBackstop=${timing.longBackstop}s claimStagger=${timing.claimStagger}s)`)) chainTxs++;
+        `${name}.set_route_timing(${peerChainId}, minWindow=${timing.minWindow}s buffer=${timing.buffer}s margin=${timing.margin}s claimStagger=${timing.claimStagger}s)`)) chainTxs++;
       else onChain = false;
     }
     if (onChain) {
@@ -337,9 +311,10 @@ export async function link(
       }
     }
 
-    // DISPUTE_{CHALLENGE_PERIOD_S,BOND_FLOOR,BOND_BPS}. Same rule as the clocks and the anchor
-    // delay: local deploys get the smallest legal values, anywhere else every variable is
-    // explicit, because a bond that silently defaults is a bond nobody chose.
+    // DISPUTE_{CHALLENGE_PERIOD_S,BOND_FLOOR}. Same rule as the clocks and the anchor delay: local
+    // deploys get the smallest legal values, anywhere else every variable is explicit, because a
+    // bond that silently defaults is a bond nobody chose. The floor is the whole bond: one flat
+    // amount per route, in this chain's wrapped native.
     const params = disputeParamsFromEnv(local.meta.env);
     // u64/u32 slots go out as JSON numbers (a string there is read as an enum variant name);
     // the u128 bond floor goes out as a string, which is how the CLI carries a u128.
@@ -352,24 +327,21 @@ export async function link(
     const paramsArg = JSON.stringify({
       challenge_period: Number(challengePeriod),
       bond_floor: params.bondFloor,
-      bond_bps: params.bondBps,
     });
     const cur = readOne(moduleAddr, "dispute_params", ["--chain_id", peerChainId]) as {
       challenge_period?: string | number;
       bond_floor?: string | number;
-      bond_bps?: string | number;
     } | null;
     const same =
       !!cur &&
       BigInt(cur.challenge_period ?? -1) === challengePeriod &&
-      BigInt(cur.bond_floor ?? -1) === BigInt(params.bondFloor) &&
-      Number(cur.bond_bps ?? -1) === params.bondBps;
+      BigInt(cur.bond_floor ?? -1) === BigInt(params.bondFloor);
     let onChain = same;
     if (onChain) {
       console.log(`  [skip] DisputeManager.set_dispute_params(${peerChainId}) already set`);
     } else {
       onChain = acting.call(moduleAddr, "DisputeManager", "set_dispute_params", ["--chain_id", peerChainId, "--params", paramsArg],
-        `DisputeManager.set_dispute_params(${peerChainId}, challengePeriod=${params.challengePeriod}s bondFloor=${params.bondFloor} bondBps=${params.bondBps})`);
+        `DisputeManager.set_dispute_params(${peerChainId}, challengePeriod=${params.challengePeriod}s bondFloor=${params.bondFloor})`);
       if (onChain) chainTxs++;
     }
     if (onChain) {
@@ -437,11 +409,25 @@ export async function link(
 export type { ChainDeploymentManifest };
 
 /**
- * The dispute params from env, same rule as the clocks. The contract's floor is 1 hour and its bond
- * cap is 10%; both are re-checked by the manifest schema, so a bad value fails before a transaction.
+ * The smallest floor `link` accepts outside `local`: 1 XLM (10^7 stroops). The floor is the whole
+ * bond, so a dust floor makes a dispute free in practice. A sanity bound, not the tuned value: the
+ * operating rules size each route's floor above it.
  */
-function disputeParamsFromEnv(env: string, vars: Record<string, string | undefined> = process.env): DisputeParams {
+export const MIN_BOND_FLOOR_OUTSIDE_LOCAL = 10_000_000n;
+
+/**
+ * The contract's challenge period is 1 hour to 7 days and its bond floor at least 1; both are
+ * re-checked by the manifest schema, so a bad value fails before it reaches a transaction. Outside
+ * `local` the floor must also clear `MIN_BOND_FLOOR_OUTSIDE_LOCAL`, and a `DISPUTE_BOND_BPS` left in
+ * the env is refused: the percentage term is gone, so a value there would be silently ignored.
+ */
+export function disputeParamsFromEnv(env: string, vars: Record<string, string | undefined> = process.env): DisputeParams {
   const isLocal = env === "local";
+  if (vars.DISPUTE_BOND_BPS !== undefined) {
+    throw new Error(
+      "link: DISPUTE_BOND_BPS is set, but the percentage term was removed: the bond is the route's flat DISPUTE_BOND_FLOOR. Unset it",
+    );
+  }
   const read = (name: string, localDefault: string): string => {
     const v = vars[name];
     if (v !== undefined) {
@@ -453,46 +439,22 @@ function disputeParamsFromEnv(env: string, vars: Record<string, string | undefin
       `link: ${name} is unset for env=${env}; set every DISPUTE_* parameter or deploy with DEPLOY_ENV=local`,
     );
   };
+  // 1, not 0: `Dispute.validate` rejects a zero floor, because the floor is the whole bond and a
+  // zero one is a free dispute. "The smallest legal value" is the rule everywhere here, and for
+  // this parameter the smallest legal value is one. Outside local there is no default.
+  const bondFloor = read("DISPUTE_BOND_FLOOR", "1");
+  if (!isLocal && BigInt(bondFloor) < MIN_BOND_FLOOR_OUTSIDE_LOCAL) {
+    throw new Error(
+      `link: DISPUTE_BOND_FLOOR=${bondFloor} is below the ${MIN_BOND_FLOOR_OUTSIDE_LOCAL} minimum for env=${env}; the floor is the whole bond, so a dust floor makes disputes free`,
+    );
+  }
   return {
     challengePeriod: read("DISPUTE_CHALLENGE_PERIOD_S", "3600"),
-    // 1, not 0: `Dispute.validate` rejects a zero floor, because a zero floor with a zero bps
-    // is a free dispute. "The smallest legal value" is the rule everywhere here, and for this
-    // parameter the smallest legal value is one.
-    bondFloor: read("DISPUTE_BOND_FLOOR", "1"),
-    bondBps: Number(read("DISPUTE_BOND_BPS", "0")),
+    bondFloor,
   };
 }
 
 /** The route clocks from env: local deploys get the smallest legal set; elsewhere every var is required. */
-/**
- * The peer's side of the route: what its manifest recorded, else (A-5) what its env file says its
- * link will set. `local` here is the peer's view of THIS chain.
- */
-export function peerSide(peer: ChainDeploymentManifest, localKey: string, peerEnvFile: string | undefined) {
-  const recorded = {
-    disputeModule: !!peer.contracts.disputeManager,
-    timing: peer.routeTiming?.[localKey],
-    dispute: peer.disputeParams?.[localKey],
-    anchorDelay: peer.rootAnchorConfig?.anchorDelays?.[localKey],
-  };
-  // Complete when the peer's link recorded its clocks and (where it has a dispute module) its params.
-  const complete = !!recorded.timing && (!!recorded.dispute || !peer.contracts.disputeManager);
-  if (complete) return recorded;
-  // A local pair needs no env file: both sides run the local defaults, which is exactly what the
-  // peer's link will set. A real network's peer must be linked already or described by --peer-env.
-  if (!peerEnvFile && peer.meta.env !== "local") return recorded;
-  const vars = peerEnvFile ? readEnvFile(peerEnvFile) : {};
-  const env = vars.DEPLOY_ENV ?? peer.meta.env;
-  // Only what the peer has not recorded is derived (a redeployed dispute module, for instance,
-  // has clocks on record but no params until the peer links again).
-  return {
-    disputeModule: recorded.disputeModule,
-    timing: recorded.timing ?? routeTimingFromEnv(env, vars),
-    dispute: recorded.dispute ?? (peer.contracts.disputeManager ? disputeParamsFromEnv(env, vars) : undefined),
-    anchorDelay: recorded.anchorDelay ?? vars.ANCHOR_DELAY_S ?? "0",
-  };
-}
-
 function routeTimingFromEnv(env: string, vars: Record<string, string | undefined> = process.env): RouteTiming {
   const local = env === "local";
   const read = (name: string, localDefault: string): string => {
@@ -506,30 +468,22 @@ function routeTimingFromEnv(env: string, vars: Record<string, string | undefined
       `link: ${name} is unset for env=${env}; set every ROUTE_*_S clock (seconds) or deploy with DEPLOY_ENV=local`,
     );
   };
-  return {
+  const timing = {
     minWindow: read("ROUTE_MIN_WINDOW_S", "0"),
     buffer: read("ROUTE_BUFFER_S", "1800"),
     margin: read("ROUTE_MARGIN_S", "0"),
-    longBackstop: read("ROUTE_LONG_BACKSTOP_S", "86400"),
     claimStagger: read("ROUTE_CLAIM_STAGGER_S", "0"),
   };
+  // Mirror of `RouteTiming.validate` / `timing::validate` field 2 (`margin <= buffer / 2`): refused
+  // here, before anything is sent. The contract stays the authority; a change to the cap touches both.
+  if (BigInt(timing.margin) > BigInt(timing.buffer) / 2n) {
+    throw new Error(
+      `link: ROUTE_MARGIN_S=${timing.margin} exceeds half of ROUTE_BUFFER_S=${timing.buffer}; the escrows refuse a margin above half the buffer`,
+    );
+  }
+  return timing;
 }
 
-/** KEY=VALUE lines of an env file (the deploy env files), `#` comments and blanks skipped. */
-export function readEnvFile(file: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const raw of fs.readFileSync(file, "utf8").split("\n")) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq <= 0) continue;
-    const key = line.slice(0, eq).trim().replace(/^export\s+/, "");
-    let value = line.slice(eq + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
-    out[key] = value;
-  }
-  return out;
-}
 
 /**
  * A-6: two chains linked into one route must have been deployed for the same environment and

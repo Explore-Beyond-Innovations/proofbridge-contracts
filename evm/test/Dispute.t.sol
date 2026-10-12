@@ -13,6 +13,7 @@ import {AdManagerTest} from "./Admanager.t.sol";
 import {CancellationHarness} from "./Cancellation.t.sol";
 import {IRootAnchor} from "src/interfaces/IRootAnchor.sol";
 import {RootAnchor} from "src/RootAnchor.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 /*//////////////////////////////////////////////////////////////
        2.3g — disputes, with the lifecycle in its own contract
@@ -50,7 +51,6 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
     uint64 internal constant CHALLENGE = 2 hours;
     uint128 internal constant BOND_FLOOR = 1 ether;
-    uint16 internal constant BOND_BPS = 100; // 1%
 
     function setUp() public virtual override {
         super.setUp();
@@ -59,9 +59,9 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         dm.setEscrow(address(adManager), true);
         dm.setArbiter(arbiter);
         dm.setProtocolFeePool(feePool);
-        dm.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        dm.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR));
         adManager.setDisputeManager(IDisputeManager(address(dm)));
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 0));
         vm.stopPrank();
         filer = recipient;
         anchor = _anchorOf(admin, address(this));
@@ -102,7 +102,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     }
 
     function _file(IAdManager.OrderParams memory p, address who) internal returns (uint256 bond) {
-        bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        bond = BOND_FLOOR;
         vm.deal(who, bond);
         vm.prank(who);
         adManager.dispute{value: bond}(p, bytes32("evidence"));
@@ -114,7 +114,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     /// failure on either side of the call must leave neither half-updated.
     function test_boundary_filingIsAtomicAcrossBothContracts() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(1);
-        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint256 bond = BOND_FLOOR;
 
         // Under-funding fails inside the *module*, after the escrow has already written Disputed.
         vm.deal(filer, bond);
@@ -125,7 +125,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         adManager.dispute{value: bond - 1}(p, bytes32(0));
 
         // Neither side kept anything: the escrow's status rolled back with the module's record.
-        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Open), "escrow rolled back");
+        assertEq(uint8(statusOf(address(adManager), h)), uint8(IEscrow.Status.Open), "escrow rolled back");
         assertFalse(dm.isDisputed(h), "module rolled back");
     }
 
@@ -143,7 +143,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     function test_boundary_moduleHasNoWriteAccessToTheEscrow() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(3);
         _file(p, filer);
-        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Disputed));
+        assertEq(uint8(statusOf(address(adManager), h)), uint8(IEscrow.Status.Disputed));
         // The escrow exposes no dispute-status setter at all, to the module or anyone else.
         (bool ok,) = address(adManager).call(abi.encodeWithSignature("setDisputeOpen(bytes32,bool)", h, false));
         assertFalse(ok, "no such entry point exists");
@@ -173,15 +173,44 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         dm.resolveDispute(h, Dispute.Outcome.MutualRefund);
     }
 
-    /// T-23: the bond is `max(floor, bps x amount)`, and both terms are per route.
-    function test_t23_bondScalesWithTheOrder() public pure {
-        Dispute.Params memory p = Dispute.Params(2 hours, 1 ether, 100); // 1%
-        // Floor dominates a small order.
-        assertEq(Dispute.bondFor(10 ether, p), 1 ether);
-        // The percentage dominates a large one.
-        assertEq(Dispute.bondFor(1000 ether, p), 10 ether);
-        // Exactly at the crossover the floor still wins (>= keeps it non-zero).
-        assertEq(Dispute.bondFor(100 ether, p), 1 ether);
+    /// T-23: the bond is the route's flat floor; nothing else sizes it.
+    function test_t23_bondIsTheRouteFloor() public pure {
+        assertEq(Dispute.bondFor(Dispute.Params(2 hours, 1 ether)), 1 ether);
+        assertEq(Dispute.bondFor(Dispute.Params(2 hours, 1)), 1, "the smallest legal floor");
+        assertEq(Dispute.bondFor(Dispute.Params(7 days, 250 ether)), 250 ether, "a large-order route");
+    }
+
+    /// The bond is the floor for any order amount and any order-token decimals: a dust order and
+    /// orders that together lock half the ad, in 6-, 18- and 30-decimal order units, all pay exactly
+    /// `bondFor(peerChainId)`, which is the floor. One wei more is refused.
+    function test_bondIsTheFloorForAnyAmountAndDecimals() public {
+        test_fundAd_makerOnly();
+        (,,,,,,, uint256 balance,) = adManager.ads(lastAdId);
+        uint8[3] memory decimals = [uint8(6), 18, 30];
+        // In order-token units; the ad token has 18 decimals.
+        uint256[3] memory amounts = [uint256(1), balance / 4, (balance / 4) * 1e12];
+        for (uint256 i = 0; i < 3; i++) {
+            IAdManager.OrderParams memory p = _defaultParams(lastAdId);
+            p.orderDecimals = decimals[i];
+            p.amount = amounts[i];
+            p.salt = 9_000 + i;
+            vm.prank(maker);
+            bytes32 h = adManager.lockForOrder(p, 0);
+
+            assertEq(dm.bondFor(orderChainId), BOND_FLOOR, "the quote is the floor");
+            vm.deal(filer, BOND_FLOOR + 1);
+            vm.prank(filer);
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    DisputeManager.DisputeManager__NativeAmountMismatch.selector, BOND_FLOOR + 1, BOND_FLOOR
+                )
+            );
+            adManager.dispute{value: BOND_FLOOR + 1}(p, bytes32("evidence"));
+            vm.prank(filer);
+            adManager.dispute{value: BOND_FLOOR}(p, bytes32("evidence"));
+            (, uint128 bond,,,,,,) = dm.disputes(h);
+            assertEq(bond, BOND_FLOOR, "filing took the floor");
+        }
     }
 
     /// The parameters fail closed: an unconfigured route cannot be disputed for free.
@@ -189,10 +218,10 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         (IAdManager.OrderParams memory p,) = _lockedOrder(6);
         vm.prank(admin);
         // A different peer chain has no params.
-        dm.setDisputeParams(orderChainId + 1, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        dm.setDisputeParams(orderChainId + 1, Dispute.Params(CHALLENGE, BOND_FLOOR));
         vm.startPrank(admin);
         vm.expectRevert(abi.encodeWithSelector(Dispute.Dispute__InvalidParams.selector, 1));
-        dm.setDisputeParams(orderChainId, Dispute.Params(1 minutes, BOND_FLOOR, BOND_BPS));
+        dm.setDisputeParams(orderChainId, Dispute.Params(1 minutes, BOND_FLOOR));
         vm.stopPrank();
         // And the validated one is still in force.
         _file(p, filer);
@@ -216,28 +245,79 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
         _warpPastWindow(h);
         adManager.finalizeDispute(p); // now allowed: the fallback applies
-        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Resolved));
+        assertEq(uint8(statusOf(address(adManager), h)), uint8(IEscrow.Status.Resolved));
     }
 
-    /// c41-J: a pause between the lock and the filing extends the bridger's unlock on this leg; the
-    /// dispute's floor must carry it too, or the fallback ends the order while the payout is valid.
-    function test_j_fallbackCarriesAPauseBeforeTheFiling() public {
+    /// A pause stops entries only: filing, answering and finalizing all work while paused, and a pause
+    /// before or after the filing moves no deadline.
+    function test_pause_movesNoDisputeDeadline_andEveryDisputeDoorStaysOpen() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(30);
         vm.prank(admin);
         adManager.pause();
         vm.warp(block.timestamp + 3 hours);
-        vm.prank(admin);
-        adManager.unpause();
         _file(p, filer);
         uint256 until_ = dm.effectiveChallengeDeadline(h);
-        assertEq(until_, p.deadline + 30 minutes + 3 hours, "the floor carries the pause since the lock");
+        assertEq(until_, p.deadline + 30 minutes, "the floor is plain time");
+        vm.prank(maker);
+        adManager.respondToDispute(p, bytes32("answer"));
+        vm.warp(until_ - 1);
+        vm.prank(admin);
+        adManager.unpause();
+        assertEq(dm.effectiveChallengeDeadline(h), until_, "an unpause moves nothing");
 
-        vm.warp(p.deadline + 30 minutes + 1); // the old floor: the unlock is still open here
+        vm.prank(admin);
+        adManager.pause();
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeNotResolved.selector, h));
         adManager.finalizeDispute(p);
-        vm.warp(until_ + 1);
+        vm.warp(until_);
         adManager.finalizeDispute(p);
-        assertEq(uint256(adManager.orders(h)), uint256(IEscrow.Status.Resolved));
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Resolved));
+    }
+
+    /// One deadline per record, in plain time: filing writes max(now + challenge, deadline + buffer),
+    /// a ruling writes max(now, deadline) + buffer, and the buffer is the order's own timing version's,
+    /// not the live one. `windowOver` and the finalize check flip on the same second.
+    function test_plainTime_filingAndRulingDeadlines() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(70);
+        (IAdManager.OrderParams memory q, bytes32 hq) =
+            _openOrder(lastAdId, address(adToken), 60 ether, 71, bridger, recipient);
+        (IAdManager.OrderParams memory r, bytes32 hr) =
+            _openOrder(lastAdId, address(adToken), 60 ether, 72, bridger, recipient);
+        vm.prank(admin);
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 2 hours, 0, 0));
+
+        // The floor arm, from the order's 30-minute buffer.
+        _file(p, filer);
+        assertEq(dm.effectiveChallengeDeadline(h), p.deadline + 30 minutes, "filing: the floor arm");
+        // A ruling before the deadline still waits for it.
+        _file(r, filer);
+        vm.prank(arbiter);
+        dm.resolveDispute(hr, Dispute.Outcome.MutualRefund);
+        assertEq(dm.effectiveChallengeDeadline(hr), r.deadline + 30 minutes, "ruling: before the deadline");
+
+        // The challenge arm: filed close to the deadline.
+        vm.warp(q.deadline - 10 minutes);
+        _file(q, filer);
+        assertEq(dm.effectiveChallengeDeadline(hq), block.timestamp + CHALLENGE, "filing: the challenge arm");
+
+        // A ruling after the deadline: now + buffer.
+        vm.warp(p.deadline + 10 minutes);
+        vm.prank(arbiter);
+        dm.resolveDispute(h, Dispute.Outcome.MutualRefund);
+        uint256 end = p.deadline + 40 minutes;
+        assertEq(dm.effectiveChallengeDeadline(h), end, "ruling: after the deadline");
+
+        vm.warp(end - 1);
+        (, bool windowOver,) = dm.outcomeOf(h);
+        assertFalse(windowOver);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeNotResolved.selector, h));
+        adManager.finalizeDispute(p);
+        vm.warp(end);
+        (, windowOver,) = dm.outcomeOf(h);
+        assertTrue(windowOver);
+        assertEq(adManager.disputeFinalizesAt(p), end);
+        adManager.finalizeDispute(p);
+        assertEq(uint256(statusOf(address(adManager), h)), uint256(IEscrow.Status.Resolved));
     }
 
     /// T-13: `inFlightOf` returns to zero on `Resolved`, as on every other terminal.
@@ -251,7 +331,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         _warpPastWindow(h);
         adManager.finalizeDispute(p);
 
-        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Resolved));
+        assertEq(uint8(statusOf(address(adManager), h)), uint8(IEscrow.Status.Resolved));
         assertEq(adManager.inFlightOf(p.adSettlementSigner), 0);
     }
 
@@ -282,7 +362,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         _warpPastWindow(h);
         adManager.finalizeDispute(p); // must not revert
 
-        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Resolved));
+        assertEq(uint8(statusOf(address(adManager), h)), uint8(IEscrow.Status.Resolved));
         assertGt(dm.claimable(refuser), 0, "credited instead of pushed");
     }
 
@@ -303,7 +383,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     /// cancel it. Filing is restricted to the order's two parties.
     function test_onlyAPartyMayFile() public {
         (IAdManager.OrderParams memory p,) = _lockedOrder(20);
-        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint256 bond = BOND_FLOOR;
         vm.deal(stranger, bond);
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__NotAParty.selector, stranger));
@@ -336,7 +416,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
         _presentSettledOn(p, h);
 
-        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Filled), "evidence terminated it");
+        assertEq(uint8(statusOf(address(adManager), h)), uint8(IEscrow.Status.Filled), "evidence terminated it");
         assertFalse(dm.isDisputed(h), "and closed the dispute with it");
         assertEq(_wNativeToken.balanceOf(address(dm)), 0, "no bond left stranded in the module");
     }
@@ -354,6 +434,122 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
         assertEq(filer.balance, 0, "a disproved filer does not get the bond back");
         assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, bond, "it went to the fee pool");
+    }
+
+    /// Who the bond goes to on an evidence close, pinned per filer. A bridger who filed against a
+    /// payout nobody denied disputed a settleable trade: the fee pool takes the bond.
+    function test_evidenceClose_bridgerFiled_bondToTheFeePool() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(25);
+        uint256 bond = _file(p, filer);
+        _presentSettledOn(p, h);
+        assertEq(filer.balance + _wNativeToken.balanceOf(filer), 0, "the bridger's bond is not returned");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, bond, "the fee pool took it");
+    }
+
+    /// The maker filed and evidence then settled the trade: the fee pool takes the bond.
+    function test_evidenceClose_makerFiled_bondToTheFeePool() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(26);
+        uint256 bond = _file(p, maker);
+        _presentSettledOn(p, h);
+        assertEq(maker.balance + _wNativeToken.balanceOf(maker), 0, "the maker's bond is not returned");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, bond, "the fee pool took it");
+    }
+
+    /// A bridger who filed while the maker halted, then won by evidence, had reason to file: the
+    /// bond comes back to it. The outcome stays `TradeProceeds`; only the recipient changes.
+    function test_evidenceClose_bridgerFiled_haltedMaker_bondBackToTheBridger() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(27);
+        vm.prank(maker);
+        adManager.haltSettlement();
+        uint256 bond = _file(p, filer);
+        bytes32 root = bytes32(uint256(0xf00d) + nextSeq);
+        anchor.anchor(orderChainId, root, nextSeq++);
+        vm.expectEmit(true, true, true, true, address(dm));
+        emit DisputeManager.BondRouted(h, filer, uint128(bond), true);
+        adManager.presentSettled(p, root, hex"");
+        assertEq(filer.balance + _wNativeToken.balanceOf(filer), bond, "the bridger's bond is back");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, 0, "the fee pool took nothing");
+    }
+
+    /// The co-signed unlock is an evidence close too: a halt held since the lock and lifted before
+    /// the unlock still denied the payout while it held.
+    function test_evidenceClose_byCoSignedUnlock_haltSinceTheLock_bondBackToTheBridger() public {
+        (IAdManager.OrderParams memory p,) = _lockedOrder(28);
+        vm.prank(maker);
+        adManager.haltSettlement();
+        uint256 bond = _file(p, filer);
+        vm.warp(block.timestamp + 1);
+        vm.prank(maker);
+        adManager.resumeSettlement();
+        adManager.unlock(p, bytes32(uint256(0x2828)), bytes32(0), hex"", hex"");
+        assertEq(filer.balance + _wNativeToken.balanceOf(filer), bond, "the bridger's bond is back");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, 0, "the fee pool took nothing");
+    }
+
+    /// An unwired order-chain verifier denies the payout like a halt: a bridger filer gets its bond
+    /// back when evidence settles the trade.
+    function test_evidenceClose_bridgerFiled_verifierUnset_bondBackToTheBridger() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(29);
+        uint256 bond = _file(p, filer);
+        vm.prank(admin);
+        adManager.setRootVerifier(orderChainId, address(0));
+        _presentSettledOn(p, h);
+        assertEq(filer.balance + _wNativeToken.balanceOf(filer), bond, "the bridger's bond is back");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, 0, "the fee pool took nothing");
+    }
+
+    /// A verifier unset after the lock and wired again before the proof lands: the gap it opened is
+    /// stamped (`_rootVerifierChangedAt`), so the rule is still read as denied at close time and the
+    /// bridger's bond comes back although the verifier is in place again. Without the stamp, the
+    /// rewire would erase the denial and the fee pool would take the bond.
+    function test_evidenceClose_bridgerFiled_verifierRewiredSinceTheLock_bondBackToTheBridger() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(33);
+        address verifier = address(adManager.rootVerifier(orderChainId));
+        uint256 bond = _file(p, filer);
+        vm.warp(block.timestamp + 10);
+        vm.startPrank(admin);
+        adManager.setRootVerifier(orderChainId, address(0));
+        adManager.setRootVerifier(orderChainId, verifier);
+        vm.stopPrank();
+        assertEq(address(adManager.rootVerifier(orderChainId)), verifier, "the verifier is wired again");
+        _presentSettledOn(p, h);
+        assertEq(filer.balance + _wNativeToken.balanceOf(filer), bond, "the bridger's bond is back");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, 0, "the fee pool took nothing");
+    }
+
+    /// The third denial lever: a slot of the signer expiring between the lock and the presentation
+    /// cutoff (a kill, a shorten) denied the payout, so a bridger filer gets its bond back. The expiry
+    /// sits strictly after the lock, so a close that reads only the lock's second misses it.
+    function test_evidenceClose_bridgerFiled_signerExpiredSinceTheLock_bondBackToTheBridger() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(31);
+        vm.warp(block.timestamp + 10);
+        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(block.timestamp));
+        uint256 bond = _file(p, filer);
+        _presentSettledOn(p, h);
+        assertEq(filer.balance + _wNativeToken.balanceOf(filer), bond, "the bridger's bond is back");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, 0, "the fee pool took nothing");
+    }
+
+    /// A rotation whose old slot outlives the presentation cutoff put no expiry in the payout's
+    /// life: nothing was denied, so the fee pool takes the bond as for any other needless filing.
+    function test_evidenceClose_bridgerFiled_slotOutlivingTheCutoff_bondToTheFeePool() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(32);
+        keyRegistry.addSlotExpiry(p.adSettlementSigner, uint64(p.deadline + 2 days));
+        uint256 bond = _file(p, filer);
+        _presentSettledOn(p, h);
+        assertEq(filer.balance + _wNativeToken.balanceOf(filer), 0, "the bridger's bond is not returned");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, bond, "the fee pool took it");
+    }
+
+    /// The maker filed against its own halted order: unchanged, the fee pool takes the bond.
+    function test_evidenceClose_makerFiled_haltedMaker_bondStillToTheFeePool() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(30);
+        vm.prank(maker);
+        adManager.haltSettlement();
+        uint256 bond = _file(p, maker);
+        _presentSettledOn(p, h);
+        assertEq(maker.balance + _wNativeToken.balanceOf(maker), 0, "the maker's bond is not returned");
+        assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, bond, "the fee pool took it");
     }
 
     /// B3: a ruling opens a window rather than paying. One issued a second before the deadline must
@@ -383,7 +579,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
         vm.prank(maker);
         adManager.respondToDispute(p, bytes32("response"));
-        (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        (,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
         assertEq(responderEvidence, bytes32("response"), "the counterparty's hash is recorded");
     }
 
@@ -398,7 +594,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__AlreadyResponded.selector, h));
         adManager.respondToDispute(p, bytes32("second"));
-        (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        (,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
         assertEq(responderEvidence, bytes32("first"), "the first answer stands");
     }
 
@@ -417,20 +613,21 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         adManager.respondToDispute(p, bytes32("on time"));
     }
 
-    /// D5: the answer deadline is the effective one, so a pause after the filing moves it.
-    function test_d5_aPauseMovesTheAnswerDeadline() public {
+    /// D5: a pause after the filing leaves the answer deadline where it was, and answering stays open.
+    function test_d5_aPauseLeavesTheAnswerDeadline() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(29);
         _file(p, filer);
         uint256 until = dm.effectiveChallengeDeadline(h);
         vm.prank(admin);
         adManager.pause();
-        vm.warp(block.timestamp + 1 hours);
-        vm.prank(admin);
-        adManager.unpause();
-        assertEq(dm.effectiveChallengeDeadline(h), until + 1 hours);
         vm.warp(until);
+        assertEq(dm.effectiveChallengeDeadline(h), until);
         vm.prank(maker);
-        adManager.respondToDispute(p, bytes32("still open"));
+        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__ResponseWindowClosed.selector, until));
+        adManager.respondToDispute(p, bytes32("late"));
+        vm.warp(until - 1);
+        vm.prank(maker);
+        adManager.respondToDispute(p, bytes32("on time"));
     }
 
     /// D5 (R1, 2026-10-05): the ruling closes the answer window. Without the guard the record's
@@ -444,7 +641,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__AlreadyRuled.selector, h));
         adManager.respondToDispute(p, bytes32("too late"));
-        (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        (,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
         assertEq(responderEvidence, bytes32(0), "nothing recorded");
     }
 
@@ -455,7 +652,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         vm.prank(maker);
         vm.expectRevert(DisputeManager.DisputeManager__ZeroResponse.selector);
         adManager.respondToDispute(p, bytes32(0));
-        (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        (,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
         assertEq(responderEvidence, bytes32(0));
     }
 
@@ -463,33 +660,21 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     /// so no surplus is ever wrapped and nothing needs refunding.
     /// 49E-2: the bond is exact, so the amount is quoted by the contract, not re-derived by clients.
     function test_49e2_bondForQuotesWhatTheFilingRequires() public {
-        assertEq(
-            dm.bondFor(60 ether, orderChainId),
-            Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS))
-        );
-        assertEq(dm.bondFor(1, orderChainId), BOND_FLOOR, "the floor dominates a tiny amount");
-        vm.expectRevert();
-        dm.bondFor(60 ether, orderChainId + 7);
+        assertEq(dm.bondFor(orderChainId), BOND_FLOOR);
+        vm.expectRevert(abi.encodeWithSelector(Dispute.Dispute__NoParams.selector, orderChainId + 7));
+        dm.bondFor(orderChainId + 7);
     }
 
-    /// 49E-2: above the floor the bond is BOND_BPS of the amount; the literals are 1% of each amount.
-    function test_49e2_bondForScalesAboveTheFloor() public view {
-        assertEq(dm.bondFor(500 ether, orderChainId), 5 ether, "1% of 500 is above the 1-ether floor");
-        assertEq(dm.bondFor(1000 ether, orderChainId), 10 ether, "and follows the amount");
-        assertEq(dm.bondFor(1000 ether + 12_300, orderChainId), 10 ether + 123, "to the wei");
-    }
-
-    /// 49E-2: at the boundary 1% of the amount equals the floor; one step past it the percentage wins.
-    function test_49e2_bondForAtTheFloorBoundary() public view {
-        assertEq(dm.bondFor(100 ether, orderChainId), 1 ether, "1% of 100 is exactly the floor");
-        assertEq(dm.bondFor(100 ether + 99, orderChainId), 1 ether, "rounds down onto the floor");
-        assertEq(dm.bondFor(100 ether + 100, orderChainId), 1 ether + 1, "one wei of bond past the floor");
-        assertEq(dm.bondFor(100 ether - 100, orderChainId), 1 ether, "just below: the floor");
+    /// 49E-2: the quote follows the route's floor when the admin retunes it.
+    function test_49e2_bondForFollowsTheRouteFloor() public {
+        vm.prank(admin);
+        dm.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, 3 ether));
+        assertEq(dm.bondFor(orderChainId), 3 ether);
     }
 
     function test_c17_bondMustBeExact() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(26);
-        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint256 bond = BOND_FLOOR;
         vm.deal(filer, bond * 2);
 
         vm.prank(filer);
@@ -522,8 +707,22 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         _warpPastWindow(h);
         adManager.finalizeDispute(p);
 
-        (, uint64 finalizeAt,,) = adManager.claims(h);
+        (, uint64 finalizeAt) = adManager.claims(h);
         assertEq(finalizeAt, 0, "the claim record is cleared on the dispute terminal too");
+    }
+
+    /// Filing on a `Claimed` leg ends its cancel window, so the claim record goes at the filing,
+    /// not only at the terminal: while disputed, `claims(h)` reads empty.
+    function test_filingOnAClaimedLeg_clearsTheClaim() public {
+        (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(30);
+        vm.warp(p.deadline);
+        adManager.claimCancel(p);
+        (, uint64 before) = adManager.claims(h);
+        assertGt(before, 0, "the claim is open");
+        _file(p, filer);
+        (uint64 openedAt, uint64 finalizeAt) = adManager.claims(h);
+        assertEq(openedAt, 0, "no claim record while disputed");
+        assertEq(finalizeAt, 0, "no claim record while disputed");
     }
 
     /// S6: de-authorising an escrow mid-incident must not strand the bonds it already opened.
@@ -605,15 +804,16 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     function test_bondRoutingMatchesTheSharedVector() public view {
         string memory v = vm.readFile("../test-vectors/dispute.json");
         uint256 n = vm.parseJsonUint(v, ".counts.bondRouting");
-        assertEq(n, 10, "5 outcomes x both arms of the flag");
+        assertEq(n, 20, "5 outcomes x both arms of both flags");
 
         for (uint256 i = 0; i < n; i++) {
             string memory at = string.concat(".bondRouting[", vm.toString(i), "]");
             uint256 outcomeValue = vm.parseJsonUint(v, string.concat(at, ".outcomeValue"));
             bool filerIsBridger = vm.parseJsonBool(v, string.concat(at, ".filerIsBridger"));
+            bool returnToFiler = vm.parseJsonBool(v, string.concat(at, ".returnToFiler"));
             bool expected = vm.parseJsonBool(v, string.concat(at, ".bondReturnsToFiler"));
             assertEq(
-                Dispute.bondReturnsToFiler(Dispute.Outcome(outcomeValue), filerIsBridger),
+                Dispute.bondReturnsToFiler(Dispute.Outcome(outcomeValue), filerIsBridger, returnToFiler),
                 expected,
                 "routing disagrees with the shared vector"
             );
@@ -672,22 +872,22 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         assertEq(vm.parseJsonUint(v, ".outcomes[4].value"), uint256(Dispute.Outcome.MakerForfeit));
     }
 
-    /// Bond sizing, likewise: the cases live in the vector, not in each chain's head.
-    function test_bondSizingMatchesTheSharedVector() public view {
+    /// Bond sizing, likewise: the cases live in the vector, not in each chain's head. Each row's
+    /// order amount and decimals differ; the bond is the row's floor regardless.
+    function test_bondSizingMatchesTheSharedVector() public {
         string memory v = vm.readFile("../test-vectors/dispute.json");
         uint256 n = vm.parseJsonUint(v, ".counts.bondSizing");
         for (uint256 i = 0; i < n; i++) {
             string memory at = string.concat(".bondSizing[", vm.toString(i), "]");
             Dispute.Params memory p = Dispute.Params({
-                challengePeriod: CHALLENGE,
-                bondFloor: uint128(vm.parseJsonUint(v, string.concat(at, ".bondFloor"))),
-                bondBps: uint16(vm.parseJsonUint(v, string.concat(at, ".bondBps")))
+                challengePeriod: CHALLENGE, bondFloor: uint128(vm.parseJsonUint(v, string.concat(at, ".bondFloor")))
             });
-            assertEq(
-                Dispute.bondFor(vm.parseJsonUint(v, string.concat(at, ".amount")), p),
-                vm.parseJsonUint(v, string.concat(at, ".bond")),
-                "bond sizing disagrees with the shared vector"
-            );
+            uint256 want = vm.parseJsonUint(v, string.concat(at, ".bond"));
+            assertEq(Dispute.bondFor(p), want, "bond sizing disagrees with the shared vector");
+            // And the module's quote, which is what a filing on the route charges.
+            vm.prank(admin);
+            dm.setDisputeParams(orderChainId, p);
+            assertEq(dm.bondFor(orderChainId), want, "the module's quote disagrees with the shared vector");
         }
     }
 
@@ -701,36 +901,41 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
     /*//////////////// batch B (soak): filing window, module pinning, events ////////////////*/
 
-    /// C-10: filing is allowed up to and including the primary's window end.
-    function test_c10_filingAtTheWindowEndIsAllowed() public {
+    /// C-10: filing is allowed up to the last second before the primary's window end.
+    function test_c10_filingBeforeTheWindowEndIsAllowed() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(60);
-        vm.warp(p.deadline + 30 minutes);
+        vm.warp(p.deadline + 30 minutes - 1);
         _file(p, filer);
         assertTrue(dm.isDisputed(h));
     }
 
-    /// C-10: one second past the window end, filing is refused. A later dispute would run past the
-    /// point the follower's backstop may already have refunded the bridger.
-    function test_c10_filingPastTheWindowEndIsRefused() public {
+    /// C-10: at the window end, filing is refused: that second belongs to `finalizeCancel` alone, so
+    /// a filing can never race the cancel it would block.
+    function test_c10_filingAtTheWindowEndIsRefused() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(61);
         uint256 windowEnd = p.deadline + 30 minutes;
-        vm.warp(windowEnd + 1);
-        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        vm.warp(windowEnd);
+        uint256 bond = BOND_FLOOR;
         vm.deal(filer, bond);
         vm.prank(filer);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeWindowClosed.selector, h, windowEnd));
         adManager.dispute{value: bond}(p, bytes32("evidence"));
     }
 
-    /// C-10: a pause after the lock moves the window end by the pause, so filing still fits.
-    function test_c10_aPauseExtendsTheFilingWindow() public {
+    /// C-10: a pause after the lock leaves the filing window where it was; filing works while paused.
+    function test_c10_aPauseLeavesTheFilingWindow() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(62);
         vm.prank(admin);
         adManager.pause();
         vm.warp(block.timestamp + 1 hours);
-        vm.prank(admin);
-        adManager.unpause();
-        vm.warp(p.deadline + 30 minutes + 1 hours);
+        uint256 windowEnd = p.deadline + 30 minutes;
+        vm.warp(windowEnd);
+        uint256 bond = BOND_FLOOR;
+        vm.deal(filer, bond);
+        vm.prank(filer);
+        vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeWindowClosed.selector, h, windowEnd));
+        adManager.dispute{value: bond}(p, bytes32("evidence"));
+        vm.warp(windowEnd - 1);
         _file(p, filer);
         assertTrue(dm.isDisputed(h));
     }
@@ -744,17 +949,17 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         uint256 claimedEnd = p.deadline + 30 minutes;
         // The route's buffer grows after the claim; the claim's own end does not move.
         vm.prank(admin);
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 2 hours, 0, 1 days, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 2 hours, 0, 0));
 
-        vm.warp(claimedEnd + 1);
-        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        vm.warp(claimedEnd);
+        uint256 bond = BOND_FLOOR;
         vm.deal(filer, bond);
         vm.prank(filer);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__DisputeWindowClosed.selector, h, claimedEnd));
         adManager.dispute{value: bond}(p, bytes32("evidence"));
 
-        // At the claimed end itself, filing still goes through.
-        vm.warp(claimedEnd);
+        // One second before the claimed end, filing still goes through.
+        vm.warp(claimedEnd - 1);
         vm.prank(filer);
         adManager.dispute{value: bond}(p, bytes32("evidence"));
         assertTrue(dm.isDisputed(h));
@@ -763,11 +968,11 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     /// C-36: the challenge period has a ceiling of 7 days.
     function test_c36_challengePeriodCeiling() public {
         vm.startPrank(admin);
-        dm.setDisputeParams(orderChainId, Dispute.Params(7 days, BOND_FLOOR, BOND_BPS));
+        dm.setDisputeParams(orderChainId, Dispute.Params(7 days, BOND_FLOOR));
         vm.expectRevert(abi.encodeWithSelector(Dispute.Dispute__InvalidParams.selector, 1));
-        dm.setDisputeParams(orderChainId, Dispute.Params(7 days + 1, BOND_FLOOR, BOND_BPS));
+        dm.setDisputeParams(orderChainId, Dispute.Params(7 days + 1, BOND_FLOOR));
         vm.stopPrank();
-        (uint64 period,,) = dm.disputeParams(orderChainId);
+        (uint64 period,) = dm.disputeParams(orderChainId);
         assertEq(period, 7 days, "the refused write left the accepted one in force");
     }
 
@@ -782,8 +987,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
             string memory at = string.concat(".paramValidation[", vm.toString(i), "]");
             Dispute.Params memory p = Dispute.Params({
                 challengePeriod: uint64(vm.parseJsonUint(v, string.concat(at, ".challengePeriod"))),
-                bondFloor: uint128(vm.parseUint(vm.parseJsonString(v, string.concat(at, ".bondFloor")))),
-                bondBps: uint16(vm.parseJsonUint(v, string.concat(at, ".bondBps")))
+                bondFloor: uint128(vm.parseUint(vm.parseJsonString(v, string.concat(at, ".bondFloor"))))
             });
             uint256 field = vm.parseJsonUint(v, string.concat(at, ".validField"));
             if (field != 0) {
@@ -801,7 +1005,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         b.setEscrow(address(adManager), true);
         b.setArbiter(arbiter);
         b.setProtocolFeePool(feePool);
-        b.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        b.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR));
         adManager.setDisputeManager(IDisputeManager(address(b)));
         vm.stopPrank();
     }
@@ -817,7 +1021,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
         vm.prank(maker);
         adManager.respondToDispute(p, bytes32("response"));
-        (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        (,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
         assertEq(responderEvidence, bytes32("response"), "the response landed in A");
 
         vm.prank(arbiter);
@@ -825,7 +1029,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         _warpPastWindow(h);
         adManager.finalizeDispute(p);
 
-        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Resolved));
+        assertEq(uint8(statusOf(address(adManager), h)), uint8(IEscrow.Status.Resolved));
         assertFalse(dm.isDisputed(h), "A's record closed");
         assertEq(filer.balance, bond, "and A paid the bond back");
 
@@ -846,7 +1050,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
         _presentSettledOn(p, h);
 
-        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Filled));
+        assertEq(uint8(statusOf(address(adManager), h)), uint8(IEscrow.Status.Filled));
         assertFalse(dm.isDisputed(h), "A's record closed by the evidence");
         assertEq(_wNativeToken.balanceOf(address(dm)), 0, "no bond stranded in A");
         assertEq(_wNativeToken.balanceOf(feePool) + feePool.balance, bond, "TradeProceeds routed it to the pool");
@@ -889,7 +1093,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     /// C-14: the filing event carries the filer's evidence hash.
     function test_c14_filingEventCarriesTheEvidence() public {
         (IAdManager.OrderParams memory p, bytes32 h) = _lockedOrder(76);
-        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint256 bond = BOND_FLOOR;
         uint64 challengeDeadline = uint64(block.timestamp) + CHALLENGE;
         if (p.deadline + 30 minutes > challengeDeadline) challengeDeadline = uint64(p.deadline + 30 minutes);
         vm.deal(filer, bond);
@@ -974,7 +1178,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         adManager.respondToDispute(p, bytes32("mine too"));
         vm.prank(maker);
         adManager.respondToDispute(p, bytes32("theirs"));
-        (,,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        (,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
         assertEq(responderEvidence, bytes32("theirs"));
     }
 
@@ -1005,23 +1209,23 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
     /// escrow asks twice.
     function test_c19_moduleEdgeRefusesStrangersAndDoubles() public {
         bytes32 h = keccak256("direct");
-        uint256 bond = Dispute.bondFor(60 ether, Dispute.Params(CHALLENGE, BOND_FLOOR, BOND_BPS));
+        uint256 bond = BOND_FLOOR;
         vm.deal(stranger, 2 * bond);
         vm.prank(stranger);
         vm.expectRevert(DisputeManager.DisputeManager__NotEscrow.selector);
-        dm.openDispute{value: bond}(h, 60 ether, orderChainId, stranger, bytes32(0), 0, 0, 0);
+        dm.openDispute{value: bond}(h, orderChainId, stranger, bytes32(0), 0, 0);
 
         vm.prank(admin);
         dm.setEscrow(stranger, true);
         vm.prank(stranger);
-        dm.openDispute{value: bond}(h, 60 ether, orderChainId, filer, bytes32(0), 0, 0, 0);
+        dm.openDispute{value: bond}(h, orderChainId, filer, bytes32(0), 0, 0);
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__DisputeExists.selector, h));
-        dm.openDispute{value: bond}(h, 60 ether, orderChainId, filer, bytes32(0), 0, 0, 0);
+        dm.openDispute{value: bond}(h, orderChainId, filer, bytes32(0), 0, 0);
 
         // Settling a bond or recording a response is for the escrow that opened it, nobody else.
         vm.expectRevert(DisputeManager.DisputeManager__NotEscrow.selector);
-        dm.settleBond(h, Dispute.Outcome.MutualRefund, false);
+        dm.settleBond(h, Dispute.Outcome.MutualRefund, false, false);
         vm.expectRevert(DisputeManager.DisputeManager__NotEscrow.selector);
         dm.recordResponse(h, maker, bytes32(0));
     }
@@ -1038,7 +1242,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         vm.prank(filer);
         vm.expectRevert(abi.encodeWithSelector(Dispute.Dispute__NoParams.selector, orderChainId));
         adManager.dispute{value: 1 ether}(p, bytes32("evidence"));
-        assertEq(uint8(adManager.orders(h)), uint8(IEscrow.Status.Open), "nothing changed");
+        assertEq(uint8(statusOf(address(adManager), h)), uint8(IEscrow.Status.Open), "nothing changed");
     }
 }
 

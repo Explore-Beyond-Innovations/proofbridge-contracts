@@ -133,18 +133,18 @@ contract EscrowDoorGas is Test {
         adManager.setPeerEscrow(ORDER_CHAIN, _b32(address(portal)));
         adManager.setTokenRoute(address(adToken), ORDER_CHAIN, _b32(address(orderToken)));
         adManager.setRootVerifier(ORDER_CHAIN, address(new MockRootVerifier(true)));
-        adManager.setRouteTiming(ORDER_CHAIN, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        adManager.setRouteTiming(ORDER_CHAIN, RouteTiming.Timing(0, 30 minutes, 0, 0));
         adManager.setRootAnchor(IRootAnchor(address(anchor)));
         adManager.setDisputeManager(IDisputeManager(address(dm)));
         dm.setEscrow(address(adManager), true);
         dm.setArbiter(arbiter);
         dm.setProtocolFeePool(feePool);
-        dm.setDisputeParams(ORDER_CHAIN, Dispute.Params(CHALLENGE, 1 ether, 100));
+        dm.setDisputeParams(ORDER_CHAIN, Dispute.Params(CHALLENGE, 1 ether));
 
         portal.setPeerEscrow(AD_CHAIN, _b32(address(adManager)));
         portal.setTokenRoute(address(orderToken), AD_CHAIN, _b32(address(adToken)));
         portal.setRootVerifier(AD_CHAIN, address(new MockRootVerifier(true)));
-        portal.setRouteTiming(AD_CHAIN, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        portal.setRouteTiming(AD_CHAIN, RouteTiming.Timing(0, 30 minutes, 0, 0));
         portal.setRootAnchor(IRootAnchor(address(anchor)));
         vm.stopPrank();
 
@@ -168,7 +168,7 @@ contract EscrowDoorGas is Test {
         _prepare(adMmr);
         vm.prank(maker);
         uint256 g0 = gasleft();
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
         _check("AdManager.lockForOrder", g0 - gasleft(), LOCK_FOR_ORDER_CEILING);
     }
 
@@ -185,7 +185,7 @@ contract EscrowDoorGas is Test {
 
     function test_gas_dispute() public {
         IAdManager.OrderParams memory p = _lock(3);
-        uint256 bond = Dispute.bondFor(AMOUNT, Dispute.Params(CHALLENGE, 1 ether, 100));
+        uint256 bond = 1 ether;
         vm.deal(recipient, bond);
         _prepare(adMmr);
         vm.prank(recipient);
@@ -425,7 +425,7 @@ contract EscrowDoorGas is Test {
     function _lock(uint256 salt) internal returns (IAdManager.OrderParams memory p) {
         p = _adParams(salt);
         vm.prank(maker);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     function _create(uint256 salt) internal returns (IOrderPortal.OrderParams memory p) {
@@ -435,7 +435,7 @@ contract EscrowDoorGas is Test {
     }
 
     function _fileAs(IAdManager.OrderParams memory p, address who) internal {
-        uint256 bond = Dispute.bondFor(AMOUNT, Dispute.Params(CHALLENGE, 1 ether, 100));
+        uint256 bond = 1 ether;
         vm.deal(who, bond);
         vm.prank(who);
         adManager.dispute{value: bond}(p, bytes32("evidence"));

@@ -4,7 +4,7 @@ use soroban_sdk::{contracttype, Address, BytesN, String, U256};
 
 pub use proofbridge_core::token::NATIVE_TOKEN_ADDRESS;
 pub use proofbridge_core::types::{
-    ClaimEntry, ClaimRecord, ContractConfig, DisputeOutcome, OrderRecord, RouteTiming, Status,
+    ClaimRecord, ContractConfig, DisputeOutcome, OrderRecord, RouteTiming, Status,
 };
 
 /// Source chain configuration (present = supported)
@@ -79,7 +79,7 @@ pub struct OrderParams {
 
 /// A maker's settlement halt (#422): `halted` refuses the co-signed unlock of every order against
 /// the maker's ads; `last_resumed_at` lets a cancel tell whether the halt was in force at any point
-/// at or after the order's deadline (still in force, or resumed at or after it).
+/// since the order's lock (still in force, or resumed at or after it).
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Halt {

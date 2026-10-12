@@ -24,9 +24,15 @@ const KEY_NONCE: Symbol = symbol_short!("nonce");
 const KEY_EXPIRED: Symbol = symbol_short!("expiredat");
 /// (KEY_USED, account, commitment) -> bool; a commitment never re-enters a slot.
 const KEY_USED: Symbol = symbol_short!("used");
-/// (KEY_KEYSLOT, account, fingerprint) -> u32: the slot a key occupies, for `set_valid_until`.
+/// (KEY_KEYSLOT, account, commitment) -> u32: the slot a key occupies, for `set_valid_until`.
 /// Outlives the slot on purpose: a stale entry names a slot that is gone, so it reads as NoSuchSlot.
 const KEY_KEYSLOT: Symbol = symbol_short!("keyslot");
+/// (KEY_APPROVAL, account, maker) -> MakerApproval: may `maker` name `account` as settlement signer.
+const KEY_APPROVAL: Symbol = symbol_short!("approval");
+/// (KEY_REPIN, account, order_hash) -> RepinApproval: the latest re-pin consent (2.7 plan 12 D12).
+const KEY_REPIN: Symbol = symbol_short!("repin");
+/// (KEY_APPRGEN, account) -> u64: bumped by `revoke`; an approval counts only at the current one.
+const KEY_APPRGEN: Symbol = symbol_short!("apprgen");
 /// 2.1b proof-carried registration wiring (instance); absent = disabled.
 const KEY_PROOFREG: Symbol = symbol_short!("proofreg");
 
@@ -55,13 +61,12 @@ pub fn set_proof_registration(env: &Env, cfg: &ProofRegistration) {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeySlot {
-    /// keccak256(bls_pub_key)
+    /// keccak256 of the key's EIP-2537 128-byte form, the same value on every chain
+    /// (`cross_contract::key_commitment`); `touch` keeps its keyslot row alive.
     pub commitment: BytesN<32>,
     /// 0 = no expiry; else usable while ledger timestamp < valid_until
     pub valid_until: u64,
     pub registered_at: u64,
-    /// keccak256 of the EIP-2537 form (the RetireKey name); `touch` keeps its keyslot row alive.
-    pub fingerprint: BytesN<32>,
 }
 
 #[contracttype]
@@ -157,14 +162,14 @@ pub fn remove_slot(env: &Env, account: &BytesN<32>, slot_id: u32) {
         .remove(&(KEY_EXPIRED, account.clone(), slot_id));
 }
 
-pub fn get_key_slot(env: &Env, account: &BytesN<32>, fingerprint: &BytesN<32>) -> Option<u32> {
+pub fn get_key_slot(env: &Env, account: &BytesN<32>, commitment: &BytesN<32>) -> Option<u32> {
     env.storage()
         .persistent()
-        .get(&(KEY_KEYSLOT, account.clone(), fingerprint.clone()))
+        .get(&(KEY_KEYSLOT, account.clone(), commitment.clone()))
 }
 
-pub fn set_key_slot(env: &Env, account: &BytesN<32>, fingerprint: &BytesN<32>, slot_id: u32) {
-    let key = (KEY_KEYSLOT, account.clone(), fingerprint.clone());
+pub fn set_key_slot(env: &Env, account: &BytesN<32>, commitment: &BytesN<32>, slot_id: u32) {
+    let key = (KEY_KEYSLOT, account.clone(), commitment.clone());
     env.storage().persistent().set(&key, &slot_id);
     bump(env, &key);
 }
@@ -196,6 +201,64 @@ pub fn set_nonce(env: &Env, account: &BytesN<32>, nonce: u64) {
     bump(env, &key);
 }
 
+/// One (account, maker) approval: its flag, the pair's next nonce, the account generation it was set at.
+#[contracttype]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MakerApproval {
+    pub approved: bool,
+    pub nonce: u64,
+    pub generation: u64,
+}
+
+pub fn get_approval(env: &Env, account: &BytesN<32>, maker: &BytesN<32>) -> MakerApproval {
+    env.storage()
+        .persistent()
+        .get(&(KEY_APPROVAL, account.clone(), maker.clone()))
+        .unwrap_or_default()
+}
+
+pub fn set_approval(env: &Env, account: &BytesN<32>, maker: &BytesN<32>, a: &MakerApproval) {
+    let key = (KEY_APPROVAL, account.clone(), maker.clone());
+    env.storage().persistent().set(&key, a);
+    bump(env, &key);
+}
+
+/// The settlement signer's consent to move one order's co-signing pin; `nonce` is the (account,
+/// order) pair's next nonce, 0 while nothing was ever approved.
+#[contracttype]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepinApproval {
+    pub from_slot: u32,
+    pub to_slot: u32,
+    pub nonce: u64,
+}
+
+pub fn get_repin(env: &Env, account: &BytesN<32>, order_hash: &BytesN<32>) -> RepinApproval {
+    env.storage()
+        .persistent()
+        .get(&(KEY_REPIN, account.clone(), order_hash.clone()))
+        .unwrap_or_default()
+}
+
+pub fn set_repin(env: &Env, account: &BytesN<32>, order_hash: &BytesN<32>, r: &RepinApproval) {
+    let key = (KEY_REPIN, account.clone(), order_hash.clone());
+    env.storage().persistent().set(&key, r);
+    bump(env, &key);
+}
+
+pub fn get_approval_gen(env: &Env, account: &BytesN<32>) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&(KEY_APPRGEN, account.clone()))
+        .unwrap_or(0)
+}
+
+pub fn set_approval_gen(env: &Env, account: &BytesN<32>, generation: u64) {
+    let key = (KEY_APPRGEN, account.clone());
+    env.storage().persistent().set(&key, &generation);
+    bump(env, &key);
+}
+
 pub fn is_used(env: &Env, account: &BytesN<32>, commitment: &BytesN<32>) -> bool {
     env.storage()
         .persistent()
@@ -210,19 +273,19 @@ pub fn set_used(env: &Env, account: &BytesN<32>, commitment: &BytesN<32>) {
 
 /// Re-extend the account's live records at use time (unlock) so an active
 /// account never archives between writes; the keyslot row too, so a retirement never needs a restore.
-pub fn touch(env: &Env, account: &BytesN<32>, slot_id: u32, fingerprint: &BytesN<32>) {
+pub fn touch(env: &Env, account: &BytesN<32>, slot_id: u32, commitment: &BytesN<32>) {
     bump(env, &(KEY_ENTRY, account.clone()));
     bump(env, &(KEY_SLOT, account.clone(), slot_id));
-    bump(env, &(KEY_KEYSLOT, account.clone(), fingerprint.clone()));
+    bump(env, &(KEY_KEYSLOT, account.clone(), commitment.clone()));
 }
 
 /// Test-only: the keyslot row's live-until ledger.
 #[cfg(test)]
-pub fn key_slot_ttl(env: &Env, account: &BytesN<32>, fingerprint: &BytesN<32>) -> u32 {
+pub fn key_slot_ttl(env: &Env, account: &BytesN<32>, commitment: &BytesN<32>) -> u32 {
     use soroban_sdk::testutils::storage::Persistent as _;
     env.storage()
         .persistent()
-        .get_ttl(&(KEY_KEYSLOT, account.clone(), fingerprint.clone()))
+        .get_ttl(&(KEY_KEYSLOT, account.clone(), commitment.clone()))
 }
 
 fn bump<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {

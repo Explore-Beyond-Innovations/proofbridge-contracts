@@ -505,7 +505,7 @@ contract AgentPolicyParityTest is AgentPolicyBase {
         p.adDecimals = uint8(vectors.readUint(string.concat(lock, ".adDecimals")));
 
         string memory action = vectors.readString(string.concat(lock, ".action"));
-        if (_eq(action, "lock_for_order")) return abi.encodeCall(IAdManager.lockForOrder, (p));
+        if (_eq(action, "lock_for_order")) return abi.encodeCall(IAdManager.lockForOrder, (p, uint32(0)));
         // A real function of the escrow's, and one no policy can list.
         if (_eq(action, "other")) {
             return abi.encodeWithSignature("withdrawFromAd(string,uint256,address)", p.adId, 1, agent);

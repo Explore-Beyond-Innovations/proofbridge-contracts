@@ -2,9 +2,11 @@
 // Stellar per-chain deploy CLI.
 //
 // Usage:
-//   stellar-deploy deploy             [--out <manifest-path>] [--chain-id <n>]
+//   stellar-deploy deploy             [--out <manifest-path>] [--chain-id <n>] [--allow-wasm-mismatch]
+//     --allow-wasm-mismatch: reuse a key registry / counterparty verifier whose recorded wasm hash is
+//     missing or differs, for this one run (outside local this flag is the only override).
 //   stellar-deploy deploy-test-tokens [--out <manifest-path>] [--chain-id <n>]
-//   stellar-deploy link --peer <peer-manifest> [--in <local-manifest>] [--peer-env <peer-env-file>]
+//   stellar-deploy link --peer <peer-manifest> [--in <local-manifest>]
 //   stellar-deploy handover --to <G...> | --verify   [--in <manifest-path>] [--chain-id <n>]
 //   stellar-deploy retirements-audit --file <vault-export.json> [--in <manifest-path>] [--chain-id <n>]
 //
@@ -20,6 +22,7 @@ import { handover } from "../src/handover.js";
 import { formatAudit, retirementsAudit } from "../src/keys-env.js";
 import { manifestPath, readManifest } from "../src/manifest.js";
 import { requireDeployEnv, requireStellarChainId } from "../src/deploy-env.js";
+import { WASM_MISMATCH_FLAG } from "../src/wasm-reuse.js";
 
 function parseFlag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
@@ -39,6 +42,8 @@ async function main(): Promise<void> {
       const r = await deployCore({
         manifestOut: parseFlag(rest, "--out"),
         chainId: parseChainId(rest),
+        // Passed: the override for this run. Absent: undefined, so deployCore reads the env (local only).
+        ...(rest.includes(WASM_MISMATCH_FLAG) ? { allowWasmMismatch: true } : {}),
       });
       // Described, not sent: the admin has calls to make. Not a success a script may build on.
       if (r.described.length) process.exit(2);
@@ -60,8 +65,6 @@ async function main(): Promise<void> {
       const r = await link({
         peerManifest: peer,
         localManifest: parseFlag(rest, "--in"),
-        // A-5: the peer's env file, so a fresh route is checked both ways before anything is sent.
-        peerEnvFile: parseFlag(rest, "--peer-env"),
         localChainId: parseChainId(rest),
       });
       if (r.described.length) process.exit(2);

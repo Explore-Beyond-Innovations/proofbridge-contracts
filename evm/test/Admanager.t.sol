@@ -18,6 +18,7 @@ import {MockKeyRegistry} from "./mocks/MockKeyRegistry.sol";
 import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
 import {AddressCast} from "src/libraries/AddressCast.sol";
 import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 contract MockAdManager is AdManager {
     constructor(address admin, IVerifier v, IMerkleManager m, IwNativeToken t) AdManager(admin, v, m, t) {}
@@ -88,7 +89,7 @@ contract AdManagerTest is Test {
         merkleManager.setManager(address(adManager), true);
         adManager.setRootVerifier(orderChainId, address(new MockRootVerifier(true)));
         // 2.3e: timing is fail-closed; the suite's clocks (buffer 30 min, no window bound, no stagger).
-        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 1 days, 0));
+        adManager.setRouteTiming(orderChainId, RouteTiming.Timing(0, 30 minutes, 0, 0));
         adManager.setKeyRegistry(keyRegistry);
         vm.stopPrank();
 
@@ -453,7 +454,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__ChainNotSupported.selector, p.orderChainId));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -479,7 +480,7 @@ contract AdManagerTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IAdManager.AdManager__OrderChainMismatch.selector, orderChainId, p.orderChainId)
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -499,7 +500,7 @@ contract AdManagerTest is Test {
                 IAdManager.AdManager__OrderPortalMismatch.selector, _b32(orderPortal), p.srcOrderPortal
             )
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -520,7 +521,7 @@ contract AdManagerTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IEscrow.Escrow__MissingRoute.selector, p.orderChainToken, p.orderChainId)
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -545,7 +546,7 @@ contract AdManagerTest is Test {
                 p.orderChainToken // provided in params
             )
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -561,7 +562,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(IAdManager.AdManager__NotMaker.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -587,7 +588,7 @@ contract AdManagerTest is Test {
                 IAdManager.AdManager__AdTokenMismatch.selector, _b32(address(adToken)), _b32(address(otherAdToken))
             )
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -608,7 +609,7 @@ contract AdManagerTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IAdManager.AdManager__AdRecipientMismatch.selector, expected, p.adRecipient)
         );
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -624,7 +625,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(IAdManager.AdManager__BridgerZero.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -640,7 +641,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(IAdManager.AdManager__RecipientZero.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -662,7 +663,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(AddressCast.AddressCast__NotEvmAddress.selector, dirty));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -678,7 +679,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(IEscrow.Escrow__ZeroAmount.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -694,7 +695,7 @@ contract AdManagerTest is Test {
 
         vm.prank(maker);
         vm.expectRevert(IEscrow.Escrow__InsufficientLiquidity.selector);
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -715,13 +716,13 @@ contract AdManagerTest is Test {
         emit IAdManager.OrderLocked(adId, expectedHash, adMaker, token, p.amount, p.bridger, p.orderRecipient);
 
         vm.prank(maker);
-        bytes32 orderHash = adManager.lockForOrder(p);
+        bytes32 orderHash = adManager.lockForOrder(p, 0);
         assertEq(orderHash, expectedHash, "order hash mismatch");
 
         (,,,,,,,, uint256 lockedAfter) = adManager.ads(adId);
         assertEq(lockedAfter, lockedBefore + p.amount, "locked not incremented");
 
-        (IEscrow.Status status) = adManager.orders(orderHash);
+        (IEscrow.Status status) = statusOf(address(adManager), orderHash);
         assertEq(uint256(status), uint256(IEscrow.Status.Open), "order not open");
     }
 
@@ -737,11 +738,11 @@ contract AdManagerTest is Test {
         bytes32 orderHash = adManager.hashOrderPublic(p);
 
         vm.prank(maker);
-        bytes32 h1 = adManager.lockForOrder(p);
+        bytes32 h1 = adManager.lockForOrder(p, 0);
 
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IEscrow.Escrow__OrderExists.selector, h1));
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -848,7 +849,7 @@ contract AdManagerTest is Test {
         vm.startPrank(maker);
 
         // Lock succeeds -> increases ad.locked
-        adManager.lockForOrder(p);
+        adManager.lockForOrder(p, 0);
 
         vm.expectRevert(IAdManager.AdManager__ActiveLocks.selector);
         adManager.closeAd(adId, recipient);
@@ -936,7 +937,7 @@ contract AdManagerTest is Test {
         bytes32 orderHashExpected = adManager.hashOrderPublic(p);
 
         vm.prank(maker);
-        orderHash = adManager.lockForOrder(p);
+        orderHash = adManager.lockForOrder(p, 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -980,7 +981,7 @@ contract AdManagerTest is Test {
 
         // Snapshot state
         (,,,,,,,, uint256 lockedBefore) = adManager.ads(p.adId);
-        (IEscrow.Status statusBefore) = adManager.orders(orderHash);
+        (IEscrow.Status statusBefore) = statusOf(address(adManager), orderHash);
         assertEq(uint256(statusBefore), uint256(IEscrow.Status.Open));
 
         // Flip verifier to fail
@@ -993,7 +994,7 @@ contract AdManagerTest is Test {
         adManager.unlock(p, TestField.fe("X"), t_root, hex"", hex"");
 
         // State unchanged
-        (IEscrow.Status statusAfter) = adManager.orders(orderHash);
+        (IEscrow.Status statusAfter) = statusOf(address(adManager), orderHash);
         assertEq(uint256(statusAfter), uint256(IEscrow.Status.Open), "status changed");
         (,,,,,,,, uint256 lockedAfter) = adManager.ads(p.adId);
         assertEq(lockedAfter, lockedBefore, "locked changed");
@@ -1026,7 +1027,7 @@ contract AdManagerTest is Test {
         adManager.unlock(p, TestField.fe("N1"), targetRoot, hex"", hex"");
 
         // Status -> Filled
-        (IEscrow.Status status) = adManager.orders(orderHash);
+        (IEscrow.Status status) = statusOf(address(adManager), orderHash);
         assertEq(uint256(status), uint256(IEscrow.Status.Filled), "status not filled");
 
         // Locked reduced
@@ -1067,7 +1068,7 @@ contract AdManagerTest is Test {
         adManager.unlock(p, TestField.fe("N2"), targetRoot, hex"", hex"");
 
         // status
-        (IEscrow.Status status) = adManager.orders(orderHash);
+        (IEscrow.Status status) = statusOf(address(adManager), orderHash);
         assertEq(uint256(status), uint256(IEscrow.Status.Filled), "status not filled");
 
         // locked reduced
