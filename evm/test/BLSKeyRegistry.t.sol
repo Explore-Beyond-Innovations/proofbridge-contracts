@@ -353,6 +353,31 @@ contract BLSKeyRegistryTest is Test {
         registry.lookup(account, 2);
     }
 
+    /// The at-once arm's boundary second: with a guard wired and nothing open, a slot that dies at
+    /// `vu` is kept at `vu` itself (D17a: a lock in that second still counts the kill) and pruned one
+    /// second later. The slot is shortened to graceTs so the boundary falls on the `registerLate` clock.
+    function test_registerAtCap_atOnceBoundary_keptAtExpiry_prunedTheSecondAfter() public {
+        bytes32 account = v.readBytes32(".slots.makerOnSepolia.account");
+        idleGuard();
+        for (uint256 i = 0; i < 5; i++) {
+            registerSlot("makerOnSepolia", i);
+        }
+        setValidUntil("makerOnSepolia", 2, false); // validUntil = graceTs, still ahead at T0
+        uint64 g = graceTs();
+
+        vm.warp(g); // the expiry second itself: dead, but still kept
+        vm.expectRevert(IBLSKeyRegistry.SlotExpired.selector);
+        registry.commitmentAt(account, 2);
+        vm.expectRevert(IBLSKeyRegistry.RegistryFull.selector);
+        registerSlot("makerOnSepolia", 5);
+        registry.lookup(account, 2);
+
+        vm.warp(g + 1); // one second past the expiry, nothing open: pruned at once
+        assertEq(registerSlot("makerOnSepolia", 5), 5);
+        vm.expectRevert(IBLSKeyRegistry.NoSuchSlot.selector);
+        registry.lookup(account, 2);
+    }
+
     /// #422 D14b: a shorten on a slot that already died cannot move its death later — a re-kill
     /// after an order's window must not erase an expiry inside it.
     function test_setValidUntil_recordedExpiryOnlyMovesEarlier() public {
