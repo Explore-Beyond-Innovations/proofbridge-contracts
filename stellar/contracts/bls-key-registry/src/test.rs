@@ -909,6 +909,44 @@ fn register_at_cap_grace_boundary_kept_at_expiry_plus_grace_pruned_the_second_af
     assert_eq!(client.lookup(&account, &2), None);
 }
 
+/// The at-once arm's boundary second: with a guard wired and nothing open, a slot that dies at `vu`
+/// is kept at `vu` itself (D17a: a lock in that second still counts the kill) and pruned one second
+/// later. The slot is shortened to grace_ts so the boundary falls on the `registerLate` clock.
+#[test]
+fn register_at_cap_at_once_boundary_kept_at_expiry_pruned_the_second_after() {
+    let (env, client, v) = setup();
+    let account = slot_account(&env, &v, MAKER);
+    idle_guard(&env, &client);
+    for i in 0..5 {
+        register_slot(&env, &client, &v, MAKER, i);
+    }
+    set_valid_until(&env, &client, &v, MAKER, 2, false); // valid_until = grace_ts, still ahead at T0
+    let g = grace_ts(&v);
+
+    env.ledger().set_timestamp(g); // the expiry second itself: dead, but still kept
+    assert_eq!(
+        client.try_commitment_at(&account, &2),
+        Err(Ok(RegistryError::SlotExpired))
+    );
+    let r = slot_reg(&v, MAKER, 5);
+    assert_eq!(
+        client.try_register(
+            &account,
+            &signed(&env, &oa(&v, MAKER)["registerLate"][5]),
+            &bn::<96>(&env, &r["pkNative"]),
+            &bn::<192>(&env, &r["pop"]),
+            &5,
+            &LATE_DEADLINE,
+        ),
+        Err(Ok(RegistryError::RegistryFull))
+    );
+    assert!(client.lookup(&account, &2).is_some());
+
+    env.ledger().set_timestamp(g + 1); // one second past the expiry, nothing open: pruned at once
+    assert_eq!(register_slot(&env, &client, &v, MAKER, 5), 5);
+    assert_eq!(client.lookup(&account, &2), None);
+}
+
 /// #422 D14b: a shorten on a slot that already died cannot move its death later — a re-kill after
 /// an order's window must not erase an expiry inside it.
 #[test]

@@ -297,9 +297,11 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
     /// anyone may then apply it on the AdManager (`repinOrder`), which checks the order is still open
     /// and `toSlot` usable. The (account, order) pair's own nonce, so a signature applies once. Not
     /// pausable: it moves a pin off a leaked key, which only protects the order. The consent has no
-    /// deadline and `revoke` leaves it: it is withdrawn by superseding it (a consent at the next nonce
-    /// naming another slot, or the current pin), and a late-applied one can only move the pin to a
-    /// slot that is usable then and stamp the order re-pinned, which gives the bridger the grace.
+    /// deadline and `revoke` leaves it: it is withdrawn by superseding it with a consent at the next
+    /// nonce whose `fromSlot` is not the order's pin, which `repinOrder` refuses (`NoRepin`). One
+    /// naming the current pin as both ends is still applicable, and applying it stamps the order
+    /// re-pinned, which counts as a denial. A late-applied consent can only move the pin to a slot
+    /// that is usable then and stamp the order re-pinned, which gives the bridger the grace.
     function approveRepin(
         bytes32 account,
         bytes32 orderHash,
@@ -342,12 +344,14 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
 
     /// Drops every dead slot the escrows can no longer need: at once when guards are wired and none
     /// reports an open position for the account (#422 D17: no order's cancel can still ask about its
-    /// history), else after its expiry + GRACE_PERIOD, open positions or not. The 30 days outlast every
-    /// finalize a kill can still touch: an order's life as a payout is at most the window, its buffer,
-    /// the challenge period and the ruling buffer (about 16 days), plus a grace capped by the 7-day
-    /// anchor delay and one buffer, so a slot kept longer protects nothing and only fills the cap.
-    /// With no guard to ask, never at once (D17b). Not in the expiry's own second (D17a): a lock in
-    /// that second still counts the kill. Swap-remove; order is not meaningful.
+    /// history), else after its expiry + GRACE_PERIOD, open positions or not. The 30 days outlast the
+    /// evidence a kill is weighed against: a settlement on the order chain exists by that chain's
+    /// cutoff (at most 7 days after the lock) and is usable on the ad chain once anchored (the 7-day
+    /// anchor-delay cap plus the 1-day buffer), so by about lock + 16 days, while a kill that counts
+    /// against the order happened at or after its lock and the slot lives to at least that + 30 days.
+    /// A late finalize or a second ruling only moves clocks over evidence already in place. With no
+    /// guard to ask, never at once (D17b). Not in the expiry's own second (D17a): a lock in that
+    /// second still counts the kill. Swap-remove; order is not meaningful.
     function _prune(bytes32 account, RegistryEntry storage e) private {
         bool atOnce = positionGuards.length != 0 && !_hasOpenPositions(account);
         uint256 i = 0;
