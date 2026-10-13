@@ -10,7 +10,7 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
  * @custom:security-contact security@proofbridge.xyz
  * @notice EIP-712 hashing for the canonical cross-chain `Order`.
  * @dev Each side (OrderPortal, AdManager) owns its own `OrderParams` layout
- *      tailored to its direction; both collapse into the same 17-field
+ *      tailored to its direction; both collapse into the same 19-field
  *      canonical `Order` tuple before hashing so the digest matches across
  *      chains. Minimal domain (name, version) — no chainId / verifyingContract,
  *      because both chain ids and contract addresses are bound inside the
@@ -31,7 +31,7 @@ library OrderHash {
 
     /// @notice EIP-712 typehash for `Order`.
     bytes32 internal constant ORDER_TYPEHASH = keccak256(
-        "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt,uint8 orderDecimals,uint8 adDecimals,uint256 deadline,bytes32 adSettlementSigner)"
+        "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt,uint8 orderDecimals,uint8 adDecimals,uint256 deadline,bytes32 adSettlementSigner,uint16 lpFeeBps,uint16 protocolFeeBps)"
     );
 
     /**
@@ -58,6 +58,9 @@ library OrderHash {
         uint8 adDecimals;
         uint256 deadline;
         bytes32 adSettlementSigner;
+        /// #586: the bridge fee the bridger deposited against, in bps (the ad chain charges exactly this).
+        uint16 lpFeeBps;
+        uint16 protocolFeeBps;
     }
 
     /// @notice A hashed value is wider than Soroban's type for it (u128 amount / chain ids, u64 deadline).
@@ -87,7 +90,7 @@ library OrderHash {
 
     /// @notice Compute the `keccak256(abi.encode(...))` struct hash for `Order`.
     function structHash(Order memory o) internal pure returns (bytes32) {
-        bytes32[] memory buf = EfficientHashLib.malloc(18);
+        bytes32[] memory buf = EfficientHashLib.malloc(20);
         EfficientHashLib.set(buf, 0, ORDER_TYPEHASH);
         EfficientHashLib.set(buf, 1, o.orderChainToken);
         EfficientHashLib.set(buf, 2, o.adChainToken);
@@ -106,6 +109,8 @@ library OrderHash {
         EfficientHashLib.set(buf, 15, uint256(o.adDecimals));
         EfficientHashLib.set(buf, 16, o.deadline);
         EfficientHashLib.set(buf, 17, o.adSettlementSigner);
+        EfficientHashLib.set(buf, 18, uint256(o.lpFeeBps));
+        EfficientHashLib.set(buf, 19, uint256(o.protocolFeeBps));
         return EfficientHashLib.hash(buf);
     }
 

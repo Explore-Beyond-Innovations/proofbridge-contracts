@@ -70,7 +70,36 @@ fn proposal_ids_are_pinned() {
         "GARCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCFRVX",
     );
     assert_eq!(
-        id(e, "set_manager", (who, true).into_val(e)),
+        id(e, "set_manager", (who.clone(), true).into_val(e)),
         "8d7bff83e54b34b14f272be202c745d99bad76ccb3645eb8bd7e5c763aa2498e"
+    );
+    // a contract address + bool
+    let escrow = Address::from_str(
+        e,
+        "CAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDB3V",
+    );
+    assert_eq!(
+        id(
+            e,
+            "set_escrow_appender",
+            (escrow.clone(), false).into_val(e)
+        ),
+        "7bbe7109b0cf1bf22f497e93d00c169387d256cd1568173929b16e11a0bb0df6"
+    );
+    // a vec of addresses + u32
+    let signers: Vec<Address> = soroban_sdk::vec![e, who.clone()];
+    assert_eq!(
+        id(e, "set_signers", (signers, 1u32).into_val(e)),
+        "100d2335126ea0e1dd3e4d59bbef42c0c34725f53cb6d9bc4d91c7da7b117fbe"
+    );
+    // address + address + a vec of u128 + bool
+    let sources: Vec<u128> = soroban_sdk::vec![e, 1_000_002u128];
+    assert_eq!(
+        id(
+            e,
+            "set_proof_registration",
+            (escrow.clone(), escrow, sources, true).into_val(e)
+        ),
+        "47c0f7edb3e2211853a154b3bdd3b20b59220b4c489b450b5d1e3b21fe3dfd64"
     );
 }

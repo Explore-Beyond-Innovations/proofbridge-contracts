@@ -132,10 +132,6 @@ pub struct OrderRecord {
     /// lever, so the denial rule counts it for the rest of the order's life; a slot left behind can
     /// no longer erase a kill the rule would have counted. False on the order portal.
     pub repinned: bool,
-    /// On the ad chain (#586): the fee bps live at the lock, which the payout charges, so a fee change
-    /// never moves a live order. 0 on the order portal.
-    pub lp_fee_bps: u32,
-    pub protocol_fee_bps: u32,
 }
 
 /// The open presentation window on an order (`Claimed` ⇔ a record exists).

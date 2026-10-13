@@ -63,6 +63,7 @@ impl DisputeManagerContract {
             !allowed,
             "set_escrow",
             (escrow.clone(), allowed).into_val(&env),
+            timelock::brake_key(&env, "set_escrow", escrow.clone().into_val(&env)),
         )
         .map_err(timelock_error)?;
         storage::set_escrow(&env, &escrow, allowed);
@@ -194,6 +195,8 @@ impl DisputeManagerContract {
         let old = storage::get_admin(&env).ok_or(Error::NotInitialized)?;
         storage::set_admin(&env, &pending);
         storage::clear_pending_admin(&env);
+        // #586 D6: a handover voids the old admin's pending proposals.
+        timelock::bump_epoch(&env);
         events::AdminTransferred {
             from: old,
             to: pending,
@@ -208,7 +211,8 @@ impl DisputeManagerContract {
     ///
     /// Escrow-only: the escrow hashed the order, so it is the only party that can vouch for the
     /// deadline it passes, which is why filing starts there and this contract is never the entry
-    /// point. The bond is the route's flat floor (`bond_for`), so no order amount is passed.
+    /// point. The bond is the route's token bond on the order amount when configured, else the
+    /// flat floor (`bond_for`) in wrapped native; a filer holding none of the token posts the floor.
     #[allow(clippy::too_many_arguments)]
     pub fn open_dispute(
         env: Env,
@@ -228,22 +232,21 @@ impl DisputeManagerContract {
         }
         let p = storage::get_params(&env, peer_chain_id).ok_or(Error::NoDisputeParams)?;
         // #586: the route's token bond when configured, else the flat floor in wrapped native.
-        let (bond_token, bond) = Self::bond_of(&env, &p, &token, peer_chain_id, amount)?;
+        let (mut bond_token, mut bond) = Self::bond_of(&env, &p, &token, peer_chain_id, amount)?;
 
         // The filer funds the bond directly into this contract: it never rests in the escrow, which
         // keeps "the escrow's balance is its order escrow" a single-contract invariant for 2.3h.
         filer.require_auth();
-        let client = token::Client::new(&env, &bond_token);
-        let here = env.current_contract_address();
-        let before = client.balance(&here);
-        // 49S-3: a token refusal is ours to name; raw, its number would read as a dispute error.
-        client
-            .try_transfer(&filer, &here, &(bond as i128))
-            .map_err(|_| Error::BondTransferFailed)?
-            .map_err(|_| Error::BondTransferFailed)?;
-        // #586: an exact pull, as the escrows require: a fee-on-transfer token is refused.
-        if client.balance(&here) - before != bond as i128 {
-            return Err(Error::BondTransferShort);
+        if !Self::pull_bond(&env, &filer, &bond_token, bond)? {
+            // #586 D1: a filer the route's token bond cannot be taken from (it holds none) posts the
+            // native floor instead; only when that is refused too does the filing fail.
+            let w = storage::get_w_native(&env).ok_or(Error::NotInitialized)?;
+            let floor = dispute::bond_for(&p);
+            if (bond_token == w && bond == floor) || !Self::pull_bond(&env, &filer, &w, floor)? {
+                return Err(Error::BondTransferFailed);
+            }
+            bond_token = w;
+            bond = floor;
         }
 
         // The challenge period is a floor on how long the arbiter has, never a licence to finish
@@ -494,9 +497,10 @@ impl DisputeManagerContract {
         peer_chain_id: u128,
         token: Address,
         amount: u128,
-    ) -> Result<(Address, u128), Error> {
+    ) -> Result<(Address, u128, u128), Error> {
         let p = storage::get_params(&env, peer_chain_id).ok_or(Error::NoDisputeParams)?;
-        Self::bond_of(&env, &p, &token, peer_chain_id, amount)
+        let (bond_token, bond) = Self::bond_of(&env, &p, &token, peer_chain_id, amount)?;
+        Ok((bond_token, bond, dispute::bond_for(&p)))
     }
 
     /// #586: the route's token-bond config, if any.
@@ -565,6 +569,24 @@ impl DisputeManagerContract {
     }
 
     // ── internal ─────────────────────────────────────────────────────────
+
+    /// Pull exactly `amount` of `token` from `filer`: false when the token refuses the transfer (no
+    /// balance, no trustline), `BondTransferShort` when it moves anything else (a fee-on-transfer token).
+    fn pull_bond(env: &Env, filer: &Address, token: &Address, amount: u128) -> Result<bool, Error> {
+        let client = token::Client::new(env, token);
+        let here = env.current_contract_address();
+        let before = client.balance(&here);
+        if !matches!(
+            client.try_transfer(filer, &here, &(amount as i128)),
+            Ok(Ok(()))
+        ) {
+            return Ok(false);
+        }
+        if client.balance(&here) - before != amount as i128 {
+            return Err(Error::BondTransferShort);
+        }
+        Ok(true)
+    }
 
     /// #586: the timelock gate for this module's admin setters.
     fn gate(env: &Env, fn_name: &str, args: Vec<Val>) -> Result<(), Error> {
@@ -652,6 +674,8 @@ fn timelock_error(f: proofbridge_core::escrow_ops::Fault) -> Error {
         TimelockAlreadyProposed => Error::TimelockAlreadyProposed,
         TimelockTooEarly => Error::TimelockTooEarly,
         TimelockBadArgs => Error::TimelockBadArgs,
+        TimelockExpired => Error::TimelockExpired,
+        TimelockCancelledByBrake => Error::TimelockCancelledByBrake,
         _ => Error::TimelockNotProposed,
     }
 }

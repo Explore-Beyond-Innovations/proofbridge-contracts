@@ -32,6 +32,8 @@ export const orderTypes: Record<string, { name: string; type: string }[]> = {
     { name: "adDecimals", type: "uint8" },
     { name: "deadline", type: "uint256" },
     { name: "adSettlementSigner", type: "bytes32" },
+    { name: "lpFeeBps", type: "uint16" },
+    { name: "protocolFeeBps", type: "uint16" },
   ],
 };
 
@@ -53,6 +55,8 @@ export interface OrderTypedData {
   adDecimals: string;
   deadline: string;
   adSettlementSigner: string;
+  lpFeeBps: string;
+  protocolFeeBps: string;
 }
 
 export function hexToArr(hex: string, isSignature = false): Array<number> {

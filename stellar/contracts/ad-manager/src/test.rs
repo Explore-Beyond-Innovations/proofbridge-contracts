@@ -105,6 +105,8 @@ mod cross_chain_tests {
                 &env,
                 "7777777777777777777777777777777777777777",
             ),
+            lp_fee_bps: 0,
+            protocol_fee_bps: 0,
         };
         let ad_chain_id: u128 = 2_000_000_002;
         let ad_manager = evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
@@ -147,6 +149,8 @@ mod cross_chain_tests {
                 &env,
                 "7777777777777777777777777777777777777777",
             ),
+            lp_fee_bps: 0,
+            protocol_fee_bps: 0,
         };
         let ad_chain_id: u128 = 2_000_000_002;
         let ad_manager = evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
@@ -190,6 +194,8 @@ mod cross_chain_tests {
                 &env,
                 "7777777777777777777777777777777777777777",
             ),
+            lp_fee_bps: 0,
+            protocol_fee_bps: 0,
         };
         let ad_chain_id: u128 = 2_000_000_002;
         let ad_manager = evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
@@ -241,6 +247,8 @@ mod cross_chain_tests {
                 &env,
                 "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
             ),
+            lp_fee_bps: u32::MAX,
+            protocol_fee_bps: u32::MAX,
         };
         let ad_chain_id: u128 = u128::MAX;
         let ad_manager = hex_to_bytes32(
@@ -286,6 +294,8 @@ mod cross_chain_tests {
                 &env,
                 "7777777777777777777777777777777777777777",
             ),
+            lp_fee_bps: 0,
+            protocol_fee_bps: 0,
         };
         let ad_chain_id: u128 = 2_000_000_002;
         let ad_manager = evm_address_to_bytes32(&env, "6666666666666666666666666666666666666666");
@@ -488,6 +498,8 @@ mod validation_tests {
             ad_decimals: 7,
             deadline: 4_102_444_800,
             ad_settlement_signer: make_bytes32(env, 0x77),
+            lp_fee_bps: 0,
+            protocol_fee_bps: 0,
         };
 
         (ad, params)
@@ -1417,6 +1429,8 @@ mod order_hash_parity {
                 ad_decimals: o["adDecimals"].as_u64().unwrap() as u32,
                 deadline: s("deadline").parse::<u64>().unwrap(),
                 ad_settlement_signer: bn32(&env, s("adSettlementSigner")),
+                lp_fee_bps: o["lpFeeBps"].as_u64().unwrap() as u32,
+                protocol_fee_bps: o["protocolFeeBps"].as_u64().unwrap() as u32,
             };
             let ad_chain_id = s("adChainId").parse::<u128>().unwrap();
             let ad_manager = bn32(&env, s("adManager"));
@@ -1506,6 +1520,8 @@ fn fault_codes_never_move() {
             TimelockNotProposed => 93,
             TimelockTooEarly => 94,
             TimelockBadArgs => 95,
+            TimelockExpired => 97,
+            TimelockCancelledByBrake => 98,
         }
     }
     // `Fault::ALL` is generated with the enum, so it names every variant.

@@ -775,6 +775,12 @@ impl AdManagerContract {
         let mut ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
 
         validation::validate_order(&env, &ad, &params)?;
+        // #586: the fee the bridger deposited against (in the order hash) is the one live now; a
+        // change since the deposit refuses the lock rather than charging a rate nobody agreed to.
+        let fees = storage::get_fees(&env);
+        if params.lp_fee_bps != fees.lp_bps || params.protocol_fee_bps != fees.protocol_bps {
+            return Err(AdManagerError::FeeMismatch);
+        }
         // A key retired after the ad was pointed at it (set_valid_until, a watchtower retirement)
         // must not take new locks: the bridger's deposit could never be unlocked (2.3c D2).
         validation::require_registered(&env, &ad.settlement_signer, &ad.maker)?;
@@ -825,7 +831,6 @@ impl AdManagerContract {
 
         // D10: the order chain's anchor delay now; the grace reads max(this, current) later.
         let anchor_delay = Self::anchor_delay_now(&env, params.order_chain_id)?;
-        let fees = storage::get_fees(&env);
         let maker = ad.maker.clone();
         let ad_token = ad.token.clone();
         ad.locked += ad_amount;
@@ -839,8 +844,6 @@ impl AdManagerContract {
             storage::get_registry_epoch(&env),
             u32::try_from(anchor_delay).unwrap_or(u32::MAX),
             signer_slot,
-            // #586: the fee this order's payout charges, whatever is set later.
-            (fees.lp_bps, fees.protocol_bps),
         );
         // 2.3c D1: count the settlement identity this escrow's unlock will verify — the ad's
         // signer, asserted equal to `params.ad_settlement_signer` in validate_order (and owned by
@@ -1076,7 +1079,7 @@ impl AdManagerContract {
             // The maker forfeits its stake: the locked amount leaves the ad for the order's
             // recipient, less the fee, as a settlement would (#586). Every other vacuum outcome
             // releases the lock back to liquidity, which the decrement above already did.
-            payout = Self::charge_fee(&env, &mut ad, &order_hash, ad_amount);
+            payout = Self::charge_fee(&env, &mut ad, &params, &order_hash, ad_amount, true);
         }
         storage::set_ad(&env, &params.ad_id, &ad);
         if outcome == DisputeOutcome::MakerForfeit {
@@ -1479,7 +1482,8 @@ impl AdManagerContract {
         let mut ad = storage::get_ad(env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
         let ad_token = ad.token.clone();
         ad.locked -= ad_amount;
-        let (net, protocol_fee) = Self::charge_fee(env, &mut ad, order_hash, ad_amount);
+        let (net, protocol_fee) =
+            Self::charge_fee(env, &mut ad, params, order_hash, ad_amount, false);
         storage::set_ad(env, &params.ad_id, &ad);
         Self::pay_net(
             env,
@@ -1492,17 +1496,21 @@ impl AdManagerContract {
         Ok(())
     }
 
-    /// #586: take the order's fee (the bps it locked under) out of a released lock: the LP fee stays
-    /// in the ad's balance, the rest leaves it. Returns the recipient's net and the protocol's fee.
+    /// #586: take the order's fee (the bps the bridger deposited against, in the order) out of a
+    /// released lock: the LP fee stays in the ad's balance, the rest leaves it. On a maker forfeit the
+    /// LP share goes to the bridger instead (the maker found at fault keeps nothing). Returns the
+    /// recipient's net and the protocol's fee.
     fn charge_fee(
         env: &Env,
         ad: &mut Ad,
+        params: &OrderParams,
         order_hash: &BytesN<32>,
         ad_amount: u128,
+        forfeit: bool,
     ) -> (u128, u128) {
-        let o = storage::get_order(env, order_hash);
+        let lp_bps = if forfeit { 0 } else { params.lp_fee_bps };
         let (lp_fee, protocol_fee) =
-            proofbridge_core::fees::split_fee(ad_amount, o.lp_fee_bps, o.protocol_fee_bps);
+            proofbridge_core::fees::split_fee(ad_amount, lp_bps, params.protocol_fee_bps);
         ad.balance -= ad_amount - lp_fee;
         events::FeeCharged {
             order_hash: order_hash.clone(),

@@ -53,6 +53,20 @@ pub enum RegistryError {
     /// `revoke` of an account with live slots while no position guard is wired: an open order
     /// cannot be ruled out, so it refuses.
     GuardsUnset = 25,
+    /// #586: the timelock is already active.
+    TimelockAlreadyActive = 26,
+    /// #586: this exact call is already proposed.
+    TimelockAlreadyProposed = 27,
+    /// #586: no pending proposal for this exact call (or it was voided by a handover).
+    TimelockNotProposed = 28,
+    /// #586: the proposal's 24 hours have not passed.
+    TimelockTooEarly = 29,
+    /// #586: a proposal's argument bytes are not the XDR of an argument list.
+    TimelockBadArgs = 30,
+    /// #586: the proposal's 14-day window to run has passed.
+    TimelockExpired = 31,
+    /// #586: a brake on what the proposal would re-enable was pulled after it was proposed.
+    TimelockCancelledByBrake = 32,
 }
 
 // No `From<Fault>` here on purpose. The registry's only shared helper is the event public-input

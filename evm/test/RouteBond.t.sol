@@ -55,13 +55,14 @@ contract RouteBondTest is Phase3Base {
             BondRow memory r = _bondRow(v, i);
             assertEq(Dispute.routeBond(Dispute.BondConfig(r.minBond, r.bps), r.amount), r.bond, "library");
             _config(address(adToken), r.minBond, r.bps);
-            (address quotedToken, uint256 quoted) = dm.routeBond(ORDER_CHAIN, address(adToken), r.amount);
+            (address quotedToken, uint256 quoted,) = dm.routeBond(ORDER_CHAIN, address(adToken), r.amount);
             assertEq(quotedToken, address(adToken), "quoted token");
             assertEq(quoted, r.bond, "quote");
 
             IAdManager.OrderParams memory p = _params(false, r.amount, 100 + i);
             p.deadline = block.timestamp + 7 days;
             bytes32 h = _lock(p);
+            adToken.mint(maker, r.bond);
             uint256 before = adToken.balanceOf(address(dm));
             vm.prank(maker);
             adManager.dispute(p, bytes32("e"));
@@ -91,7 +92,7 @@ contract RouteBondTest is Phase3Base {
 
     /// A route with no config posts plan 09's flat floor in native, whatever the order.
     function test_anUnconfiguredRouteKeepsTheNativeFloor() public {
-        (address t, uint256 b) = dm.routeBond(ORDER_CHAIN, address(adToken), 1e24);
+        (address t, uint256 b,) = dm.routeBond(ORDER_CHAIN, address(adToken), 1e24);
         assertEq(t, address(0));
         assertEq(b, BOND_FLOOR);
         IAdManager.OrderParams memory p = _params(false, 1e24, 1);
@@ -108,41 +109,64 @@ contract RouteBondTest is Phase3Base {
     function test_clearingAConfigRestoresTheFloor() public {
         _config(address(adToken), 1_000_000, 50);
         _config(address(adToken), 0, 0);
-        (address t, uint256 b) = dm.routeBond(ORDER_CHAIN, address(adToken), 1e24);
+        (address t, uint256 b,) = dm.routeBond(ORDER_CHAIN, address(adToken), 1e24);
         assertEq(t, address(0));
         assertEq(b, BOND_FLOOR);
     }
 
-    /// A token bond carries no value: value sent with it is refused, not kept.
-    function test_aTokenBondRefusesValue() public {
+    /// D1: a filer that sends value posts the native floor instead of the token bond (it may not hold
+    /// the token); a value other than the floor is refused. The quote names both.
+    function test_aFilerSendingValuePostsTheNativeFloor() public {
         _config(address(adToken), 1_000_000, 50);
+        (address t, uint256 tokenBond, uint256 floor_) = dm.routeBond(ORDER_CHAIN, address(adToken), 1_000_000_000);
+        assertEq(t, address(adToken));
+        assertEq(tokenBond, 5_000_000);
+        assertEq(floor_, BOND_FLOOR, "the quote carries the native floor");
         IAdManager.OrderParams memory p = _params(false, 1_000_000_000, 2);
-        _lock(p);
-        vm.deal(maker, 1);
+        bytes32 h = _lock(p);
+        vm.deal(maker, BOND_FLOOR);
         vm.prank(maker);
-        vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__NativeAmountMismatch.selector, 1, 0));
+        vm.expectRevert(
+            abi.encodeWithSelector(DisputeManager.DisputeManager__NativeAmountMismatch.selector, 1, BOND_FLOOR)
+        );
         adManager.dispute{value: 1}(p, bytes32("e"));
+        uint256 tokensBefore = adToken.balanceOf(maker);
+        vm.prank(maker);
+        adManager.dispute{value: BOND_FLOOR}(p, bytes32("e"));
+        (uint128 bond, address bondToken) = _recordBond(h);
+        assertEq(bond, BOND_FLOOR);
+        assertEq(bondToken, address(0), "posted in native");
+        assertEq(adToken.balanceOf(maker), tokensBefore, "no token was pulled");
     }
 
-    /// A native-token route scales its bond in native, posted as value, exactly.
+    /// A native-token route scales its bond in native, posted as value, exactly; the floor is still
+    /// accepted as the fallback, and any other value is refused.
     function test_aNativeRouteScalesItsBondInNative() public {
         _config(NATIVE, 0.01 ether, 50);
         IAdManager.OrderParams memory p = _params(true, 100 ether, 3);
         bytes32 h = _lock(p);
-        (address t, uint256 b) = dm.routeBond(ORDER_CHAIN, NATIVE, 100 ether);
+        (address t, uint256 b, uint256 floor_) = dm.routeBond(ORDER_CHAIN, NATIVE, 100 ether);
         assertEq(t, address(0));
         assertEq(b, 0.5 ether);
-        vm.deal(maker, 1 ether);
+        assertEq(floor_, BOND_FLOOR);
+        vm.deal(maker, 2 ether);
         vm.prank(maker);
         vm.expectRevert(
-            abi.encodeWithSelector(DisputeManager.DisputeManager__NativeAmountMismatch.selector, BOND_FLOOR, 0.5 ether)
+            abi.encodeWithSelector(DisputeManager.DisputeManager__NativeAmountMismatch.selector, 0.3 ether, 0.5 ether)
         );
-        adManager.dispute{value: BOND_FLOOR}(p, bytes32("e"));
+        adManager.dispute{value: 0.3 ether}(p, bytes32("e"));
         vm.prank(maker);
         adManager.dispute{value: 0.5 ether}(p, bytes32("e"));
         (uint128 bond, address bondToken) = _recordBond(h);
         assertEq(bond, 0.5 ether);
         assertEq(bondToken, address(0));
+
+        IAdManager.OrderParams memory q = _params(true, 100 ether, 4);
+        bytes32 hq = _lock(q);
+        vm.prank(maker);
+        adManager.dispute{value: BOND_FLOOR}(q, bytes32("e"));
+        (uint128 bondQ,) = _recordBond(hq);
+        assertEq(bondQ, BOND_FLOOR, "the floor is the fallback on a native route too");
     }
 
     /// The bond comes back, or goes to the pool, in the token it was posted in.

@@ -6,15 +6,16 @@
     "note": "Fees: lpFee = floor(amount × lpBps / 10,000) stays in the maker's ad, protocolFee = floor(amount × protocolBps / 10,000) goes to the pool, the recipient gets the rest. Bond: max(minBond, floor(amount × bondBps / 10,000)) in the order's own token."
   },
   "counts": {
-    "feeSplit": 7,
+    "feeSplit": 9,
     "feeValidation": 7,
-    "routeBond": 8,
-    "bondConfigValidation": 6
+    "routeBond": 9,
+    "bondConfigValidation": 8
   },
   "constants": {
     "maxFeeBps": 100,
     "maxBondBps": 500,
-    "timelockDelay": 86400
+    "timelockDelay": 86400,
+    "timelockGrace": 1209600
   },
   "feeSplit": [
     {
@@ -79,6 +80,24 @@
       "lpFee": "370370",
       "protocolFee": "0",
       "net": "123086419"
+    },
+    {
+      "label": "the largest u128 amount at the launch split",
+      "amount": "340282366920938463463374607431768211455",
+      "lpBps": 30,
+      "protocolBps": 20,
+      "lpFee": "1020847100762815390390123822295304634",
+      "protocolFee": "680564733841876926926749214863536422",
+      "net": "338580955086333771146057734394609370399"
+    },
+    {
+      "label": "the largest u128 amount at the ceiling",
+      "amount": "340282366920938463463374607431768211455",
+      "lpBps": 100,
+      "protocolBps": 100,
+      "lpFee": "3402823669209384634633746074317682114",
+      "protocolFee": "3402823669209384634633746074317682114",
+      "net": "333476719582519694194107115283132847227"
     }
   ],
   "feeValidation": [
@@ -188,6 +207,13 @@
       "bondBps": 500,
       "amount": "1000000000000000000",
       "bond": "50000000000000000"
+    },
+    {
+      "label": "the largest u128 amount at the ratio ceiling",
+      "minBond": "1",
+      "bondBps": 500,
+      "amount": "340282366920938463463374607431768211455",
+      "bond": "17014118346046923173168730371588410572"
     }
   ],
   "bondConfigValidation": [
@@ -226,6 +252,19 @@
       "minBond": "1",
       "bondBps": 0,
       "valid": true
+    },
+    {
+      "label": "the largest floor Soroban can pull",
+      "minBond": "170141183460469231731687303715884105727",
+      "bondBps": 0,
+      "valid": true
+    },
+    {
+      "label": "a floor one past i128",
+      "minBond": "170141183460469231731687303715884105728",
+      "bondBps": 0,
+      "valid": true,
+      "stellarValid": false
     }
   ]
 }

@@ -9,9 +9,10 @@ import {TwoStepAdmin} from "./TwoStepAdmin.sol";
  * @title AdminTimelock — a 24-hour delay on admin setters, with a one-time bootstrap bypass.
  * @dev A setter marked `timelocked` is its own execute: before activation the admin calls it directly
  *      (the bootstrap, so initial config does not take days); after activation it runs only when its
- *      exact calldata was proposed at least `TIMELOCK_DELAY` ago, and then anyone may send it. The
- *      rules are `Timelock`'s; the `_tl*` hooks let the escrows route them through the linked
- *      `ProofBridgeUtils` for EIP-170 headroom. `pause`, `unpause` and the admin handover stay instant.
+ *      exact calldata was proposed at least `TIMELOCK_DELAY` ago (and at most 14 days after that, in
+ *      this admin epoch), and then anyone may send it. The rules are `Timelock`'s; the `_tl*` hooks
+ *      let the escrows route them through the linked `ProofBridgeUtils` for EIP-170 headroom. `pause`,
+ *      `unpause` and the admin handover stay instant; an accepted handover voids pending proposals.
  */
 abstract contract AdminTimelock is IAdminTimelock, TwoStepAdmin {
     /// @inheritdoc IAdminTimelock
@@ -21,7 +22,7 @@ abstract contract AdminTimelock is IAdminTimelock, TwoStepAdmin {
 
     /// @dev Bootstrap: admin only. Active: a ripe proposal for this exact calldata, from anyone.
     modifier timelocked() {
-        _timelocked();
+        _timelocked(0);
         _;
     }
 
@@ -32,7 +33,7 @@ abstract contract AdminTimelock is IAdminTimelock, TwoStepAdmin {
 
     /// @inheritdoc IAdminTimelock
     function timelockEta(bytes32 id) external view returns (uint256) {
-        return _timelock.eta[id];
+        return _tlEta(id);
     }
 
     /// @inheritdoc IAdminTimelock
@@ -50,20 +51,28 @@ abstract contract AdminTimelock is IAdminTimelock, TwoStepAdmin {
         _tlCancel(id);
     }
 
-    function _timelocked() internal {
+    /// @dev D6: a new admin starts with no pending proposals; the old admin's are void.
+    function _afterAdminAccepted() internal override {
+        _timelock.epoch++;
+    }
+
+    /// @dev `key` names what a brake on this setter de-trusts (zero = none).
+    function _timelocked(bytes32 key) internal {
         if (!_timelock.active) {
             if (msg.sender != admin) revert NotAdmin();
             return;
         }
-        _tlConsume(keccak256(msg.data));
+        _tlConsume(keccak256(msg.data), key);
     }
 
-    /// @dev A brake (unwire, revoke) stays instant for the admin; anything else goes through the delay.
-    function _timelockedUnless(bool brake) internal {
+    /// @dev A brake (unwire, revoke) stays instant for the admin and voids every proposal on `key` made
+    ///      up to now, so none can undo it; anything else goes through the delay.
+    function _timelockedUnless(bool brake, bytes32 key) internal {
         if (brake) {
             if (msg.sender != admin) revert NotAdmin();
+            _timelock.brakedAt[key] = block.timestamp;
         } else {
-            _timelocked();
+            _timelocked(key);
         }
     }
 
@@ -79,7 +88,11 @@ abstract contract AdminTimelock is IAdminTimelock, TwoStepAdmin {
         Timelock.cancel(_timelock, id);
     }
 
-    function _tlConsume(bytes32 id) internal virtual {
-        Timelock.consume(_timelock, id);
+    function _tlConsume(bytes32 id, bytes32 key) internal virtual {
+        Timelock.consume(_timelock, id, key);
+    }
+
+    function _tlEta(bytes32 id) internal view virtual returns (uint256) {
+        return Timelock.liveEta(_timelock, id);
     }
 }

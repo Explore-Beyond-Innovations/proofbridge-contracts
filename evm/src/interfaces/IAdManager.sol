@@ -60,6 +60,10 @@ interface IAdManager is IEscrow {
         uint8 adDecimals;
         uint256 deadline;
         bytes32 adSettlementSigner;
+        /// #586: the bridge fee the bridger deposited against (in the order hash, so it is fixed at the
+        /// deposit); the AdManager's lock requires it to equal the live fee and its payouts charge it.
+        uint16 lpFeeBps;
+        uint16 protocolFeeBps;
     }
 
     /// @notice The bridge fee, taken from the bridger's payout on this chain. `lpBps` stays in the
@@ -150,6 +154,8 @@ interface IAdManager is IEscrow {
     error AdManager__NoRepin(bytes32 orderHash);
     /// @notice A fee above `MAX_FEE_BPS`, or a protocol fee with no pool to pay it to.
     error AdManager__InvalidFee();
+    /// @notice The order's fee (fixed at the bridger's deposit) is not the AdManager's live fee.
+    error AdManager__FeeMismatch(uint16 lpBps, uint16 protocolBps);
 
     /*//////////////////////////////////////////////////////////////
                                  FUNCTIONS

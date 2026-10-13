@@ -15,7 +15,7 @@ mod storage;
 use soroban_sdk::{
     bytesn, contract, contractclient, contractimpl,
     crypto::bls12_381::{Bls12381G1Affine as G1Affine, Bls12381G2Affine as G2Affine},
-    vec, Address, Bytes, BytesN, ContractExecutable, Env, String, Vec,
+    vec, Address, Bytes, BytesN, ContractExecutable, Env, IntoVal, String, Symbol, Vec,
 };
 
 use errors::RegistryError;
@@ -103,9 +103,16 @@ impl BlsKeyRegistry {
 
     /// Swap the contract's code behind the two-step admin (#404 D5): the next gap of this
     /// class is a code swap, not a migration. Storage and the pause flag are untouched.
+    /// #586: under the 24-hour delay: new code behind the address the escrows pin is new trust.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), RegistryError> {
         let admin = storage::get_admin(&env);
-        admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &admin,
+            "upgrade",
+            (new_wasm_hash.clone(),).into_val(&env),
+        )
+        .map_err(timelock_error)?;
         env.deployer()
             .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
         events::Upgraded {
@@ -122,6 +129,8 @@ impl BlsKeyRegistry {
         let old = storage::get_admin(&env);
         storage::set_admin(&env, &pending);
         storage::clear_pending_admin(&env);
+        // #586 D6: a handover voids the old admin's pending proposals.
+        proofbridge_core::timelock::bump_epoch(&env);
         events::AdminTransferred {
             from: old,
             to: pending,
@@ -130,11 +139,52 @@ impl BlsKeyRegistry {
         Ok(())
     }
 
+    // ── the 24-hour delay (#586) ─────────────────────────────────────────
+
+    /// Close the setup bypass for good. Admin only; not itself delayed.
+    pub fn activate_timelock(env: Env) -> Result<(), RegistryError> {
+        storage::get_admin(&env).require_auth();
+        proofbridge_core::timelock::activate(&env).map_err(timelock_error)
+    }
+
+    /// Queue a timelocked call: its function name and its argument list as XDR. Admin only; closes
+    /// the bypass if still open. Executable by anyone 24 hours later, for 14 days.
+    pub fn propose_action(
+        env: Env,
+        fn_name: Symbol,
+        args: Bytes,
+    ) -> Result<BytesN<32>, RegistryError> {
+        storage::get_admin(&env).require_auth();
+        proofbridge_core::timelock::propose(&env, fn_name, args).map_err(timelock_error)
+    }
+
+    /// Drop a pending proposal. Admin only.
+    pub fn cancel_action(env: Env, id: BytesN<32>) -> Result<(), RegistryError> {
+        storage::get_admin(&env).require_auth();
+        proofbridge_core::timelock::cancel(&env, id).map_err(timelock_error)
+    }
+
+    pub fn timelock_active(env: Env) -> bool {
+        proofbridge_core::timelock::is_active(&env)
+    }
+
+    /// The earliest execution time of a proposal that can still run; 0 = none.
+    pub fn timelock_eta(env: Env, id: BytesN<32>) -> u64 {
+        proofbridge_core::timelock::eta(&env, &id)
+    }
+
+    /// #586: under the 24-hour delay; the guards are what keep a key with open trades from going.
     pub fn set_position_guards(env: Env, guards: Vec<Address>) -> Result<(), RegistryError> {
         if !storage::is_initialized(&env) {
             return Err(RegistryError::NotInitialized);
         }
-        storage::get_admin(&env).require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &storage::get_admin(&env),
+            "set_position_guards",
+            (guards.clone(),).into_val(&env),
+        )
+        .map_err(timelock_error)?;
         storage::set_guards(&env, &guards);
         events::PositionGuardsSet { guards }.publish(&env);
         Ok(())
@@ -154,7 +204,20 @@ impl BlsKeyRegistry {
         if !storage::is_initialized(&env) {
             return Err(RegistryError::NotInitialized);
         }
-        storage::get_admin(&env).require_auth();
+        // #586: enabling or rewiring grants trust and waits the delay; disabling is a brake.
+        proofbridge_core::timelock::gate_unless(
+            &env,
+            &storage::get_admin(&env),
+            !enabled,
+            "set_proof_registration",
+            (anchor.clone(), verifier.clone(), sources.clone(), enabled).into_val(&env),
+            proofbridge_core::timelock::brake_key(
+                &env,
+                "set_proof_registration",
+                ().into_val(&env),
+            ),
+        )
+        .map_err(timelock_error)?;
         if enabled && sources.is_empty() {
             return Err(RegistryError::ProofRegistrationRefsUnset);
         }
@@ -825,3 +888,17 @@ fn verify_pop(
 
 #[cfg(test)]
 mod test;
+
+/// #586: the shared timelock's refusals as this contract's errors.
+fn timelock_error(f: proofbridge_core::escrow_ops::Fault) -> RegistryError {
+    use proofbridge_core::escrow_ops::Fault::*;
+    match f {
+        TimelockAlreadyActive => RegistryError::TimelockAlreadyActive,
+        TimelockAlreadyProposed => RegistryError::TimelockAlreadyProposed,
+        TimelockTooEarly => RegistryError::TimelockTooEarly,
+        TimelockBadArgs => RegistryError::TimelockBadArgs,
+        TimelockExpired => RegistryError::TimelockExpired,
+        TimelockCancelledByBrake => RegistryError::TimelockCancelledByBrake,
+        _ => RegistryError::TimelockNotProposed,
+    }
+}

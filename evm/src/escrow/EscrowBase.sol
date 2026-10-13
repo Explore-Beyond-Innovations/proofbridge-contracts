@@ -143,9 +143,11 @@ abstract contract EscrowBase is IEscrow, AdminTimelock, Pausable, ReentrancyGuar
     }
 
     /// @inheritdoc IEscrow
-    /// @dev Unwiring (`address(0)`) is a brake and stays instant; wiring goes through the delay.
+    /// @dev Unwiring (`address(0)`) is a brake and stays instant, and voids any pending re-wire of the
+    ///      route; wiring goes through the delay. The brake key is the chain id, inverted so it is never
+    ///      zero (the "no key" value); this is the escrows' only keyed setter, so it collides with none.
     function setRootVerifier(uint256 chainId, address verifier) external {
-        _timelockedUnless(verifier == address(0));
+        _timelockedUnless(verifier == address(0), bytes32(~chainId));
         _setRootVerifier(chainId, verifier);
     }
 
@@ -192,8 +194,12 @@ abstract contract EscrowBase is IEscrow, AdminTimelock, Pausable, ReentrancyGuar
         ProofBridgeUtils.timelockCancel(_timelock, id);
     }
 
-    function _tlConsume(bytes32 id) internal override {
-        ProofBridgeUtils.timelockConsume(_timelock, id);
+    function _tlConsume(bytes32 id, bytes32 key) internal override {
+        ProofBridgeUtils.timelockConsume(_timelock, id, key);
+    }
+
+    function _tlEta(bytes32 id) internal view override returns (uint256) {
+        return ProofBridgeUtils.timelockEta(_timelock, id);
     }
 
     /*//////////////////////////////////////////////////////////////

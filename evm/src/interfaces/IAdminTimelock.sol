@@ -12,12 +12,17 @@ interface IAdminTimelock {
     error Timelock__AlreadyProposed(bytes32 id);
     error Timelock__NotProposed(bytes32 id);
     error Timelock__TooEarly(uint256 eta);
+    /// @notice The proposal's 14-day window to run has passed; propose it again.
+    error Timelock__Expired(uint256 expiredAt);
+    /// @notice A brake on what this proposal would re-enable was pulled after it was proposed.
+    error Timelock__CancelledByBrake(bytes32 id);
 
     /// @notice The minimum time between a proposal and its execution: 24 hours.
     function TIMELOCK_DELAY() external view returns (uint256);
     /// @notice The bootstrap bypass is closed. One-way.
     function timelockActive() external view returns (bool);
-    /// @notice Earliest execution time of a pending proposal (`keccak256` of its calldata); 0 = none.
+    /// @notice Earliest execution time of a proposal that can still run (`keccak256` of its calldata):
+    ///         this admin epoch, not expired. 0 = none. It runs until `eta + 14 days`.
     function timelockEta(bytes32 id) external view returns (uint256);
 
     /// @notice Close the bootstrap bypass for good. Admin only; not itself delayed.

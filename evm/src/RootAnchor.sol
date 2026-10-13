@@ -3,7 +3,7 @@ pragma solidity ^0.8.34;
 
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IRootAnchor} from "./interfaces/IRootAnchor.sol";
-import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
+import {AdminTimelock} from "./libraries/AdminTimelock.sol";
 
 /**
  * @title RootAnchor (Proofbridge)
@@ -27,7 +27,7 @@ import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
  *      able to freeze a claim (D4). The delay is read at query time, so lowering it un-delays anchored
  *      roots retroactively — an admin power, deliberately.
  */
-contract RootAnchor is IRootAnchor, TwoStepAdmin, Pausable {
+contract RootAnchor is IRootAnchor, AdminTimelock, Pausable {
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
@@ -169,7 +169,8 @@ contract RootAnchor is IRootAnchor, TwoStepAdmin, Pausable {
 
     /// @notice Replace the notary set — the ladder rung (admin key → quorum → light client). Pending
     ///         approvals from the previous set stop counting.
-    function setSigners(address[] calldata signers_, uint32 threshold_) external onlyAdmin {
+    /// @dev #586: under the 24-hour delay; a new signer set is new trust in every anchored root.
+    function setSigners(address[] calldata signers_, uint32 threshold_) external timelocked {
         _setSigners(signers_, threshold_);
     }
 
@@ -189,18 +190,29 @@ contract RootAnchor is IRootAnchor, TwoStepAdmin, Pausable {
     }
 
     /// @notice Recover a route whose sequence was pinned wrongly (a buggy or compromised publisher).
-    function resetLatestSeq(uint256 sourceChainId, uint64 seq) external onlyAdmin {
+    /// @dev #586: lowering the pin re-opens history, so it waits the delay; raising it only refuses more
+    ///      and stays instant (a brake that also voids any pending lowering for the route).
+    function resetLatestSeq(uint256 sourceChainId, uint64 seq) external {
+        _timelockedUnless(
+            seq >= latestSeq[sourceChainId], keccak256(abi.encode(this.resetLatestSeq.selector, sourceChainId))
+        );
         latestSeq[sourceChainId] = seq;
         emit LatestSeqReset(sourceChainId, seq);
     }
 
-    function setAnchorDelay(uint256 sourceChainId, uint64 delay) external onlyAdmin {
+    /// @dev #586: a cut shortens the watchtower's window, so it waits the delay; a raise is a brake.
+    function setAnchorDelay(uint256 sourceChainId, uint64 delay) external {
+        _timelockedUnless(
+            delay >= anchorDelay[sourceChainId], keccak256(abi.encode(this.setAnchorDelay.selector, sourceChainId))
+        );
         if (delay > MAX_ANCHOR_DELAY) revert RootAnchor__DelayTooLong(MAX_ANCHOR_DELAY, delay);
         anchorDelay[sourceChainId] = delay;
         emit AnchorDelaySet(sourceChainId, delay);
     }
 
-    function setMonotonic(bool monotonic_) external onlyAdmin {
+    /// @dev #586: switching the sequence check off waits the delay; switching it on is a brake.
+    function setMonotonic(bool monotonic_) external {
+        _timelockedUnless(monotonic_, keccak256(abi.encode(this.setMonotonic.selector)));
         monotonic = monotonic_;
         emit MonotonicSet(monotonic_);
     }

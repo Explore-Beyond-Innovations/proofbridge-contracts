@@ -49,7 +49,7 @@ abstract contract Phase3Base is Test {
     bytes32 internal constant EVIDENCE_ROOT = bytes32(uint256(0xe71d));
     uint256 internal constant ORDER_CHAIN = 11155111;
     uint128 internal constant BOND_FLOOR = 1 ether;
-    uint256 internal constant AD_START = 1e30;
+    uint256 internal constant AD_START = 2 ** 200; // room for the vectors' u128::MAX rows
 
     function setUp() public virtual {
         mmr = new MerkleManager(admin, address(new Poseidon2Yul()));
@@ -125,6 +125,8 @@ abstract contract Phase3Base is Test {
         p.adDecimals = 18;
         p.deadline = 1 days + 7 days; // fixed, so the hash does not move with a warp
         p.adSettlementSigner = _b(maker);
+        // #586: the fee the bridger deposits against: the ad chain's live fee, as the relayer quotes it.
+        (, p.lpFeeBps, p.protocolFeeBps) = adManager.feeConfig();
     }
 
     function _lock(IAdManager.OrderParams memory p) internal returns (bytes32 h) {
@@ -157,7 +159,9 @@ abstract contract Phase3Base is Test {
                 orderDecimals: p.orderDecimals,
                 adDecimals: p.adDecimals,
                 deadline: p.deadline,
-                adSettlementSigner: p.adSettlementSigner
+                adSettlementSigner: p.adSettlementSigner,
+                lpFeeBps: p.lpFeeBps,
+                protocolFeeBps: p.protocolFeeBps
             })
         );
     }

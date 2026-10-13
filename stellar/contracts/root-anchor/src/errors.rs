@@ -24,4 +24,18 @@ pub enum RootAnchorError {
     NoSuchAnchor = 10,
     /// A later approval named a different ledger sequence than the pending root's first one
     SeqMismatch = 11,
+    /// #586: the timelock is already active.
+    TimelockAlreadyActive = 12,
+    /// #586: this exact call is already proposed.
+    TimelockAlreadyProposed = 13,
+    /// #586: no pending proposal for this exact call (or it was voided by a handover).
+    TimelockNotProposed = 14,
+    /// #586: the proposal's 24 hours have not passed.
+    TimelockTooEarly = 15,
+    /// #586: a proposal's argument bytes are not the XDR of an argument list.
+    TimelockBadArgs = 16,
+    /// #586: the proposal's 14-day window to run has passed.
+    TimelockExpired = 17,
+    /// #586: a brake on what the proposal would re-enable was pulled after it was proposed.
+    TimelockCancelledByBrake = 18,
 }

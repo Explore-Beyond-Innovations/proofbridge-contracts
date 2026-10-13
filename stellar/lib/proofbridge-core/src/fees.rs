@@ -6,10 +6,15 @@ pub const MAX_FEE_BPS: u32 = 100;
 /// `(lp_fee, protocol_fee)` on `amount`, each rounded down, so the rounding dust stays with the
 /// recipient.
 pub fn split_fee(amount: u128, lp_bps: u32, protocol_bps: u32) -> (u128, u128) {
-    (
-        amount * lp_bps as u128 / 10_000,
-        amount * protocol_bps as u128 / 10_000,
-    )
+    (bps_of(amount, lp_bps), bps_of(amount, protocol_bps))
+}
+
+/// `floor(amount × bps / 10,000)` without the product: exact for every u128 amount and any bps up to
+/// u32 (DA-2). With `amount = q × 10,000 + r` it is `q × bps + floor(r × bps / 10,000)`; neither
+/// product can overflow while `bps ≤ 10,000`, and the escrows' bps are at most 500.
+pub fn bps_of(amount: u128, bps: u32) -> u128 {
+    let bps = bps as u128;
+    amount / 10_000 * bps + amount % 10_000 * bps / 10_000
 }
 
 /// `set_fee_bps`'s rule: each at most `MAX_FEE_BPS`, and a protocol fee only with a pool to pay.

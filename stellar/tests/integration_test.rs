@@ -187,6 +187,19 @@ struct TestParamsJson {
     order_params: OrderParamsJson,
     chain_ids: ChainIdsJson,
     event_roots: std::collections::BTreeMap<std::string::String, std::string::String>,
+    fees: FeeVariantJson,
+}
+
+/// #586: the same order at the launch split; the fee is in the hash, so it has its own proofs.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeeVariantJson {
+    lp_fee_bps: u32,
+    protocol_fee_bps: u32,
+    order_hash: String,
+    order_root: String,
+    bridger_nullifier: String,
+    settled_root: String,
 }
 
 #[derive(Deserialize)]
@@ -217,6 +230,8 @@ struct OrderParamsJson {
     ad_decimals: u32,
     deadline: String,
     ad_settlement_signer: String,
+    lp_fee_bps: u32,
+    protocol_fee_bps: u32,
 }
 
 #[derive(Deserialize)]
@@ -250,6 +265,8 @@ struct TestParams {
     ad_decimals: u32,
     deadline: u64,
     ad_settlement_signer: [u8; 32],
+    lp_fee_bps: u32,
+    protocol_fee_bps: u32,
     // Chain IDs
     order_chain_id: u128,
     ad_chain_id: u128,
@@ -257,6 +274,17 @@ struct TestParams {
     event_roots: [[u8; 32]; 4],
     // 2.5c: a CANCEL root for a DIFFERENT order (the reuse negative)
     foreign_cancel_root: [u8; 32],
+    // #586: the fee variant, swapped in by `fee_setup`
+    fee_variant: FeeVariant,
+}
+
+struct FeeVariant {
+    lp_fee_bps: u32,
+    protocol_fee_bps: u32,
+    order_hash: [u8; 32],
+    order_root: [u8; 32],
+    bridger_nullifier: [u8; 32],
+    settled_root: [u8; 32],
 }
 
 fn hex_to_array(hex_str: &str) -> [u8; 32] {
@@ -308,10 +336,20 @@ fn load_test_params() -> TestParams {
         ad_decimals: json.order_params.ad_decimals,
         deadline: json.order_params.deadline.parse().unwrap(),
         ad_settlement_signer: strkey_to_array(&json.order_params.ad_settlement_signer),
+        lp_fee_bps: json.order_params.lp_fee_bps,
+        protocol_fee_bps: json.order_params.protocol_fee_bps,
         order_chain_id: json.chain_ids.order_chain_id,
         ad_chain_id: json.chain_ids.ad_chain_id,
         event_roots: [2u32, 3, 4, 5].map(|d| hex_to_array(&json.event_roots[&d.to_string()])),
         foreign_cancel_root: hex_to_array(&json.event_roots["2foreign"]),
+        fee_variant: FeeVariant {
+            lp_fee_bps: json.fees.lp_fee_bps,
+            protocol_fee_bps: json.fees.protocol_fee_bps,
+            order_hash: hex_to_array(&json.fees.order_hash),
+            order_root: hex_to_array(&json.fees.order_root),
+            bridger_nullifier: hex_to_array(&json.fees.bridger_nullifier),
+            settled_root: hex_to_array(&json.fees.settled_root),
+        },
     }
 }
 
@@ -494,8 +532,8 @@ fn setup_opts(wire_root_verifiers: bool, wire_timing: bool) -> TestSetup<'static
     );
 
     // Set merkle managers
-    ad_merkle.set_manager(&ad_manager_addr, &true);
-    order_merkle.set_manager(&order_portal_addr, &true);
+    ad_merkle.set_escrow_appender(&ad_manager_addr, &true);
+    order_merkle.set_escrow_appender(&order_portal_addr, &true);
 
     // --- Ad-manager: set_chain (uses require_auth, mocked) ---
     ad_manager.set_chain(
@@ -607,6 +645,8 @@ fn ad_manager_order_params(env: &Env, tp: &TestParams) -> ad_manager_contract::O
         ad_decimals: tp.ad_decimals,
         deadline: tp.deadline,
         ad_settlement_signer: bytes32_to_bytesn(env, &tp.ad_settlement_signer),
+        lp_fee_bps: tp.lp_fee_bps,
+        protocol_fee_bps: tp.protocol_fee_bps,
     }
 }
 
@@ -627,6 +667,8 @@ fn order_portal_order_params(env: &Env, tp: &TestParams) -> order_portal_contrac
         ad_decimals: tp.ad_decimals,
         deadline: tp.deadline,
         ad_settlement_signer: bytes32_to_bytesn(env, &tp.ad_settlement_signer),
+        lp_fee_bps: tp.lp_fee_bps,
+        protocol_fee_bps: tp.protocol_fee_bps,
     }
 }
 
@@ -9531,7 +9573,7 @@ fn test_c19_create_order_twice_is_order_exists() {
 fn test_c19_a_revoked_merkle_manager_is_merkle_append_failed() {
     let s = setup();
     merkle_contract::Client::new(&s.env, &s.ad_merkle_addr)
-        .set_manager(&s.ad_manager.address, &false);
+        .set_escrow_appender(&s.ad_manager.address, &false);
     let p = ad_manager_order_params(&s.env, &s.tp);
     assert_eq!(
         s.ad_manager.try_lock_for_order(&p, &0),
@@ -9540,7 +9582,7 @@ fn test_c19_a_revoked_merkle_manager_is_merkle_append_failed() {
     assert_eq!(ad_locked(&s), 0, "nothing was reserved");
 
     merkle_contract::Client::new(&s.env, &s.order_merkle_addr)
-        .set_manager(&s.order_portal.address, &false);
+        .set_escrow_appender(&s.order_portal.address, &false);
     let bridger = account_addr(&s, &s.tp.bridger);
     TokenContractClient::new(&s.env, &s.order_token_addr).mint(&bridger, &(s.tp.amount as i128));
     let q = order_portal_order_params(&s.env, &s.tp);
@@ -10699,12 +10741,41 @@ fn test_d5_a_pause_moves_no_answer_deadline() {
 
 const FEE_POOL_KEY: [u8; 32] = [0x99; 32];
 
-/// The launch split, 30 / 20 bps, with the pool an account.
+const PROOF_BRIDGER_FEES: &[u8] = include_bytes!("fixtures/proof_bridger_fees.bin");
+const SETTLED_CLAIM_FEES: &[u8] = include_bytes!("fixtures/event_claim_3_fees.bin");
+
+/// Sets the pool and the split, with the pool an account.
 fn wire_fees(s: &TestSetup, lp: u32, protocol: u32) -> Address {
     s.ad_manager
         .set_protocol_fee_pool(&BytesN::from_array(&s.env, &FEE_POOL_KEY));
     s.ad_manager.set_fee_bps(&lp, &protocol);
     account_addr(s, &FEE_POOL_KEY)
+}
+
+/// The fixture order at the launch split (30 / 20): the bridger deposited under it, so the fee
+/// is in the order hash, and the ad-manager is wired at the same split.
+fn fee_setup() -> (TestSetup<'static>, Address) {
+    let mut s = setup();
+    let v = &s.tp.fee_variant;
+    let (lp, protocol) = (v.lp_fee_bps, v.protocol_fee_bps);
+    s.tp.order_hash = v.order_hash;
+    s.tp.order_root = v.order_root;
+    s.tp.bridger_nullifier = v.bridger_nullifier;
+    s.tp.event_roots[1] = v.settled_root;
+    s.tp.lp_fee_bps = lp;
+    s.tp.protocol_fee_bps = protocol;
+    let pool = wire_fees(&s, lp, protocol);
+    (s, pool)
+}
+
+fn fee_unlock(s: &TestSetup, p: &ad_manager_contract::OrderParams) {
+    s.ad_manager.unlock(
+        p,
+        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
+        &Bytes::from_slice(&s.env, PROOF_BRIDGER_FEES),
+        &Bytes::new(&s.env),
+    );
 }
 
 fn ad_balance(s: &TestSetup) -> u128 {
@@ -10715,25 +10786,33 @@ fn fee_of(amount: u128, bps: u128) -> u128 {
     amount * bps / 10_000
 }
 
+/// The fee rides in the order hash: the fixture's two hashes differ only by the split.
+#[test]
+fn test_586_the_fee_is_in_the_order_hash() {
+    let (s, _pool) = fee_setup();
+    let p = ad_manager_order_params(&s.env, &s.tp);
+    assert_eq!(
+        s.ad_manager.hash_order(&p),
+        bytes32_to_bytesn(&s.env, &s.tp.order_hash)
+    );
+    let mut free = p.clone();
+    free.lp_fee_bps = 0;
+    free.protocol_fee_bps = 0;
+    assert_ne!(s.ad_manager.hash_order(&free), s.ad_manager.hash_order(&p));
+}
+
 /// The co-signed unlock pays the recipient the net, the pool the protocol fee, and leaves the LP
 /// fee in the ad.
 #[test]
 fn test_586_unlock_takes_the_fee() {
-    let s = setup();
-    let pool = wire_fees(&s, 30, 20);
+    let (s, pool) = fee_setup();
     let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
     let recipient = account_addr(&s, &s.tp.order_recipient);
     let p = locked_ad_order(&s);
     let amount = s.tp.amount;
     let balance = ad_balance(&s);
     let before = token.balance(&recipient);
-    s.ad_manager.unlock(
-        &p,
-        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
-        &bytes32_to_bytesn(&s.env, &s.tp.order_root),
-        &Bytes::from_slice(&s.env, PROOF_BRIDGER),
-        &Bytes::new(&s.env),
-    );
+    fee_unlock(&s, &p);
     let (lp, protocol) = (fee_of(amount, 30), fee_of(amount, 20));
     assert!(
         lp > 0 && protocol > 0,
@@ -10760,17 +10839,17 @@ fn test_586_unlock_takes_the_fee() {
 /// Evidence settlement takes the same fee.
 #[test]
 fn test_586_present_settled_takes_the_fee() {
-    let s = setup();
-    let pool = wire_fees(&s, 30, 20);
+    let (s, pool) = fee_setup();
     let anchor = wire_anchor(&s);
     let p = locked_ad_order(&s);
-    let (root, proof) = settled_proof(&s);
+    let root = bytes32_to_bytesn(&s.env, &s.tp.event_roots[1]);
     notarize(&s, &anchor, s.tp.order_chain_id, &root);
     let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
     let recipient = account_addr(&s, &s.tp.order_recipient);
     let before = token.balance(&recipient);
     let balance = ad_balance(&s);
-    s.ad_manager.present_settled(&p, &root, &proof);
+    s.ad_manager
+        .present_settled(&p, &root, &Bytes::from_slice(&s.env, SETTLED_CLAIM_FEES));
     let amount = s.tp.amount;
     let (lp, protocol) = (fee_of(amount, 30), fee_of(amount, 20));
     assert_eq!(
@@ -10781,11 +10860,11 @@ fn test_586_present_settled_takes_the_fee() {
     assert_eq!(balance - ad_balance(&s), amount - lp);
 }
 
-/// MakerForfeit pays the bridger as a settlement would, less the same fee.
+/// MakerForfeit: the bridger gets the LP share too (the maker keeps nothing); the pool still
+/// gets the protocol fee.
 #[test]
 fn test_586_maker_forfeit_takes_the_fee() {
-    let s = setup();
-    let pool = wire_fees(&s, 30, 20);
+    let (s, pool) = fee_setup();
     let (dm, _arbiter, filer) = wire_dispute_manager(&s);
     let p = locked_ad_order(&s);
     let order_hash = s.ad_manager.hash_order(&p);
@@ -10802,21 +10881,25 @@ fn test_586_maker_forfeit_takes_the_fee() {
     let balance = ad_balance(&s);
     s.ad_manager.finalize_dispute(&p);
     let amount = s.tp.amount;
-    let (lp, protocol) = (fee_of(amount, 30), fee_of(amount, 20));
+    let protocol = fee_of(amount, 20);
     assert_eq!(
         token.balance(&recipient) - before,
-        (amount - lp - protocol) as i128
+        (amount - protocol) as i128,
+        "the bridger did not get the LP share"
     );
     assert_eq!(token.balance(&pool), protocol as i128);
-    assert_eq!(balance - ad_balance(&s), amount - lp);
+    assert_eq!(
+        balance - ad_balance(&s),
+        amount,
+        "the maker kept the LP share"
+    );
     assert_eq!(ad_locked(&s), 0);
 }
 
 /// No fee on a cancel: the lock goes back to the ad whole and the pool gets nothing.
 #[test]
 fn test_586_a_cancel_takes_no_fee() {
-    let s = setup();
-    let pool = wire_fees(&s, 30, 20);
+    let (s, pool) = fee_setup();
     let p = locked_ad_order(&s);
     let balance = ad_balance(&s);
     warp(&s, p.deadline);
@@ -10831,28 +10914,76 @@ fn test_586_a_cancel_takes_no_fee() {
     );
 }
 
-/// A live order pays the fee it locked under; a later change applies only to later orders.
+/// No fee on a refund: a MutualRefund, a BridgerForfeit and an unruled dispute each give the
+/// lock back whole.
+#[test]
+fn test_586_refunding_rulings_take_no_fee() {
+    use dispute_manager_contract::DisputeOutcome as O;
+    for outcome in [Some(O::MutualRefund), Some(O::BridgerForfeit), None] {
+        let (s, pool) = fee_setup();
+        let (dm, _arbiter, filer) = wire_dispute_manager(&s);
+        let p = locked_ad_order(&s);
+        let h = s.ad_manager.hash_order(&p);
+        let balance = ad_balance(&s);
+        s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+        if let Some(o) = outcome.clone() {
+            dm.resolve_dispute(&h, &o);
+        }
+        warp(&s, s.ad_manager.dispute_finalizes_at(&p));
+        s.ad_manager.finalize_dispute(&p);
+        assert_eq!(ad_balance(&s), balance, "{outcome:?} took a fee");
+        assert_eq!(ad_locked(&s), 0);
+        assert_eq!(
+            TokenContractClient::new(&s.env, &s.ad_token_addr).balance(&pool),
+            0,
+            "{outcome:?} paid the pool"
+        );
+    }
+}
+
+/// The lock refuses an order whose split is not the live one: the bridger deposited under a
+/// split the maker no longer quotes.
+#[test]
+fn test_586_a_fee_change_between_deposit_and_lock_refuses_the_lock() {
+    let (s, _pool) = fee_setup();
+    s.ad_manager.set_fee_bps(&30, &30);
+    let p = ad_manager_order_params(&s.env, &s.tp);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p, &0),
+        Err(Ok(AdErr::FeeMismatch))
+    );
+    s.ad_manager.set_fee_bps(&30, &20);
+    s.ad_manager.lock_for_order(&p, &0);
+}
+
+/// A live order pays the fee it deposited under; a later change applies only to later orders.
 #[test]
 fn test_586_a_fee_change_does_not_move_a_live_order() {
-    let s = setup();
-    let pool = wire_fees(&s, 30, 20);
+    let (s, pool) = fee_setup();
     let p = locked_ad_order(&s);
-    let order = s
-        .ad_manager
-        .get_order(&bytes32_to_bytesn(&s.env, &s.tp.order_hash));
-    assert_eq!(
-        (order.lp_fee_bps, order.protocol_fee_bps),
-        (30, 20),
-        "the lock stamps the live bps"
-    );
     s.ad_manager.set_fee_bps(&100, &100);
-    assert!(ad_unlock(&s, &p, &Bytes::new(&s.env)));
+    fee_unlock(&s, &p);
     let amount = s.tp.amount;
     assert_eq!(
         TokenContractClient::new(&s.env, &s.ad_token_addr).balance(&pool),
         fee_of(amount, 20) as i128,
         "the live order moved with the new fee"
     );
+}
+
+/// The order-portal refuses a split above the 1% ceiling.
+#[test]
+fn test_586_the_order_portal_caps_the_split() {
+    let s = setup();
+    for (lp, protocol) in [(101u32, 0u32), (0, 101)] {
+        let mut p = order_portal_order_params(&s.env, &s.tp);
+        p.lp_fee_bps = lp;
+        p.protocol_fee_bps = protocol;
+        assert_eq!(
+            s.order_portal.try_create_order(&p).err(),
+            Some(Ok(OpErr::InvalidFee))
+        );
+    }
 }
 
 /// The 1% ceiling, the pool rule, and a zero pool.
@@ -11108,8 +11239,25 @@ fn test_586_merkle_manager_grant_is_delayed_and_revoke_is_instant() {
     assert!(mm.is_manager(&who));
     mm.set_manager(&who, &false);
     assert!(!mm.is_manager(&who), "the brake is instant");
-    mm.set_manager(&s.ad_manager.address, &false);
-    assert!(!mm.is_manager(&s.ad_manager.address));
+    // An escrow is not brakeable: de-authorising it goes under the delay too.
+    let escrow = s.ad_manager.address.clone();
+    assert!(mm.is_escrow_appender(&escrow));
+    assert_eq!(
+        mm.try_set_manager(&escrow, &false),
+        Err(Ok(merkle_contract::MerkleError::EscrowAppender))
+    );
+    assert_eq!(
+        mm.try_set_escrow_appender(&escrow, &false),
+        Err(Ok(merkle_contract::MerkleError::TimelockNotProposed))
+    );
+    let now = e.ledger().timestamp();
+    mm.propose_action(
+        &tl_sym(e, "set_escrow_appender"),
+        &tl_xdr(e, &tl_args(e, (escrow.clone(), false))),
+    );
+    warp(&s, now + 24 * 60 * 60);
+    mm.set_escrow_appender(&escrow, &false);
+    assert!(!mm.is_manager(&escrow));
 }
 
 /// A route with a token bond: filing through the escrow pulls `max(min, bps × amount)` of the ad
@@ -11132,7 +11280,7 @@ fn test_586_a_token_bond_is_priced_in_the_order_amount() {
     let bond = fee_of(amount, 500);
     assert_eq!(
         dm.route_bond(&s.tp.order_chain_id, &s.ad_token_addr, &amount),
-        (s.ad_token_addr.clone(), bond)
+        (s.ad_token_addr.clone(), bond, DISPUTE_BOND_FLOOR)
     );
     let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
     token.mint(&filer, &(bond as i128));
@@ -11151,4 +11299,182 @@ fn test_586_a_token_bond_is_priced_in_the_order_amount() {
         dm.get_dispute(&order_hash).unwrap().bond_token,
         s.ad_token_addr
     );
+}
+
+const TL_DELAY: u64 = 24 * 60 * 60;
+const TL_GRACE: u64 = 14 * 24 * 60 * 60;
+
+/// D4: a ripe proposal runs up to the last second of its 14-day window and is refused after; an
+/// expired proposal no longer blocks proposing the same call again.
+#[test]
+fn test_586_a_proposal_expires_after_its_window() {
+    let s = setup();
+    let e = &s.env;
+    let am = &s.ad_manager;
+    am.activate_timelock();
+    let (a, b) = (
+        BytesN::from_array(e, &[0x41; 32]),
+        BytesN::from_array(e, &[0x42; 32]),
+    );
+    let now = e.ledger().timestamp();
+    for pool in [&a, &b] {
+        am.propose_action(
+            &tl_sym(e, "set_protocol_fee_pool"),
+            &tl_xdr(e, &tl_args(e, (pool.clone(),))),
+        );
+    }
+    warp(&s, now + TL_DELAY + TL_GRACE);
+    am.set_protocol_fee_pool(&a);
+    warp(&s, now + TL_DELAY + TL_GRACE + 1);
+    assert_eq!(
+        am.try_set_protocol_fee_pool(&b),
+        Err(Ok(AdErr::TimelockExpired))
+    );
+    let later = e.ledger().timestamp();
+    am.propose_action(
+        &tl_sym(e, "set_protocol_fee_pool"),
+        &tl_xdr(e, &tl_args(e, (b.clone(),))),
+    );
+    warp(&s, later + TL_DELAY);
+    am.set_protocol_fee_pool(&b);
+}
+
+/// D6: an admin handover voids the previous admin's pending proposals; the new admin proposes
+/// afresh.
+#[test]
+fn test_586_a_handover_voids_the_old_admins_proposals() {
+    let s = setup();
+    let e = &s.env;
+    let am = &s.ad_manager;
+    am.activate_timelock();
+    let pool = BytesN::from_array(e, &[0x43; 32]);
+    let call = tl_xdr(e, &tl_args(e, (pool.clone(),)));
+    let now = e.ledger().timestamp();
+    am.propose_action(&tl_sym(e, "set_protocol_fee_pool"), &call);
+    am.transfer_admin(&Address::generate(e));
+    am.accept_admin();
+    warp(&s, now + TL_DELAY);
+    assert_eq!(
+        am.try_set_protocol_fee_pool(&pool),
+        Err(Ok(AdErr::TimelockNotProposed)),
+        "the old admin's proposal survived the handover"
+    );
+    am.propose_action(&tl_sym(e, "set_protocol_fee_pool"), &call);
+    warp(&s, now + 2 * TL_DELAY);
+    am.set_protocol_fee_pool(&pool);
+}
+
+/// Fix 2: a brake voids any pending proposal that would undo it. The voided entry still occupies
+/// its id until the admin cancels it.
+#[test]
+fn test_586_a_brake_voids_a_pending_proposal() {
+    let s = setup();
+    let e = &s.env;
+    let mm = merkle_contract::Client::new(e, &s.ad_merkle_addr);
+    mm.activate_timelock();
+    let who = Address::generate(e);
+    let call = tl_xdr(e, &tl_args(e, (who.clone(), true)));
+    let now = e.ledger().timestamp();
+    let id = mm.propose_action(&tl_sym(e, "set_manager"), &call);
+    mm.set_manager(&who, &false);
+    warp(&s, now + TL_DELAY);
+    assert_eq!(
+        mm.try_set_manager(&who, &true),
+        Err(Ok(merkle_contract::MerkleError::TimelockCancelledByBrake))
+    );
+    mm.cancel_action(&id);
+    let later = e.ledger().timestamp();
+    mm.propose_action(&tl_sym(e, "set_manager"), &call);
+    warp(&s, later + TL_DELAY);
+    mm.set_manager(&who, &true);
+    assert!(mm.is_manager(&who));
+}
+
+/// D5: the root anchor's trust grants wait the delay; its revocations and tightenings are instant
+/// and void a pending loosening.
+#[test]
+fn test_586_root_anchor_grants_are_delayed_and_revocations_instant() {
+    use root_anchor_contract::RootAnchorError as RaErr;
+    let s = setup();
+    let e = &s.env;
+    let anchor = wire_anchor(&s);
+    let chain = s.tp.order_chain_id;
+    anchor.activate_timelock();
+    let signers = soroban_sdk::vec![e, Address::generate(e)];
+    assert_eq!(
+        anchor.try_set_signers(&signers, &1u32),
+        Err(Ok(RaErr::TimelockNotProposed))
+    );
+    assert_eq!(
+        anchor.try_set_monotonic(&false),
+        Err(Ok(RaErr::TimelockNotProposed))
+    );
+    anchor.set_monotonic(&true);
+    anchor.set_anchor_delay(&chain, &3_600u64);
+    assert_eq!(
+        anchor.try_set_anchor_delay(&chain, &0u64),
+        Err(Ok(RaErr::TimelockNotProposed))
+    );
+    anchor.reset_latest_seq(&chain, &5u64);
+    assert_eq!(
+        anchor.try_reset_latest_seq(&chain, &1u64),
+        Err(Ok(RaErr::TimelockNotProposed))
+    );
+    let root = BytesN::from_array(e, &[0x44; 32]);
+    anchor.anchor(&s.admin_addr, &chain, &root, &6u64);
+    anchor.revoke_anchor(&chain, &root);
+
+    let now = e.ledger().timestamp();
+    anchor.propose_action(
+        &tl_sym(e, "set_anchor_delay"),
+        &tl_xdr(e, &tl_args(e, (chain, 0u64))),
+    );
+    anchor.propose_action(
+        &tl_sym(e, "set_signers"),
+        &tl_xdr(e, &tl_args(e, (signers.clone(), 1u32))),
+    );
+    anchor.set_anchor_delay(&chain, &7_200u64);
+    warp(&s, now + TL_DELAY);
+    assert_eq!(
+        anchor.try_set_anchor_delay(&chain, &0u64),
+        Err(Ok(RaErr::TimelockCancelledByBrake))
+    );
+    anchor.set_signers(&signers, &1u32);
+    assert_eq!(anchor.signers(), signers);
+}
+
+/// D5: the key registry's guards and enabling proof registration wait the delay; disabling is
+/// instant.
+#[test]
+fn test_586_key_registry_grants_are_delayed_and_revocations_instant() {
+    use bls_key_registry_contract::RegistryError as RegErr;
+    let s = setup();
+    let e = &s.env;
+    let id = e.register(bls_key_registry_contract::WASM, ());
+    let reg = bls_key_registry_contract::Client::new(e, &id);
+    reg.initialize(
+        &s.admin_addr,
+        &1u128,
+        &SorobanString::from_str(e, "testnet"),
+    );
+    reg.activate_timelock();
+    let guards = soroban_sdk::vec![e, s.ad_manager.address.clone()];
+    assert_eq!(
+        reg.try_set_position_guards(&guards),
+        Err(Ok(RegErr::TimelockNotProposed))
+    );
+    let (anchor, verifier) = (Address::generate(e), Address::generate(e));
+    let sources = soroban_sdk::vec![e, 2u128];
+    assert_eq!(
+        reg.try_set_proof_registration(&anchor, &verifier, &sources, &true),
+        Err(Ok(RegErr::TimelockNotProposed))
+    );
+    reg.set_proof_registration(&anchor, &verifier, &sources, &false);
+    let now = e.ledger().timestamp();
+    reg.propose_action(
+        &tl_sym(e, "set_position_guards"),
+        &tl_xdr(e, &tl_args(e, (guards.clone(),))),
+    );
+    warp(&s, now + TL_DELAY);
+    reg.set_position_guards(&guards);
 }

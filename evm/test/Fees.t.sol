@@ -86,17 +86,38 @@ contract FeeTest is Phase3Base {
         assertEq(balance, AD_START - 997_000_000);
     }
 
-    /// A MakerForfeit pays the bridger as a settlement would, less the same fee.
+    /// D7: a MakerForfeit takes the protocol fee only; the 0.3% LP share goes to the bridger, so the
+    /// maker found at fault keeps nothing.
     function test_makerForfeitTakesTheFee() public {
         _fees(30, 20);
         IAdManager.OrderParams memory p = _params(false, 1_000_000_000, 2);
-        _lock(p);
-        _disputeTo(p, recipient, Dispute.Outcome.MakerForfeit);
-        assertEq(adToken.balanceOf(recipient), 995_000_000);
+        bytes32 h = _lock(p);
+        vm.deal(recipient, BOND_FLOOR);
+        vm.prank(recipient);
+        adManager.dispute{value: BOND_FLOOR}(p, bytes32("e"));
+        vm.prank(arbiter);
+        dm.resolveDispute(h, Dispute.Outcome.MakerForfeit);
+        vm.warp(dm.effectiveChallengeDeadline(h));
+        vm.expectEmit(address(adManager));
+        emit IAdManager.FeeCharged(h, 0, 2_000_000);
+        adManager.finalizeDispute(p);
+        assertEq(adToken.balanceOf(recipient), 998_000_000, "the bridger gets the LP share too");
         assertEq(adToken.balanceOf(pool), 2_000_000);
         (uint256 balance, uint256 locked) = _adBalance(AD);
-        assertEq(balance, AD_START - 997_000_000);
+        assertEq(balance, AD_START - 1_000_000_000, "the forfeiting maker keeps nothing");
         assertEq(locked, 0);
+    }
+
+    /// Must-fix 3: the fee is the one the bridger deposited against (in the order hash). A change
+    /// between the deposit and the maker's lock refuses the lock instead of charging the new rate.
+    function test_aFeeChangeBetweenDepositAndLockRefusesTheLock() public {
+        _fees(30, 20);
+        IAdManager.OrderParams memory p = _params(false, 1_000_000_000, 11); // deposited at 30 / 20
+        vm.prank(admin);
+        adManager.setFeeBps(100, 100);
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__FeeMismatch.selector, 100, 100));
+        adManager.lockForOrder(p, 0);
     }
 
     /// The native ad pays its fee in native: the pool receives value.
@@ -138,7 +159,7 @@ contract FeeTest is Phase3Base {
         assertEq(adToken.balanceOf(recipient), 0);
     }
 
-    /// D6: an order pays the fee it locked under; a later change applies to later orders only.
+    /// D6: an order pays the fee it deposited and locked under; a later change applies to later orders only.
     function test_aFeeChangeDoesNotMoveALiveOrder() public {
         _fees(30, 20);
         IAdManager.OrderParams memory early = _params(false, 1_000_000_000, 7);
@@ -199,6 +220,7 @@ contract FeeTest is Phase3Base {
         assertEq(uint256(ProofBridgeUtils.MAX_FEE_BPS), vm.parseJsonUint(v, ".constants.maxFeeBps"));
         assertEq(uint256(Dispute.MAX_BOND_BPS), vm.parseJsonUint(v, ".constants.maxBondBps"));
         assertEq(Timelock.DELAY, vm.parseJsonUint(v, ".constants.timelockDelay"));
+        assertEq(Timelock.GRACE, vm.parseJsonUint(v, ".constants.timelockGrace"));
     }
 
     /// D7: the pool can never be zero.

@@ -59,14 +59,15 @@ pub fn validate_bond(c: &BondConfig) -> bool {
     if c.min_bond == 0 {
         c.bond_bps == 0
     } else {
-        c.bond_bps <= MAX_BOND_BPS
+        // DA-2: the bond is moved as an i128; a floor above it could never be pulled.
+        c.bond_bps <= MAX_BOND_BPS && c.min_bond <= i128::MAX as u128
     }
 }
 
 /// The scaled bond in the order's token: `max(min_bond, amount × bond_bps / 10,000)`, the ratio
 /// rounded down. The floor keeps small orders bondable; the ratio scales large ones.
 pub fn route_bond(c: &BondConfig, amount: u128) -> u128 {
-    let scaled = amount * c.bond_bps as u128 / 10_000;
+    let scaled = crate::fees::bps_of(amount, c.bond_bps);
     scaled.max(c.min_bond)
 }
 

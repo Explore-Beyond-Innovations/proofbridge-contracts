@@ -107,6 +107,10 @@ faults! {
     TimelockTooEarly,
     /// #586: a proposal's argument bytes are not the XDR of an argument list.
     TimelockBadArgs,
+    /// #586: the proposal's 14-day window to run has passed.
+    TimelockExpired,
+    /// #586: a brake on what the proposal would re-enable was pulled after it was proposed.
+    TimelockCancelledByBrake,
 }
 
 impl From<crate::decimal_scaling::DecimalScalingError> for Fault {
@@ -174,6 +178,8 @@ pub fn accept_admin(env: &Env, config: &mut ContractConfig, pending: Address) {
     let old = core::mem::replace(&mut config.admin, pending.clone());
     storage::set_config(env, config);
     storage::clear_pending_admin(env);
+    // #586 D6: a handover voids the old admin's pending proposals.
+    crate::timelock::bump_epoch(env);
     escrow_events::AdminTransferred {
         from: old,
         to: pending,

@@ -28,4 +28,10 @@ pub enum MerkleError {
     TimelockTooEarly = 14,
     /// #586: a proposal's argument bytes are not the XDR of an argument list.
     TimelockBadArgs = 15,
+    /// #586: the proposal's 14-day window to run has passed.
+    TimelockExpired = 16,
+    /// #586: a brake on what the proposal would re-enable was pulled after it was proposed.
+    TimelockCancelledByBrake = 17,
+    /// #586: an escrow appender changes only through `set_escrow_appender`, under the delay.
+    EscrowAppender = 18,
 }

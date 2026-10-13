@@ -85,6 +85,10 @@ pub struct OrderParams {
     pub deadline: u64,
     /// The account whose settlement key co-signs for the maker (envelope slot 0); hashed
     pub ad_settlement_signer: BytesN<32>,
+    /// #586: the bridge fee the bridger deposited against (in the order hash, so fixed at the
+    /// deposit); the ad-manager's lock requires it to equal the live fee and its payouts charge it.
+    pub lp_fee_bps: u32,
+    pub protocol_fee_bps: u32,
 }
 
 /// A maker's settlement halt (#422): `halted` refuses the co-signed unlock of every order against

@@ -1348,7 +1348,7 @@ fn route_bond_matches_the_shared_vector() {
         let amount = n("amount");
         assert_eq!(
             f.client.route_bond(&CHAIN, &tok, &amount),
-            (tok.clone(), n("bond")),
+            (tok.clone(), n("bond"), BOND_FLOOR),
             "quote, row {i}"
         );
         let need = n("bond") as i128;
@@ -1377,7 +1377,12 @@ fn bond_config_validation_matches_the_shared_vector() {
             bond_bps: row["bondBps"].as_u64().unwrap() as u32,
         };
         let got = f.client.try_set_bond_config(&f.token, &CHAIN, &cfg);
-        if row["valid"].as_bool().unwrap() {
+        let valid = row
+            .get("stellarValid")
+            .unwrap_or(&row["valid"])
+            .as_bool()
+            .unwrap();
+        if valid {
             assert!(got.is_ok(), "{}", row["label"]);
         } else {
             assert_eq!(got, Err(Ok(Error::InvalidBondConfig)), "{}", row["label"]);
@@ -1392,7 +1397,7 @@ fn an_unconfigured_route_keeps_the_native_floor() {
     let (tok, _) = odd_token(&f);
     assert_eq!(
         f.client.route_bond(&CHAIN, &tok, &1_000_000_000),
-        (f.token.clone(), BOND_FLOOR)
+        (f.token.clone(), BOND_FLOOR, BOND_FLOOR)
     );
     f.client.set_bond_config(
         &tok,
@@ -1414,6 +1419,44 @@ fn an_unconfigured_route_keeps_the_native_floor() {
     let h = hash(&f.env, 0x81);
     assert_eq!(file_token(&f, &h, &tok, 1_000_000_000), BOND_FLOOR);
     assert_eq!(f.client.get_dispute(&h).unwrap().bond_token, f.token);
+}
+
+/// D1: a filer the token bond cannot be taken from posts the native floor; with neither, the
+/// filing fails.
+#[test]
+fn a_filer_without_the_token_posts_the_native_floor() {
+    let f = fixture();
+    let (tok, c) = odd_token(&f);
+    f.client.set_bond_config(
+        &tok,
+        &CHAIN,
+        &BondConfig {
+            min_bond: 5,
+            bond_bps: 50,
+        },
+    );
+    c.transfer(&f.filer, &f.escrow, &c.balance(&f.filer));
+    let h = hash(&f.env, 0x82);
+    assert_eq!(file_token(&f, &h, &tok, 1_000_000_000), BOND_FLOOR);
+    assert_eq!(f.client.get_dispute(&h).unwrap().bond_token, f.token);
+
+    let w = soroban_sdk::token::Client::new(&f.env, &f.token);
+    w.transfer(&f.filer, &f.escrow, &w.balance(&f.filer));
+    let h2 = hash(&f.env, 0x83);
+    assert_eq!(
+        f.client.try_open_dispute(
+            &f.escrow,
+            &h2,
+            &CHAIN,
+            &f.filer,
+            &hash(&f.env, 0xEE),
+            &DEADLINE,
+            &BUFFER,
+            &tok,
+            &1_000_000_000,
+        ),
+        Err(Ok(Error::BondTransferFailed))
+    );
 }
 
 /// A short receipt (a fee-on-transfer token) is refused.

@@ -116,6 +116,8 @@ impl ProofBridgeMerkleManagerContract {
         let old = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
         storage::set_admin(&env, &pending);
         storage::clear_pending_admin(&env);
+        // #586 D6: a handover voids the old admin's pending proposals.
+        proofbridge_core::timelock::bump_epoch(&env);
         AdminTransferred {
             from: old,
             to: pending,
@@ -178,8 +180,12 @@ impl ProofBridgeMerkleManagerContract {
             return Err(MerkleError::NotInitialized);
         }
 
-        // #586: adding an appender goes through the timelock; removing one is the Registrar's brake
-        // and stays instant.
+        // #586: an escrow appender changes only through `set_escrow_appender`, under the delay.
+        if storage::is_escrow_appender(&env, &manager) {
+            return Err(MerkleError::EscrowAppender);
+        }
+        // Adding a (non-escrow) appender goes through the timelock; removing one is its brake, instant,
+        // and voids any pending re-add.
         let admin = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
         proofbridge_core::timelock::gate_unless(
             &env,
@@ -187,6 +193,11 @@ impl ProofBridgeMerkleManagerContract {
             !status,
             "set_manager",
             (manager.clone(), status).into_val(&env),
+            proofbridge_core::timelock::brake_key(
+                &env,
+                "set_manager",
+                manager.clone().into_val(&env),
+            ),
         )
         .map_err(timelock_error)?;
 
@@ -204,6 +215,38 @@ impl ProofBridgeMerkleManagerContract {
         storage::extend_instance_ttl(&env);
 
         Ok(())
+    }
+
+    /// #586: add or remove an escrow as an appender. Both ways go through the timelock: an escrow's
+    /// exits append leaves, so an instant removal would be an instant freeze of its cancels, refunds
+    /// and dispute finalizes.
+    pub fn set_escrow_appender(
+        env: Env,
+        escrow: Address,
+        enabled: bool,
+    ) -> Result<(), MerkleError> {
+        let admin = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
+        proofbridge_core::timelock::gate(
+            &env,
+            &admin,
+            "set_escrow_appender",
+            (escrow.clone(), enabled).into_val(&env),
+        )
+        .map_err(timelock_error)?;
+        storage::set_escrow_appender(&env, &escrow, enabled);
+        storage::set_manager(&env, &escrow, enabled);
+        ManagerUpdated {
+            manager: escrow,
+            status: enabled,
+        }
+        .publish(&env);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// #586: whether `addr` is an escrow appender (managed only under the delay).
+    pub fn is_escrow_appender(env: Env, addr: Address) -> bool {
+        storage::is_escrow_appender(&env, &addr)
     }
 
     // =========================================================================
@@ -360,6 +403,8 @@ fn timelock_error(f: proofbridge_core::escrow_ops::Fault) -> MerkleError {
         TimelockAlreadyProposed => MerkleError::TimelockAlreadyProposed,
         TimelockTooEarly => MerkleError::TimelockTooEarly,
         TimelockBadArgs => MerkleError::TimelockBadArgs,
+        TimelockExpired => MerkleError::TimelockExpired,
+        TimelockCancelledByBrake => MerkleError::TimelockCancelledByBrake,
         _ => MerkleError::TimelockNotProposed,
     }
 }

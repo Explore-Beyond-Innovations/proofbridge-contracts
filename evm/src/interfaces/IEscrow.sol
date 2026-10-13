@@ -10,7 +10,7 @@ import {RouteTiming} from "../libraries/RouteTiming.sol";
 
 /**
  * @title IEscrow — what both escrows (AdManager, OrderPortal) share.
- * @notice One order = one 17-field EIP-712 hash on both chains; each escrow holds one leg of it,
+ * @notice One order = one 19-field EIP-712 hash on both chains; each escrow holds one leg of it,
  *         appends that leg's leaf to the chain's MMR, and settles it on a proof about the other
  *         leg. The types, events and errors here are the shared half; each escrow's own
  *         interface adds its leg.
@@ -55,10 +55,6 @@ interface IEscrow {
         /// lever, so the denial rule counts it for the rest of the order's life; a slot left behind
         /// can no longer erase a kill the rule would have counted. Unused on the OrderPortal.
         bool repinned;
-        /// On the AdManager: the fee bps live at the lock, which its payout charges (a fee change
-        /// never moves a live order). Unused on the OrderPortal.
-        uint16 lpFeeBps;
-        uint16 protocolFeeBps;
     }
 
     /*//////////////////////////////////////////////////////////////

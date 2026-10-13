@@ -18,6 +18,10 @@ import {IwNativeToken, wNativeToken} from "src/wNativeToken.sol";
 import {TwoStepAdmin} from "src/libraries/TwoStepAdmin.sol";
 import {RouteTiming} from "src/libraries/RouteTiming.sol";
 import {Dispute} from "src/libraries/Dispute.sol";
+import {RootAnchor} from "src/RootAnchor.sol";
+import {BLSKeyRegistry} from "src/BLSKeyRegistry.sol";
+import {IOrderPortal} from "src/interfaces/IOrderPortal.sol";
+import {IVerifier as IV} from "src/interfaces/IVerifier.sol";
 import {Poseidon2Yul_BN254 as Poseidon2Yul} from "@poseidon2/src/bn254/yul/Poseidon2Yul.sol";
 
 /// #586 (plan 2.6 doc 24, D1–D3): the 24-hour delay on admin setters and its one-time setup bypass,
@@ -71,8 +75,10 @@ contract TimelockTest is Test {
     }
 
     function _mmrCalls() internal view returns (bytes[] memory c) {
-        c = new bytes[](1);
-        c[0] = abi.encodeCall(MerkleManager.setManager, (address(adManager), true));
+        c = new bytes[](3);
+        c[0] = abi.encodeCall(MerkleManager.setManager, (makeAddrView("registrar"), true));
+        c[1] = abi.encodeCall(MerkleManager.setEscrowAppender, (address(adManager), true));
+        c[2] = abi.encodeCall(MerkleManager.setEscrowAppender, (address(adManager), false));
     }
 
     function _dmCalls() internal view returns (bytes[] memory c) {
@@ -330,5 +336,177 @@ contract TimelockTest is Test {
         vm.expectRevert(TwoStepAdmin.NotAdmin.selector);
         dm.setEscrow(address(adManager), false);
         vm.stopPrank();
+    }
+
+    /*//////////////////////////// review pass 1 ////////////////////////////*/
+
+    function _activateAndPropose(bytes memory data) internal returns (bytes32 id, uint256 eta) {
+        id = keccak256(data);
+        vm.prank(admin);
+        adManager.proposeAction(data);
+        eta = block.timestamp + DELAY;
+    }
+
+    /// D4: a ripe proposal runs for 14 days after its eta, then expires; an expired one can be proposed again.
+    function test_aProposalExpires14DaysAfterItRipens() public {
+        bytes memory data = abi.encodeCall(IEscrow.setPeerEscrow, (CHAIN, PEER));
+        (bytes32 id, uint256 eta) = _activateAndPropose(data);
+        vm.warp(eta + 14 days + 1);
+        assertEq(adManager.timelockEta(id), 0, "an expired proposal reads as none");
+        vm.expectRevert(abi.encodeWithSelector(IAdminTimelock.Timelock__Expired.selector, eta + 14 days));
+        adManager.setPeerEscrow(CHAIN, PEER);
+        vm.prank(admin);
+        adManager.proposeAction(data); // allowed again: the expired one no longer blocks it
+        vm.warp(block.timestamp + DELAY);
+        adManager.setPeerEscrow(CHAIN, PEER);
+        assertEq(adManager.peerEscrow(CHAIN), PEER);
+    }
+
+    /// D4: the last second of the window still runs.
+    function test_theLastSecondOfTheWindowRuns() public {
+        (, uint256 eta) = _activateAndPropose(abi.encodeCall(IEscrow.setPeerEscrow, (CHAIN, PEER)));
+        vm.warp(eta + 14 days);
+        adManager.setPeerEscrow(CHAIN, PEER);
+    }
+
+    /// D6: an accepted handover voids the old admin's pending proposals.
+    function test_aHandoverVoidsTheOldAdminsProposals() public {
+        bytes memory data = abi.encodeCall(IEscrow.setPeerEscrow, (CHAIN, PEER));
+        (bytes32 id, uint256 eta) = _activateAndPropose(data);
+        vm.prank(admin);
+        adManager.transferAdmin(stranger);
+        vm.prank(stranger);
+        adManager.acceptAdmin();
+        assertEq(adManager.timelockEta(id), 0, "the old admin's proposal is void");
+        vm.warp(eta);
+        vm.expectRevert(abi.encodeWithSelector(IAdminTimelock.Timelock__NotProposed.selector, id));
+        adManager.setPeerEscrow(CHAIN, PEER);
+        // The new admin can propose the same call afresh.
+        vm.prank(stranger);
+        adManager.proposeAction(data);
+        vm.warp(block.timestamp + DELAY);
+        adManager.setPeerEscrow(CHAIN, PEER);
+    }
+
+    /// Fix 2: pulling a brake voids every pending proposal that would undo it, whoever runs it.
+    function test_aBrakeVoidsThePendingProposalThatWouldUndoIt() public {
+        address v = makeAddrView("rootVerifier");
+        vm.prank(admin);
+        adManager.setRootVerifier(CHAIN, v); // setup
+        bytes memory rewire = abi.encodeCall(IEscrow.setRootVerifier, (CHAIN, makeAddrView("v2")));
+        (bytes32 id, uint256 eta) = _activateAndPropose(rewire);
+        vm.prank(admin);
+        adManager.setRootVerifier(CHAIN, address(0)); // the brake
+        vm.warp(eta);
+        vm.expectRevert(abi.encodeWithSelector(IAdminTimelock.Timelock__CancelledByBrake.selector, id));
+        adManager.setRootVerifier(CHAIN, makeAddrView("v2"));
+        // The voided entry stays until cancelled or expired; a proposal made after the brake runs.
+        vm.warp(block.timestamp + 1);
+        vm.startPrank(admin);
+        adManager.cancelAction(id);
+        adManager.proposeAction(rewire);
+        vm.stopPrank();
+        vm.warp(block.timestamp + DELAY);
+        adManager.setRootVerifier(CHAIN, makeAddrView("v2"));
+        assertEq(address(adManager.rootVerifier(CHAIN)), makeAddrView("v2"));
+        // Another route's proposals are untouched by this route's brake.
+    }
+
+    /// D3 / fix 1: an escrow appender cannot be braked out instantly; removing one waits the delay.
+    function test_anEscrowAppenderIsNotBrakeable() public {
+        vm.startPrank(admin);
+        mmr.setEscrowAppender(address(adManager), true);
+        mmr.activateTimelock();
+        vm.expectRevert(
+            abi.encodeWithSelector(MerkleManager.MerkleManager__EscrowAppender.selector, address(adManager))
+        );
+        mmr.setManager(address(adManager), false);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAdminTimelock.Timelock__NotProposed.selector,
+                keccak256(abi.encodeCall(MerkleManager.setEscrowAppender, (address(adManager), false)))
+            )
+        );
+        mmr.setEscrowAppender(address(adManager), false);
+        vm.stopPrank();
+        assertTrue(mmr.isManager(address(adManager)), "the escrow keeps appending");
+    }
+
+    /// D5: RootAnchor: new signers, a delay cut, a sequence lowering and the monotonic check off wait the
+    /// delay; a delay raise, a sequence raise, monotonic on and a revoke stay instant.
+    function test_rootAnchorGrantsWaitAndRevocationsDoNot() public {
+        address[] memory signers = new address[](1);
+        signers[0] = address(this);
+        RootAnchor anchor = new RootAnchor(admin, signers, 1);
+        vm.startPrank(admin);
+        anchor.setAnchorDelay(CHAIN, 600);
+        anchor.activateTimelock();
+        address[] memory other = new address[](1);
+        other[0] = stranger;
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAdminTimelock.Timelock__NotProposed.selector,
+                keccak256(abi.encodeCall(RootAnchor.setSigners, (other, 1)))
+            )
+        );
+        anchor.setSigners(other, 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAdminTimelock.Timelock__NotProposed.selector,
+                keccak256(abi.encodeCall(RootAnchor.setAnchorDelay, (CHAIN, 60)))
+            )
+        );
+        anchor.setAnchorDelay(CHAIN, 60);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAdminTimelock.Timelock__NotProposed.selector,
+                keccak256(abi.encodeCall(RootAnchor.setMonotonic, (false)))
+            )
+        );
+        anchor.setMonotonic(false);
+        anchor.setAnchorDelay(CHAIN, 3600); // a raise: instant
+        assertEq(anchor.anchorDelay(CHAIN), 3600);
+        anchor.resetLatestSeq(CHAIN, 10); // a raise: instant
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAdminTimelock.Timelock__NotProposed.selector,
+                keccak256(abi.encodeCall(RootAnchor.resetLatestSeq, (CHAIN, 5)))
+            )
+        );
+        anchor.resetLatestSeq(CHAIN, 5);
+        anchor.setMonotonic(true); // on: instant
+        vm.stopPrank();
+    }
+
+    /// D5: the BLS key registry's position guards and proof registration (when enabling) wait the
+    /// delay; disabling proof registration is a brake.
+    function test_keyRegistryGrantsWaitAndDisablingDoesNot() public {
+        BLSKeyRegistry reg = new BLSKeyRegistry(admin, "local");
+        address[] memory guards = new address[](1);
+        guards[0] = address(adManager);
+        vm.startPrank(admin);
+        reg.activateTimelock();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAdminTimelock.Timelock__NotProposed.selector,
+                keccak256(abi.encodeCall(BLSKeyRegistry.setPositionGuards, (guards)))
+            )
+        );
+        reg.setPositionGuards(guards);
+        uint256[] memory none = new uint256[](0);
+        reg.setProofRegistration(IRootAnchor(address(0)), IV(address(0)), none, false); // the brake
+        vm.stopPrank();
+        assertFalse(reg.proofRegistrationEnabled());
+    }
+
+    /// Must-fix 3: the OrderPortal refuses an order fee share above 1% (the ad chain could never lock it).
+    function test_theOrderPortalRefusesAFeeAboveOnePercent() public {
+        IOrderPortal.OrderParams memory p;
+        p.amount = 1;
+        p.bridger = bytes32(uint256(uint160(address(this))));
+        p.adRecipient = bytes32(uint256(1));
+        p.lpFeeBps = 101;
+        vm.expectRevert(IOrderPortal.OrderPortal__InvalidFee.selector);
+        portal.createOrder(p);
     }
 }

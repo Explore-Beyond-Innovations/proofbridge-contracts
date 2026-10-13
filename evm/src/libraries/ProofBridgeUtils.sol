@@ -37,7 +37,7 @@ library ProofBridgeUtils {
         return OrderHash.digest(o);
     }
 
-    /// The ad leg's order hash: the canonical 17-field order from its params plus the ad-chain
+    /// The ad leg's order hash: the canonical 19-field order from its params plus the ad-chain
     /// context, here for EIP-170 headroom.
     function adOrderHash(IAdManager.OrderParams calldata p, uint256 adChainId, address adManager)
         public
@@ -62,7 +62,9 @@ library ProofBridgeUtils {
                 orderDecimals: p.orderDecimals,
                 adDecimals: p.adDecimals,
                 deadline: p.deadline,
-                adSettlementSigner: p.adSettlementSigner
+                adSettlementSigner: p.adSettlementSigner,
+                lpFeeBps: p.lpFeeBps,
+                protocolFeeBps: p.protocolFeeBps
             })
         );
     }
@@ -75,9 +77,16 @@ library ProofBridgeUtils {
         bytes32 peer,
         bytes32 routed,
         IKeyRegistry registry,
-        uint32 signerSlot
-    ) public view {
+        uint32 signerSlot,
+        IAdManager.FeeConfig storage fees,
+        address verifier
+    ) public view returns (uint256 adAmount) {
         if (!ad.open) revert IAdManager.AdManager__AdClosed();
+        // #586: the fee the bridger deposited against is the one live now; a change since the deposit
+        // refuses the lock (the trade cancels at no cost) rather than charging a rate nobody agreed to.
+        if (params.lpFeeBps != fees.lpBps || params.protocolFeeBps != fees.protocolBps) {
+            revert IAdManager.AdManager__FeeMismatch(fees.lpBps, fees.protocolBps);
+        }
         if (params.amount == 0) revert IEscrow.Escrow__ZeroAmount();
         if (params.bridger == bytes32(0)) revert IAdManager.AdManager__BridgerZero();
         if (params.orderRecipient == bytes32(0)) revert IAdManager.AdManager__RecipientZero();
@@ -121,6 +130,15 @@ library ProofBridgeUtils {
         // slot the lock pins must be the signer's and usable now, in the registry the order records.
         _requireSettlementSigner(registry, ad.settlementSigner, maker);
         _requireUsableSlot(registry, ad.settlementSigner, signerSlot);
+
+        // #464: no new order while the order chain's verifier reads another key registry.
+        (bool split, address verifierRegistry) = registrySplit(verifier, address(registry));
+        if (split) {
+            revert IAdManager.AdManager__RegistrySplit(params.orderChainId, address(registry), verifierRegistry);
+        }
+        // The signed amount is in order-chain units; the pool accounts in ad-chain units.
+        adAmount = DecimalScaling.scale(params.amount, params.orderDecimals, params.adDecimals);
+        if (adAmount > ad.balance - ad.locked) revert IEscrow.Escrow__InsufficientLiquidity();
     }
 
     /// The AdManager's settlement-signer gate, here for EIP-170 headroom: a registry is wired, the
@@ -220,15 +238,19 @@ library ProofBridgeUtils {
         emit IAdManager.FeeBpsSet(lpBps, protocolBps);
     }
 
-    /// The AdManager's fee on a released lock (EIP-170 headroom), at the bps the order locked under:
-    /// the LP fee stays in the ad's balance, the rest of `adAmount` leaves it. Returns the
-    /// recipient's net and the protocol's fee.
-    function chargeFee(IAdManager.Ad storage ad, IEscrow.Order storage o, bytes32 orderHash, uint256 adAmount)
-        public
-        returns (uint256 net, uint256 protocolFee)
-    {
+    /// The AdManager's fee on a released lock (EIP-170 headroom), at the bps the bridger deposited
+    /// against (in the order, so in its hash): the LP fee stays in the ad's balance, the rest of
+    /// `adAmount` leaves it. On a maker forfeit the LP share goes to the bridger instead (the maker
+    /// found at fault keeps nothing). Returns the recipient's net and the protocol's fee.
+    function chargeFee(
+        IAdManager.Ad storage ad,
+        IAdManager.OrderParams calldata p,
+        bytes32 orderHash,
+        uint256 adAmount,
+        bool forfeit
+    ) public returns (uint256 net, uint256 protocolFee) {
         uint256 lpFee;
-        (lpFee, protocolFee) = splitFee(adAmount, o.lpFeeBps, o.protocolFeeBps);
+        (lpFee, protocolFee) = splitFee(adAmount, forfeit ? 0 : p.lpFeeBps, p.protocolFeeBps);
         ad.balance -= adAmount - lpFee;
         net = adAmount - lpFee - protocolFee;
         emit IAdManager.FeeCharged(orderHash, lpFee, protocolFee);
@@ -247,8 +269,12 @@ library ProofBridgeUtils {
         Timelock.cancel(s, id);
     }
 
-    function timelockConsume(Timelock.State storage s, bytes32 id) public {
-        Timelock.consume(s, id);
+    function timelockConsume(Timelock.State storage s, bytes32 id, bytes32 key) public {
+        Timelock.consume(s, id, key);
+    }
+
+    function timelockEta(Timelock.State storage s, bytes32 id) public view returns (uint256) {
+        return Timelock.liveEta(s, id);
     }
 
     function _requireUsableSlot(IKeyRegistry registry, bytes32 signer, uint32 slot) private view {

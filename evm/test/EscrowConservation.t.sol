@@ -94,9 +94,15 @@ contract EscrowConservationInvariantTest is Test {
     uint256 internal constant NET = LOCK - LP_FEE - PROTOCOL_FEE;
     uint256 internal constant ERC20_AD_START = 500_000 ether;
     uint256 internal constant NATIVE_AD_START = 500 ether;
-    /// Ghosts: payouts (unlock, presentSettled, MakerForfeit) landed, per token.
-    uint256 internal paidErc20;
-    uint256 internal paidNative;
+    /// Ghosts (#586, DA-5): what the payouts (unlock, presentSettled, MakerForfeit) moved, per token,
+    /// at each order's own amount and the bps it deposited against: the protocol's fees, the LP fees
+    /// kept in the ad, and the amounts released from the ad.
+    uint256[2] internal protocolPaid;
+    uint256[2] internal lpKept;
+    uint256[2] internal released;
+    /// Each live order's amount and fee bps, fixed at its lock.
+    mapping(uint256 salt => uint256) internal amountOf;
+    mapping(uint256 salt => uint16[2]) internal bpsOf;
 
     EscrowHandler internal handler;
     mapping(uint256 salt => uint256) internal deadlineOf;
@@ -182,6 +188,13 @@ contract EscrowConservationInvariantTest is Test {
         if (!live[salt]) {
             if (deadlineOf[salt] != 0) generation[salt]++;
             deadlineOf[salt] = block.timestamp + 7 days;
+            // DA-5: a salt's first order is `LOCK` (the unit tests read it); later ones vary, 1 wei up to
+            // 20 ether, so rounding and odd amounts are exercised; the bps are the live ones (the quote).
+            amountOf[salt] = generation[salt] == 0
+                ? LOCK
+                : 1 + uint256(keccak256(abi.encode("amount", salt, generation[salt]))) % 20 ether;
+            (, uint16 lp, uint16 protocol) = adManager.feeConfig();
+            bpsOf[salt] = [lp, protocol];
         }
         IAdManager.OrderParams memory p = _params(salt);
         vm.prank(maker);
@@ -204,8 +217,29 @@ contract EscrowConservationInvariantTest is Test {
     }
 
     function _countPaid(uint256 salt) internal {
-        if (_isNative(salt)) paidNative++;
-        else paidErc20++;
+        _countPaid(salt, false);
+    }
+
+    /// The payout's split, as the AdManager computes it from the order's own bps (a forfeit keeps no LP fee).
+    function _countPaid(uint256 salt, bool forfeit) internal {
+        uint256 t = _isNative(salt) ? 1 : 0;
+        uint256 a = amountOf[salt];
+        uint256 lp = forfeit ? 0 : a * bpsOf[salt][0] / 10_000;
+        protocolPaid[t] += a * bpsOf[salt][1] / 10_000;
+        lpKept[t] += lp;
+        released[t] += a;
+    }
+
+    /// The recipient's net for this salt's live order.
+    function _netOf(uint256 salt) internal view returns (uint256) {
+        uint256 a = amountOf[salt];
+        return a - a * bpsOf[salt][0] / 10_000 - a * bpsOf[salt][1] / 10_000;
+    }
+
+    /// DA-5: the admin changes the fee between locks (setup mode, so instant). Live orders keep theirs.
+    function handlerSetFees(uint16 lp, uint16 protocol) external {
+        vm.prank(admin);
+        adManager.setFeeBps(lp % 101, protocol % 101);
     }
 
     /// Or let its clock run out and cancel it back to the pool. Warps forward only, to the escrow's
@@ -248,7 +282,7 @@ contract EscrowConservationInvariantTest is Test {
         if (block.timestamp < until) vm.warp(until);
         adManager.finalizeDispute(p);
         live[salt] = false;
-        if (o == Dispute.Outcome.MakerForfeit) _countPaid(salt);
+        if (o == Dispute.Outcome.MakerForfeit) _countPaid(salt, true);
         applied = uint8(o == Dispute.Outcome.None ? Dispute.Outcome.MutualRefund : o);
     }
 
@@ -286,8 +320,9 @@ contract EscrowConservationInvariantTest is Test {
         address who = _recipientOf(salt);
         address token = native ? NATIVE : address(adToken);
         uint256 before = adManager.claimable(who, token);
+        uint256 net = _netOf(salt);
         this.handlerUnlock(salt);
-        require(adManager.claimable(who, token) == before + NET, "the refused push was not credited");
+        require(adManager.claimable(who, token) == before + net, "the refused push was not credited");
         // The mock ERC20 refuses every transfer, so only the native side redirects while refusing.
         if (!native) this.handlerSetRefusing(false);
         this.handlerClaimTo(native);
@@ -335,7 +370,7 @@ contract EscrowConservationInvariantTest is Test {
         bool native = _isNative(salt);
         p.orderChainToken = bytes32(uint256(uint160(orderToken)));
         p.adChainToken = bytes32(uint256(uint160(native ? NATIVE : address(adToken))));
-        p.amount = LOCK;
+        p.amount = amountOf[salt];
         p.bridger = bytes32(uint256(uint160(bridger)));
         p.orderChainId = orderChainId;
         p.srcOrderPortal = bytes32(uint256(uint160(orderPortal)));
@@ -351,6 +386,9 @@ contract EscrowConservationInvariantTest is Test {
         // params — and a different order hash — on each call, opening two orders under one salt.
         p.deadline = deadlineOf[salt];
         p.adSettlementSigner = bytes32(uint256(uint160(maker)));
+        // #586: the fee the bridger deposited against, fixed with the order.
+        p.lpFeeBps = bpsOf[salt][0];
+        p.protocolFeeBps = bpsOf[salt][1];
     }
 
     /// The hash the escrow keys the order by.
@@ -416,19 +454,23 @@ contract EscrowConservationInvariantTest is Test {
     function invariant_feesAddUp() public view {
         assertEq(
             adToken.balanceOf(protocolPool) + adManager.claimable(protocolPool, address(adToken)),
-            paidErc20 * PROTOCOL_FEE,
+            protocolPaid[0],
             "the pool did not get each payout's protocol fee (ERC20)"
         );
         assertEq(
             protocolPool.balance + adManager.claimable(protocolPool, NATIVE),
-            paidNative * PROTOCOL_FEE,
+            protocolPaid[1],
             "the pool did not get each payout's protocol fee (native)"
         );
         (,,,,,,, uint256 adBalance,) = adManager.ads(ERC20_AD);
-        assertEq(adBalance, ERC20_AD_START - paidErc20 * (LOCK - LP_FEE), "the maker did not keep the LP fee (ERC20)");
+        assertEq(
+            adBalance, ERC20_AD_START - (released[0] - lpKept[0]), "the maker did not keep exactly the LP fee (ERC20)"
+        );
         (,,,,,,, uint256 nativeBalance,) = adManager.ads(NATIVE_AD);
         assertEq(
-            nativeBalance, NATIVE_AD_START - paidNative * (LOCK - LP_FEE), "the maker did not keep the LP fee (native)"
+            nativeBalance,
+            NATIVE_AD_START - (released[1] - lpKept[1]),
+            "the maker did not keep exactly the LP fee (native)"
         );
     }
 
@@ -446,8 +488,8 @@ contract EscrowConservationInvariantTest is Test {
         uint256 nativeLive;
         for (uint256 i = 0; i < seen.length; i++) {
             if (!live[seen[i]]) continue;
-            if (_isNative(seen[i])) nativeLive += LOCK;
-            else erc20Live += LOCK;
+            if (_isNative(seen[i])) nativeLive += amountOf[seen[i]];
+            else erc20Live += amountOf[seen[i]];
         }
         (,,,,,,,, uint256 locked) = adManager.ads(ERC20_AD);
         assertEq(locked, erc20Live, "locked liquidity does not match the live orders (ERC20)");
@@ -517,14 +559,17 @@ contract EscrowConservationInvariantTest is Test {
         uint8 applied = this.handlerDispute(20, true, 3); // index 3 = MakerForfeit
         assertEq(applied, uint8(Dispute.Outcome.MakerForfeit));
         (,,,,,,, uint256 nativeBalance, uint256 nativeLocked) = adManager.ads(NATIVE_AD);
-        assertEq(nativeBalance, 500 ether - LOCK + LP_FEE, "the forfeit left the ad, less the LP fee");
+        // D7: the forfeiting maker keeps no LP fee; the bridger gets it.
+        assertEq(nativeBalance, 500 ether - LOCK, "the whole lock left the ad");
         assertEq(nativeLocked, 0);
-        assertEq(adManager.claimable(address(nativeRecipient), NATIVE), NET, "credited to the recipient");
+        assertEq(
+            adManager.claimable(address(nativeRecipient), NATIVE), LOCK - PROTOCOL_FEE, "credited to the recipient"
+        );
         assertEq(protocolPool.balance, PROTOCOL_FEE, "the forfeit paid the protocol fee");
         // C-16: still refusing, the recipient redirects its own credit.
         handler.claimTo(true);
         assertEq(handler.claimsTo(), 1);
-        assertEq(nativeClaimWallet.balance, NET);
+        assertEq(nativeClaimWallet.balance, LOCK - PROTOCOL_FEE);
         invariant_claimToPaysOnlyTheCallersCredit();
         invariant_escrowHoldsWhatItOwes();
     }
@@ -601,7 +646,9 @@ library OrderHashReader {
                 orderDecimals: p.orderDecimals,
                 adDecimals: p.adDecimals,
                 deadline: p.deadline,
-                adSettlementSigner: p.adSettlementSigner
+                adSettlementSigner: p.adSettlementSigner,
+                lpFeeBps: p.lpFeeBps,
+                protocolFeeBps: p.protocolFeeBps
             })
         );
     }
@@ -984,6 +1031,10 @@ contract EscrowHandler {
             outcomes[applied]++;
             _countCredit(before);
         } catch {}
+    }
+
+    function setFees(uint16 lp, uint16 protocol) external {
+        try t.handlerSetFees(lp, protocol) {} catch {}
     }
 
     function claim() external {

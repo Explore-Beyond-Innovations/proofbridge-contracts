@@ -25,6 +25,12 @@ pub fn validate_order(env: &Env, params: &OrderParams) -> Result<(), OrderPortal
     if params.amount == 0 {
         return Err(OrderPortalError::ZeroAmount);
     }
+    // #586: the fee the bridger deposits against is fixed here, in the hash; the ad chain's lock
+    // refuses it unless it is that chain's live fee. Out of range can never lock, so refused now.
+    let max = proofbridge_core::fees::MAX_FEE_BPS;
+    if params.lp_fee_bps > max || params.protocol_fee_bps > max {
+        return Err(OrderPortalError::InvalidFee);
+    }
 
     // Validate recipient: must be non-zero and decode to a Stellar account
     // address. Soroban contract (`C...`) addresses are not supported here.

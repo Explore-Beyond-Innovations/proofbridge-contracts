@@ -403,7 +403,7 @@ contract DisputeInvariantTest is Test {
         address who = byBridger ? recipient : maker;
         // #586: quote the route's bond; a token bond is approved to the module, native is sent.
         DisputeManager live = DisputeManager(payable(address(adManager.disputeManager())));
-        (address bondToken, uint256 bond) = live.routeBond(orderChainId, address(adToken), LOCK);
+        (address bondToken, uint256 bond,) = live.routeBond(orderChainId, address(adToken), LOCK);
         if (bondToken != address(0)) {
             vm.prank(who);
             adToken.approve(address(live), bond);

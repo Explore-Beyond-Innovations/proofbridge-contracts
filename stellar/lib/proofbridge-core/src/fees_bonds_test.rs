@@ -32,6 +32,14 @@ fn rows<'a>(v: &'a serde_json::Value, key: &str) -> &'a std::vec::Vec<serde_json
     rows
 }
 
+/// Soroban's answer for a validation row: `stellarValid` where the chains differ, else `valid`.
+fn stellar_valid(row: &serde_json::Value) -> bool {
+    row.get("stellarValid")
+        .unwrap_or(&row["valid"])
+        .as_bool()
+        .unwrap()
+}
+
 #[test]
 fn the_ceilings_match_the_shared_vectors() {
     let v = vectors();
@@ -46,6 +54,10 @@ fn the_ceilings_match_the_shared_vectors() {
     assert_eq!(
         crate::timelock::DELAY,
         v["constants"]["timelockDelay"].as_u64().unwrap()
+    );
+    assert_eq!(
+        crate::timelock::GRACE,
+        v["constants"]["timelockGrace"].as_u64().unwrap()
     );
 }
 
@@ -116,10 +128,6 @@ fn bond_config_validation_matches_the_shared_vectors() {
             min_bond: u128_of(row, "minBond"),
             bond_bps: u32_of(row, "bondBps"),
         };
-        assert_eq!(
-            dispute::validate_bond(&c),
-            row["valid"].as_bool().unwrap(),
-            "{label}"
-        );
+        assert_eq!(dispute::validate_bond(&c), stellar_valid(row), "{label}");
     }
 }

@@ -1,4 +1,4 @@
-//! EIP-712 order hashing for the AdManager: maps its `OrderParams` onto the shared 17-field
+//! EIP-712 order hashing for the AdManager: maps its `OrderParams` onto the shared 19-field
 //! `Order` (`proofbridge_core::eip712`), which owns the preimage layout.
 
 // some are used only by the tests
@@ -33,6 +33,8 @@ pub fn order_of(params: &OrderParams, ad_chain_id: u128, ad_manager: &BytesN<32>
         ad_decimals: params.ad_decimals,
         deadline: params.deadline,
         ad_settlement_signer: params.ad_settlement_signer.to_array(),
+        lp_fee_bps: params.lp_fee_bps,
+        protocol_fee_bps: params.protocol_fee_bps,
     }
 }
 

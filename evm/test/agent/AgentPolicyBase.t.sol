@@ -156,7 +156,9 @@ abstract contract AgentPolicyBase is RhinestoneModuleKit, Test {
             orderDecimals: 18,
             adDecimals: 18,
             deadline: type(uint64).max,
-            adSettlementSigner: signer
+            adSettlementSigner: signer,
+            lpFeeBps: 0,
+            protocolFeeBps: 0
         });
     }
 

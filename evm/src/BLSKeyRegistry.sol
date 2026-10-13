@@ -14,7 +14,7 @@ import {LeafDomain} from "./libraries/LeafDomain.sol";
 import {KeyMessages} from "./libraries/KeyMessages.sol";
 import {ShortString, ShortStrings} from "@openzeppelin/contracts/utils/ShortStrings.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
-import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
+import {AdminTimelock} from "./libraries/AdminTimelock.sol";
 
 /// @title BLSKeyRegistry v2 — maps a 32-byte account id to up to five BLS key slots.
 /// @notice State changes are authenticated by the owner's wallet sig + BLS
@@ -22,7 +22,7 @@ import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
 ///         the per-account nonce; `setValidUntil` is shorten-only and nonce-free so
 ///         a pre-signed retirement never expires (design 03 §3.4, 05 §5.6). One owner
 ///         signature serves both registries (2.6 plan 13, `KeyMessages`).
-contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
+contract BLSKeyRegistry is IBLSKeyRegistry, AdminTimelock, Pausable {
     struct RegistryEntry {
         uint32 nextSlotId; // monotonic, never reused
         uint32[] liveSlots; // stored slot ids, length <= MAX_ACTIVE_SLOTS
@@ -99,7 +99,8 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
         _unpause();
     }
 
-    function setPositionGuards(address[] calldata guards) external onlyAdmin {
+    /// @dev #586: under the 24-hour delay; the guards are what keep a key with open trades from going.
+    function setPositionGuards(address[] calldata guards) external timelocked {
         delete positionGuards;
         for (uint256 i = 0; i < guards.length; i++) {
             positionGuards.push(IPositionGuard(guards[i]));
@@ -110,10 +111,11 @@ contract BLSKeyRegistry is IBLSKeyRegistry, TwoStepAdmin, Pausable {
     /// Wire (or unwire) proof-carried registration: the anchor, the verifier and the home chains a
     /// leaf may come from. Enabling requires all three; the flip is a configuration change, never a
     /// redeploy (2.1b D3). This chain is never a source: its own leaves belong to another registry.
+    /// @dev #586: enabling or rewiring grants trust and waits the delay; disabling is a brake.
     function setProofRegistration(IRootAnchor anchor_, IVerifier verifier_, uint256[] calldata sources, bool enabled)
         external
-        onlyAdmin
     {
+        _timelockedUnless(!enabled, keccak256(abi.encode(this.setProofRegistration.selector)));
         if (
             enabled && (address(anchor_).code.length == 0 || address(verifier_).code.length == 0 || sources.length == 0)
         ) revert ProofRegistrationRefsUnset();

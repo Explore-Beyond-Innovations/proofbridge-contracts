@@ -228,16 +228,20 @@ contract AdManager is EscrowBase, IAdManager {
         returns (bytes32 orderHash)
     {
         Ad storage ad = _getAdOwned(params.adId, msg.sender);
-        orderHash = _validateOrder(ad, params, signerSlot);
+        // The lock-time rules, the registry split (#464) and the liquidity check run in the linked
+        // library; it returns the signed amount in ad-chain units, what the pool accounts in.
+        uint256 adAmount = ProofBridgeUtils.validateLock(
+            ad,
+            params,
+            peerEscrow[params.orderChainId],
+            tokenRoute[ad.token][params.orderChainId],
+            keyRegistry,
+            signerSlot,
+            feeConfig,
+            address(rootVerifier[params.orderChainId])
+        );
+        orderHash = _orderHash(params);
         uint32 version = _requireMinWindow(params.orderChainId, params.deadline);
-        // #464: no new order while the order chain's verifier reads another key registry.
-        (bool split, address verifierRegistry) =
-            ProofBridgeUtils.registrySplit(address(rootVerifier[params.orderChainId]), address(keyRegistry));
-        if (split) revert AdManager__RegistrySplit(params.orderChainId, address(keyRegistry), verifierRegistry);
-
-        // The signed amount is in order-chain units; the pool accounts in ad-chain units.
-        uint256 adAmount = _adAmount(params);
-        if (adAmount > ad.balance - ad.locked) revert Escrow__InsufficientLiquidity();
 
         Order storage o = _openOrder(orderHash, version);
         // #465: the registry this order is judged against, whatever is wired later.
@@ -246,9 +250,6 @@ contract AdManager is EscrowBase, IAdManager {
         o.pinnedSlot = signerSlot;
         // The denied grace reads the larger of this and the live delay: a raise lengthens it, a cut never shortens it.
         o.anchorDelay = uint32(_anchorDelayNow(params.orderChainId));
-        // The fee this order's payout charges: the bps live now, whatever is set later.
-        o.lpFeeBps = feeConfig.lpBps;
-        o.protocolFeeBps = feeConfig.protocolBps;
         ad.locked += adAmount;
         // 2.3c D1: count the settlement identity this escrow's unlock will verify — the ad's signer,
         // asserted equal to `params.adSettlementSigner` in `_validateOrder` (and owned by the maker
@@ -396,7 +397,7 @@ contract AdManager is EscrowBase, IAdManager {
             // The maker forfeits its stake: the locked amount leaves the ad for the order's
             // recipient, less the fee, as a settlement would. Every other vacuum outcome just
             // releases the lock back to liquidity, which the decrement above already did.
-            (net, protocolFee) = _chargeFee(ad, orderHash, adAmount);
+            (net, protocolFee) = ProofBridgeUtils.chargeFee(ad, params, orderHash, adAmount, true);
         }
 
         _resolve(orderHash, params.adSettlementSigner);
@@ -603,7 +604,7 @@ contract AdManager is EscrowBase, IAdManager {
                               INTERNAL LOGIC
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev The canonical 17-field order from this leg's params plus the ad-chain context.
+    /// @dev The canonical 19-field order from this leg's params plus the ad-chain context.
     function _hashOrder(OrderParams calldata p, uint256 adChainId, address dstAdManager)
         internal
         pure
@@ -632,17 +633,8 @@ contract AdManager is EscrowBase, IAdManager {
         Ad storage ad = _adOf(p);
         uint256 adAmount = _adAmount(p);
         ad.locked -= adAmount;
-        (uint256 net, uint256 protocolFee) = _chargeFee(ad, orderHash, adAmount);
+        (uint256 net, uint256 protocolFee) = ProofBridgeUtils.chargeFee(ad, p, orderHash, adAmount, false);
         _payNet(p.orderRecipient.toAddressChecked(), ad.token, net, protocolFee);
-    }
-
-    /// @dev Take the order's fee (the bps it locked under) out of a released lock: the LP fee stays in
-    ///      the ad's balance, the rest leaves it. Returns the recipient's net and the protocol's fee.
-    function _chargeFee(Ad storage ad, bytes32 orderHash, uint256 adAmount)
-        private
-        returns (uint256 net, uint256 protocolFee)
-    {
-        return ProofBridgeUtils.chargeFee(ad, _orders[orderHash], orderHash, adAmount);
     }
 
     /// @dev The recipient's net, then the protocol's fee (never owed without a pool: `setFeeBps`).
@@ -780,24 +772,5 @@ contract AdManager is EscrowBase, IAdManager {
         ad = ads[adId];
         if (ad.maker == address(0)) revert AdManager__AdNotFound();
         if (ad.maker != maker) revert AdManager__NotMaker();
-    }
-
-    /// @dev Every lock-time rule, cheapest first; the cross-contract registry read last. The body
-    ///      lives in the linked `ProofBridgeUtils` for EIP-170 headroom; the wired peer and route are
-    ///      read here and handed over.
-    function _validateOrder(Ad storage ad, OrderParams calldata params, uint32 signerSlot)
-        private
-        view
-        returns (bytes32 orderHash)
-    {
-        ProofBridgeUtils.validateLock(
-            ad,
-            params,
-            peerEscrow[params.orderChainId],
-            tokenRoute[ad.token][params.orderChainId],
-            keyRegistry,
-            signerSlot
-        );
-        orderHash = _orderHash(params);
     }
 }

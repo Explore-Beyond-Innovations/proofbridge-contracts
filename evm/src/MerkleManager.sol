@@ -24,11 +24,17 @@ contract MerkleManager is IMerkleManager, AdminTimelock {
     /// @notice Who may append: the escrows (and the Registrar once proof registration is on).
     mapping(address => bool) public isManager;
 
+    /// @notice #586: the appenders that are escrows, managed only under the delay (`setEscrowAppender`).
+    mapping(address => bool) public isEscrowAppender;
+
     // Errors
     error MerkleManager__ZeroAddress();
     error MerkleManager__NotManager(address caller);
+    /// @notice An escrow appender is changed through `setEscrowAppender`, under the delay.
+    error MerkleManager__EscrowAppender(address account);
 
     event ManagerSet(address indexed account, bool enabled);
+    event EscrowAppenderSet(address indexed escrow, bool enabled);
     // Self-verifying core; width/size stay readable via the view functions.
     event DepositHashAppended(uint256 indexed index, bytes32 indexed orderHash, uint256 side, bytes32 newRoot);
 
@@ -45,13 +51,26 @@ contract MerkleManager is IMerkleManager, AdminTimelock {
         _tree.setHasher(poseidon2Yul);
     }
 
-    /// @notice Add (`enabled`) or remove an appender. Removing one stops its appends at once.
-    /// @dev Adding goes through the timelock; removing is the Registrar's brake and stays instant.
+    /// @notice Add (`enabled`) or remove a non-escrow appender (the Registrar from the T3 flip).
+    /// @dev Adding goes through the timelock; removing is that appender's brake and stays instant, and
+    ///      voids any pending re-add. An escrow appender is not reachable here: removing one would
+    ///      freeze its cancels, refunds and dispute finalizes, so it goes through `setEscrowAppender`.
     function setManager(address account, bool enabled) external {
-        _timelockedUnless(!enabled);
+        if (isEscrowAppender[account]) revert MerkleManager__EscrowAppender(account);
+        _timelockedUnless(!enabled, keccak256(abi.encode(this.setManager.selector, account)));
         if (account == address(0)) revert MerkleManager__ZeroAddress();
         isManager[account] = enabled;
         emit ManagerSet(account, enabled);
+    }
+
+    /// @notice Add or remove an escrow as an appender. Both ways go through the timelock (#586): an
+    ///         escrow's exits append leaves, so an instant removal would be an instant freeze.
+    function setEscrowAppender(address escrow, bool enabled) external timelocked {
+        if (escrow == address(0)) revert MerkleManager__ZeroAddress();
+        isEscrowAppender[escrow] = enabled;
+        isManager[escrow] = enabled;
+        emit ManagerSet(escrow, enabled);
+        emit EscrowAppenderSet(escrow, enabled);
     }
 
     /**

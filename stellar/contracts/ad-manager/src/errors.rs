@@ -193,6 +193,12 @@ pub enum AdManagerError {
     TimelockTooEarly = 94,
     /// #586: a proposal's argument bytes are not the XDR of an argument list.
     TimelockBadArgs = 95,
+    /// #586: the order's fee (fixed at the bridger's deposit) is not the ad-manager's live fee.
+    FeeMismatch = 96,
+    /// #586: the proposal's 14-day window to run has passed.
+    TimelockExpired = 97,
+    /// #586: a brake on what the proposal would re-enable was pulled after it was proposed.
+    TimelockCancelledByBrake = 98,
 }
 
 /// The shared escrow code reports an opaque reason; this is where it becomes this contract's own
@@ -244,6 +250,8 @@ impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
             TimelockNotProposed => AdManagerError::TimelockNotProposed,
             TimelockTooEarly => AdManagerError::TimelockTooEarly,
             TimelockBadArgs => AdManagerError::TimelockBadArgs,
+            TimelockExpired => AdManagerError::TimelockExpired,
+            TimelockCancelledByBrake => AdManagerError::TimelockCancelledByBrake,
         }
     }
 }

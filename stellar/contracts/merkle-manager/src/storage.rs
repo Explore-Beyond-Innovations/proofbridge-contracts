@@ -141,6 +141,22 @@ pub fn is_manager(env: &Env, addr: &Address) -> bool {
 }
 
 /// Set manager status for an address.
+/// #586: `(escapp, addr) -> bool`, the appenders that are escrows.
+const KEY_ESCAPP: Symbol = symbol_short!("escapp");
+
+pub fn is_escrow_appender(env: &Env, addr: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&(KEY_ESCAPP, addr.clone()))
+        .unwrap_or(false)
+}
+
+pub fn set_escrow_appender(env: &Env, addr: &Address, enabled: bool) {
+    let key = (KEY_ESCAPP, addr.clone());
+    env.storage().persistent().set(&key, &enabled);
+    extend_persistent(env, &key);
+}
+
 pub fn set_manager(env: &Env, addr: &Address, status: bool) {
     let key = (KEY_MGRS, addr.clone());
     env.storage().persistent().set(&key, &status);
