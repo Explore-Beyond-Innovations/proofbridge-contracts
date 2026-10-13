@@ -21,6 +21,9 @@ const CLEAN: Record<string, string | undefined> = {
   ANCHOR_THRESHOLD: undefined,
   DISPUTE_ARBITER: undefined,
   DISPUTE_FEE_POOL: undefined,
+  PROTOCOL_FEE_POOL: undefined,
+  LP_FEE_BPS: undefined,
+  PROTOCOL_FEE_BPS: undefined,
   EVENT_VK: undefined,
   STELLAR_EVENT_VK: undefined,
   LOCAL_EVM_CHAIN_IDS: undefined,
@@ -70,9 +73,19 @@ test("A-8: outside local the deployer may not be the anchor notary", async () =>
   );
 });
 
-test("vkRecord: a testnet deploy without the VK file is refused before the first contract", async () => {
+/** #586: the fee values a non-local deploy must name. */
+const FEES = { PROTOCOL_FEE_POOL: A1, LP_FEE_BPS: "30", PROTOCOL_FEE_BPS: "20" };
+
+test("#586: a testnet deploy without the fee values is refused before the first contract", async () => {
   await withEnv(
     { ...CLEAN, ANCHOR_PUBLISHER: A1, DISPUTE_ARBITER: A1, DISPUTE_FEE_POOL: A1, EVENT_VK: path.join(tmp, "no-vk") },
+    () => refusesWithNoTx(sepolia, () => deploy(sepolia, "testnet", "fee.json"), /PROTOCOL_FEE_POOL is unset/),
+  );
+});
+
+test("vkRecord: a testnet deploy without the VK file is refused before the first contract", async () => {
+  await withEnv(
+    { ...CLEAN, ...FEES, ANCHOR_PUBLISHER: A1, DISPUTE_ARBITER: A1, DISPUTE_FEE_POOL: A1, EVENT_VK: path.join(tmp, "no-vk") },
     () => refusesWithNoTx(sepolia, () => deploy(sepolia, "testnet", "vk.json"), /VK file is missing/),
   );
 });

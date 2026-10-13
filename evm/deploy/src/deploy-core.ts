@@ -11,9 +11,12 @@ import {
   envOrDefault,
   foreignAdmins,
   requireEnv,
+  timelockedOf,
   type DescribedCall,
+  type PendingCall,
   evmRoot,
 } from "./common.js";
+import type { FeeConfig } from "@proofbridge/deployment-manifest";
 import { namedOutsideLocal, requireDeployEnv, assertChainIdForEnv } from "./deploy-env.js";
 import { assertRegistryEnv, registryEnvOf } from "./keys-env.js";
 import { assertReusedVk, vkRecord, assertVerifierCode } from "./vk.js";
@@ -66,6 +69,8 @@ export interface DeployCoreResult {
   manifestPath: string;
   /** Admin-only calls the signer could not make (the admin was handed over); empty when all sent. */
   described: DescribedCall[];
+  /** #586: setters under the 24-hour delay, proposed by this run or still waiting; re-run after them. */
+  pending: PendingCall[];
   chainId: bigint;
   contracts: {
     verifier: string;
@@ -207,6 +212,10 @@ async function deployCoreRun(
       "deploy-core: DISPUTE_ARBITER must not be the admin — the arbiter's containment is that it holds no escrow powers",
     );
   }
+  // #586: the bridge fee. Local gets the launch split with the deployer as the pool; elsewhere every
+  // value is explicit, like the arbiter: a fee nobody chose must not ship.
+  const fee = feeConfigFromEnv(env, admin);
+  if (!ethers.isAddress(fee.pool)) throw new Error(`deploy-core: not an address: ${fee.pool} (PROTOCOL_FEE_POOL)`);
 
   // ...and so is what depends on the chain. The manifest is a claim; the chain is the fact.
   const reusedAgentPolicy = existing?.contracts.agentPolicy?.address;
@@ -214,6 +223,7 @@ async function deployCoreRun(
   const manifestUtils = existing?.contracts.proofBridgeUtils?.address;
   let reusedUtils: string | undefined;
   let foreign: string[] = [];
+  let timelocked: string[] = [];
   let heldAdmins: Awaited<ReturnType<typeof adminsOf>> = [];
   if (existing) {
     const provider = signer.provider!;
@@ -250,6 +260,8 @@ async function deployCoreRun(
       return address ? [{ label: artifact, artifact, address }] : [];
     });
     heldAdmins = await adminsOf(reusedAdminBearing, (a, f, n) => attachContract(a, f, n, signer));
+    // #586: reused contracts whose 24-hour delay is on: their setters are proposed, not sent.
+    timelocked = await timelockedOf(reusedAdminBearing, (a, f, n) => attachContract(a, f, n, signer));
 
     // Review D3: a reused key registry must be bound to this environment.
     const reusedRegistry = existing.contracts.blsKeyRegistry?.address;
@@ -350,7 +362,7 @@ async function deployCoreRun(
   }
 
   // Per contract: what this run deploys has the deployer as admin and is always wired now (H1).
-  const acting = new Acting(foreign, nonces, "wire");
+  const acting = new Acting(foreign, nonces, "wire", timelocked);
 
   async function deployIfMissing(
     label: string,
@@ -594,6 +606,25 @@ async function deployCoreRun(
     }
   }
 
+  // ── the bridge fee (#586) ─────────────────────────────────────────
+  // The pool first: the contract refuses a protocol fee with no pool to pay it to. The manifest
+  // records the fee only when the chain holds it (sent now, or already there).
+  let feeRecorded: FeeConfig | undefined = existing?.feeConfig;
+  {
+    const adManager = attachContract(adManagerAddr, "AdManager", "AdManager", signer);
+    const [curPool, curLp, curProtocol] = await adManager.getFunction("feeConfig")();
+    let poolOnChain = String(curPool).toLowerCase() === fee.pool.toLowerCase();
+    if (poolOnChain) console.log(`  [skip] AdManager.setProtocolFeePool already ${fee.pool}`);
+    else poolOnChain = await acting.call(adManager, "AdManager", "setProtocolFeePool", [fee.pool], `AdManager.setProtocolFeePool(${fee.pool})`);
+    let bpsOnChain = Number(curLp) === fee.lpBps && Number(curProtocol) === fee.protocolBps;
+    if (bpsOnChain) console.log(`  [skip] AdManager.setFeeBps already ${fee.lpBps} / ${fee.protocolBps}`);
+    else if (poolOnChain || fee.protocolBps === 0) {
+      bpsOnChain = await acting.call(adManager, "AdManager", "setFeeBps", [fee.lpBps, fee.protocolBps],
+        `AdManager.setFeeBps(lp=${fee.lpBps}, protocol=${fee.protocolBps})`);
+    }
+    if (poolOnChain && bpsOnChain) feeRecorded = fee;
+  }
+
   // ── agent policy module (2.1g): the parser library, then the module linked to it ──
   // One shared, ownerless contract per chain that every maker's account installs. Reused only as
   // a pair: a reused module still points at the library it was linked with.
@@ -758,6 +789,9 @@ async function deployCoreRun(
     // Who holds admin, from what the chain answered for the reused contracts; the deployer for a
     // fresh deploy. `handover` moves it.
     admin: adminBlockFromChain(existing?.admin, heldAdmins, deployer, "evm-deploy"),
+    feeConfig: feeRecorded,
+    tokenBonds: existing?.tokenBonds,
+    timelock: existing?.timelock,
   });
 
   await writeManifest(outPath, manifest);
@@ -775,6 +809,7 @@ async function deployCoreRun(
   return {
     manifestPath: outPath,
     described: acting.described,
+    pending: acting.pending,
     chainId,
     contracts: {
       verifier: verifierAddr,
@@ -796,6 +831,31 @@ async function deployCoreRun(
   };
 }
 
+
+/** The largest fee the AdManager accepts, per side, in bps (1%). */
+export const MAX_FEE_BPS = 100;
+
+/**
+ * #586: the bridge fee from env. `local` defaults to the launch split (30 / 20) paid to the deployer;
+ * anywhere else `PROTOCOL_FEE_POOL`, `LP_FEE_BPS` and `PROTOCOL_FEE_BPS` are all required.
+ */
+export function feeConfigFromEnv(env: string, localPool: string, vars: Record<string, string | undefined> = process.env): FeeConfig {
+  const isLocal = env === "local";
+  const read = (name: string, localDefault: string): string => {
+    const v = vars[name];
+    if (v !== undefined && v !== "") return v;
+    if (isLocal) return localDefault;
+    throw new Error(`deploy-core: ${name} is unset for DEPLOY_ENV=${env}; set PROTOCOL_FEE_POOL, LP_FEE_BPS and PROTOCOL_FEE_BPS`);
+  };
+  const bps = (name: string, localDefault: string): number => {
+    const v = read(name, localDefault);
+    if (!/^\d+$/.test(v) || Number(v) > MAX_FEE_BPS) {
+      throw new Error(`deploy-core: ${name}="${v}" must be a whole number of bps, at most ${MAX_FEE_BPS} (1%)`);
+    }
+    return Number(v);
+  };
+  return { pool: read("PROTOCOL_FEE_POOL", localPool), lpBps: bps("LP_FEE_BPS", "30"), protocolBps: bps("PROTOCOL_FEE_BPS", "20") };
+}
 
 /// Who the deploy makes a MerkleManager manager: the escrows. The Registrar waits for the T3 flip.
 export function appendersAtDeploy(c: { adManager: string; orderPortal: string; registrar: string }): { name: string; addr: string }[] {
