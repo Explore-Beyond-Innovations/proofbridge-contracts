@@ -1505,6 +1505,7 @@ fn fault_codes_never_move() {
             TimelockAlreadyProposed => 92,
             TimelockNotProposed => 93,
             TimelockTooEarly => 94,
+            TimelockBadArgs => 95,
         }
     }
     // `Fault::ALL` is generated with the enum, so it names every variant.

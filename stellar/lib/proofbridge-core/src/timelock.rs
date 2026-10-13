@@ -7,7 +7,9 @@
 //! contracts that carry it (both escrows, the merkle-manager, the dispute-manager).
 
 use soroban_sdk::{
-    contractevent, symbol_short, xdr::ToXdr, Address, BytesN, Env, Symbol, Val, Vec,
+    contractevent, symbol_short,
+    xdr::{FromXdr, ToXdr},
+    Address, Bytes, BytesN, Env, Symbol, Val, Vec,
 };
 
 use crate::escrow_ops::Fault;
@@ -85,8 +87,11 @@ fn set_active(env: &Env) {
     .publish(env);
 }
 
-/// Queue a call. Closes the bypass if still open. The caller has authenticated the admin.
-pub fn propose(env: &Env, fn_name: Symbol, args: Vec<Val>) -> Result<BytesN<32>, Fault> {
+/// Queue a call: `args` is the XDR of the call's argument list (an `ScVal::Vec`, the arguments in
+/// order, each with the setter's own type), so any tool can build it. Closes the bypass if still
+/// open. The caller has authenticated the admin.
+pub fn propose(env: &Env, fn_name: Symbol, args: Bytes) -> Result<BytesN<32>, Fault> {
+    let args = Vec::<Val>::from_xdr(env, &args).map_err(|_| Fault::TimelockBadArgs)?;
     if !is_active(env) {
         set_active(env);
     }

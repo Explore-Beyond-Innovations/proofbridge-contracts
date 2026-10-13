@@ -63,4 +63,6 @@ pub enum DisputeManagerError {
     TimelockNotProposed = 32,
     /// #586: the proposal's 24 hours have not passed.
     TimelockTooEarly = 33,
+    /// #586: a proposal's argument bytes are not the XDR of an argument list.
+    TimelockBadArgs = 34,
 }

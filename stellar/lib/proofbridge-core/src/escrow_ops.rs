@@ -105,6 +105,8 @@ faults! {
     TimelockNotProposed,
     /// #586: the proposal's 24 hours have not passed.
     TimelockTooEarly,
+    /// #586: a proposal's argument bytes are not the XDR of an argument list.
+    TimelockBadArgs,
 }
 
 impl From<crate::decimal_scaling::DecimalScalingError> for Fault {

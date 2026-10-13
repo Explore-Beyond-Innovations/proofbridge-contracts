@@ -1060,6 +1060,12 @@ fn args(
     v.into_val(env)
 }
 
+/// A proposal's argument list as the contract takes it: the XDR of the `ScVal::Vec`.
+fn xdr_args(env: &Env, a: &soroban_sdk::Vec<soroban_sdk::Val>) -> soroban_sdk::Bytes {
+    use soroban_sdk::xdr::ToXdr;
+    a.clone().to_xdr(env)
+}
+
 fn sym(env: &Env, s: &str) -> soroban_sdk::Symbol {
     soroban_sdk::Symbol::new(env, s)
 }
@@ -1110,7 +1116,7 @@ fn every_admin_setter_is_gated_once_active() {
         ),
     ];
     for (name, a) in calls.iter() {
-        let id = f.client.propose_action(name, a);
+        let id = f.client.propose_action(name, &xdr_args(e, a));
         assert_eq!(f.client.timelock_eta(&id), T0 + DAY);
     }
 
@@ -1155,8 +1161,10 @@ fn activation_is_one_way_and_a_proposal_activates() {
     let f = fixture();
     let e = &f.env;
     assert!(!f.client.timelock_active());
-    f.client
-        .propose_action(&sym(e, "set_arbiter"), &args(e, (f.admin.clone(),)));
+    f.client.propose_action(
+        &sym(e, "set_arbiter"),
+        &xdr_args(e, &args(e, (f.admin.clone(),))),
+    );
     assert!(
         f.client.timelock_active(),
         "the first proposal closed the bypass"
@@ -1175,7 +1183,7 @@ fn execute_must_match_the_proposal() {
     let a = Address::generate(e);
     let b = Address::generate(e);
     f.client
-        .propose_action(&sym(e, "set_arbiter"), &args(e, (a.clone(),)));
+        .propose_action(&sym(e, "set_arbiter"), &xdr_args(e, &args(e, (a.clone(),))));
     e.ledger().set_timestamp(T0 + DAY);
     assert_eq!(
         f.client.try_set_arbiter(&b),
@@ -1195,9 +1203,9 @@ fn reproposal_refused_and_cancel_works() {
     let e = &f.env;
     let a = Address::generate(e);
     let call = (sym(e, "set_arbiter"), args(e, (a.clone(),)));
-    let id = f.client.propose_action(&call.0, &call.1);
+    let id = f.client.propose_action(&call.0, &xdr_args(e, &call.1));
     assert_eq!(
-        f.client.try_propose_action(&call.0, &call.1),
+        f.client.try_propose_action(&call.0, &xdr_args(e, &call.1)),
         Err(Ok(Error::TimelockAlreadyProposed))
     );
     f.client.cancel_action(&id);
@@ -1509,5 +1517,53 @@ fn a_token_bond_pays_out_in_its_token_and_credits_a_refusal() {
     assert_eq!(
         f.client.claimable_token(&f.filer, &f.token),
         f.client.claimable(&f.filer)
+    );
+}
+
+/// Argument bytes that are not an argument list are refused, and nothing is queued: XDR of another
+/// type is `TimelockBadArgs`; bytes that are not XDR at all trap in the host.
+#[test]
+fn proposal_bytes_must_be_an_argument_list() {
+    use soroban_sdk::xdr::ToXdr;
+    let f = fixture();
+    let e = &f.env;
+    assert_eq!(
+        f.client
+            .try_propose_action(&sym(e, "set_arbiter"), &7u32.to_xdr(e)),
+        Err(Ok(Error::TimelockBadArgs))
+    );
+    assert!(f
+        .client
+        .try_propose_action(
+            &sym(e, "set_arbiter"),
+            &soroban_sdk::Bytes::from_array(e, &[1, 2, 3])
+        )
+        .is_err());
+    assert!(
+        !f.client.timelock_active(),
+        "a refused proposal does not close the bypass"
+    );
+}
+
+/// The id is `sha256` of the XDR of `(fn_name, args)`: pinned, so the deploy CLI's encoder can check
+/// itself against it.
+#[test]
+fn the_proposal_id_is_pinned() {
+    let f = fixture();
+    let e = &f.env;
+    let a = args(e, (CHAIN, params()));
+    let id = f
+        .client
+        .propose_action(&sym(e, "set_dispute_params"), &xdr_args(e, &a));
+    assert_eq!(
+        id,
+        proofbridge_core::timelock::action_id(e, &sym(e, "set_dispute_params"), &a)
+    );
+    std::println!(
+        "set_dispute_params(1000002, {{3600*2, 1000}}) id = {:?}",
+        id.to_array()
+            .iter()
+            .map(|b| std::format!("{b:02x}"))
+            .collect::<std::string::String>()
     );
 }

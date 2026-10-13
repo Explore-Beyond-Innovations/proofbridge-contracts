@@ -10893,6 +10893,11 @@ fn tl_args(
     v.into_val(env)
 }
 
+fn tl_xdr(env: &Env, a: &soroban_sdk::Vec<soroban_sdk::Val>) -> Bytes {
+    use soroban_sdk::xdr::ToXdr;
+    a.clone().to_xdr(env)
+}
+
 fn tl_sym(env: &Env, s: &str) -> soroban_sdk::Symbol {
     soroban_sdk::Symbol::new(env, s)
 }
@@ -10982,7 +10987,7 @@ fn test_586_every_escrow_setter_is_gated_once_active() {
 
     let now = e.ledger().timestamp();
     for (name, a) in gated.iter() {
-        let id = am.propose_action(&tl_sym(e, name), a);
+        let id = am.propose_action(&tl_sym(e, name), &tl_xdr(e, a));
         assert_eq!(am.timelock_eta(&id), now + 24 * 60 * 60, "{name}");
     }
     warp(&s, now + 24 * 60 * 60 - 1);
@@ -11065,7 +11070,7 @@ fn test_586_every_escrow_setter_is_gated_once_active() {
         ("set_root_anchor", tl_args(e, (module.clone(),))),
     ];
     for (name, a) in op_calls.iter() {
-        op.propose_action(&tl_sym(e, name), a);
+        op.propose_action(&tl_sym(e, name), &tl_xdr(e, a));
     }
     warp(&s, now + 24 * 60 * 60);
     op.set_chain(&chain, &peer);
@@ -11094,7 +11099,10 @@ fn test_586_merkle_manager_grant_is_delayed_and_revoke_is_instant() {
         Err(Ok(merkle_contract::MerkleError::TimelockNotProposed))
     );
     let now = e.ledger().timestamp();
-    mm.propose_action(&tl_sym(e, "set_manager"), &tl_args(e, (who.clone(), true)));
+    mm.propose_action(
+        &tl_sym(e, "set_manager"),
+        &tl_xdr(e, &tl_args(e, (who.clone(), true))),
+    );
     warp(&s, now + 24 * 60 * 60);
     mm.set_manager(&who, &true);
     assert!(mm.is_manager(&who));

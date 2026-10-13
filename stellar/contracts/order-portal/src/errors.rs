@@ -146,6 +146,8 @@ pub enum OrderPortalError {
     TimelockNotProposed = 110,
     /// #586: the proposal's 24 hours have not passed.
     TimelockTooEarly = 111,
+    /// #586: a proposal's argument bytes are not the XDR of an argument list.
+    TimelockBadArgs = 112,
 }
 
 /// The shared escrow code reports an opaque reason; this is where it becomes this contract's own
@@ -181,6 +183,7 @@ impl From<proofbridge_core::escrow_ops::Fault> for OrderPortalError {
             TimelockAlreadyProposed => OrderPortalError::TimelockAlreadyProposed,
             TimelockNotProposed => OrderPortalError::TimelockNotProposed,
             TimelockTooEarly => OrderPortalError::TimelockTooEarly,
+            TimelockBadArgs => OrderPortalError::TimelockBadArgs,
             // The leader relays module refusals 1:1; the follower collapses them. Named, not a
             // wildcard: a new `Fault` still fails to compile until someone places it.
             NoDisputeManager

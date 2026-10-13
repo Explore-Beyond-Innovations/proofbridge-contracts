@@ -191,6 +191,8 @@ pub enum AdManagerError {
     TimelockNotProposed = 93,
     /// #586: the proposal's 24 hours have not passed.
     TimelockTooEarly = 94,
+    /// #586: a proposal's argument bytes are not the XDR of an argument list.
+    TimelockBadArgs = 95,
 }
 
 /// The shared escrow code reports an opaque reason; this is where it becomes this contract's own
@@ -241,6 +243,7 @@ impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
             TimelockAlreadyProposed => AdManagerError::TimelockAlreadyProposed,
             TimelockNotProposed => AdManagerError::TimelockNotProposed,
             TimelockTooEarly => AdManagerError::TimelockTooEarly,
+            TimelockBadArgs => AdManagerError::TimelockBadArgs,
         }
     }
 }

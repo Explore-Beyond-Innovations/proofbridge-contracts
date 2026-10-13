@@ -26,4 +26,6 @@ pub enum MerkleError {
     TimelockNotProposed = 13,
     /// #586: the proposal's 24 hours have not passed.
     TimelockTooEarly = 14,
+    /// #586: a proposal's argument bytes are not the XDR of an argument list.
+    TimelockBadArgs = 15,
 }

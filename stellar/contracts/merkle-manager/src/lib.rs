@@ -18,7 +18,7 @@ mod storage;
 
 use errors::MerkleError;
 use soroban_sdk::{
-    contract, contractevent, contractimpl, Address, BytesN, Env, IntoVal, Symbol, Val, Vec,
+    contract, contractevent, contractimpl, Address, Bytes, BytesN, Env, IntoVal, Symbol, Vec,
 };
 
 // =============================================================================
@@ -140,7 +140,7 @@ impl ProofBridgeMerkleManagerContract {
     pub fn propose_action(
         env: Env,
         fn_name: Symbol,
-        args: Vec<Val>,
+        args: Bytes,
     ) -> Result<BytesN<32>, MerkleError> {
         let admin = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
         admin.require_auth();
@@ -359,6 +359,7 @@ fn timelock_error(f: proofbridge_core::escrow_ops::Fault) -> MerkleError {
         TimelockAlreadyActive => MerkleError::TimelockAlreadyActive,
         TimelockAlreadyProposed => MerkleError::TimelockAlreadyProposed,
         TimelockTooEarly => MerkleError::TimelockTooEarly,
+        TimelockBadArgs => MerkleError::TimelockBadArgs,
         _ => MerkleError::TimelockNotProposed,
     }
 }

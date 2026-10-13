@@ -29,7 +29,9 @@ mod test;
 use proofbridge_core::dispute;
 use proofbridge_core::timelock;
 use proofbridge_core::types::{BondConfig, DisputeOutcome, DisputeParams, DisputeRecord};
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, IntoVal, Symbol, Val, Vec};
+use soroban_sdk::{
+    contract, contractimpl, token, Address, Bytes, BytesN, Env, IntoVal, Symbol, Val, Vec,
+};
 
 pub use errors::DisputeManagerError as Error;
 
@@ -156,7 +158,7 @@ impl DisputeManagerContract {
 
     /// Queue a timelocked call: its function name and its exact argument list. Admin only; closes
     /// the bypass if still open. Executable by anyone 24 hours later by calling the function itself.
-    pub fn propose_action(env: Env, fn_name: Symbol, args: Vec<Val>) -> Result<BytesN<32>, Error> {
+    pub fn propose_action(env: Env, fn_name: Symbol, args: Bytes) -> Result<BytesN<32>, Error> {
         Self::require_admin(&env)?;
         let id =
             proofbridge_core::timelock::propose(&env, fn_name, args).map_err(timelock_error)?;
@@ -649,6 +651,7 @@ fn timelock_error(f: proofbridge_core::escrow_ops::Fault) -> Error {
         TimelockAlreadyActive => Error::TimelockAlreadyActive,
         TimelockAlreadyProposed => Error::TimelockAlreadyProposed,
         TimelockTooEarly => Error::TimelockTooEarly,
+        TimelockBadArgs => Error::TimelockBadArgs,
         _ => Error::TimelockNotProposed,
     }
 }

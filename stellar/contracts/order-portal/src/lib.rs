@@ -43,7 +43,7 @@ use proofbridge_core::cross_contract::{
     LEAF_DOMAIN_AD, LEAF_DOMAIN_CANCEL, LEAF_DOMAIN_FORFEIT, LEAF_DOMAIN_SETTLED,
 };
 use proofbridge_core::escrow_ops as ops;
-use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, IntoVal, Symbol, Val, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, IntoVal, Symbol};
 
 pub use errors::OrderPortalError;
 pub use types::{
@@ -151,7 +151,7 @@ impl OrderPortalContract {
     pub fn propose_action(
         env: Env,
         fn_name: Symbol,
-        args: Vec<Val>,
+        args: Bytes,
     ) -> Result<BytesN<32>, OrderPortalError> {
         let config = storage::get_config(&env)?;
         config.admin.require_auth();
