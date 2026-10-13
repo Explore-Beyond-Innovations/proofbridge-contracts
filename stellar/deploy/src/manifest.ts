@@ -11,6 +11,8 @@ import {
   type RootAnchorConfig,
   type RouteTiming,
   type DisputeParams,
+  type FeeConfig,
+  type TokenBondConfig,
 } from "@proofbridge/deployment-manifest";
 import { deploymentsDir } from "./common.js";
 import { strkeyToHex } from "./stellar-cli.js";
@@ -81,6 +83,12 @@ export interface BuildStellarManifestInput {
   disputeParams?: Record<string, DisputeParams>;
   /** Who holds admin (#424): the source account until `handover`; preserved across redeploys. */
   admin?: AdminHandover;
+  /** #586: the ad-manager's fee, as the chain holds it after this run (pool as a G... account). */
+  feeConfig?: FeeConfig;
+  /** #586: per peer chain → per local token contract → the route's token bond; written by link. */
+  tokenBonds?: Record<string, Record<string, TokenBondConfig>>;
+  /** #586: when the 24-hour delay was switched on; preserved. */
+  timelock?: { activatedAt: string };
   /** Wasm installed for operators to instantiate (C-4), and the wasm the key registry and the
    *  counterparty verifier were deployed from (a re-run refuses to reuse them under other code). */
   wasmHashes?: { agentAccount?: string; blsKeyRegistry?: string; counterpartyVerifier?: string };
@@ -144,6 +152,9 @@ export function buildManifest(
     routeTiming: input.routeTiming ?? {},
     disputeParams: input.disputeParams ?? {},
     ...(input.admin ? { admin: input.admin } : {}),
+    ...(input.feeConfig ? { feeConfig: input.feeConfig } : {}),
+    tokenBonds: input.tokenBonds ?? {},
+    ...(input.timelock ? { timelock: input.timelock } : {}),
     ...wasmHashesEntry(input.wasmHashes),
     meta: {
       deployedAt: new Date().toISOString(),
