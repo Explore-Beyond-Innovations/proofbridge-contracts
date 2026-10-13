@@ -135,7 +135,7 @@ UltraHonk zero-knowledge proof verifier.
 
 ### Order struct
 
-Seventeen fields, hashed in this order (`OrderHash.ORDER_TYPEHASH`, the Soroban `eip712` module):
+Nineteen fields, hashed in this order (`OrderHash.ORDER_TYPEHASH`, the Soroban `eip712` module):
 
 ```text
 Order {
@@ -156,8 +156,14 @@ Order {
     adDecimals          // the ad-chain token's decimals
     deadline            // unix seconds; the termination clocks run from it
     adSettlementSigner  // the account whose BLS key co-signs for the maker
+    lpFeeBps            // the maker's fee, bps (uint16), kept in the ad
+    protocolFeeBps      // the protocol's fee, bps (uint16), paid to the fee pool
 }
 ```
+
+The two fee fields are the split the bridger deposits against, so the fee is fixed at the deposit. The
+OrderPortal refuses either above 1%; the AdManager's lock refuses the order unless both equal its live
+`feeConfig`, and the payout charges the order's own split.
 
 Each escrow passes the fields it holds and fills in its own chain id and address (the AdManager's
 `OrderParams` names the portal `srcOrderPortal`; the two chain/contract pairs come from the

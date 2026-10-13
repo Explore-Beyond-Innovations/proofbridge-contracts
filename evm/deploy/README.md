@@ -14,8 +14,8 @@ Node/ethers CLI for deploying ProofBridge on one EVM chain. Emits a
 ### `deploy`
 
 Deploys (or reuses) Verifier, MerkleManager, wNativeToken, AdManager,
-OrderPortal. Sets AdManager and OrderPortal as MerkleManager managers
-(`setManager`). The Registrar is deployed but not made a manager: that is a
+OrderPortal. Sets AdManager and OrderPortal as MerkleManager escrow appenders
+(`setEscrowAppender`). The Registrar is deployed but not made a manager: that is a
 step of proof registration's T3 flip (`setManager(registrar, true)`).
 Writes/updates the manifest.
 
@@ -92,17 +92,35 @@ stale or could not be checked.
 
 ### `timelock status` / `timelock activate --confirm` / `timelock {propose|execute|cancel}`
 
-The 24-hour admin delay (#586) on the AdManager, the OrderPortal, the MerkleManager and the
-DisputeManager. Until `activate`, their setters are the admin's and instant: that setup window is how
-`deploy` and `link` configure a fresh chain. `timelock activate --confirm` closes it for good on every
-one of them (the manifest records `timelock.activatedAt`). From then on a change is proposed by the
-admin, waits 24 hours, and is executed by anyone with exactly the proposed arguments; the admin may
-cancel it first. Pause, unpause and the admin handover stay instant.
+The 24-hour admin delay (#586) on the AdManager, the OrderPortal, the MerkleManager, the
+DisputeManager, the RootAnchor and the BLSKeyRegistry. Until `activate`, their setters are the admin's
+and instant: that setup window is how `deploy` and `link` configure a fresh chain. `timelock activate
+--confirm` closes it for good on every one of them (the manifest records `timelock.activatedAt` once all
+are on). From then on a change is proposed by the admin, waits 24 hours, and is executed by anyone with
+exactly the proposed arguments; the admin may cancel it first. Pause, unpause and the admin handover stay instant.
+
+- **Grants wait, revocations do not.** On the RootAnchor and the BLSKeyRegistry only the setters that
+  add trust are delayed (a new signer set, a shorter anchor delay, a lower sequence pin, switching the
+  sequence check off, the position guards, enabling proof registration). Revoking an anchor,
+  raising a delay or a pin, switching the check on and disabling proof registration stay instant.
+  On the MerkleManager, removing a non-escrow appender (`setManager(x, false)`) is instant; the escrows are
+  escrow appenders, added and removed only through the delayed `setEscrowAppender`.
+- **A brake voids what would undo it.** An instant revocation voids every pending proposal that would
+  reverse it. The voided proposal still holds its id: cancel it, then propose again.
+- **Proposals expire.** A proposal can run for 14 days after its 24 hours are up, then never; propose
+  it again. An admin handover voids every proposal the previous admin made.
+- **Activation is checked.** Outside `local`, `activate` refuses a manifest missing any of the six
+  contracts before sending anything. If any contract fails to activate, the command exits 1 naming
+  each one, and does not record the activation. It prints `status` at the end either way.
+- **A redeploy into an activated chain activates what it adds.** A contract `deploy` deploys into a
+  chain whose manifest records the activation is wired while still in setup, then activated in the
+  same run. `status` flags any contract still in setup on an activated chain.
 
 `deploy` and `link` follow the delay on their own: on a contract whose delay is on, a call they would
 have sent is proposed instead (or, when the signer is not the admin, the `proposeAction` is described),
-the command exits 2, and the same command re-run after 24 hours executes it. For a change neither
-makes, use the commands directly:
+the command exits 2, and the same command re-run after 24 hours executes it. The fee pool and the fee
+split are proposed in the same run, so one 24-hour round sets both. For a change neither makes, use the
+commands directly:
 
 ```bash
 evm-deploy timelock propose --contract AdManager --fn setFeeBps --args '[30, 20]'
