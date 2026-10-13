@@ -31,3 +31,5 @@ mod fees_bonds_test;
 mod parity_math_test;
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod timelock_test;
