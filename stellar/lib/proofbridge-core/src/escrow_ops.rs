@@ -97,6 +97,14 @@ faults! {
     /// token) leaves it short of what it owes; more is a balance it did not record. Refused either
     /// way, exactly `amount` or nothing.
     TransferShort,
+    /// #586: `activate_timelock` on an already active timelock.
+    TimelockAlreadyActive,
+    /// #586: the call is already proposed (its clock stands).
+    TimelockAlreadyProposed,
+    /// #586: no pending proposal for this exact call.
+    TimelockNotProposed,
+    /// #586: the proposal's 24 hours have not passed.
+    TimelockTooEarly,
 }
 
 impl From<crate::decimal_scaling::DecimalScalingError> for Fault {
@@ -399,6 +407,8 @@ pub fn open_dispute(
     filer: &Address,
     evidence: &BytesN<32>,
     deadline: u64,
+    token: &Address,
+    amount: u128,
 ) -> Result<u128, Fault> {
     match storage::get_order_status(env, order_hash) {
         Status::Open | Status::Claimed => {}
@@ -421,6 +431,8 @@ pub fn open_dispute(
             evidence,
             &deadline,
             &buffer,
+            token,
+            &amount,
         )
         .map_err(dispute_module_fault)?
         .map_err(|_| Fault::DisputeModuleRejected)?;

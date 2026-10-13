@@ -4,7 +4,7 @@
 //! The two implementations are kept honest by the shared vectors, not by this file — which is why
 //! the rules are written here in one place rather than inline at each call site.
 
-use crate::types::{DisputeOutcome, DisputeParams};
+use crate::types::{BondConfig, DisputeOutcome, DisputeParams};
 
 /// A challenge period shorter than this leaves no room to gather evidence.
 pub const MIN_CHALLENGE_PERIOD: u64 = 60 * 60;
@@ -48,6 +48,26 @@ pub fn validate(p: &DisputeParams) -> Result<(), u8> {
 /// it properly needs an oracle. Routes that carry large orders get a higher floor.
 pub fn bond_for(p: &DisputeParams) -> u128 {
     p.bond_floor
+}
+
+/// The ceiling on a route's `bond_bps` (5% of the order).
+pub const MAX_BOND_BPS: u32 = 500;
+
+/// `{0, 0}` clears the route's config (back to the flat floor); otherwise the floor is non-zero and
+/// the ratio at most `MAX_BOND_BPS`. `false` = refused.
+pub fn validate_bond(c: &BondConfig) -> bool {
+    if c.min_bond == 0 {
+        c.bond_bps == 0
+    } else {
+        c.bond_bps <= MAX_BOND_BPS
+    }
+}
+
+/// The scaled bond in the order's token: `max(min_bond, amount × bond_bps / 10,000)`, the ratio
+/// rounded down. The floor keeps small orders bondable; the ratio scales large ones.
+pub fn route_bond(c: &BondConfig, amount: u128) -> u128 {
+    let scaled = amount * c.bond_bps as u128 / 10_000;
+    scaled.max(c.min_bond)
 }
 
 /// Whether the filer's position was vindicated, which is what routes the bond.

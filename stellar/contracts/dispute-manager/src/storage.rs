@@ -5,7 +5,7 @@
 //! route.
 
 use proofbridge_core::ttl;
-use proofbridge_core::types::{DisputeParams, DisputeRecord};
+use proofbridge_core::types::{BondConfig, DisputeParams, DisputeRecord};
 use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol};
 
 const KEY_CONFIG: Symbol = symbol_short!("config");
@@ -21,6 +21,37 @@ const KEY_DPARAMS: Symbol = symbol_short!("dparams");
 const KEY_DISPUTE: Symbol = symbol_short!("disputes");
 /// Credited payouts: `(claims, recipient) -> u128`.
 const KEY_CLAIMS: Symbol = symbol_short!("claims");
+/// #586: per-route token bonds: `(bondcfg, token, chain_id) -> BondConfig`.
+const KEY_BONDCFG: Symbol = symbol_short!("bondcfg");
+/// #586: credited token-bond payouts: `(tclaims, recipient, token) -> u128`.
+const KEY_TCLAIMS: Symbol = symbol_short!("tclaims");
+
+pub fn get_bond_config(env: &Env, token: &Address, chain_id: u128) -> Option<BondConfig> {
+    let key = (KEY_BONDCFG, token.clone(), chain_id);
+    env.storage().persistent().get(&key)
+}
+
+/// `{0, 0}` removes the entry: the route is back on the flat floor.
+pub fn set_bond_config(env: &Env, token: &Address, chain_id: u128, c: &BondConfig) {
+    let key = (KEY_BONDCFG, token.clone(), chain_id);
+    if c.min_bond == 0 {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, c);
+        ttl::extend_persistent(env, &key);
+    }
+}
+
+pub fn get_token_claimable(env: &Env, who: &Address, token: &Address) -> u128 {
+    let key = (KEY_TCLAIMS, who.clone(), token.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn set_token_claimable(env: &Env, who: &Address, token: &Address, amount: u128) {
+    let key = (KEY_TCLAIMS, who.clone(), token.clone());
+    env.storage().persistent().set(&key, &amount);
+    ttl::extend_persistent(env, &key);
+}
 
 // ── admin ────────────────────────────────────────────────────────────────
 

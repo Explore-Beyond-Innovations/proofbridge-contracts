@@ -7,7 +7,7 @@
 extern crate std;
 
 use super::*;
-use proofbridge_core::types::DisputeParams;
+use proofbridge_core::types::{BondConfig, DisputeParams};
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     token, Address, BytesN, Env,
@@ -113,6 +113,8 @@ fn file_at(f: &F, h: &BytesN<32>, deadline: u64) -> u128 {
         &hash(&f.env, 0xEE),
         &deadline,
         &BUFFER,
+        &f.token,
+        &0,
     )
 }
 
@@ -235,7 +237,9 @@ fn an_unconfigured_route_cannot_be_disputed() {
             &f.filer,
             &hash(&f.env, 0),
             &DEADLINE,
-            &BUFFER
+            &BUFFER,
+            &f.token,
+            &0,
         ),
         Err(Ok(Error::NoDisputeParams))
     );
@@ -256,7 +260,9 @@ fn only_a_registered_escrow_may_open_a_dispute() {
             &f.filer,
             &hash(&f.env, 0),
             &DEADLINE,
-            &BUFFER
+            &BUFFER,
+            &f.token,
+            &0,
         ),
         Err(Ok(Error::NotEscrow))
     );
@@ -286,7 +292,9 @@ fn one_dispute_per_order() {
             &f.filer,
             &hash(&f.env, 0),
             &DEADLINE,
-            &BUFFER
+            &BUFFER,
+            &f.token,
+            &0,
         ),
         Err(Ok(Error::DisputeExists))
     );
@@ -868,6 +876,8 @@ fn an_unfunded_bond_is_bond_transfer_failed() {
             &hash(&f.env, 0xEE),
             &DEADLINE,
             &BUFFER,
+            &f.token,
+            &0,
         ),
         Err(Ok(Error::BondTransferFailed))
     );
@@ -1036,5 +1046,468 @@ fn d5_a_zero_answer_is_refused() {
         f.client
             .try_record_response(&f.escrow, &h, &Address::generate(&f.env), &hash(&f.env, 0),),
         Err(Ok(Error::ZeroResponse))
+    );
+}
+
+// ── #586: the 24-hour delay ──────────────────────────────────────────────
+
+const DAY: u64 = 24 * 60 * 60;
+
+fn args(
+    env: &Env,
+    v: impl soroban_sdk::IntoVal<Env, soroban_sdk::Vec<soroban_sdk::Val>>,
+) -> soroban_sdk::Vec<soroban_sdk::Val> {
+    v.into_val(env)
+}
+
+fn sym(env: &Env, s: &str) -> soroban_sdk::Symbol {
+    soroban_sdk::Symbol::new(env, s)
+}
+
+/// After activation every admin setter refuses without a proposal; with one it refuses a second
+/// early and runs at 24 hours, once, needing nobody's auth.
+#[test]
+fn every_admin_setter_is_gated_once_active() {
+    let f = fixture();
+    let e = &f.env;
+    let other = Address::generate(e);
+    let bond = BondConfig {
+        min_bond: 7,
+        bond_bps: 50,
+    };
+    f.client.activate_timelock();
+    assert!(f.client.timelock_active());
+
+    assert_eq!(
+        f.client.try_set_escrow(&other, &true),
+        Err(Ok(Error::TimelockNotProposed))
+    );
+    assert_eq!(
+        f.client.try_set_dispute_params(&CHAIN, &params()),
+        Err(Ok(Error::TimelockNotProposed))
+    );
+    assert_eq!(
+        f.client.try_set_arbiter(&other),
+        Err(Ok(Error::TimelockNotProposed))
+    );
+    assert_eq!(
+        f.client.try_set_protocol_fee_pool(&other),
+        Err(Ok(Error::TimelockNotProposed))
+    );
+    assert_eq!(
+        f.client.try_set_bond_config(&f.token, &CHAIN, &bond),
+        Err(Ok(Error::TimelockNotProposed))
+    );
+
+    let calls = [
+        (sym(e, "set_escrow"), args(e, (other.clone(), true))),
+        (sym(e, "set_dispute_params"), args(e, (CHAIN, params()))),
+        (sym(e, "set_arbiter"), args(e, (other.clone(),))),
+        (sym(e, "set_protocol_fee_pool"), args(e, (other.clone(),))),
+        (
+            sym(e, "set_bond_config"),
+            args(e, (f.token.clone(), CHAIN, bond.clone())),
+        ),
+    ];
+    for (name, a) in calls.iter() {
+        let id = f.client.propose_action(name, a);
+        assert_eq!(f.client.timelock_eta(&id), T0 + DAY);
+    }
+
+    e.ledger().set_timestamp(T0 + DAY - 1);
+    assert_eq!(
+        f.client.try_set_arbiter(&other),
+        Err(Ok(Error::TimelockTooEarly))
+    );
+
+    e.ledger().set_timestamp(T0 + DAY);
+    f.client.set_escrow(&other, &true);
+    assert!(e.auths().is_empty(), "a ripe proposal needs nobody's auth");
+    f.client.set_dispute_params(&CHAIN, &params());
+    f.client.set_arbiter(&other);
+    f.client.set_protocol_fee_pool(&other);
+    f.client.set_bond_config(&f.token, &CHAIN, &bond);
+    assert_eq!(f.client.get_arbiter(), Some(other.clone()));
+    assert_eq!(f.client.bond_config(&f.token, &CHAIN), Some(bond));
+
+    // Consumed: the same call again needs a new proposal.
+    assert_eq!(
+        f.client.try_set_arbiter(&other),
+        Err(Ok(Error::TimelockNotProposed))
+    );
+}
+
+/// Before activation the setters are the admin's (its auth is what runs them); after, a ripe
+/// proposal runs with no auth at all.
+#[test]
+fn the_setup_bypass_is_the_admins() {
+    let f = fixture();
+    let other = Address::generate(&f.env);
+    f.client.set_arbiter(&other);
+    let auths = f.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, f.admin, "the bypass ran on the admin's auth");
+}
+
+/// Activation is one-way; the first proposal activates too.
+#[test]
+fn activation_is_one_way_and_a_proposal_activates() {
+    let f = fixture();
+    let e = &f.env;
+    assert!(!f.client.timelock_active());
+    f.client
+        .propose_action(&sym(e, "set_arbiter"), &args(e, (f.admin.clone(),)));
+    assert!(
+        f.client.timelock_active(),
+        "the first proposal closed the bypass"
+    );
+    assert_eq!(
+        f.client.try_activate_timelock(),
+        Err(Ok(Error::TimelockAlreadyActive))
+    );
+}
+
+/// The proposal is the exact call: other arguments are another id.
+#[test]
+fn execute_must_match_the_proposal() {
+    let f = fixture();
+    let e = &f.env;
+    let a = Address::generate(e);
+    let b = Address::generate(e);
+    f.client
+        .propose_action(&sym(e, "set_arbiter"), &args(e, (a.clone(),)));
+    e.ledger().set_timestamp(T0 + DAY);
+    assert_eq!(
+        f.client.try_set_arbiter(&b),
+        Err(Ok(Error::TimelockNotProposed))
+    );
+    assert_eq!(
+        f.client.try_set_protocol_fee_pool(&a),
+        Err(Ok(Error::TimelockNotProposed))
+    );
+    f.client.set_arbiter(&a);
+}
+
+/// A pending proposal cannot be re-proposed; the admin cancels one, and the cancelled call is refused.
+#[test]
+fn reproposal_refused_and_cancel_works() {
+    let f = fixture();
+    let e = &f.env;
+    let a = Address::generate(e);
+    let call = (sym(e, "set_arbiter"), args(e, (a.clone(),)));
+    let id = f.client.propose_action(&call.0, &call.1);
+    assert_eq!(
+        f.client.try_propose_action(&call.0, &call.1),
+        Err(Ok(Error::TimelockAlreadyProposed))
+    );
+    f.client.cancel_action(&id);
+    assert_eq!(f.client.timelock_eta(&id), 0);
+    assert_eq!(
+        f.client.try_cancel_action(&id),
+        Err(Ok(Error::TimelockNotProposed))
+    );
+    e.ledger().set_timestamp(T0 + DAY);
+    assert_eq!(
+        f.client.try_set_arbiter(&a),
+        Err(Ok(Error::TimelockNotProposed))
+    );
+}
+
+/// Removing an escrow is a brake: instant, and the admin's; adding one back is delayed.
+#[test]
+fn removing_an_escrow_stays_instant() {
+    let f = fixture();
+    f.client.activate_timelock();
+    f.client.set_escrow(&f.escrow, &false);
+    assert_eq!(
+        f.env.auths()[0].0,
+        f.admin,
+        "the brake ran on the admin's auth"
+    );
+    assert!(!f.client.is_escrow(&f.escrow));
+    assert_eq!(
+        f.client.try_set_escrow(&f.escrow, &true),
+        Err(Ok(Error::TimelockNotProposed))
+    );
+}
+
+// ── #586: per-route bonds in the order's own token ───────────────────────
+
+/// A token that can take a fee on transfer or refuse a recipient, for the bond's exactness and
+/// credit paths.
+#[soroban_sdk::contract]
+pub struct OddToken;
+
+#[soroban_sdk::contracttype]
+enum OddKey {
+    Bal(Address),
+    Blocked(Address),
+    FeeBps,
+}
+
+#[soroban_sdk::contractimpl]
+impl OddToken {
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let b = Self::balance(env.clone(), to.clone());
+        env.storage()
+            .persistent()
+            .set(&OddKey::Bal(to), &(b + amount));
+    }
+
+    pub fn set_blocked(env: Env, who: Address, blocked: bool) {
+        env.storage()
+            .persistent()
+            .set(&OddKey::Blocked(who), &blocked);
+    }
+
+    pub fn set_fee_bps(env: Env, bps: i128) {
+        env.storage().persistent().set(&OddKey::FeeBps, &bps);
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&OddKey::Bal(id))
+            .unwrap_or(0)
+    }
+
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        from.require_auth();
+        let blocked: bool = env
+            .storage()
+            .persistent()
+            .get(&OddKey::Blocked(to.clone()))
+            .unwrap_or(false);
+        if blocked {
+            panic!("blocked");
+        }
+        let bps: i128 = env.storage().persistent().get(&OddKey::FeeBps).unwrap_or(0);
+        let fb = Self::balance(env.clone(), from.clone());
+        if fb < amount {
+            panic!("short");
+        }
+        env.storage()
+            .persistent()
+            .set(&OddKey::Bal(from), &(fb - amount));
+        let tb = Self::balance(env.clone(), to.clone());
+        env.storage()
+            .persistent()
+            .set(&OddKey::Bal(to), &(tb + amount - amount * bps / 10_000));
+    }
+}
+
+fn odd_token(f: &F) -> (Address, OddTokenClient<'static>) {
+    let id = f.env.register(OddToken, ());
+    let c = OddTokenClient::new(&f.env, &id);
+    c.mint(&f.filer, &1_000_000_000_000);
+    (id, c)
+}
+
+fn file_token(f: &F, h: &BytesN<32>, token: &Address, amount: u128) -> u128 {
+    f.client.open_dispute(
+        &f.escrow,
+        h,
+        &CHAIN,
+        &f.filer,
+        &hash(&f.env, 0xEE),
+        &DEADLINE,
+        &BUFFER,
+        token,
+        &amount,
+    )
+}
+
+const FEES_BONDS: &str = include_str!("../../../../test-vectors/fees-bonds.json");
+
+/// Each vector row: the quote and a real filing pull exactly the row's bond, in the order's token.
+#[test]
+fn route_bond_matches_the_shared_vector() {
+    let v: serde_json::Value = serde_json::from_str(FEES_BONDS).unwrap();
+    let rows = v["routeBond"].as_array().unwrap();
+    assert_eq!(
+        rows.len() as u64,
+        v["counts"]["routeBond"].as_u64().unwrap()
+    );
+    let f = fixture();
+    let (tok, c) = odd_token(&f);
+    for (i, row) in rows.iter().enumerate() {
+        let n = |k: &str| -> u128 { row[k].as_str().unwrap().parse().unwrap() };
+        let cfg = BondConfig {
+            min_bond: n("minBond"),
+            bond_bps: row["bondBps"].as_u64().unwrap() as u32,
+        };
+        f.client.set_bond_config(&tok, &CHAIN, &cfg);
+        let amount = n("amount");
+        assert_eq!(
+            f.client.route_bond(&CHAIN, &tok, &amount),
+            (tok.clone(), n("bond")),
+            "quote, row {i}"
+        );
+        let need = n("bond") as i128;
+        if c.balance(&f.filer) < need {
+            c.mint(&f.filer, &need);
+        }
+        let before = c.balance(&f.filer);
+        let h = hash(&f.env, 0x70 + i as u8);
+        assert_eq!(file_token(&f, &h, &tok, amount), n("bond"));
+        assert_eq!(
+            before - c.balance(&f.filer),
+            need,
+            "the filing pulled other than the bond, row {i}"
+        );
+        assert_eq!(f.client.get_dispute(&h).unwrap().bond_token, tok);
+    }
+}
+
+#[test]
+fn bond_config_validation_matches_the_shared_vector() {
+    let v: serde_json::Value = serde_json::from_str(FEES_BONDS).unwrap();
+    let f = fixture();
+    for row in v["bondConfigValidation"].as_array().unwrap() {
+        let cfg = BondConfig {
+            min_bond: row["minBond"].as_str().unwrap().parse().unwrap(),
+            bond_bps: row["bondBps"].as_u64().unwrap() as u32,
+        };
+        let got = f.client.try_set_bond_config(&f.token, &CHAIN, &cfg);
+        if row["valid"].as_bool().unwrap() {
+            assert!(got.is_ok(), "{}", row["label"]);
+        } else {
+            assert_eq!(got, Err(Ok(Error::InvalidBondConfig)), "{}", row["label"]);
+        }
+    }
+}
+
+/// An unconfigured route keeps the flat floor in wrapped native; clearing a config restores it.
+#[test]
+fn an_unconfigured_route_keeps_the_native_floor() {
+    let f = fixture();
+    let (tok, _) = odd_token(&f);
+    assert_eq!(
+        f.client.route_bond(&CHAIN, &tok, &1_000_000_000),
+        (f.token.clone(), BOND_FLOOR)
+    );
+    f.client.set_bond_config(
+        &tok,
+        &CHAIN,
+        &BondConfig {
+            min_bond: 5,
+            bond_bps: 50,
+        },
+    );
+    f.client.set_bond_config(
+        &tok,
+        &CHAIN,
+        &BondConfig {
+            min_bond: 0,
+            bond_bps: 0,
+        },
+    );
+    assert_eq!(f.client.bond_config(&tok, &CHAIN), None);
+    let h = hash(&f.env, 0x81);
+    assert_eq!(file_token(&f, &h, &tok, 1_000_000_000), BOND_FLOOR);
+    assert_eq!(f.client.get_dispute(&h).unwrap().bond_token, f.token);
+}
+
+/// A short receipt (a fee-on-transfer token) is refused.
+#[test]
+fn a_short_token_bond_is_refused() {
+    let f = fixture();
+    let (tok, c) = odd_token(&f);
+    c.set_fee_bps(&100);
+    f.client.set_bond_config(
+        &tok,
+        &CHAIN,
+        &BondConfig {
+            min_bond: 1_000_000,
+            bond_bps: 0,
+        },
+    );
+    assert_eq!(
+        f.client.try_open_dispute(
+            &f.escrow,
+            &hash(&f.env, 0x82),
+            &CHAIN,
+            &f.filer,
+            &hash(&f.env, 0xEE),
+            &DEADLINE,
+            &BUFFER,
+            &tok,
+            &1
+        ),
+        Err(Ok(Error::BondTransferShort))
+    );
+}
+
+/// The bond pays out in its token; a recipient the token refuses is credited and claims later.
+#[test]
+fn a_token_bond_pays_out_in_its_token_and_credits_a_refusal() {
+    let f = fixture();
+    let (tok, c) = odd_token(&f);
+    f.client.set_bond_config(
+        &tok,
+        &CHAIN,
+        &BondConfig {
+            min_bond: 1_000_000,
+            bond_bps: 0,
+        },
+    );
+
+    // Returned to the filer.
+    let h = hash(&f.env, 0x83);
+    let before = c.balance(&f.filer);
+    file_token(&f, &h, &tok, 1);
+    f.client
+        .settle_bond(&f.escrow, &h, &DisputeOutcome::MutualRefund, &false, &false);
+    assert_eq!(
+        c.balance(&f.filer),
+        before,
+        "the bond came back in its token"
+    );
+
+    // Forfeited to the pool.
+    let h2 = hash(&f.env, 0x84);
+    file_token(&f, &h2, &tok, 1);
+    f.client.settle_bond(
+        &f.escrow,
+        &h2,
+        &DisputeOutcome::TradeProceeds,
+        &false,
+        &false,
+    );
+    assert_eq!(
+        c.balance(&f.fee_pool),
+        1_000_000,
+        "the forfeited bond reached the pool in its token"
+    );
+
+    // Refused: credited, then claimed once the filer accepts again.
+    let h3 = hash(&f.env, 0x85);
+    file_token(&f, &h3, &tok, 1);
+    c.set_blocked(&f.filer, &true);
+    f.client.settle_bond(
+        &f.escrow,
+        &h3,
+        &DisputeOutcome::MutualRefund,
+        &false,
+        &false,
+    );
+    assert_eq!(f.client.claimable_token(&f.filer, &tok), 1_000_000);
+    assert_eq!(
+        f.client.try_claim_token(&f.filer, &tok),
+        Err(Ok(Error::BondTransferFailed))
+    );
+    c.set_blocked(&f.filer, &false);
+    let before = c.balance(&f.filer);
+    f.client.claim_token(&f.filer, &tok);
+    assert_eq!(c.balance(&f.filer) - before, 1_000_000);
+    assert_eq!(f.client.claimable_token(&f.filer, &tok), 0);
+    assert_eq!(
+        f.client.try_claim_token(&f.filer, &tok),
+        Err(Ok(Error::NothingToClaim))
+    );
+    // The wrapped native token's credits are the `claimable` ledger.
+    assert_eq!(
+        f.client.claimable_token(&f.filer, &f.token),
+        f.client.claimable(&f.filer)
     );
 }

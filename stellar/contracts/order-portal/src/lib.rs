@@ -43,7 +43,7 @@ use proofbridge_core::cross_contract::{
     LEAF_DOMAIN_AD, LEAF_DOMAIN_CANCEL, LEAF_DOMAIN_FORFEIT, LEAF_DOMAIN_SETTLED,
 };
 use proofbridge_core::escrow_ops as ops;
-use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, IntoVal, Symbol, Val, Vec};
 
 pub use errors::OrderPortalError;
 pub use types::{
@@ -135,6 +135,47 @@ impl OrderPortalContract {
     // Admin Functions - Chains
     // =========================================================================
 
+    // ── the 24-hour delay (#586) ─────────────────────────────────────────
+
+    /// Close the setup bypass for good. Admin only; not itself delayed.
+    pub fn activate_timelock(env: Env) -> Result<(), OrderPortalError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        proofbridge_core::timelock::activate(&env)?;
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Queue a timelocked call: its function name and its exact argument list. Admin only; closes
+    /// the bypass if still open. Executable by anyone 24 hours later by calling the function itself.
+    pub fn propose_action(
+        env: Env,
+        fn_name: Symbol,
+        args: Vec<Val>,
+    ) -> Result<BytesN<32>, OrderPortalError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        let id = proofbridge_core::timelock::propose(&env, fn_name, args)?;
+        storage::extend_instance_ttl(&env);
+        Ok(id)
+    }
+
+    /// Drop a pending proposal. Admin only.
+    pub fn cancel_action(env: Env, id: BytesN<32>) -> Result<(), OrderPortalError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        Ok(proofbridge_core::timelock::cancel(&env, id)?)
+    }
+
+    pub fn timelock_active(env: Env) -> bool {
+        proofbridge_core::timelock::is_active(&env)
+    }
+
+    /// The earliest execution time of a pending proposal; 0 = none.
+    pub fn timelock_eta(env: Env, id: BytesN<32>) -> u64 {
+        proofbridge_core::timelock::eta(&env, &id)
+    }
+
     /// Configure a destination (ad) chain.
     pub fn set_chain(
         env: Env,
@@ -142,7 +183,12 @@ impl OrderPortalContract {
         ad_manager: BytesN<32>,
     ) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "set_chain",
+            (ad_chain_id, ad_manager.clone()).into_val(&env),
+        )?;
 
         // A stored entry is what makes the chain supported, so it must name a counterpart.
         if auth::is_zero_bytes32(&ad_manager) {
@@ -171,7 +217,12 @@ impl OrderPortalContract {
         module: Address,
     ) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "set_root_verifier",
+            (chain_id, module.clone()).into_val(&env),
+        )?;
         ops::set_root_verifier(&env, chain_id, module);
         Ok(())
     }
@@ -194,7 +245,12 @@ impl OrderPortalContract {
         timing: RouteTiming,
     ) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "set_route_timing",
+            (chain_id, timing.clone()).into_val(&env),
+        )?;
         Ok(ops::set_route_timing(&env, chain_id, timing)?)
     }
 
@@ -207,14 +263,24 @@ impl OrderPortalContract {
     /// Set the notary the evidence paths read (2.3e D7). Settlement never touches it.
     pub fn set_root_anchor(env: Env, anchor: Address) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "set_root_anchor",
+            (anchor.clone(),).into_val(&env),
+        )?;
         ops::set_root_anchor(&env, anchor);
         Ok(())
     }
 
     pub fn remove_chain(env: Env, ad_chain_id: u128) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "remove_chain",
+            (ad_chain_id,).into_val(&env),
+        )?;
 
         storage::remove_chain(&env, ad_chain_id);
 
@@ -241,7 +307,12 @@ impl OrderPortalContract {
         ad_token: BytesN<32>,
     ) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "set_token_route",
+            (order_token.clone(), ad_chain_id, ad_token.clone()).into_val(&env),
+        )?;
 
         if auth::is_zero_bytes32(&order_token) || auth::is_zero_bytes32(&ad_token) {
             return Err(OrderPortalError::RoutesZeroAddress);
@@ -269,7 +340,12 @@ impl OrderPortalContract {
         ad_chain_id: u128,
     ) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "remove_token_route",
+            (order_token.clone(), ad_chain_id).into_val(&env),
+        )?;
 
         storage::remove_token_route(&env, &order_token, ad_chain_id);
 
@@ -335,7 +411,7 @@ impl OrderPortalContract {
             LEAF_DOMAIN_AD,
         )?;
 
-        storage::open_order(&env, &order_hash, timing_version, 0, 0, 0);
+        storage::open_order(&env, &order_hash, timing_version, 0, 0, 0, (0, 0));
         // 2.3c D1: count only the party this escrow authenticated (the bridger). The maker is
         // counted by the ad-manager that authenticated them.
         storage::set_in_flight(

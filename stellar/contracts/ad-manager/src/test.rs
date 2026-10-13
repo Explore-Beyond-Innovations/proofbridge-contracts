@@ -1501,6 +1501,10 @@ fn fault_codes_never_move() {
             DisputeAlreadyResponded => 83,
             DisputeZeroResponse => 84,
             DisputeAlreadyRuled => 85,
+            TimelockAlreadyActive => 91,
+            TimelockAlreadyProposed => 92,
+            TimelockNotProposed => 93,
+            TimelockTooEarly => 94,
         }
     }
     // `Fault::ALL` is generated with the enum, so it names every variant.

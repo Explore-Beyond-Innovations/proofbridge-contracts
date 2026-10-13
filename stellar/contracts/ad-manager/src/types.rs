@@ -7,6 +7,16 @@ pub use proofbridge_core::types::{
     ClaimRecord, ContractConfig, DisputeOutcome, OrderRecord, RouteTiming, Status,
 };
 
+/// The bridge fee (#586), taken from the bridger's payout on this chain: `lp_bps` stays in the
+/// maker's ad, `protocol_bps` goes to `pool` (an account id, paid like any payout recipient).
+#[contracttype]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FeeConfig {
+    pub pool: Option<BytesN<32>>,
+    pub lp_bps: u32,
+    pub protocol_bps: u32,
+}
+
 /// Source chain configuration (present = supported)
 #[contracttype]
 #[derive(Clone, Debug)]

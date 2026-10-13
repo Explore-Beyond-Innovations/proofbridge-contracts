@@ -101,6 +101,8 @@ pub fn get_order(env: &Env, order_hash: &BytesN<32>) -> OrderRecord {
             anchor_delay: 0,
             pinned_slot: 0,
             repinned: false,
+            lp_fee_bps: 0,
+            protocol_fee_bps: 0,
         })
 }
 
@@ -117,6 +119,7 @@ pub fn open_order(
     registry_epoch: u32,
     anchor_delay: u32,
     pinned_slot: u32,
+    fee_bps: (u32, u32),
 ) {
     set_order(
         env,
@@ -129,6 +132,8 @@ pub fn open_order(
             anchor_delay,
             pinned_slot,
             repinned: false,
+            lp_fee_bps: fee_bps.0,
+            protocol_fee_bps: fee_bps.1,
         },
     );
 }

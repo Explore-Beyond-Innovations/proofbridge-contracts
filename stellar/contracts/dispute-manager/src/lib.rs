@@ -27,8 +27,9 @@ mod storage;
 mod test;
 
 use proofbridge_core::dispute;
-use proofbridge_core::types::{DisputeOutcome, DisputeParams, DisputeRecord};
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env};
+use proofbridge_core::timelock;
+use proofbridge_core::types::{BondConfig, DisputeOutcome, DisputeParams, DisputeRecord};
+use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, IntoVal, Symbol, Val, Vec};
 
 pub use errors::DisputeManagerError as Error;
 
@@ -51,8 +52,17 @@ impl DisputeManagerContract {
 
     // ── admin ────────────────────────────────────────────────────────────
 
+    /// Allowing goes through the timelock; disallowing (stops new filings) is a brake and stays instant.
     pub fn set_escrow(env: Env, escrow: Address, allowed: bool) -> Result<(), Error> {
-        Self::require_admin(&env)?;
+        let admin = storage::get_admin(&env).ok_or(Error::NotInitialized)?;
+        timelock::gate_unless(
+            &env,
+            &admin,
+            !allowed,
+            "set_escrow",
+            (escrow.clone(), allowed).into_val(&env),
+        )
+        .map_err(timelock_error)?;
         storage::set_escrow(&env, &escrow, allowed);
         events::EscrowSet { escrow, allowed }.publish(&env);
         storage::extend_instance_ttl(&env);
@@ -66,7 +76,11 @@ impl DisputeManagerContract {
         chain_id: u128,
         params: DisputeParams,
     ) -> Result<(), Error> {
-        Self::require_admin(&env)?;
+        Self::gate(
+            &env,
+            "set_dispute_params",
+            (chain_id, params.clone()).into_val(&env),
+        )?;
         // One arm per field `validate` names. A field added there without an arm here traps instead
         // of being reported as the bond floor's error.
         dispute::validate(&params).map_err(|f| match f {
@@ -84,7 +98,7 @@ impl DisputeManagerContract {
     /// be able to pause an escrow, re-route tokens or re-point the anchor, and keeping it here is
     /// what bounds its blast radius.
     pub fn set_arbiter(env: Env, arbiter: Address) -> Result<(), Error> {
-        Self::require_admin(&env)?;
+        Self::gate(&env, "set_arbiter", (arbiter.clone(),).into_val(&env))?;
         storage::set_arbiter(&env, &arbiter);
         events::ArbiterSet { arbiter }.publish(&env);
         storage::extend_instance_ttl(&env);
@@ -92,11 +106,77 @@ impl DisputeManagerContract {
     }
 
     pub fn set_protocol_fee_pool(env: Env, pool: Address) -> Result<(), Error> {
-        Self::require_admin(&env)?;
+        Self::gate(
+            &env,
+            "set_protocol_fee_pool",
+            (pool.clone(),).into_val(&env),
+        )?;
         storage::set_fee_pool(&env, &pool);
         events::ProtocolFeePoolSet { pool }.publish(&env);
         storage::extend_instance_ttl(&env);
         Ok(())
+    }
+
+    /// #586: a route's bond in the order's own token; `{0, 0}` clears it (back to the flat floor).
+    /// Timelocked.
+    pub fn set_bond_config(
+        env: Env,
+        token: Address,
+        peer_chain_id: u128,
+        config: BondConfig,
+    ) -> Result<(), Error> {
+        Self::gate(
+            &env,
+            "set_bond_config",
+            (token.clone(), peer_chain_id, config.clone()).into_val(&env),
+        )?;
+        if !dispute::validate_bond(&config) {
+            return Err(Error::InvalidBondConfig);
+        }
+        storage::set_bond_config(&env, &token, peer_chain_id, &config);
+        events::BondConfigSet {
+            token,
+            peer_chain_id,
+            config,
+        }
+        .publish(&env);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    // ── the 24-hour delay (#586) ─────────────────────────────────────────
+
+    /// Close the setup bypass for good. Admin only; not itself delayed.
+    pub fn activate_timelock(env: Env) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+        proofbridge_core::timelock::activate(&env).map_err(timelock_error)?;
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Queue a timelocked call: its function name and its exact argument list. Admin only; closes
+    /// the bypass if still open. Executable by anyone 24 hours later by calling the function itself.
+    pub fn propose_action(env: Env, fn_name: Symbol, args: Vec<Val>) -> Result<BytesN<32>, Error> {
+        Self::require_admin(&env)?;
+        let id =
+            proofbridge_core::timelock::propose(&env, fn_name, args).map_err(timelock_error)?;
+        storage::extend_instance_ttl(&env);
+        Ok(id)
+    }
+
+    /// Drop a pending proposal. Admin only.
+    pub fn cancel_action(env: Env, id: BytesN<32>) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+        proofbridge_core::timelock::cancel(&env, id).map_err(timelock_error)
+    }
+
+    pub fn timelock_active(env: Env) -> bool {
+        proofbridge_core::timelock::is_active(&env)
+    }
+
+    /// The earliest execution time of a pending proposal; 0 = none.
+    pub fn timelock_eta(env: Env, id: BytesN<32>) -> u64 {
+        proofbridge_core::timelock::eta(&env, &id)
     }
 
     pub fn transfer_admin(env: Env, to: Address) -> Result<(), Error> {
@@ -137,23 +217,32 @@ impl DisputeManagerContract {
         evidence: BytesN<32>,
         deadline: u64,
         buffer: u64,
+        token: Address,
+        amount: u128,
     ) -> Result<u128, Error> {
         Self::require_escrow(&env, &escrow)?;
         if storage::get_dispute(&env, &order_hash).is_some() {
             return Err(Error::DisputeExists);
         }
         let p = storage::get_params(&env, peer_chain_id).ok_or(Error::NoDisputeParams)?;
-        let bond = dispute::bond_for(&p);
+        // #586: the route's token bond when configured, else the flat floor in wrapped native.
+        let (bond_token, bond) = Self::bond_of(&env, &p, &token, peer_chain_id, amount)?;
 
         // The filer funds the bond directly into this contract: it never rests in the escrow, which
         // keeps "the escrow's balance is its order escrow" a single-contract invariant for 2.3h.
         filer.require_auth();
-        let w = storage::get_w_native(&env).ok_or(Error::NotInitialized)?;
+        let client = token::Client::new(&env, &bond_token);
+        let here = env.current_contract_address();
+        let before = client.balance(&here);
         // 49S-3: a token refusal is ours to name; raw, its number would read as a dispute error.
-        token::Client::new(&env, &w)
-            .try_transfer(&filer, &env.current_contract_address(), &(bond as i128))
+        client
+            .try_transfer(&filer, &here, &(bond as i128))
             .map_err(|_| Error::BondTransferFailed)?
             .map_err(|_| Error::BondTransferFailed)?;
+        // #586: an exact pull, as the escrows require: a fee-on-transfer token is refused.
+        if client.balance(&here) - before != bond as i128 {
+            return Err(Error::BondTransferShort);
+        }
 
         // The challenge period is a floor on how long the arbiter has, never a licence to finish
         // early: no dispute path may complete before the order's own `deadline + buffer` (D3,
@@ -173,6 +262,7 @@ impl DisputeManagerContract {
                 escrow,
                 order_deadline: deadline,
                 buffer,
+                bond_token,
             },
         );
         events::DisputeFiled {
@@ -223,7 +313,7 @@ impl DisputeManagerContract {
             } else {
                 storage::get_fee_pool(&env).unwrap_or(d.initiator.clone())
             };
-            Self::pay_or_credit(&env, &to, d.bond)?;
+            Self::pay_or_credit(&env, &to, &d.bond_token, d.bond)?;
             events::BondRouted {
                 order_hash,
                 to,
@@ -394,8 +484,61 @@ impl DisputeManagerContract {
         Ok(dispute::bond_for(&p))
     }
 
+    /// #586: the exact bond a filing on an order of `amount` of `token` against `peer_chain_id`
+    /// pulls, and its token (the wrapped native token for the flat floor). What `open_dispute`
+    /// charges; fails as it would.
+    pub fn route_bond(
+        env: Env,
+        peer_chain_id: u128,
+        token: Address,
+        amount: u128,
+    ) -> Result<(Address, u128), Error> {
+        let p = storage::get_params(&env, peer_chain_id).ok_or(Error::NoDisputeParams)?;
+        Self::bond_of(&env, &p, &token, peer_chain_id, amount)
+    }
+
+    /// #586: the route's token-bond config, if any.
+    pub fn bond_config(env: Env, token: Address, peer_chain_id: u128) -> Option<BondConfig> {
+        storage::get_bond_config(&env, &token, peer_chain_id)
+    }
+
     pub fn claimable(env: Env, who: Address) -> u128 {
         storage::get_claimable(&env, &who)
+    }
+
+    /// #586: a credited bond payout in `token` (the wrapped native token's is `claimable`).
+    pub fn claimable_token(env: Env, who: Address, token: Address) -> u128 {
+        match storage::get_w_native(&env) {
+            Some(w) if w == token => storage::get_claimable(&env, &who),
+            _ => storage::get_token_claimable(&env, &who, &token),
+        }
+    }
+
+    /// #586: withdraw a credited token-bond payout. Permissionless: it pays only the recipient.
+    pub fn claim_token(env: Env, recipient: Address, token: Address) -> Result<(), Error> {
+        if storage::get_w_native(&env).as_ref() == Some(&token) {
+            return Self::claim(env, recipient);
+        }
+        let amount = storage::get_token_claimable(&env, &recipient, &token);
+        if amount == 0 {
+            return Err(Error::NothingToClaim);
+        }
+        storage::set_token_claimable(&env, &recipient, &token, 0);
+        token::Client::new(&env, &token)
+            .try_transfer(
+                &env.current_contract_address(),
+                &recipient,
+                &(amount as i128),
+            )
+            .map_err(|_| Error::BondTransferFailed)?
+            .map_err(|_| Error::BondTransferFailed)?;
+        events::TokenBondClaimed {
+            recipient,
+            token,
+            amount,
+        }
+        .publish(&env);
+        Ok(())
     }
 
     /// Withdraw a credited bond payout.
@@ -421,6 +564,30 @@ impl DisputeManagerContract {
 
     // ── internal ─────────────────────────────────────────────────────────
 
+    /// #586: the timelock gate for this module's admin setters.
+    fn gate(env: &Env, fn_name: &str, args: Vec<Val>) -> Result<(), Error> {
+        let admin = storage::get_admin(env).ok_or(Error::NotInitialized)?;
+        timelock::gate(env, &admin, fn_name, args).map_err(timelock_error)
+    }
+
+    /// #586: the route's bond — its `BondConfig` in the order's token when set, else the flat floor
+    /// in the wrapped native token.
+    fn bond_of(
+        env: &Env,
+        p: &DisputeParams,
+        token: &Address,
+        peer_chain_id: u128,
+        amount: u128,
+    ) -> Result<(Address, u128), Error> {
+        match storage::get_bond_config(env, token, peer_chain_id) {
+            Some(c) => Ok((token.clone(), dispute::route_bond(&c, amount))),
+            None => Ok((
+                storage::get_w_native(env).ok_or(Error::NotInitialized)?,
+                dispute::bond_for(p),
+            )),
+        }
+    }
+
     fn require_admin(env: &Env) -> Result<Address, Error> {
         let admin = storage::get_admin(env).ok_or(Error::NotInitialized)?;
         admin.require_auth();
@@ -443,22 +610,45 @@ impl DisputeManagerContract {
     }
 
     /// Best effort, then credit — a recipient that cannot be paid must not brick a resolution.
-    fn pay_or_credit(env: &Env, to: &Address, amount: u128) -> Result<(), Error> {
-        let w = storage::get_w_native(env).ok_or(Error::NotInitialized)?;
-        let client = token::Client::new(env, &w);
+    /// In the bond's own token; the wrapped native token's credits keep their `claimable` ledger.
+    fn pay_or_credit(env: &Env, to: &Address, token: &Address, amount: u128) -> Result<(), Error> {
+        let client = token::Client::new(env, token);
         if client
             .try_transfer(&env.current_contract_address(), to, &(amount as i128))
             .is_ok()
         {
             return Ok(());
         }
-        let owed = storage::get_claimable(env, to);
-        storage::set_claimable(env, to, owed + amount);
-        events::BondCredited {
-            recipient: to.clone(),
-            amount,
+        let w = storage::get_w_native(env).ok_or(Error::NotInitialized)?;
+        if *token == w {
+            let owed = storage::get_claimable(env, to);
+            storage::set_claimable(env, to, owed + amount);
+            events::BondCredited {
+                recipient: to.clone(),
+                amount,
+            }
+            .publish(env);
+        } else {
+            let owed = storage::get_token_claimable(env, to, token);
+            storage::set_token_claimable(env, to, token, owed + amount);
+            events::TokenBondCredited {
+                recipient: to.clone(),
+                token: token.clone(),
+                amount,
+            }
+            .publish(env);
         }
-        .publish(env);
         Ok(())
+    }
+}
+
+/// #586: the shared timelock's refusals as this contract's errors.
+fn timelock_error(f: proofbridge_core::escrow_ops::Fault) -> Error {
+    use proofbridge_core::escrow_ops::Fault::*;
+    match f {
+        TimelockAlreadyActive => Error::TimelockAlreadyActive,
+        TimelockAlreadyProposed => Error::TimelockAlreadyProposed,
+        TimelockTooEarly => Error::TimelockTooEarly,
+        _ => Error::TimelockNotProposed,
     }
 }

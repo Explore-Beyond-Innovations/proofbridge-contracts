@@ -17,7 +17,9 @@ mod mmr;
 mod storage;
 
 use errors::MerkleError;
-use soroban_sdk::{contract, contractevent, contractimpl, Address, BytesN, Env, Vec};
+use soroban_sdk::{
+    contract, contractevent, contractimpl, Address, BytesN, Env, IntoVal, Symbol, Val, Vec,
+};
 
 // =============================================================================
 // Events
@@ -122,6 +124,48 @@ impl ProofBridgeMerkleManagerContract {
         Ok(())
     }
 
+    // ── the 24-hour delay (#586) ─────────────────────────────────────────
+
+    /// Close the setup bypass for good. Admin only; not itself delayed.
+    pub fn activate_timelock(env: Env) -> Result<(), MerkleError> {
+        let admin = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
+        admin.require_auth();
+        proofbridge_core::timelock::activate(&env).map_err(timelock_error)?;
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Queue a timelocked call: its function name and its exact argument list. Admin only; closes
+    /// the bypass if still open. Executable by anyone 24 hours later by calling the function itself.
+    pub fn propose_action(
+        env: Env,
+        fn_name: Symbol,
+        args: Vec<Val>,
+    ) -> Result<BytesN<32>, MerkleError> {
+        let admin = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
+        admin.require_auth();
+        let id =
+            proofbridge_core::timelock::propose(&env, fn_name, args).map_err(timelock_error)?;
+        storage::extend_instance_ttl(&env);
+        Ok(id)
+    }
+
+    /// Drop a pending proposal. Admin only.
+    pub fn cancel_action(env: Env, id: BytesN<32>) -> Result<(), MerkleError> {
+        let admin = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
+        admin.require_auth();
+        proofbridge_core::timelock::cancel(&env, id).map_err(timelock_error)
+    }
+
+    pub fn timelock_active(env: Env) -> bool {
+        proofbridge_core::timelock::is_active(&env)
+    }
+
+    /// The earliest execution time of a pending proposal; 0 = none.
+    pub fn timelock_eta(env: Env, id: BytesN<32>) -> u64 {
+        proofbridge_core::timelock::eta(&env, &id)
+    }
+
     /// Set or unset a manager.
     ///
     /// Only the admin can call this function. Managers are authorized
@@ -134,9 +178,17 @@ impl ProofBridgeMerkleManagerContract {
             return Err(MerkleError::NotInitialized);
         }
 
-        // Get admin and require auth
+        // #586: adding an appender goes through the timelock; removing one is the Registrar's brake
+        // and stays instant.
         let admin = storage::get_admin(&env).ok_or(MerkleError::NotInitialized)?;
-        admin.require_auth();
+        proofbridge_core::timelock::gate_unless(
+            &env,
+            &admin,
+            !status,
+            "set_manager",
+            (manager.clone(), status).into_val(&env),
+        )
+        .map_err(timelock_error)?;
 
         // Set manager status
         storage::set_manager(&env, &manager, status);
@@ -299,3 +351,14 @@ impl ProofBridgeMerkleManagerContract {
 
 #[cfg(test)]
 mod test;
+
+/// #586: the shared timelock's refusals as this contract's errors.
+fn timelock_error(f: proofbridge_core::escrow_ops::Fault) -> MerkleError {
+    use proofbridge_core::escrow_ops::Fault::*;
+    match f {
+        TimelockAlreadyActive => MerkleError::TimelockAlreadyActive,
+        TimelockAlreadyProposed => MerkleError::TimelockAlreadyProposed,
+        TimelockTooEarly => MerkleError::TimelockTooEarly,
+        _ => MerkleError::TimelockNotProposed,
+    }
+}

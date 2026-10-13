@@ -51,4 +51,16 @@ pub enum DisputeManagerError {
     AlreadyResponded = 26,
     /// D5: an empty answer is refused, so "answered" is exactly "the slot is non-zero".
     ZeroResponse = 27,
+    /// #586: a bond config with a ratio but no floor, or a ratio above `MAX_BOND_BPS`.
+    InvalidBondConfig = 28,
+    /// #586: a token bond's pull moved a different amount than the bond (a fee-on-transfer token).
+    BondTransferShort = 29,
+    /// #586: the timelock is already active.
+    TimelockAlreadyActive = 30,
+    /// #586: this exact call is already proposed.
+    TimelockAlreadyProposed = 31,
+    /// #586: no pending proposal for this exact call.
+    TimelockNotProposed = 32,
+    /// #586: the proposal's 24 hours have not passed.
+    TimelockTooEarly = 33,
 }

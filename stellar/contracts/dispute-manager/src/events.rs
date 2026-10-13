@@ -1,6 +1,6 @@
 //! Events for the DisputeManager. Mirrors the EVM module's event surface.
 
-use proofbridge_core::types::{DisputeOutcome, DisputeParams};
+use proofbridge_core::types::{BondConfig, DisputeOutcome, DisputeParams};
 use soroban_sdk::{contractevent, Address, BytesN};
 
 #[contractevent(topics = ["escrow_set"], data_format = "vec")]
@@ -91,4 +91,34 @@ pub struct AdminTransferred {
     #[topic]
     pub from: Address,
     pub to: Address,
+}
+
+/// #586: a route's token-bond config was set or cleared.
+#[contractevent(topics = ["bond_cfg"], data_format = "vec")]
+pub struct BondConfigSet {
+    #[topic]
+    pub token: Address,
+    #[topic]
+    pub peer_chain_id: u128,
+    pub config: BondConfig,
+}
+
+/// #586: a token-bond payout that could not be pushed, credited.
+#[contractevent(topics = ["tbond_crd"], data_format = "vec")]
+pub struct TokenBondCredited {
+    #[topic]
+    pub recipient: Address,
+    #[topic]
+    pub token: Address,
+    pub amount: u128,
+}
+
+/// #586: a credited token-bond payout claimed.
+#[contractevent(topics = ["tbond_clm"], data_format = "vec")]
+pub struct TokenBondClaimed {
+    #[topic]
+    pub recipient: Address,
+    #[topic]
+    pub token: Address,
+    pub amount: u128,
 }
