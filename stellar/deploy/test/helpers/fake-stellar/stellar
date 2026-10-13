@@ -30,7 +30,8 @@ if [ -n "${FAKE_STELLAR_IDS:-}" ]; then
       *" -- registry"*) printf '"%s"\n' "$(id_for bls_key_registry.wasm)"; exit 0;;
       *" -- position_guards"*|*" -- wired_chains"*) echo '[]'; exit 0;;
       *" -- key_registry"*|*" -- get_arbiter"*|*" -- get_protocol_fee_pool"*) echo null; exit 0;;
-      *" -- is_manager"*) echo false; exit 0;;
+      *" -- is_manager"*|*" -- timelock_active"*) echo false; exit 0;;
+      *" -- fee_config"*) echo '{"pool":null,"lp_bps":0,"protocol_bps":0}'; exit 0;;
     esac
   fi
 fi
