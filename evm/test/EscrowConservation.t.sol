@@ -60,6 +60,8 @@ contract EscrowConservationInvariantTest is Test {
     address internal recipient = makeAddr("recipient");
     address internal arbiter = makeAddr("arbiter");
     address internal feePool = makeAddr("feePool");
+    /// The escrow's protocol fee pool (#586), apart from the module's bond pool so the two never mix.
+    address internal protocolPool = makeAddr("protocolPool");
     address internal orderPortal = makeAddr("orderPortal");
     address internal orderToken = makeAddr("orderToken");
     /// Where `claimTo` sends the recipients' credit; nothing else pays these two.
@@ -84,6 +86,17 @@ contract EscrowConservationInvariantTest is Test {
     uint64 internal constant CHALLENGE = 2 hours;
     uint128 internal constant BOND_FLOOR = 1 ether;
     uint256 internal constant LOCK = 1 ether;
+    /// #586: the campaign runs with the mainnet fee on (0.3% maker, 0.2% protocol to `feePool`).
+    uint16 internal constant LP_BPS = 30;
+    uint16 internal constant PROTOCOL_BPS = 20;
+    uint256 internal constant LP_FEE = LOCK * LP_BPS / 10_000;
+    uint256 internal constant PROTOCOL_FEE = LOCK * PROTOCOL_BPS / 10_000;
+    uint256 internal constant NET = LOCK - LP_FEE - PROTOCOL_FEE;
+    uint256 internal constant ERC20_AD_START = 500_000 ether;
+    uint256 internal constant NATIVE_AD_START = 500 ether;
+    /// Ghosts: payouts (unlock, presentSettled, MakerForfeit) landed, per token.
+    uint256 internal paidErc20;
+    uint256 internal paidNative;
 
     EscrowHandler internal handler;
     mapping(uint256 salt => uint256) internal deadlineOf;
@@ -119,6 +132,8 @@ contract EscrowConservationInvariantTest is Test {
         dm.setArbiter(arbiter);
         dm.setProtocolFeePool(feePool);
         dm.setDisputeParams(orderChainId, Dispute.Params(CHALLENGE, BOND_FLOOR));
+        adManager.setProtocolFeePool(protocolPool);
+        adManager.setFeeBps(LP_BPS, PROTOCOL_BPS);
         vm.stopPrank();
 
         adToken = new RefusableERC20();
@@ -185,6 +200,12 @@ contract EscrowConservationInvariantTest is Test {
         adManager.unlock(p, _nullifier(salt), bytes32(uint256(1)), hex"", hex"");
         // only reached when the unlock succeeded
         live[salt] = false;
+        _countPaid(salt);
+    }
+
+    function _countPaid(uint256 salt) internal {
+        if (_isNative(salt)) paidNative++;
+        else paidErc20++;
     }
 
     /// Or let its clock run out and cancel it back to the pool. Warps forward only, to the escrow's
@@ -204,6 +225,7 @@ contract EscrowConservationInvariantTest is Test {
     function handlerPresent(uint256 salt) external {
         adManager.presentSettled(_params(salt), EVIDENCE_ROOT, hex"");
         live[salt] = false;
+        _countPaid(salt);
     }
 
     /// A dispute run to its end: filed by either party, ruled `outcome` (or left unruled), then
@@ -226,6 +248,7 @@ contract EscrowConservationInvariantTest is Test {
         if (block.timestamp < until) vm.warp(until);
         adManager.finalizeDispute(p);
         live[salt] = false;
+        if (o == Dispute.Outcome.MakerForfeit) _countPaid(salt);
         applied = uint8(o == Dispute.Outcome.None ? Dispute.Outcome.MutualRefund : o);
     }
 
@@ -264,7 +287,7 @@ contract EscrowConservationInvariantTest is Test {
         address token = native ? NATIVE : address(adToken);
         uint256 before = adManager.claimable(who, token);
         this.handlerUnlock(salt);
-        require(adManager.claimable(who, token) == before + LOCK, "the refused push was not credited");
+        require(adManager.claimable(who, token) == before + NET, "the refused push was not credited");
         // The mock ERC20 refuses every transfer, so only the native side redirects while refusing.
         if (!native) this.handlerSetRefusing(false);
         this.handlerClaimTo(native);
@@ -373,15 +396,39 @@ contract EscrowConservationInvariantTest is Test {
     /// no exit, stranded as surely as a shortfall is a promise it cannot keep.
     function invariant_escrowHoldsWhatItOwes() public view {
         (,,,,,,, uint256 adBalance,) = adManager.ads(ERC20_AD);
-        uint256 owed = adManager.claimable(recipient, address(adToken));
+        uint256 owed =
+            adManager.claimable(recipient, address(adToken)) + adManager.claimable(protocolPool, address(adToken));
         assertEq(adToken.balanceOf(address(adManager)), adBalance + owed, "escrow holds other than it owes (ERC20)");
 
         (,,,,,,, uint256 nativeBalance,) = adManager.ads(NATIVE_AD);
-        uint256 nativeOwed = adManager.claimable(address(nativeRecipient), NATIVE);
+        uint256 nativeOwed =
+            adManager.claimable(address(nativeRecipient), NATIVE) + adManager.claimable(protocolPool, NATIVE);
         assertEq(
             wNative.balanceOf(address(adManager)),
             nativeBalance + nativeOwed,
             "escrow holds other than it owes (native)"
+        );
+    }
+
+    /// #586: every payout split exactly: the pool received (or is owed) the protocol fee of each one,
+    /// and the maker's ad lost only the net and the protocol fee, keeping the LP fee. Nothing else
+    /// moves an ad's balance in this campaign (cancels and refunds release the lock only).
+    function invariant_feesAddUp() public view {
+        assertEq(
+            adToken.balanceOf(protocolPool) + adManager.claimable(protocolPool, address(adToken)),
+            paidErc20 * PROTOCOL_FEE,
+            "the pool did not get each payout's protocol fee (ERC20)"
+        );
+        assertEq(
+            protocolPool.balance + adManager.claimable(protocolPool, NATIVE),
+            paidNative * PROTOCOL_FEE,
+            "the pool did not get each payout's protocol fee (native)"
+        );
+        (,,,,,,, uint256 adBalance,) = adManager.ads(ERC20_AD);
+        assertEq(adBalance, ERC20_AD_START - paidErc20 * (LOCK - LP_FEE), "the maker did not keep the LP fee (ERC20)");
+        (,,,,,,, uint256 nativeBalance,) = adManager.ads(NATIVE_AD);
+        assertEq(
+            nativeBalance, NATIVE_AD_START - paidNative * (LOCK - LP_FEE), "the maker did not keep the LP fee (native)"
         );
     }
 
@@ -470,13 +517,14 @@ contract EscrowConservationInvariantTest is Test {
         uint8 applied = this.handlerDispute(20, true, 3); // index 3 = MakerForfeit
         assertEq(applied, uint8(Dispute.Outcome.MakerForfeit));
         (,,,,,,, uint256 nativeBalance, uint256 nativeLocked) = adManager.ads(NATIVE_AD);
-        assertEq(nativeBalance, 500 ether - LOCK, "the forfeit left the ad");
+        assertEq(nativeBalance, 500 ether - LOCK + LP_FEE, "the forfeit left the ad, less the LP fee");
         assertEq(nativeLocked, 0);
-        assertEq(adManager.claimable(address(nativeRecipient), NATIVE), LOCK, "credited to the recipient");
+        assertEq(adManager.claimable(address(nativeRecipient), NATIVE), NET, "credited to the recipient");
+        assertEq(protocolPool.balance, PROTOCOL_FEE, "the forfeit paid the protocol fee");
         // C-16: still refusing, the recipient redirects its own credit.
         handler.claimTo(true);
         assertEq(handler.claimsTo(), 1);
-        assertEq(nativeClaimWallet.balance, LOCK);
+        assertEq(nativeClaimWallet.balance, NET);
         invariant_claimToPaysOnlyTheCallersCredit();
         invariant_escrowHoldsWhatItOwes();
     }
@@ -489,12 +537,12 @@ contract EscrowConservationInvariantTest is Test {
         handler.creditThenClaimTo(true); // once per run: a no-op now
         assertEq(handler.claimsTo(), 1, "the step did not land");
         assertEq(handler.credits(), 1);
-        assertEq(claimedToErc20, LOCK);
+        assertEq(claimedToErc20, NET);
         // The step's own logic, on the native token, from not refusing.
         handler.setRefusing(false);
         this.handlerCreditThenClaimTo(true);
         assertFalse(adToken.refusing(), "the step restores the refusing flag");
-        assertEq(claimedToNative, LOCK);
+        assertEq(claimedToNative, NET);
         invariant_claimToPaysOnlyTheCallersCredit();
         invariant_escrowHoldsWhatItOwes();
         invariant_lockedMatchesLiveOrders();

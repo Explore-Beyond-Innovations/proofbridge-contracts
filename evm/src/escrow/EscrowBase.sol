@@ -18,7 +18,8 @@ import {RequestAuth} from "../libraries/RequestAuth.sol";
 import {RootVerifierRegistry} from "../libraries/RootVerifierRegistry.sol";
 import {RouteTiming} from "../libraries/RouteTiming.sol";
 import {Termination} from "../libraries/Termination.sol";
-import {TwoStepAdmin} from "../libraries/TwoStepAdmin.sol";
+import {AdminTimelock} from "../libraries/AdminTimelock.sol";
+import {ProofBridgeUtils} from "../libraries/ProofBridgeUtils.sol";
 
 /**
  * @title EscrowBase (Proofbridge)
@@ -49,7 +50,7 @@ import {TwoStepAdmin} from "../libraries/TwoStepAdmin.sol";
  *      there; that was measured against the SDK harness default of 100M, not the network's 400M.
  *      The split stands on the shape argument, not the CPU one.)
  */
-abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuardTransient, RootVerifierRegistry {
+abstract contract EscrowBase is IEscrow, AdminTimelock, Pausable, ReentrancyGuardTransient, RootVerifierRegistry {
     using SafeERC20 for IERC20;
     using SafeNativeToken for IwNativeToken;
     using AddressCast for address;
@@ -136,18 +137,20 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     }
 
     /// @inheritdoc IEscrow
-    function setPeerEscrow(uint256 chainId, bytes32 peer) external onlyAdmin {
+    function setPeerEscrow(uint256 chainId, bytes32 peer) external timelocked {
         peerEscrow[chainId] = peer;
         emit PeerEscrowSet(chainId, peer);
     }
 
     /// @inheritdoc IEscrow
-    function setRootVerifier(uint256 chainId, address verifier) external onlyAdmin {
+    /// @dev Unwiring (`address(0)`) is a brake and stays instant; wiring goes through the delay.
+    function setRootVerifier(uint256 chainId, address verifier) external {
+        _timelockedUnless(verifier == address(0));
         _setRootVerifier(chainId, verifier);
     }
 
     /// @inheritdoc IEscrow
-    function setTokenRoute(address localToken, uint256 peerChainId, bytes32 peerToken) external onlyAdmin {
+    function setTokenRoute(address localToken, uint256 peerChainId, bytes32 peerToken) external timelocked {
         if (localToken == address(0) || peerToken == bytes32(0)) revert Escrow__RouteZeroAddress();
         if (peerEscrow[peerChainId] == bytes32(0)) revert Escrow__ChainNotSupported(peerChainId);
         tokenRoute[localToken][peerChainId] = peerToken;
@@ -155,13 +158,13 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     }
 
     /// @inheritdoc IEscrow
-    function removeTokenRoute(address localToken, uint256 peerChainId) external onlyAdmin {
+    function removeTokenRoute(address localToken, uint256 peerChainId) external timelocked {
         delete tokenRoute[localToken][peerChainId];
         emit TokenRouteRemoved(localToken, peerChainId);
     }
 
     /// @inheritdoc IEscrow
-    function setRouteTiming(uint256 chainId, RouteTiming.Timing calldata timing) external onlyAdmin {
+    function setRouteTiming(uint256 chainId, RouteTiming.Timing calldata timing) external timelocked {
         RouteTiming.validate(timing);
         uint32 v = timingVersion[chainId] + 1;
         timingVersion[chainId] = v;
@@ -170,10 +173,27 @@ abstract contract EscrowBase is IEscrow, TwoStepAdmin, Pausable, ReentrancyGuard
     }
 
     /// @inheritdoc IEscrow
-    function setRootAnchor(IRootAnchor anchor) external onlyAdmin {
+    function setRootAnchor(IRootAnchor anchor) external timelocked {
         if (address(anchor) == address(0)) revert Escrow__ZeroAddress();
         rootAnchor = anchor;
         emit RootAnchorSet(address(anchor));
+    }
+
+    /// @dev The timelock rules run in the linked `ProofBridgeUtils` (EIP-170 headroom).
+    function _tlActivate() internal override {
+        ProofBridgeUtils.timelockActivate(_timelock);
+    }
+
+    function _tlPropose(bytes calldata data) internal override {
+        ProofBridgeUtils.timelockPropose(_timelock, data);
+    }
+
+    function _tlCancel(bytes32 id) internal override {
+        ProofBridgeUtils.timelockCancel(_timelock, id);
+    }
+
+    function _tlConsume(bytes32 id) internal override {
+        ProofBridgeUtils.timelockConsume(_timelock, id);
     }
 
     /*//////////////////////////////////////////////////////////////

@@ -36,8 +36,9 @@ interface IDisputeManager {
     /**
      * @notice Open a dispute on an order the escrow has already hashed and checked, taking the bond.
      * @dev Escrow-only, and payable: the bond arrives with the call rather than sitting in the
-     *      escrow. The bond is the route's flat floor (`bondFor(peerChainId)`), so no order amount
-     *      is passed.
+     *      escrow. The bond is the route's `BondConfig` for (`token`, `peerChainId`) when one is
+     *      set, scaled by `amount` (the order's amount in `token` units) and pulled in `token` from
+     *      `filer`; otherwise the flat floor in native (`bondFor(peerChainId)`). `routeBond` quotes it.
      *
      *      The escrow vouches for every value here. `deadline` and `buffer` (the order's own timing
      *      version's) are what stop a short challenge period finalizing a dispute before the order's
@@ -50,7 +51,9 @@ interface IDisputeManager {
         address filer,
         bytes32 evidence,
         uint64 deadline,
-        uint64 buffer
+        uint64 buffer,
+        address token,
+        uint256 amount
     ) external payable returns (uint128 bond);
 
     /**

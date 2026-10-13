@@ -2,7 +2,7 @@
 pragma solidity ^0.8.34;
 
 import {MMRPoseidon2} from "@solidity-mmr/MMRPoseidon2.sol";
-import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
+import {AdminTimelock} from "./libraries/AdminTimelock.sol";
 import {IMerkleManager} from "./interfaces/IMerkleManager.sol";
 
 /**
@@ -13,7 +13,7 @@ import {IMerkleManager} from "./interfaces/IMerkleManager.sol";
  *      pause; the Registrar, the one non-escrow appender, has none, and `setManager(registrar,
  *      false)` is its brake.
  */
-contract MerkleManager is IMerkleManager, TwoStepAdmin {
+contract MerkleManager is IMerkleManager, AdminTimelock {
     using MMRPoseidon2 for MMRPoseidon2.Tree;
 
     MMRPoseidon2.Tree _tree;
@@ -46,7 +46,9 @@ contract MerkleManager is IMerkleManager, TwoStepAdmin {
     }
 
     /// @notice Add (`enabled`) or remove an appender. Removing one stops its appends at once.
-    function setManager(address account, bool enabled) external onlyAdmin {
+    /// @dev Adding goes through the timelock; removing is the Registrar's brake and stays instant.
+    function setManager(address account, bool enabled) external {
+        _timelockedUnless(!enabled);
         if (account == address(0)) revert MerkleManager__ZeroAddress();
         isManager[account] = enabled;
         emit ManagerSet(account, enabled);

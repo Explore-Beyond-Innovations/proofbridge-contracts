@@ -62,6 +62,14 @@ interface IAdManager is IEscrow {
         bytes32 adSettlementSigner;
     }
 
+    /// @notice The bridge fee, taken from the bridger's payout on this chain. `lpBps` stays in the
+    ///         maker's ad balance; `protocolBps` goes to `pool`. Each is capped at `MAX_FEE_BPS`.
+    struct FeeConfig {
+        address pool;
+        uint16 lpBps;
+        uint16 protocolBps;
+    }
+
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -97,6 +105,10 @@ interface IAdManager is IEscrow {
     );
     /// @notice A lock was released back to the ad's free balance by an unchallenged cancel.
     event LockCancelled(string indexed adId, bytes32 indexed orderHash, uint256 amount);
+    event ProtocolFeePoolSet(address indexed pool);
+    event FeeBpsSet(uint16 lpBps, uint16 protocolBps);
+    /// @notice A payout's fee, at the bps the order locked under: `lpFee` stayed in the ad, `protocolFee` went to the pool.
+    event FeeCharged(bytes32 indexed orderHash, uint256 lpFee, uint256 protocolFee);
 
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -136,6 +148,8 @@ interface IAdManager is IEscrow {
     error AdManager__SlotNotUsable(bytes32 signer, uint32 slotId);
     /// @notice No re-pin consent for this order from its current pin.
     error AdManager__NoRepin(bytes32 orderHash);
+    /// @notice A fee above `MAX_FEE_BPS`, or a protocol fee with no pool to pay it to.
+    error AdManager__InvalidFee();
 
     /*//////////////////////////////////////////////////////////////
                                  FUNCTIONS
@@ -219,6 +233,16 @@ interface IAdManager is IEscrow {
     /// @dev On the primary only. The OrderPortal is the follower and has no dispute of its own — it
     ///      learns how one ended from an anchored proof of this chain's leaf, never from a module.
     function setDisputeManager(IDisputeManager manager) external;
+
+    /// @notice Where the protocol fee is paid. Timelocked; never zero once set.
+    function setProtocolFeePool(address pool) external;
+
+    /// @notice The fee split, each at most `MAX_FEE_BPS`; a protocol fee needs the pool set. Timelocked.
+    ///         Applies to orders locked after it; a live order keeps the bps it locked under.
+    function setFeeBps(uint16 lpBps, uint16 protocolBps) external;
+
+    /// @notice The live fee config (pool, lpBps, protocolBps).
+    function feeConfig() external view returns (address pool, uint16 lpBps, uint16 protocolBps);
     /// @notice The dispute module, or the zero address when disputes are unavailable here.
     function disputeManager() external view returns (IDisputeManager);
     /// @notice Emitted when the dispute module is (re)pointed.

@@ -348,8 +348,8 @@ contract EscrowDoorGas is Test {
         }
     }
 
-    // MerkleManager storage: `_tree` at slot 2 (after `admin`, `pendingAdmin`) = {root, size, width, hasher, hashes}.
-    uint256 internal constant TREE_SLOT = 2;
+    // MerkleManager storage: `_tree` at slot 4 (after `admin`, `pendingAdmin`, the two-slot `_timelock`) = {root, size, width, hasher, hashes}.
+    uint256 internal constant TREE_SLOT = 4;
 
     function _seed(MerkleManager mmr, uint256 width, uint256[] memory peaks, bytes32[] memory values, bytes32 root)
         internal

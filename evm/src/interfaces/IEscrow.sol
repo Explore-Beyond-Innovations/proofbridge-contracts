@@ -55,6 +55,10 @@ interface IEscrow {
         /// lever, so the denial rule counts it for the rest of the order's life; a slot left behind
         /// can no longer erase a kill the rule would have counted. Unused on the OrderPortal.
         bool repinned;
+        /// On the AdManager: the fee bps live at the lock, which its payout charges (a fee change
+        /// never moves a live order). Unused on the OrderPortal.
+        uint16 lpFeeBps;
+        uint16 protocolFeeBps;
     }
 
     /*//////////////////////////////////////////////////////////////

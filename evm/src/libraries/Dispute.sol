@@ -46,6 +46,14 @@ library Dispute {
         uint128 bondFloor;
     }
 
+    /// @notice A route's bond in the order's own token (`DisputeManager.bondConfig[token][peerChainId]`):
+    ///         `max(minBond, amount × bondBps / 10,000)`, in the token's raw units. Unset
+    ///         (`minBond == 0`) means the route posts the flat `Params.bondFloor` in wrapped native.
+    struct BondConfig {
+        uint128 minBond;
+        uint16 bondBps;
+    }
+
     /// @notice One dispute, keyed by order hash.
     struct Record {
         address initiator;
@@ -61,6 +69,9 @@ library Dispute {
         ///      Both pack into the slot `ruling` already occupies, so the record costs no more.
         uint64 orderDeadline;
         uint64 buffer;
+        /// @dev The bond's token: `address(0)` for wrapped native (the flat floor, or a native-token
+        ///      route), else the order's ERC20 on a route with a `BondConfig`.
+        address bondToken;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -73,6 +84,9 @@ library Dispute {
     /// @notice C-36: bounds how long a dispute can delay the other party's exit.
     uint64 internal constant MAX_CHALLENGE_PERIOD = 7 days;
 
+    /// @notice The ceiling on a route's `bondBps` (5% of the order).
+    uint16 internal constant MAX_BOND_BPS = 500;
+
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -80,6 +94,8 @@ library Dispute {
     /// @notice `field`: 1 challengePeriod, 2 bondFloor. 3 is retired (the old percentage term).
     error Dispute__InvalidParams(uint8 field);
     error Dispute__NoParams(uint256 chainId);
+    /// @notice A `BondConfig` with a zero `minBond` but a ratio, or a ratio above `MAX_BOND_BPS`.
+    error Dispute__InvalidBondConfig();
 
     /*//////////////////////////////////////////////////////////////
                                   LOGIC
@@ -108,6 +124,21 @@ library Dispute {
      */
     function bondFor(Params memory p) internal pure returns (uint256) {
         return p.bondFloor;
+    }
+
+    /// @dev `{0, 0}` clears the route's config (back to the flat floor); otherwise the floor is
+    ///      non-zero and the ratio at most `MAX_BOND_BPS`.
+    function validateBond(BondConfig calldata c) internal pure {
+        if (c.minBond == 0 ? c.bondBps != 0 : c.bondBps > MAX_BOND_BPS) revert Dispute__InvalidBondConfig();
+    }
+
+    /**
+     * @notice The scaled bond, in the order's token: `max(minBond, amount × bondBps / 10,000)`,
+     *         the ratio rounded down. The floor keeps small orders bondable; the ratio scales large ones.
+     */
+    function routeBond(BondConfig memory c, uint256 amount) internal pure returns (uint256 bond) {
+        bond = amount * c.bondBps / 10_000;
+        if (bond < c.minBond) bond = c.minBond;
     }
 
     /**

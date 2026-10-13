@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {IwNativeToken, SafeNativeToken} from "./wNativeToken.sol";
 import {IDisputeManager} from "./interfaces/IDisputeManager.sol";
+import {AddressCast} from "./libraries/AddressCast.sol";
+import {AdminTimelock} from "./libraries/AdminTimelock.sol";
 import {Dispute} from "./libraries/Dispute.sol";
-import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
 
 /**
  * @title DisputeManager (Proofbridge)
@@ -32,8 +36,9 @@ import {TwoStepAdmin} from "./libraries/TwoStepAdmin.sol";
  *      AdManager and OrderPortal, on both chains. One implementation means one outcome table to
  *      audit, one arbiter key, and one bond pot — and it is what returned AdManager's size margin.
  */
-contract DisputeManager is IDisputeManager, TwoStepAdmin {
+contract DisputeManager is IDisputeManager, AdminTimelock {
     using SafeNativeToken for IwNativeToken;
+    using SafeERC20 for IERC20;
     using Dispute for mapping(uint256 => Dispute.Params);
 
     /*//////////////////////////////////////////////////////////////
@@ -67,6 +72,13 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     ///         reverting recipient can never brick a resolution (D8).
     mapping(address recipient => uint256) public claimable;
 
+    /// @notice Per-route bonds in the order's own token (`Dispute.BondConfig`): local token → peer
+    ///         chain → config. Unset routes post the flat `bondFloor` in wrapped native.
+    mapping(address token => mapping(uint256 peerChainId => Dispute.BondConfig)) public bondConfig;
+
+    /// @notice Token-bond payouts that could not be pushed: recipient → token → amount.
+    mapping(address recipient => mapping(address token => uint256)) public tokenClaimable;
+
     /*//////////////////////////////////////////////////////////////
                              EVENTS / ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -85,6 +97,9 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     /// @notice A credited bond payout left for `to` (`to == recipient` for `claim`). Named apart from
     ///         the escrows' `PayoutClaimed` so the two can never share a topic0 (49E-1).
     event BondClaimed(address indexed recipient, address indexed to, uint256 amount);
+    event BondConfigSet(address indexed token, uint256 indexed peerChainId, Dispute.BondConfig config);
+    event TokenPayoutCredited(address indexed recipient, address indexed token, uint256 amount);
+    event TokenBondClaimed(address indexed recipient, address indexed to, address indexed token, uint256 amount);
 
     error DisputeManager__NotEscrow();
     error DisputeManager__NotArbiter();
@@ -106,6 +121,8 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
     /// @notice D5: an empty answer is refused, so "answered" is exactly "the slot is non-zero".
     error DisputeManager__ZeroResponse();
     error DisputeManager__NothingToClaim();
+    /// @notice A token bond's pull moved a different amount than the bond (a fee-on-transfer token).
+    error DisputeManager__TransferShort(uint256 expected, uint256 received);
 
     modifier onlyEscrow() {
         if (!isEscrow[msg.sender]) revert DisputeManager__NotEscrow();
@@ -124,25 +141,35 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
                                  ADMIN
     //////////////////////////////////////////////////////////////*/
 
-    function setEscrow(address escrow, bool allowed) external onlyAdmin {
+    /// @dev Allowing goes through the timelock; disallowing (stops new filings) is a brake and stays instant.
+    function setEscrow(address escrow, bool allowed) external {
+        _timelockedUnless(!allowed);
         if (escrow == address(0)) revert DisputeManager__ZeroAddress();
         isEscrow[escrow] = allowed;
         emit EscrowSet(escrow, allowed);
     }
 
-    function setDisputeParams(uint256 chainId, Dispute.Params calldata params) external onlyAdmin {
+    function setDisputeParams(uint256 chainId, Dispute.Params calldata params) external timelocked {
         Dispute.validate(params);
         disputeParams[chainId] = params;
         emit DisputeParamsSet(chainId, params);
     }
 
-    function setArbiter(address arbiter_) external onlyAdmin {
+    /// @notice A route's bond in the order's own token; `{0, 0}` clears it (back to the flat floor).
+    function setBondConfig(address token, uint256 peerChainId, Dispute.BondConfig calldata config) external timelocked {
+        if (token == address(0)) revert DisputeManager__ZeroAddress();
+        Dispute.validateBond(config);
+        bondConfig[token][peerChainId] = config;
+        emit BondConfigSet(token, peerChainId, config);
+    }
+
+    function setArbiter(address arbiter_) external timelocked {
         if (arbiter_ == address(0)) revert DisputeManager__ZeroAddress();
         arbiter = arbiter_;
         emit ArbiterSet(arbiter_);
     }
 
-    function setProtocolFeePool(address pool) external onlyAdmin {
+    function setProtocolFeePool(address pool) external timelocked {
         if (pool == address(0)) revert DisputeManager__ZeroAddress();
         protocolFeePool = pool;
         emit ProtocolFeePoolSet(pool);
@@ -159,18 +186,17 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         address filer,
         bytes32 evidence,
         uint64 deadline,
-        uint64 buffer
+        uint64 buffer,
+        address token,
+        uint256 amount
     ) external payable onlyEscrow returns (uint128 bond) {
         if (disputes[orderHash].initiator != address(0)) {
             revert DisputeManager__DisputeExists(orderHash);
         }
 
         Dispute.Params storage p = disputeParams.load(peerChainId);
-        uint256 required = Dispute.bondFor(p);
-        // Exact (C-17): an over- or under-paid bond is refused, so nothing is left to refund.
-        if (msg.value != required) revert DisputeManager__NativeAmountMismatch(msg.value, required);
-        bond = uint128(required);
-        i_wNativeToken.safeDeposit(required);
+        address bondToken;
+        (bondToken, bond) = _takeBond(p, filer, token, peerChainId, amount);
 
         // The challenge period can be shorter than the order has left to run, so it is a floor on
         // how long the arbiter has, never a licence to finish early: no dispute path may complete
@@ -188,7 +214,8 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
             responderEvidence: bytes32(0),
             ruling: Dispute.Outcome.None,
             orderDeadline: deadline,
-            buffer: buffer
+            buffer: buffer,
+            bondToken: bondToken
         });
         disputeEscrow[orderHash] = msg.sender;
         emit DisputeFiled(orderHash, filer, bond, challengeDeadline, evidence);
@@ -205,6 +232,7 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
 
         uint128 bond = d.bond;
         address filer = d.initiator;
+        address bondToken = d.bondToken;
         delete disputes[orderHash];
         delete disputeEscrow[orderHash];
 
@@ -214,7 +242,8 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
             // An unset fee pool must not strand the bond; the filer keeps it rather than this
             // contract holding it forever.
             if (to == address(0)) to = filer;
-            _payOrCredit(to, bond);
+            if (bondToken == address(0)) _payOrCredit(to, bond);
+            else _payOrCreditToken(to, bondToken, bond);
             emit BondRouted(orderHash, to, bond, toFiler);
         }
     }
@@ -294,6 +323,17 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         return Dispute.bondFor(disputeParams.load(peerChainId));
     }
 
+    /// @notice The exact bond a filing on an order of `amount` of local `token` against
+    ///         `peerChainId` must post, and its token (`address(0)` = native, sent as value; else the
+    ///         ERC20 the filer approves to this module). What `openDispute` charges; reverts as it would.
+    function routeBond(uint256 peerChainId, address token, uint256 amount)
+        external
+        view
+        returns (address bondToken, uint256 bond)
+    {
+        return _bondOf(disputeParams.load(peerChainId), token, peerChainId, amount);
+    }
+
     /// @inheritdoc IDisputeManager
     function initiatorOf(bytes32 orderHash) external view returns (address) {
         return disputes[orderHash].initiator;
@@ -321,6 +361,17 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         _payCredit(msg.sender, to);
     }
 
+    /// @notice Withdraw a credited token-bond payout to its recipient. Permissionless.
+    function claimToken(address recipient, address token) external {
+        _payTokenCredit(recipient, token, recipient);
+    }
+
+    /// @notice Withdraw the caller's own token credit to `to`: for a recipient the token refuses.
+    function claimTokenTo(address token, address to) external {
+        if (to == address(0)) revert DisputeManager__ZeroAddress();
+        _payTokenCredit(msg.sender, token, to);
+    }
+
     /*//////////////////////////////////////////////////////////////
                                 INTERNAL
     //////////////////////////////////////////////////////////////*/
@@ -331,6 +382,64 @@ contract DisputeManager is IDisputeManager, TwoStepAdmin {
         claimable[recipient] = 0;
         i_wNativeToken.safeWithdrawTo(amount, to);
         emit BondClaimed(recipient, to, amount);
+    }
+
+    /// @dev The route's bond: its `BondConfig` in the order's token when set (a native-token order
+    ///      posts it as native), else the flat floor in native. `address(0)` = native.
+    function _bondOf(Dispute.Params storage p, address token, uint256 peerChainId, uint256 amount)
+        private
+        view
+        returns (address bondToken, uint256 bond)
+    {
+        Dispute.BondConfig memory c = bondConfig[token][peerChainId];
+        if (c.minBond == 0) return (address(0), Dispute.bondFor(p));
+        bond = Dispute.routeBond(c, amount);
+        if (!AddressCast.isNative(token)) bondToken = token;
+    }
+
+    /// @dev Take the route's bond from the filer: native as exact `msg.value`, a token by an exact pull.
+    function _takeBond(Dispute.Params storage p, address filer, address token, uint256 peerChainId, uint256 amount)
+        private
+        returns (address bondToken, uint128 bond)
+    {
+        uint256 required;
+        (bondToken, required) = _bondOf(p, token, peerChainId, amount);
+        bond = SafeCast.toUint128(required);
+        if (bondToken == address(0)) {
+            // Exact (C-17): an over- or under-paid bond is refused, so nothing is left to refund.
+            if (msg.value != required) revert DisputeManager__NativeAmountMismatch(msg.value, required);
+            i_wNativeToken.safeDeposit(required);
+        } else {
+            // The filer approved this module for the bond; only the transfer itself is checked.
+            if (msg.value != 0) revert DisputeManager__NativeAmountMismatch(msg.value, 0);
+            uint256 before = IERC20(bondToken).balanceOf(address(this));
+            IERC20(bondToken).safeTransferFrom(filer, address(this), required);
+            uint256 received = IERC20(bondToken).balanceOf(address(this)) - before;
+            if (received != required) revert DisputeManager__TransferShort(required, received);
+        }
+    }
+
+    function _payTokenCredit(address recipient, address token, address to) private {
+        uint256 amount = tokenClaimable[recipient][token];
+        if (amount == 0) revert DisputeManager__NothingToClaim();
+        tokenClaimable[recipient][token] = 0;
+        IERC20(token).safeTransfer(to, amount);
+        emit TokenBondClaimed(recipient, to, token, amount);
+    }
+
+    /// @notice The token payout transfer, self-callable only so {_payOrCreditToken} can catch it.
+    function directTokenPayout(address to, address token, uint256 amount) external {
+        if (msg.sender != address(this)) revert DisputeManager__NotEscrow();
+        IERC20(token).safeTransfer(to, amount);
+    }
+
+    /// @dev Best effort, then credit, as for native bonds: a recipient the token refuses cannot brick a resolution.
+    function _payOrCreditToken(address to, address token, uint128 amount) private {
+        try this.directTokenPayout{gas: 150_000}(to, token, amount) {}
+        catch {
+            tokenClaimable[to][token] += amount;
+            emit TokenPayoutCredited(to, token, amount);
+        }
     }
 
     /// @notice The payout transfer, self-callable only so {_payOrCredit} can catch it.

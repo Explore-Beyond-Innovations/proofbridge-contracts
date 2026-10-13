@@ -78,7 +78,8 @@ contract DisputeInvariantTest is Test {
     uint256 internal constant SLOT_CREDIT = 2;
     uint256 internal constant SLOT_UNLOCK = 4;
     uint256 internal constant SLOT_CANCEL = 8;
-    uint256 internal constant TARGETED = 4;
+    uint256 internal constant SLOT_TOKEN_BOND = 16;
+    uint256 internal constant TARGETED = 5;
     /// One swap is what C-11 needs (a dispute left on the old module); every invariant walks each
     /// module, so more would only slow the campaign.
     uint256 internal constant MAX_MODULES = 2;
@@ -92,6 +93,8 @@ contract DisputeInvariantTest is Test {
     uint256 internal nonce;
     /// Every module the escrow was ever wired to, the first included.
     DisputeManager[] internal modules;
+    /// Ghost (#586): filings that posted a token bond.
+    uint256 internal tokenBondsFiled;
     /// Ghost: the total `claimTo` moved to `recipientWallet`.
     uint256 internal claimedTo;
     /// Which of the slots past the cap have been taken (`SLOT_*` bits).
@@ -133,6 +136,8 @@ contract DisputeInvariantTest is Test {
 
         adToken = new ERC20Mock();
         adToken.mint(maker, 1_000_000 ether);
+        // #586: the parties' own stock for token bonds (`handlerToggleTokenBond`).
+        adToken.mint(recipient, 1_000_000 ether);
         vm.startPrank(admin);
         adManager.setTokenRoute(address(adToken), orderChainId, bytes32(uint256(uint160(orderToken))));
         vm.stopPrank();
@@ -371,14 +376,46 @@ contract DisputeInvariantTest is Test {
         vm.warp(block.timestamp + by);
     }
 
+    /// #586: one filing under a token bond on its own slot, so every run posts one whatever the
+    /// toggles did. Leaves the route's mode as it found it.
+    function handlerTokenBondFiling(uint256 seed, bool byBridger) external {
+        DisputeManager m = DisputeManager(payable(address(adManager.disputeManager())));
+        (uint128 minBond,) = m.bondConfig(address(adToken), orderChainId);
+        if (minBond == 0) this.handlerToggleTokenBond();
+        _file(_lockTargeted(seed, SLOT_TOKEN_BOND), byBridger);
+        if (minBond == 0) this.handlerToggleTokenBond();
+    }
+
+    /// #586: switch the live module's route between the native floor and a token bond in the ad
+    /// token (`max(1 token, 0.5%)`). Open disputes keep the token they were posted in.
+    function handlerToggleTokenBond() external {
+        IDisputeManager live = adManager.disputeManager();
+        DisputeManager m = DisputeManager(payable(address(live)));
+        (uint128 minBond,) = m.bondConfig(address(adToken), orderChainId);
+        vm.prank(admin);
+        m.setBondConfig(
+            address(adToken), orderChainId, minBond == 0 ? Dispute.BondConfig(1 ether, 50) : Dispute.BondConfig(0, 0)
+        );
+    }
+
     /// Returns whether the module recorded the bridger-side party as the filer.
     function _file(uint256 i, bool byBridger) internal returns (bool bridgerFiled) {
-        uint256 bond = BOND_FLOOR;
         address who = byBridger ? recipient : maker;
-        // C-17: the bond is paid exactly; any other value is refused.
-        vm.deal(who, bond);
-        vm.prank(who);
-        adManager.dispute{value: bond}(orders[i], bytes32("e"));
+        // #586: quote the route's bond; a token bond is approved to the module, native is sent.
+        DisputeManager live = DisputeManager(payable(address(adManager.disputeManager())));
+        (address bondToken, uint256 bond) = live.routeBond(orderChainId, address(adToken), LOCK);
+        if (bondToken != address(0)) {
+            vm.prank(who);
+            adToken.approve(address(live), bond);
+            vm.prank(who);
+            adManager.dispute(orders[i], bytes32("e"));
+            tokenBondsFiled++;
+        } else {
+            // C-17: the bond is paid exactly; any other value is refused.
+            vm.deal(who, bond);
+            vm.prank(who);
+            adManager.dispute{value: bond}(orders[i], bytes32("e"));
+        }
         bridgerFiled = _moduleOf(i).initiatorOf(hashes[i]) == recipient;
     }
 
@@ -482,11 +519,16 @@ contract DisputeInvariantTest is Test {
         for (uint256 k = 0; k < modules.length; k++) {
             DisputeManager m = modules[k];
             uint256 owed = m.claimable(maker) + m.claimable(recipient) + m.claimable(feePool);
+            uint256 tokenOwed = m.tokenClaimable(maker, address(adToken))
+                + m.tokenClaimable(recipient, address(adToken)) + m.tokenClaimable(feePool, address(adToken));
             for (uint256 i = 0; i < hashes.length; i++) {
-                (, uint128 bond,,,,,,) = m.disputes(hashes[i]);
-                owed += bond;
+                (, uint128 bond,,,,,,, address bondToken) = m.disputes(hashes[i]);
+                if (bondToken == address(0)) owed += bond;
+                else tokenOwed += bond;
             }
             assertEq(wNative.balanceOf(address(m)), owed, "a module holds other than its bonds and credits");
+            // #586: token bonds, likewise, in the token they were posted in.
+            assertEq(adToken.balanceOf(address(m)), tokenOwed, "a module holds other than its token bonds and credits");
         }
     }
 
@@ -518,7 +560,7 @@ contract DisputeInvariantTest is Test {
             bytes32 h = hashes[i];
             if (statusOf(address(adManager), h) != IEscrow.Status.Disputed) continue;
             DisputeManager m = _moduleOf(i);
-            (,,,,,, uint64 orderDeadline, uint64 buffer) = m.disputes(h);
+            (,,,,,, uint64 orderDeadline, uint64 buffer,) = m.disputes(h);
             assertGe(
                 m.effectiveChallengeDeadline(h),
                 uint256(orderDeadline) + buffer,
@@ -557,6 +599,24 @@ contract DisputeInvariantTest is Test {
         assertGt(handler.swaps(), 0, "the dispute module was never swapped");
         assertGt(handler.finalizedOnOldModule(), 0, "no dispute finalized on a swapped-out module");
         assertGt(handler.claimsTo(), 0, "claimTo never paid");
+        assertGt(tokenBondsFiled, 0, "no token bond was ever posted");
+    }
+
+    /// #586: the token-bond branch is reachable through the handler, and solvency holds across it.
+    function test_aTokenBondFilingIsReachable() public {
+        handler.toggleTokenBond();
+        handler.file(1, false);
+        handler.file(2, true);
+        assertEq(tokenBondsFiled, 2, "the token-bond filings did not land");
+        handler.toggleTokenBond(); // back to the floor: the open disputes keep their token
+        handler.file(3, false);
+        assertEq(tokenBondsFiled, 2);
+        invariant_moduleIsSolventForItsBonds();
+        handler.rule(1, uint8(Dispute.Outcome.MakerForfeit));
+        handler.finalize(1);
+        handler.finalize(0);
+        invariant_moduleIsSolventForItsBonds();
+        assertGt(adToken.balanceOf(feePool) + adToken.balanceOf(recipient), 0);
     }
 
     /// Proves the harness reaches the state the invariants police. Without this a handler that
@@ -690,6 +750,14 @@ contract DisputeHandler {
 
     function respond(uint256 pick) external {
         try t.handlerRespond(pick) {} catch {}
+    }
+
+    function toggleTokenBond() external {
+        try t.handlerToggleTokenBond() {} catch {}
+    }
+
+    function tokenBondFiling(uint256 seed, bool byBridger) external {
+        try t.handlerTokenBondFiling(seed, byBridger) {} catch {}
     }
 
     function finalize(uint256 pick) external {

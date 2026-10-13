@@ -1,0 +1,231 @@
+{
+  "_meta": {
+    "purpose": "The bridge fee split and the per-route dispute bond, shared by both chains so the two implementations cannot drift apart.",
+    "generator": "scripts/bls-vectors/src/gen-fees-bonds.ts",
+    "spec": "docs/engineering/t2/2.6-build/24-phase3-contract-pieces.md",
+    "note": "Fees: lpFee = floor(amount × lpBps / 10,000) stays in the maker's ad, protocolFee = floor(amount × protocolBps / 10,000) goes to the pool, the recipient gets the rest. Bond: max(minBond, floor(amount × bondBps / 10,000)) in the order's own token."
+  },
+  "counts": {
+    "feeSplit": 7,
+    "feeValidation": 7,
+    "routeBond": 8,
+    "bondConfigValidation": 6
+  },
+  "constants": {
+    "maxFeeBps": 100,
+    "maxBondBps": 500,
+    "timelockDelay": 86400
+  },
+  "feeSplit": [
+    {
+      "label": "the launch split on 1,000 USDC (6 decimals)",
+      "amount": "1000000000",
+      "lpBps": 30,
+      "protocolBps": 20,
+      "lpFee": "3000000",
+      "protocolFee": "2000000",
+      "net": "995000000"
+    },
+    {
+      "label": "one ether, 18 decimals",
+      "amount": "1000000000000000000",
+      "lpBps": 30,
+      "protocolBps": 20,
+      "lpFee": "3000000000000000",
+      "protocolFee": "2000000000000000",
+      "net": "995000000000000000"
+    },
+    {
+      "label": "too small for either fee: the bridger keeps it all",
+      "amount": "333",
+      "lpBps": 30,
+      "protocolBps": 20,
+      "lpFee": "0",
+      "protocolFee": "0",
+      "net": "333"
+    },
+    {
+      "label": "rounding dust stays with the bridger",
+      "amount": "10001",
+      "lpBps": 30,
+      "protocolBps": 20,
+      "lpFee": "30",
+      "protocolFee": "20",
+      "net": "9951"
+    },
+    {
+      "label": "fees off",
+      "amount": "1000000000",
+      "lpBps": 0,
+      "protocolBps": 0,
+      "lpFee": "0",
+      "protocolFee": "0",
+      "net": "1000000000"
+    },
+    {
+      "label": "both at the 1% ceiling",
+      "amount": "1000000000",
+      "lpBps": 100,
+      "protocolBps": 100,
+      "lpFee": "10000000",
+      "protocolFee": "10000000",
+      "net": "980000000"
+    },
+    {
+      "label": "maker fee only",
+      "amount": "123456789",
+      "lpBps": 30,
+      "protocolBps": 0,
+      "lpFee": "370370",
+      "protocolFee": "0",
+      "net": "123086419"
+    }
+  ],
+  "feeValidation": [
+    {
+      "label": "the launch split",
+      "lpBps": 30,
+      "protocolBps": 20,
+      "poolSet": true,
+      "valid": true
+    },
+    {
+      "label": "both at the ceiling",
+      "lpBps": 100,
+      "protocolBps": 100,
+      "poolSet": true,
+      "valid": true
+    },
+    {
+      "label": "maker fee one past the ceiling",
+      "lpBps": 101,
+      "protocolBps": 0,
+      "poolSet": true,
+      "valid": false
+    },
+    {
+      "label": "protocol fee one past the ceiling",
+      "lpBps": 0,
+      "protocolBps": 101,
+      "poolSet": true,
+      "valid": false
+    },
+    {
+      "label": "a protocol fee with no pool to pay",
+      "lpBps": 30,
+      "protocolBps": 20,
+      "poolSet": false,
+      "valid": false
+    },
+    {
+      "label": "a maker fee needs no pool",
+      "lpBps": 30,
+      "protocolBps": 0,
+      "poolSet": false,
+      "valid": true
+    },
+    {
+      "label": "fees off",
+      "lpBps": 0,
+      "protocolBps": 0,
+      "poolSet": false,
+      "valid": true
+    }
+  ],
+  "routeBond": [
+    {
+      "label": "10 USDC: the floor",
+      "minBond": "1000000",
+      "bondBps": 50,
+      "amount": "10000000",
+      "bond": "1000000"
+    },
+    {
+      "label": "100 USDC: still the floor",
+      "minBond": "1000000",
+      "bondBps": 50,
+      "amount": "100000000",
+      "bond": "1000000"
+    },
+    {
+      "label": "200 USDC: exactly the floor",
+      "minBond": "1000000",
+      "bondBps": 50,
+      "amount": "200000000",
+      "bond": "1000000"
+    },
+    {
+      "label": "1,000 USDC: 0.5%",
+      "minBond": "1000000",
+      "bondBps": 50,
+      "amount": "1000000000",
+      "bond": "5000000"
+    },
+    {
+      "label": "100,000 USDC: 0.5%",
+      "minBond": "1000000",
+      "bondBps": 50,
+      "amount": "100000000000",
+      "bond": "500000000"
+    },
+    {
+      "label": "the ratio rounds down",
+      "minBond": "1",
+      "bondBps": 50,
+      "amount": "1000199",
+      "bond": "5000"
+    },
+    {
+      "label": "a flat token bond (no ratio)",
+      "minBond": "5000000",
+      "bondBps": 0,
+      "amount": "100000000000",
+      "bond": "5000000"
+    },
+    {
+      "label": "the ratio ceiling, 18 decimals",
+      "minBond": "1",
+      "bondBps": 500,
+      "amount": "1000000000000000000",
+      "bond": "50000000000000000"
+    }
+  ],
+  "bondConfigValidation": [
+    {
+      "label": "the launch config",
+      "minBond": "1000000",
+      "bondBps": 50,
+      "valid": true
+    },
+    {
+      "label": "the clear",
+      "minBond": "0",
+      "bondBps": 0,
+      "valid": true
+    },
+    {
+      "label": "a ratio with no floor",
+      "minBond": "0",
+      "bondBps": 50,
+      "valid": false
+    },
+    {
+      "label": "the ratio ceiling",
+      "minBond": "1",
+      "bondBps": 500,
+      "valid": true
+    },
+    {
+      "label": "one past the ratio ceiling",
+      "minBond": "1",
+      "bondBps": 501,
+      "valid": false
+    },
+    {
+      "label": "a floor alone",
+      "minBond": "1",
+      "bondBps": 0,
+      "valid": true
+    }
+  ]
+}
