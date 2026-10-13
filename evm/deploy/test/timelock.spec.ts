@@ -79,6 +79,27 @@ test("DISPUTE_TOKEN_BONDS is checked with the contract's rules before anything i
   assert.throws(() => tokenBondsFromEnv({ DISPUTE_TOKEN_BONDS: '{"usdc":{"minBond":"1","bondBps":501}}' }), /0\.\.500/);
 });
 
+const STRANGER = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+
+test("activate refuses a non-local manifest missing a contract, before anything is sent", async () => {
+  const m = JSON.parse(fs.readFileSync(M, "utf8"));
+  m.meta.env = "testnet";
+  delete m.contracts.rootAnchor;
+  const partial = path.join(tmp, "partial.json");
+  fs.writeFileSync(partial, JSON.stringify(m));
+  await assert.rejects(() => timelockActivate({ ...opts(), manifest: partial }), /testnet manifest .* has no RootAnchor; nothing was sent/);
+  assert.equal(Boolean(await (await adManager()).getFunction("timelockActive")()), false, "nothing was activated");
+});
+
+test("a partial activation fails loudly, naming every contract still in setup", async () => {
+  // Not the admin: every activateTimelock reverts, and the command must not report success.
+  await assert.rejects(
+    () => timelockActivate({ ...opts(), privateKey: STRANGER }),
+    /AdManager, OrderPortal, MerkleManager, DisputeManager, RootAnchor, BLSKeyRegistry failed to activate/,
+  );
+  assert.equal((await readManifest(M)).timelock, undefined, "the manifest does not record a partial activation");
+});
+
 test("once the delay is on, a re-run proposes; after 24 hours a re-run executes", async () => {
   await timelockActivate(opts());
   const status = await timelockStatus(opts());
@@ -117,8 +138,22 @@ test("propose, early execute refused, cancel, and execute after the delay", asyn
   await timelockPropose(call);
   await warpDay();
   // Anyone may execute: the stranger's key runs it.
-  await timelockExecute({ ...call, privateKey: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" });
+  await timelockExecute({ ...call, privateKey: STRANGER });
   const [, lp, protocol] = await (await adManager()).getFunction("feeConfig")();
   assert.equal(Number(lp), 5);
   assert.equal(Number(protocol), 5);
+});
+
+test("a contract deployed into an activated chain is activated in the same run", async () => {
+  const m = JSON.parse(fs.readFileSync(M, "utf8"));
+  delete m.contracts.disputeManager;
+  fs.writeFileSync(M, JSON.stringify(m));
+  const r = await withEnv({ ...CLEAN, EVENT_VK: path.join(tmp, "no-vk"), LP_FEE_BPS: "5", PROTOCOL_FEE_BPS: "5" }, () =>
+    deployCore({ rpcUrl: a.url, privateKey: K0, env: "local", manifestOut: M }),
+  );
+  assert.deepEqual(r.activatedNow, ["DisputeManager"]);
+  const dm = attachContract(r.contracts.disputeManager, "DisputeManager", "DisputeManager", new ethers.Wallet(K0, a.provider));
+  assert.equal(Boolean(await dm.getFunction("timelockActive")()), true, "the new DisputeManager kept instant setters");
+  const status = await timelockStatus(opts());
+  for (const [name, on] of Object.entries(status)) assert.equal(on, true, `${name} is in setup on an activated chain`);
 });

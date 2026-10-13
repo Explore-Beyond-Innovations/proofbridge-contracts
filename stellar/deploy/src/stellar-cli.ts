@@ -302,9 +302,12 @@ export class Acting {
     return this.foreign.size === 0;
   }
 
-  /** Send `fn(args)` on `contractId`, or describe it. Returns whether it was sent. */
-  call(contractId: string, label: string, fn: string, args: string[], line: string): boolean {
-    if (this.timelocked.has(contractId)) return this.callTimelocked(contractId, label, fn, args, line);
+  /**
+   * Send `fn(args)` on `contractId`, or describe it. Returns whether it was sent. `instant` marks a
+   * brake (a call the contract runs without the delay, such as a tightening): never proposed.
+   */
+  call(contractId: string, label: string, fn: string, args: string[], line: string, instant = false): boolean {
+    if (!instant && this.timelocked.has(contractId)) return this.callTimelocked(contractId, label, fn, args, line);
     if (!this.canSendTo(contractId)) {
       this.described.push({ label, contractId, fn, args });
       console.log(`  [describe] ${line}`);

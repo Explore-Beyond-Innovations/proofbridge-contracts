@@ -33,6 +33,18 @@ test("proposal ids match the contract's for every argument type", () => {
     "dd1faec679716838e42560f4a0f81347ce0473b32a32b84ef05d97af0178db82",
   );
   assert.equal(encodeCall("MerkleManager", "set_manager", { manager: ACCOUNT, status: "true" }).id, "8d7bff83e54b34b14f272be202c745d99bad76ccb3645eb8bd7e5c763aa2498e");
+  assert.equal(
+    encodeCall("MerkleManager", "set_escrow_appender", { escrow: CONTRACT, enabled: "false" }).id,
+    "7bbe7109b0cf1bf22f497e93d00c169387d256cd1568173929b16e11a0bb0df6",
+  );
+  assert.equal(
+    encodeCall("RootAnchor", "set_signers", { signers: JSON.stringify([ACCOUNT]), threshold: 1 }).id,
+    "100d2335126ea0e1dd3e4d59bbef42c0c34725f53cb6d9bc4d91c7da7b117fbe",
+  );
+  assert.equal(
+    encodeCall("BLSKeyRegistry", "set_proof_registration", { anchor: CONTRACT, verifier: CONTRACT, sources: JSON.stringify(["1000002"]), enabled: "true" }).id,
+    "47c0f7edb3e2211853a154b3bdd3b20b59220b4c489b450b5d1e3b21fe3dfd64",
+  );
 });
 
 test("the CLI's flag form round-trips into the encoder", () => {
@@ -54,6 +66,13 @@ test("every setter link and deploy send is in the encoder's table", () => {
   }
   for (const fn of ["set_escrow", "set_dispute_params", "set_arbiter", "set_protocol_fee_pool", "set_bond_config"]) {
     assert.ok(TIMELOCKED_SETTERS.DisputeManager![fn], `DisputeManager.${fn}`);
+  }
+  for (const fn of ["set_manager", "set_escrow_appender"]) assert.ok(TIMELOCKED_SETTERS.MerkleManager![fn], `MerkleManager.${fn}`);
+  for (const fn of ["set_signers", "reset_latest_seq", "set_anchor_delay", "set_monotonic"]) {
+    assert.ok(TIMELOCKED_SETTERS.RootAnchor![fn], `RootAnchor.${fn}`);
+  }
+  for (const fn of ["upgrade", "set_position_guards", "set_proof_registration"]) {
+    assert.ok(TIMELOCKED_SETTERS.BLSKeyRegistry![fn], `BLSKeyRegistry.${fn}`);
   }
 });
 

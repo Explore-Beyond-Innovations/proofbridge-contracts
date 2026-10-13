@@ -12,11 +12,12 @@ import {
   foreignAdmins,
   requireEnv,
   timelockedOf,
+  TIMELOCKED,
   type DescribedCall,
   type PendingCall,
   evmRoot,
 } from "./common.js";
-import type { FeeConfig } from "@proofbridge/deployment-manifest";
+import { FeeConfigSchema, type FeeConfig } from "@proofbridge/deployment-manifest";
 import { namedOutsideLocal, requireDeployEnv, assertChainIdForEnv } from "./deploy-env.js";
 import { assertRegistryEnv, registryEnvOf } from "./keys-env.js";
 import { assertReusedVk, vkRecord, assertVerifierCode } from "./vk.js";
@@ -71,6 +72,8 @@ export interface DeployCoreResult {
   described: DescribedCall[];
   /** #586: setters under the 24-hour delay, proposed by this run or still waiting; re-run after them. */
   pending: PendingCall[];
+  /** #586: contracts this run deployed into an activated chain and activated before returning. */
+  activatedNow: string[];
   chainId: bigint;
   contracts: {
     verifier: string;
@@ -607,8 +610,9 @@ async function deployCoreRun(
   }
 
   // ── the bridge fee (#586) ─────────────────────────────────────────
-  // The pool first: the contract refuses a protocol fee with no pool to pay it to. The manifest
-  // records the fee only when the chain holds it (sent now, or already there).
+  // The pool first: the contract refuses a protocol fee with no pool to pay it to. Under the delay
+  // both are proposed in the same run and executed in this order on the re-run, so one 24-hour round
+  // sets both. The manifest records the fee only when the chain holds it (sent now, or already there).
   let feeRecorded: FeeConfig | undefined = existing?.feeConfig;
   {
     const adManager = attachContract(adManagerAddr, "AdManager", "AdManager", signer);
@@ -618,7 +622,7 @@ async function deployCoreRun(
     else poolOnChain = await acting.call(adManager, "AdManager", "setProtocolFeePool", [fee.pool], `AdManager.setProtocolFeePool(${fee.pool})`);
     let bpsOnChain = Number(curLp) === fee.lpBps && Number(curProtocol) === fee.protocolBps;
     if (bpsOnChain) console.log(`  [skip] AdManager.setFeeBps already ${fee.lpBps} / ${fee.protocolBps}`);
-    else if (poolOnChain || fee.protocolBps === 0) {
+    else {
       bpsOnChain = await acting.call(adManager, "AdManager", "setFeeBps", [fee.lpBps, fee.protocolBps],
         `AdManager.setFeeBps(lp=${fee.lpBps}, protocol=${fee.protocolBps})`);
     }
@@ -735,20 +739,36 @@ async function deployCoreRun(
     }
   }
 
-  // ── MerkleManager managers: AdManager + OrderPortal ─────
-  // Check-first, like every other wire: a manager already set is not set again, and whether the
-  // call can be sent at all was decided up front. The Registrar is deployed but not a manager until
-  // proof registration's T3 flip (`setManager(registrar, true)`): until then nothing reads its leaves.
+  // ── MerkleManager appenders: AdManager + OrderPortal ─────
+  // Check-first, like every other wire: an appender already set is not set again, and whether the
+  // call can be sent at all was decided up front. The escrows go in as escrow appenders, which only
+  // the delayed `setEscrowAppender` can remove (#586). The Registrar is deployed but not a manager
+  // until proof registration's T3 flip (`setManager(registrar, true)`): until then nothing reads its leaves.
   const merkleManager = attachContract(merkleManagerAddr, "MerkleManager", "MerkleManager", signer);
   for (const { name, addr } of appendersAtDeploy({ adManager: adManagerAddr, orderPortal: orderPortalAddr, registrar: registrarAddr })) {
-    if (await merkleManager.getFunction("isManager")(addr)) {
-      console.log(`  [skip] MerkleManager.setManager(${name}) already true`);
+    if (await merkleManager.getFunction("isEscrowAppender")(addr)) {
+      console.log(`  [skip] MerkleManager.setEscrowAppender(${name}) already true`);
       continue;
     }
-    await acting.call(merkleManager, "MerkleManager", "setManager", [addr, true], `MerkleManager.setManager(${name}, true)`);
+    await acting.call(merkleManager, "MerkleManager", "setEscrowAppender", [addr, true], `MerkleManager.setEscrowAppender(${name}, true)`);
   }
   if (await merkleManager.getFunction("isManager")(registrarAddr)) {
     console.warn(`  [note] the Registrar ${registrarAddr} is a MerkleManager manager; T2 keeps it off until the T3 flip (setManager(registrar, false))`);
+  }
+
+  // #586: a contract this run added to a chain already activated would otherwise keep instant
+  // setters behind an activated manifest. It is wired above while still in setup, then activated
+  // here, in the same run; later wiring of it (link) goes under the delay like the rest.
+  const activatedNow: string[] = [];
+  if (existing?.timelock) {
+    for (const d of run.deployed) {
+      if (!TIMELOCKED.has(d.label)) continue;
+      const c = attachContract(d.address, d.label, d.label, signer);
+      if (await c.getFunction("timelockActive")()) continue;
+      await (await c.getFunction("activateTimelock")({ nonce: nonces.next() })).wait();
+      activatedNow.push(d.label);
+      console.log(`  [timelock] ${d.label}.activateTimelock() (the chain is activated)`);
+    }
   }
 
   const manifest = buildManifest({
@@ -810,6 +830,7 @@ async function deployCoreRun(
     manifestPath: outPath,
     described: acting.described,
     pending: acting.pending,
+    activatedNow,
     chainId,
     contracts: {
       verifier: verifierAddr,
@@ -832,12 +853,13 @@ async function deployCoreRun(
 }
 
 
-/** The largest fee the AdManager accepts, per side, in bps (1%). */
-export const MAX_FEE_BPS = 100;
+/** The largest fee the AdManager accepts, per side, in bps (1%): the manifest schema's bound. */
+export const MAX_FEE_BPS = FeeConfigSchema.shape.lpBps.maxValue!;
 
 /**
  * #586: the bridge fee from env. `local` defaults to the launch split (30 / 20) paid to the deployer;
- * anywhere else `PROTOCOL_FEE_POOL`, `LP_FEE_BPS` and `PROTOCOL_FEE_BPS` are all required.
+ * anywhere else `PROTOCOL_FEE_POOL`, `LP_FEE_BPS` and `PROTOCOL_FEE_BPS` are all required. Checked by
+ * the manifest's own schema, the same bounds the contract enforces.
  */
 export function feeConfigFromEnv(env: string, localPool: string, vars: Record<string, string | undefined> = process.env): FeeConfig {
   const isLocal = env === "local";
@@ -847,14 +869,17 @@ export function feeConfigFromEnv(env: string, localPool: string, vars: Record<st
     if (isLocal) return localDefault;
     throw new Error(`deploy-core: ${name} is unset for DEPLOY_ENV=${env}; set PROTOCOL_FEE_POOL, LP_FEE_BPS and PROTOCOL_FEE_BPS`);
   };
-  const bps = (name: string, localDefault: string): number => {
-    const v = read(name, localDefault);
-    if (!/^\d+$/.test(v) || Number(v) > MAX_FEE_BPS) {
-      throw new Error(`deploy-core: ${name}="${v}" must be a whole number of bps, at most ${MAX_FEE_BPS} (1%)`);
-    }
-    return Number(v);
-  };
-  return { pool: read("PROTOCOL_FEE_POOL", localPool), lpBps: bps("LP_FEE_BPS", "30"), protocolBps: bps("PROTOCOL_FEE_BPS", "20") };
+  const pool = read("PROTOCOL_FEE_POOL", localPool);
+  const raw = { LP_FEE_BPS: read("LP_FEE_BPS", "30"), PROTOCOL_FEE_BPS: read("PROTOCOL_FEE_BPS", "20") };
+  const bps = (v: string): number => (/^\d+$/.test(v) ? Number(v) : NaN);
+  const r = FeeConfigSchema.safeParse({ pool, lpBps: bps(raw.LP_FEE_BPS), protocolBps: bps(raw.PROTOCOL_FEE_BPS) });
+  if (!r.success) {
+    const field = r.error.issues[0].path[0];
+    const name = field === "lpBps" ? "LP_FEE_BPS" : field === "protocolBps" ? "PROTOCOL_FEE_BPS" : "PROTOCOL_FEE_POOL";
+    const value = name === "PROTOCOL_FEE_POOL" ? pool : raw[name];
+    throw new Error(`deploy-core: ${name}="${value}" must be a whole number of bps, at most ${MAX_FEE_BPS} (1%)`);
+  }
+  return r.data;
 }
 
 /// Who the deploy makes a MerkleManager manager: the escrows. The Registrar waits for the T3 flip.
@@ -865,7 +890,7 @@ export function appendersAtDeploy(c: { adManager: string; orderPortal: string; r
   ];
 }
 
-/// Refuse, before anything is sent, a MerkleManager this CLI cannot wire (no manager list) and a
+/// Refuse, before anything is sent, a MerkleManager this CLI cannot wire (no manager or escrow-appender list) and a
 /// manifest whose escrows or Registrar are bound to another MerkleManager.
 export async function assertMerkleManagerReusable(
   contracts: { merkleManager?: { address: string }; adManager?: { address: string }; orderPortal?: { address: string }; registrar?: { address: string } },
@@ -879,6 +904,14 @@ export async function assertMerkleManagerReusable(
       throw new Error(
         `this manifest's MerkleManager predates the manager list; deploy fresh (MerkleManager at ${mm} has no isManager; start a new manifest, e.g. deploy-contracts.sh --fresh). ` +
           `Its escrows expect an append return the current MerkleManager does not give, so reusing either half cannot work.`,
+      );
+    }
+    try {
+      await attachContract(mm, "MerkleManager", "MerkleManager", signer).getFunction("isEscrowAppender").staticCall(ethers.ZeroAddress);
+    } catch {
+      throw new Error(
+        `this manifest's MerkleManager predates the escrow-appender list (#586); deploy fresh (MerkleManager at ${mm} has no isEscrowAppender; ` +
+          `start a new manifest, e.g. deploy-contracts.sh --fresh). Its escrows could be removed instantly, which the delay exists to prevent.`,
       );
     }
   }

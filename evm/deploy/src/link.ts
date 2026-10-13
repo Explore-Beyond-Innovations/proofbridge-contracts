@@ -4,6 +4,7 @@ import {
   type RouteTiming,
   type DisputeParams,
   type TokenBondConfig,
+  TokenBondConfigSchema,
   duplicatePairKeys,
 } from "@proofbridge/deployment-manifest";
 import { Acting, adminsOf, connect, foreignAdmins, requireEnv, timelockedOf, type DescribedCall, type PendingCall } from "./common.js";
@@ -217,7 +218,8 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     if (onChain) {
       console.log(`  [skip] RootAnchor.setAnchorDelay(${peerChainId}) already ${delay}s`);
     } else {
-      onChain = await acting.call(anchor, "RootAnchor", "setAnchorDelay", [peerChainId, delay], `RootAnchor.setAnchorDelay(${peerChainId}, ${delay}s)`);
+      // #586: a raise only lengthens the watchtower's window, so it is instant even under the delay.
+      onChain = await acting.call(anchor, "RootAnchor", "setAnchorDelay", [peerChainId, delay], `RootAnchor.setAnchorDelay(${peerChainId}, ${delay}s)`, delay > cur);
       if (onChain) chainTxs++;
     }
     if (onChain && local.rootAnchorConfig) {
@@ -430,13 +432,13 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
   };
 }
 
-/** The largest route bond ratio the DisputeManager accepts, in bps (5%). */
-export const MAX_BOND_BPS = 500;
+/** The largest route bond ratio the DisputeManager accepts, in bps (5%): the manifest schema's bound. */
+export const MAX_BOND_BPS = TokenBondConfigSchema.shape.bondBps.maxValue!;
 
 /**
  * #586: `DISPUTE_TOKEN_BONDS`, a JSON object `{ "<pairKey>": { "minBond": "<base units>", "bondBps": <n> } }`:
  * the routes whose dispute bond is priced in the order's own token. Unset or `{}` = every route keeps
- * the flat native floor. Checked here, before anything is sent, with the contract's own rules.
+ * the flat native floor. Checked here, before anything is sent, by the manifest's own schema.
  */
 export function tokenBondsFromEnv(vars: Record<string, string | undefined> = process.env): Record<string, TokenBondConfig> {
   const raw = vars.DISPUTE_TOKEN_BONDS;
@@ -451,16 +453,15 @@ export function tokenBondsFromEnv(vars: Record<string, string | undefined> = pro
     throw new Error("link: DISPUTE_TOKEN_BONDS must be an object keyed by pairKey");
   }
   const out: Record<string, TokenBondConfig> = {};
-  for (const [pairKey, v] of Object.entries(parsed as Record<string, any>)) {
-    const minBond = String(v?.minBond ?? "");
-    const bondBps = Number(v?.bondBps);
-    if (!/^\d+$/.test(minBond) || BigInt(minBond) === 0n) {
-      throw new Error(`link: DISPUTE_TOKEN_BONDS["${pairKey}"].minBond must be a whole number of base units, at least 1`);
+  for (const [pairKey, v] of Object.entries(parsed as Record<string, unknown>)) {
+    const r = TokenBondConfigSchema.safeParse(v);
+    if (!r.success) {
+      const why = r.error.issues.map((i) => `${i.path.join(".") || "entry"}: ${i.message}`).join("; ");
+      throw new Error(
+        `link: DISPUTE_TOKEN_BONDS["${pairKey}"] is invalid (${why}); minBond is whole base units, at least 1, and bondBps a whole number 0..${MAX_BOND_BPS}`,
+      );
     }
-    if (!Number.isInteger(bondBps) || bondBps < 0 || bondBps > MAX_BOND_BPS) {
-      throw new Error(`link: DISPUTE_TOKEN_BONDS["${pairKey}"].bondBps must be a whole number 0..${MAX_BOND_BPS}`);
-    }
-    out[pairKey] = { minBond, bondBps };
+    out[pairKey] = r.data;
   }
   return out;
 }

@@ -33,13 +33,15 @@ export const ORDER_VECTOR_0 = {
     adDecimals: 7,
     deadline: 1767225600n,
     adSettlementSigner: "0x1717171717171717171717171717171717171717171717171717171717171717",
+    lpFeeBps: 30,
+    protocolFeeBps: 20,
   },
-  orderHash: "0xa4051971fa4ca8e6761659de7f41ac804d32c302d0b009109cc085dc28529d2b",
+  orderHash: "0x4fea4fabee30da6898ea307696f7c4d6a3c00cd2da5404e4faf2576e8c0df9ae",
 };
 
 /** `OrderHash.Order` as an ABI tuple, in struct order. */
 const ORDER_TUPLE =
-  "tuple(bytes32,bytes32,uint256,bytes32,uint256,bytes32,bytes32,uint256,bytes32,string,bytes32,bytes32,uint256,uint8,uint8,uint256,bytes32)";
+  "tuple(bytes32,bytes32,uint256,bytes32,uint256,bytes32,bytes32,uint256,bytes32,string,bytes32,bytes32,uint256,uint8,uint8,uint256,bytes32,uint16,uint16)";
 
 /**
  * Whether the code at a library's address is this build's artifact. The library has no immutables

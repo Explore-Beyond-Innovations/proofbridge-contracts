@@ -84,7 +84,7 @@ export async function connect(
 export const TIMELOCK_DELAY_S = 86_400n;
 
 /** #586: the artifacts that carry the 24-hour delay. */
-export const TIMELOCKED = new Set(["AdManager", "OrderPortal", "MerkleManager", "DisputeManager"]);
+export const TIMELOCKED = new Set(["AdManager", "OrderPortal", "MerkleManager", "DisputeManager", "RootAnchor", "BLSKeyRegistry"]);
 
 /** #586: a call under the delay: proposed by this run, or waiting out an earlier proposal. */
 export interface PendingCall {
@@ -174,16 +174,20 @@ export class Acting {
     return this.foreign.size === 0;
   }
 
-  /** Send `fn(args)` on `contract`, or describe it. Returns whether it was sent. */
+  /**
+   * Send `fn(args)` on `contract`, or describe it. Returns whether it was sent. `instant` marks a
+   * brake (a call the contract runs without the delay, such as a tightening): never proposed.
+   */
   async call(
     contract: ethers.Contract,
     label: string,
     fn: string,
     args: unknown[],
     line: string,
+    instant = false,
   ): Promise<boolean> {
     const to = await contract.getAddress();
-    if (this.timelocked.has(to.toLowerCase())) return this.callTimelocked(contract, label, fn, args, line, to);
+    if (!instant && this.timelocked.has(to.toLowerCase())) return this.callTimelocked(contract, label, fn, args, line, to);
     if (!this.canSendTo(to)) {
       this.described.push({
         label,

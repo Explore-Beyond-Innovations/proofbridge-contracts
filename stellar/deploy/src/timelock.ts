@@ -11,10 +11,19 @@ import { invokeContract, readView } from "./stellar-cli.js";
  * `sha256(xdr((fn_name, args)))` and the setter, called later with exactly those arguments by anyone,
  * consumes it. This file is the encoder (which setter takes which types) and the commands
  * (`status`, `activate`, `propose`, `execute`, `cancel`). `deploy` and `link` use the encoder through
- * `Acting` to propose instead of send once a contract's delay is on.
+ * `Acting` to propose instead of send once a contract's delay is on. A proposal expires 14 days after
+ * it ripens, and an admin handover voids the old admin's pending proposals; either way, propose again.
  */
 
-type ArgType = "u128" | "u64" | "u32" | "bool" | "bytes32" | "address" | { struct: Record<string, ArgType> };
+type ArgType =
+  | "u128"
+  | "u64"
+  | "u32"
+  | "bool"
+  | "bytes32"
+  | "address"
+  | { struct: Record<string, ArgType> }
+  | { vec: ArgType };
 
 const TIMING: ArgType = { struct: { min_window: "u64", buffer: "u64", margin: "u64", claim_stagger: "u64" } };
 
@@ -44,6 +53,7 @@ export const TIMELOCKED_SETTERS: Record<string, Record<string, [string, ArgType]
   },
   MerkleManager: {
     set_manager: [["manager", "address"], ["status", "bool"]],
+    set_escrow_appender: [["escrow", "address"], ["enabled", "bool"]],
   },
   DisputeManager: {
     set_escrow: [["escrow", "address"], ["allowed", "bool"]],
@@ -51,6 +61,19 @@ export const TIMELOCKED_SETTERS: Record<string, Record<string, [string, ArgType]
     set_arbiter: [["arbiter", "address"]],
     set_protocol_fee_pool: [["pool", "address"]],
     set_bond_config: [["token", "address"], ["peer_chain_id", "u128"], ["config", { struct: { min_bond: "u128", bond_bps: "u32" } }]],
+  },
+  // Only the trust-granting direction waits; a revocation or tightening runs at once and voids a
+  // pending loosening (#586 D5).
+  RootAnchor: {
+    set_signers: [["signers", { vec: "address" }], ["threshold", "u32"]],
+    reset_latest_seq: [["source_chain_id", "u128"], ["seq", "u64"]],
+    set_anchor_delay: [["source_chain_id", "u128"], ["delay", "u64"]],
+    set_monotonic: [["monotonic", "bool"]],
+  },
+  BLSKeyRegistry: {
+    upgrade: [["new_wasm_hash", "bytes32"]],
+    set_position_guards: [["guards", { vec: "address" }]],
+    set_proof_registration: [["anchor", "address"], ["verifier", "address"], ["sources", { vec: "u128" }], ["enabled", "bool"]],
   },
 };
 
@@ -60,9 +83,16 @@ export const TIMELOCK_CONTRACTS = {
   OrderPortal: "orderPortal",
   MerkleManager: "merkleManager",
   DisputeManager: "disputeManager",
+  RootAnchor: "rootAnchor",
+  BLSKeyRegistry: "blsKeyRegistry",
 } as const;
 
 function toScVal(v: unknown, t: ArgType, where: string): xdr.ScVal {
+  if (typeof t === "object" && "vec" in t) {
+    const items = (typeof v === "string" ? JSON.parse(v) : v) as unknown[];
+    if (!Array.isArray(items)) throw new Error(`timelock: ${where} must be a JSON array`);
+    return xdr.ScVal.scvVec(items.map((x, i) => toScVal(x, t.vec, `${where}[${i}]`)));
+  }
   if (typeof t === "object") {
     const obj = (typeof v === "string" ? JSON.parse(v) : v) as Record<string, unknown>;
     // A #[contracttype] struct is an ScMap keyed by field name, keys in order.
@@ -163,6 +193,10 @@ async function contractId(manifest: string, label: keyof typeof TIMELOCK_CONTRAC
   return { m, id };
 }
 
+/**
+ * Whether each contract's delay is on. A contract still in setup on a chain the manifest records as
+ * activated (a later deploy added it and it was never switched on) is flagged.
+ */
 export async function timelockStatus(opts: TimelockOptions): Promise<Record<string, boolean>> {
   const m = await readManifest(opts.manifest);
   const out: Record<string, boolean> = {};
@@ -170,16 +204,28 @@ export async function timelockStatus(opts: TimelockOptions): Promise<Record<stri
     const id = m.contracts[key]?.address;
     if (!id) continue;
     out[label] = readView(id, "timelock_active") === true;
-    console.log(`  ${label}: ${out[label] ? "delay on" : "setup (no delay)"}`);
+    const flag = !out[label] && m.timelock ? "  <-- the chain is activated; run `timelock activate --confirm`" : "";
+    console.log(`  ${label}: ${out[label] ? "delay on" : "setup (no delay)"}${flag}`);
   }
   return out;
 }
 
-/** Switch the delay on, for good, on every contract that carries it (admin). Idempotent. */
+/**
+ * Switch the delay on, for good, on every contract that carries it (admin). Idempotent: a contract
+ * already on is skipped. Outside local, a manifest missing any of them is refused before anything is
+ * sent. Throws (the CLI exits non-zero) naming every contract that failed to activate; the manifest
+ * records the time only once every one of them is on.
+ */
 export async function timelockActivate(opts: TimelockOptions): Promise<{ activated: string[] }> {
   const m = await readManifest(opts.manifest);
+  if (m.meta.env !== "local") {
+    const missing = Object.entries(TIMELOCK_CONTRACTS).filter(([, key]) => !m.contracts[key]).map(([label]) => label);
+    if (missing.length > 0) {
+      throw new Error(`timelock activate: the ${m.meta.env} manifest ${opts.manifest} has no ${missing.join(", ")}; nothing was sent`);
+    }
+  }
   const activated: string[] = [];
-  let allOn = true;
+  const failed: string[] = [];
   for (const [label, key] of Object.entries(TIMELOCK_CONTRACTS)) {
     const id = m.contracts[key]?.address;
     if (!id) continue;
@@ -192,15 +238,34 @@ export async function timelockActivate(opts: TimelockOptions): Promise<{ activat
       activated.push(label);
       console.log(`  [timelock] ${label}.activate_timelock()`);
     } catch (err) {
-      allOn = false;
+      failed.push(label);
       console.error(`  [timelock] ${label}.activate_timelock() failed: ${err}`);
     }
   }
-  if (allOn && !m.timelock) {
+  if (failed.length > 0) {
+    throw new Error(`timelock activate: ${failed.join(", ")} failed to activate and keep instant setters; fix and re-run`);
+  }
+  if (!m.timelock) {
     m.timelock = { activatedAt: new Date().toISOString() };
     await writeManifest(opts.manifest, m);
   }
   return { activated };
+}
+
+/**
+ * #586: activate each of `deployed` (label to contract id) that carries the delay and is still in
+ * setup. `deploy` calls it for what it added to a chain already activated.
+ */
+export function activateDeployed(deployed: Record<string, string>): string[] {
+  const out: string[] = [];
+  for (const label of Object.keys(TIMELOCK_CONTRACTS)) {
+    const id = deployed[label];
+    if (!id || readView(id, "timelock_active") === true) continue;
+    invokeContract(id, "activate_timelock");
+    out.push(label);
+    console.log(`  [timelock] ${label}.activate_timelock() (the chain is activated)`);
+  }
+  return out;
 }
 
 export async function timelockPropose(opts: TimelockCallOptions): Promise<EncodedCall & { eta: number }> {

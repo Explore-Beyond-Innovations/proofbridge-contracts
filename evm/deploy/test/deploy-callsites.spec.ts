@@ -143,10 +143,13 @@ function withImmutableChanged(code: string): string {
 test("deploy makes the escrows MerkleManager managers and not the Registrar", async () => {
   await withEnv({ ...CLEAN, EVENT_VK: vkFile }, async () => {
     const r = await deploy(local, "local", "managers.json");
-    const mm = new ethers.Contract(r.contracts.merkleManager, ["function isManager(address) view returns (bool)"], local.provider);
+    const mm = new ethers.Contract(r.contracts.merkleManager, ["function isManager(address) view returns (bool)", "function isEscrowAppender(address) view returns (bool)"], local.provider);
     assert.equal(await mm.isManager(r.contracts.adManager), true, "AdManager");
     assert.equal(await mm.isManager(r.contracts.orderPortal), true, "OrderPortal");
     assert.equal(await mm.isManager(r.contracts.registrar), false, "Registrar is not a manager in T2");
+    // #586 D3: the escrows are escrow appenders, which only the delayed setter can remove.
+    assert.equal(await mm.isEscrowAppender(r.contracts.adManager), true, "AdManager is an escrow appender");
+    assert.equal(await mm.isEscrowAppender(r.contracts.orderPortal), true, "OrderPortal is an escrow appender");
   });
 });
 

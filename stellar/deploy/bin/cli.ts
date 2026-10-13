@@ -10,7 +10,7 @@
 //   stellar-deploy handover --to <G...> | --verify   [--in <manifest-path>] [--chain-id <n>]
 //   stellar-deploy retirements-audit --file <vault-export.json> [--in <manifest-path>] [--chain-id <n>]
 //   stellar-deploy timelock status|activate --confirm [--in <manifest-path>] [--chain-id <n>]
-//   stellar-deploy timelock propose|execute|cancel --contract <AdManager|OrderPortal|MerkleManager|DisputeManager>
+//   stellar-deploy timelock propose|execute|cancel --contract <AdManager|OrderPortal|MerkleManager|DisputeManager|RootAnchor|BLSKeyRegistry>
 //                  --fn <setter> --args '<JSON object of the setter's arguments by name>' [--in] [--chain-id]
 //
 // Reads the `stellar` CLI environment:
@@ -117,7 +117,12 @@ async function main(): Promise<void> {
           console.error("timelock activate is permanent: every later admin change waits 24 hours. Re-run with --confirm");
           process.exit(2);
         }
-        await timelockActivate({ manifest });
+        // A partial activation throws (exit 1, naming each contract); the status prints either way.
+        try {
+          await timelockActivate({ manifest });
+        } finally {
+          await timelockStatus({ manifest });
+        }
         return;
       }
       const contract = parseFlag(rest, "--contract");

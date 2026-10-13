@@ -8,7 +8,7 @@
 //   evm-deploy handover --to <address> | --verify   [--in <manifest-path>]
 //   evm-deploy retirements-audit --file <vault-export.json> [--in <manifest-path>]
 //   evm-deploy timelock status|activate --confirm [--in <manifest-path>]
-//   evm-deploy timelock propose|execute|cancel --contract <AdManager|OrderPortal|MerkleManager|DisputeManager>
+//   evm-deploy timelock propose|execute|cancel --contract <AdManager|OrderPortal|MerkleManager|DisputeManager|RootAnchor|BLSKeyRegistry>
 //              --fn <setter> --args '<JSON array>' [--in <manifest-path>]
 //
 // Reads EVM_RPC_URL, EVM_ADMIN_PRIVATE_KEY from env. Other knobs:
@@ -98,7 +98,12 @@ async function main(): Promise<void> {
           console.error("timelock activate is permanent: every later admin change waits 24 hours. Re-run with --confirm");
           process.exit(2);
         }
-        await timelockActivate({ manifest });
+        // A partial activation throws (exit 1, naming each contract); the status prints either way.
+        try {
+          await timelockActivate({ manifest });
+        } finally {
+          await timelockStatus({ manifest });
+        }
         return;
       }
       const contract = parseFlag(rest, "--contract") as TimelockContract | undefined;
