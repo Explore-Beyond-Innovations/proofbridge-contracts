@@ -90,6 +90,27 @@ registry as a simulated `set_valid_until` and listed as `current`, `stale-format
 older RetireKey message; collect it again), `no-slot` or `already-shorter`. Exits 1 when any row is
 stale or could not be checked.
 
+### `timelock status` / `timelock activate --confirm` / `timelock {propose|execute|cancel}`
+
+The 24-hour admin delay (#586) on the ad-manager, the order-portal, the merkle-manager and the
+dispute-manager. Until `activate`, their setters are the admin's and instant: that setup window is how
+`deploy` and `link` configure a fresh chain. `timelock activate --confirm` closes it for good on every
+one of them (the manifest records `timelock.activatedAt`). From then on a change is proposed by the
+admin, waits 24 hours, and is executed by anyone with exactly the proposed arguments; the admin may
+cancel it first. Pause, unpause and the admin handover stay instant.
+
+`deploy` and `link` follow the delay on their own: on a contract whose delay is on, a call they would
+have sent is proposed instead (or, when the signer is not the admin, the `propose_action` is described),
+the command exits 2, and the same command re-run after 24 hours executes it. For a change neither
+makes, use the commands directly; `--args` names each argument, and the CLI encodes the list the
+contract keys the proposal by:
+
+```bash
+stellar-deploy timelock propose --contract AdManager --fn set_fee_bps --args '{"lp_bps": 30, "protocol_bps": 20}'
+stellar-deploy timelock execute --contract AdManager --fn set_fee_bps --args '{"lp_bps": 30, "protocol_bps": 20}'   # 24 hours later, any key
+stellar-deploy timelock cancel  --contract AdManager --fn set_fee_bps --args '{"lp_bps": 30, "protocol_bps": 20}'   # admin, before then
+```
+
 ## Moving to a new key registry
 
 Pointing the AdManager at a new registry (`set_key_registry`, with every co-signature verifier on the same one)
@@ -161,6 +182,10 @@ orchestrator.
 | `GIT_COMMIT` | `unknown` | `meta.commit` |
 | `DISPUTE_ARBITER` | admin (`local` only) | The only account that may rule a dispute (2.3g). Must not be the admin outside `local`: its whole containment is that it holds no escrow powers |
 | `DISPUTE_FEE_POOL` | admin (`local` only) | Where forfeited bonds go. Unset, every forfeited bond returns to the filer |
+| `PROTOCOL_FEE_POOL` | admin (`local` only) | #586: where the ad-manager pays the protocol fee: a Stellar account (G…), paid like a payout recipient. Its own setting, even when it names the same address as `DISPUTE_FEE_POOL` |
+| `LP_FEE_BPS` | `30` (`local` only) | #586: the maker's share of the bridge fee, kept in the ad, in bps (at most 100) |
+| `PROTOCOL_FEE_BPS` | `20` (`local` only) | #586: the protocol's share, paid to the pool, in bps (at most 100; above 0 needs the pool) |
+| `DISPUTE_TOKEN_BONDS` | unset | #586 (`link`): `{"<pairKey>": {"minBond": "<base units>", "bondBps": <0..500>}}` — routes whose dispute bond is `max(minBond, amount × bondBps / 10,000)` in the order's own token. A route not named keeps `DISPUTE_BOND_FLOOR` in native |
 | `DISPUTE_CHALLENGE_PERIOD_S` | `3600` (`local` only) | How long the arbiter has to rule. A floor, never a licence to finish early — no dispute completes before the order's own `deadline + buffer` |
 | `DISPUTE_BOND_FLOOR` | `1` (`local` only) | The route's dispute bond, flat for every order, in wrapped-native base units. Must be ≥ 1; the contract rejects zero. No default outside `local`, and there it must be at least `10000000` (1 XLM): the floor is the whole bond, so a dust floor would make disputes free. A sanity bound, not the tuned value (the operating rules size each route) |
 | `DISPUTE_BOND_BPS` | — | Removed: the bond is the flat floor. `link` refuses to run while it is still set |
