@@ -329,11 +329,9 @@ contract DisputeManager is IDisputeManager, AdminTimelock {
     function routeBond(uint256 peerChainId, address token, uint256 amount)
         external
         view
-        returns (address bondToken, uint256 bond, uint256 nativeFloor)
+        returns (address bondToken, uint256 bond)
     {
-        Dispute.Params storage p = disputeParams.load(peerChainId);
-        (bondToken, bond) = _bondOf(p, token, peerChainId, amount);
-        nativeFloor = Dispute.bondFor(p);
+        (bondToken, bond) = _bondOf(disputeParams.load(peerChainId), token, peerChainId, amount);
     }
 
     /// @inheritdoc IDisputeManager
@@ -400,19 +398,13 @@ contract DisputeManager is IDisputeManager, AdminTimelock {
     }
 
     /// @dev Take the route's bond from the filer: native as exact `msg.value`, a token by an exact pull.
-    ///      The native floor is always accepted instead (#586 D1): a filer that sends value posts the
-    ///      floor, so one without the route's token (or a client quoting `bondFor`) can still file.
+    ///      A route with a token bond requires it; the native floor is not accepted instead (#586).
     function _takeBond(Dispute.Params storage p, address filer, address token, uint256 peerChainId, uint256 amount)
         private
         returns (address bondToken, uint128 bond)
     {
         uint256 required;
         (bondToken, required) = _bondOf(p, token, peerChainId, amount);
-        uint256 floor_ = Dispute.bondFor(p);
-        if ((bondToken != address(0) && msg.value != 0) || (bondToken == address(0) && msg.value == floor_)) {
-            bondToken = address(0);
-            required = floor_;
-        }
         bond = SafeCast.toUint128(required);
         if (bondToken == address(0)) {
             // Exact (C-17): an over- or under-paid bond is refused, so nothing is left to refund.

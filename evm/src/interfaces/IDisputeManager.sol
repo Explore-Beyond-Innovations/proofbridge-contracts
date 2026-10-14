@@ -38,8 +38,8 @@ interface IDisputeManager {
      * @dev Escrow-only, and payable: the bond arrives with the call rather than sitting in the
      *      escrow. The bond is the route's `BondConfig` for (`token`, `peerChainId`) when one is
      *      set, scaled by `amount` (the order's amount in `token` units) and pulled in `token` from
-     *      `filer`; otherwise the flat floor in native (`bondFor(peerChainId)`). A filer that sends value
-     *      always posts the native floor instead (#586). `routeBond` quotes both.
+     *      `filer`; otherwise the flat floor in native (`bondFor(peerChainId)`). A route with a token bond
+     *      requires it: the native floor is not accepted instead (#586). `routeBond` quotes it.
      *
      *      The escrow vouches for every value here. `deadline` and `buffer` (the order's own timing
      *      version's) are what stop a short challenge period finalizing a dispute before the order's

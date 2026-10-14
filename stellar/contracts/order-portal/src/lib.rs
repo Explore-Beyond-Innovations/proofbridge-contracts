@@ -217,13 +217,15 @@ impl OrderPortalContract {
         module: Address,
     ) -> Result<(), OrderPortalError> {
         let config = storage::get_config(&env)?;
-        proofbridge_core::timelock::gate(
-            &env,
-            &config.admin,
-            "set_root_verifier",
-            (chain_id, module.clone()).into_val(&env),
-        )?;
-        ops::set_root_verifier(&env, chain_id, module);
+        ops::set_root_verifier_gated(&env, &config.admin, chain_id, module)?;
+        Ok(())
+    }
+
+    /// #586: unwire `chain_id`'s root verifier, instantly (the brake): its unlocks fail closed, and
+    /// any pending proposal to wire one for it is void. Re-wiring goes through the delay.
+    pub fn unset_root_verifier(env: Env, chain_id: u128) -> Result<(), OrderPortalError> {
+        let config = storage::get_config(&env)?;
+        ops::unset_root_verifier(&env, &config.admin, chain_id)?;
         Ok(())
     }
 
@@ -771,7 +773,7 @@ impl OrderPortalContract {
     // Internal Helpers
     // =========================================================================
 
-    /// The canonical 17-field order hash from this leg's params plus the order-chain context.
+    /// The canonical 19-field order hash from this leg's params plus the order-chain context.
     fn order_hash(env: &Env, config: &ContractConfig, params: &OrderParams) -> BytesN<32> {
         let contract_bytes = eip712::contract_address_to_bytes32(env);
         eip712::hash_order(env, params, config.chain_id, &contract_bytes)

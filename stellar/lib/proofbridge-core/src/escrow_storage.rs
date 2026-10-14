@@ -276,6 +276,16 @@ pub fn set_root_verifier(env: &Env, chain_id: u128, module: &Address) {
     extend_persistent(env, &stamp);
 }
 
+/// #586: unwire the route's verifier (the brake), stamping the change like a set.
+pub fn remove_root_verifier(env: &Env, chain_id: u128) {
+    env.storage().persistent().remove(&(KEY_RVERIF, chain_id));
+    let stamp = (KEY_RVCHG, chain_id);
+    env.storage()
+        .persistent()
+        .set(&stamp, &env.ledger().timestamp());
+    extend_persistent(env, &stamp);
+}
+
 /// When the route's verifier last changed; 0 while never set.
 pub fn get_root_verifier_changed_at(env: &Env, chain_id: u128) -> u64 {
     env.storage()

@@ -11280,7 +11280,7 @@ fn test_586_a_token_bond_is_priced_in_the_order_amount() {
     let bond = fee_of(amount, 500);
     assert_eq!(
         dm.route_bond(&s.tp.order_chain_id, &s.ad_token_addr, &amount),
-        (s.ad_token_addr.clone(), bond, DISPUTE_BOND_FLOOR)
+        (s.ad_token_addr.clone(), bond)
     );
     let token = TokenContractClient::new(&s.env, &s.ad_token_addr);
     token.mint(&filer, &(bond as i128));
@@ -11477,4 +11477,87 @@ fn test_586_key_registry_grants_are_delayed_and_revocations_instant() {
     );
     warp(&s, now + TL_DELAY);
     reg.set_position_guards(&guards);
+}
+
+/// Q2 parity with EVM `setRootVerifier(chain, 0)`: unwiring a chain's root verifier is an instant
+/// brake on both escrows (the route's unlocks fail closed), it voids an earlier proposal to wire one,
+/// and wiring again waits the delay.
+#[test]
+fn test_586_unwiring_a_root_verifier_is_instant_and_rewiring_waits() {
+    let s = setup();
+    let e = &s.env;
+    let p = locked_ad_order(&s);
+    let am = &s.ad_manager;
+    let op = &s.order_portal;
+    am.activate_timelock();
+    op.activate_timelock();
+    let (oc, ac) = (s.tp.order_chain_id, s.tp.ad_chain_id);
+    let module = e.register(MockRootVerifier, ());
+    MockRootVerifierClient::new(e, &module).set_ok(&true);
+
+    let now = e.ledger().timestamp();
+    am.propose_action(
+        &tl_sym(e, "set_root_verifier"),
+        &tl_xdr(e, &tl_args(e, (oc, module.clone()))),
+    );
+    am.unset_root_verifier(&oc);
+    op.unset_root_verifier(&ac);
+    assert_eq!(am.root_verifier(&oc), None);
+    assert_eq!(op.root_verifier(&ac), None);
+    assert_eq!(
+        am.try_unlock(
+            &p,
+            &bytes32_to_bytesn(e, &s.tp.bridger_nullifier),
+            &bytes32_to_bytesn(e, &s.tp.order_root),
+            &Bytes::from_slice(e, PROOF_BRIDGER),
+            &Bytes::new(e),
+        ),
+        Err(Ok(AdErr::RootVerifierNotSet)),
+        "an unwired route unlocks nothing"
+    );
+
+    warp(&s, now + TL_DELAY);
+    assert_eq!(
+        am.try_set_root_verifier(&oc, &module),
+        Err(Ok(AdErr::TimelockCancelledByBrake)),
+        "a proposal made before the unwire never runs"
+    );
+    assert_eq!(
+        op.try_set_root_verifier(&ac, &module),
+        Err(Ok(OpErr::TimelockNotProposed)),
+        "wiring again waits the delay"
+    );
+
+    let later = e.ledger().timestamp();
+    let module2 = e.register(MockRootVerifier, ());
+    MockRootVerifierClient::new(e, &module2).set_ok(&true);
+    am.propose_action(
+        &tl_sym(e, "set_root_verifier"),
+        &tl_xdr(e, &tl_args(e, (oc, module2.clone()))),
+    );
+    op.propose_action(
+        &tl_sym(e, "set_root_verifier"),
+        &tl_xdr(e, &tl_args(e, (ac, module2.clone()))),
+    );
+    warp(&s, later + TL_DELAY);
+    am.set_root_verifier(&oc, &module2);
+    op.set_root_verifier(&ac, &module2);
+    assert_eq!(am.root_verifier(&oc), Some(module2.clone()));
+    assert_eq!(op.root_verifier(&ac), Some(module2));
+}
+
+/// The unwire is the admin's alone.
+#[test]
+fn test_586_only_the_admin_unwires_a_root_verifier() {
+    let s = setup();
+    let e = &s.env;
+    e.set_auths(&[]);
+    assert!(s
+        .ad_manager
+        .try_unset_root_verifier(&s.tp.order_chain_id)
+        .is_err());
+    assert!(s
+        .order_portal
+        .try_unset_root_verifier(&s.tp.ad_chain_id)
+        .is_err());
 }

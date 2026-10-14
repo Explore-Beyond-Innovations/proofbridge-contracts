@@ -1348,7 +1348,7 @@ fn route_bond_matches_the_shared_vector() {
         let amount = n("amount");
         assert_eq!(
             f.client.route_bond(&CHAIN, &tok, &amount),
-            (tok.clone(), n("bond"), BOND_FLOOR),
+            (tok.clone(), n("bond")),
             "quote, row {i}"
         );
         let need = n("bond") as i128;
@@ -1397,7 +1397,7 @@ fn an_unconfigured_route_keeps_the_native_floor() {
     let (tok, _) = odd_token(&f);
     assert_eq!(
         f.client.route_bond(&CHAIN, &tok, &1_000_000_000),
-        (f.token.clone(), BOND_FLOOR, BOND_FLOOR)
+        (f.token.clone(), BOND_FLOOR)
     );
     f.client.set_bond_config(
         &tok,
@@ -1421,10 +1421,10 @@ fn an_unconfigured_route_keeps_the_native_floor() {
     assert_eq!(f.client.get_dispute(&h).unwrap().bond_token, f.token);
 }
 
-/// D1: a filer the token bond cannot be taken from posts the native floor; with neither, the
-/// filing fails.
+/// A route with a token bond requires it: a filer holding none of the token is refused, even with
+/// the native floor to hand.
 #[test]
-fn a_filer_without_the_token_posts_the_native_floor() {
+fn a_token_bond_route_refuses_the_native_floor() {
     let f = fixture();
     let (tok, c) = odd_token(&f);
     f.client.set_bond_config(
@@ -1436,17 +1436,16 @@ fn a_filer_without_the_token_posts_the_native_floor() {
         },
     );
     c.transfer(&f.filer, &f.escrow, &c.balance(&f.filer));
-    let h = hash(&f.env, 0x82);
-    assert_eq!(file_token(&f, &h, &tok, 1_000_000_000), BOND_FLOOR);
-    assert_eq!(f.client.get_dispute(&h).unwrap().bond_token, f.token);
-
     let w = soroban_sdk::token::Client::new(&f.env, &f.token);
-    w.transfer(&f.filer, &f.escrow, &w.balance(&f.filer));
-    let h2 = hash(&f.env, 0x83);
+    let floor_held = w.balance(&f.filer);
+    assert!(
+        floor_held >= BOND_FLOOR as i128,
+        "the filer can pay the floor"
+    );
     assert_eq!(
         f.client.try_open_dispute(
             &f.escrow,
-            &h2,
+            &hash(&f.env, 0x82),
             &CHAIN,
             &f.filer,
             &hash(&f.env, 0xEE),
@@ -1457,6 +1456,7 @@ fn a_filer_without_the_token_posts_the_native_floor() {
         ),
         Err(Ok(Error::BondTransferFailed))
     );
+    assert_eq!(w.balance(&f.filer), floor_held, "no floor was taken");
 }
 
 /// A short receipt (a fee-on-transfer token) is refused.

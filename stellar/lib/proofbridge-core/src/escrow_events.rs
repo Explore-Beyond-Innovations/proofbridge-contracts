@@ -32,6 +32,14 @@ pub struct RootVerifierSet {
     pub module: Address,
 }
 
+/// #586: a chain's root verifier unwired by the instant brake; the route's unlocks fail closed.
+#[contractevent(topics = ["rvunset"], data_format = "single-value")]
+pub struct RootVerifierUnset {
+    #[topic]
+    pub chain_id: u128,
+    pub at: u64,
+}
+
 #[contractevent(topics = ["paused"], data_format = "single-value")]
 pub struct Paused {
     pub admin: Address,

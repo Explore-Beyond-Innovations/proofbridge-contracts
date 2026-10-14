@@ -106,6 +106,8 @@ unpause and the admin handover stay instant.
   anchor, raising a delay or a pin, switching the check on and disabling proof registration stay
   instant. On the merkle-manager, removing a non-escrow appender (`set_manager(x, false)`) is instant;
   the escrows are escrow appenders, added and removed only through the delayed `set_escrow_appender`.
+- **Unwiring a root verifier is instant.** `unset_root_verifier(chain_id)` on either escrow unwires
+  that chain's root verifier at once, so its unlocks fail closed; wiring one again waits the delay.
 - **A brake voids what would undo it.** An instant revocation voids every pending proposal that would
   reverse it. The voided proposal still holds its id: cancel it, then propose again.
 - **Proposals expire.** A proposal can run for 14 days after its 24 hours are up, then never; propose
