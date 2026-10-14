@@ -16,14 +16,20 @@ pub mod eip712;
 pub mod escrow_events;
 pub mod escrow_ops;
 pub mod escrow_storage;
+pub mod fees;
 pub mod rate_limit;
 pub mod secp;
+pub mod timelock;
 pub mod timing;
 pub mod token;
 pub mod ttl;
 pub mod types;
 
 #[cfg(test)]
+mod fees_bonds_test;
+#[cfg(test)]
 mod parity_math_test;
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod timelock_test;

@@ -12,7 +12,7 @@ contract WidthHarness {
     }
 }
 
-/// 17-field EIP-712 order-hash parity (T-19, T-66) against the frozen 2.5b fixture. The same file
+/// 19-field EIP-712 order-hash parity (T-19, T-66) against the frozen 2.5b fixture. The same file
 /// drives the Soroban and relayer suites; each recomputes every vector's committed hashes.
 contract OrderHashParityTest is Test {
     using stdJson for string;
@@ -76,6 +76,8 @@ contract OrderHashParityTest is Test {
         o.adDecimals = uint8(v.readUint(string.concat(p, ".order.adDecimals")));
         o.deadline = _uint(string.concat(p, ".order.deadline"));
         o.adSettlementSigner = v.readBytes32(string.concat(p, ".order.adSettlementSigner"));
+        o.lpFeeBps = uint16(v.readUint(string.concat(p, ".order.lpFeeBps")));
+        o.protocolFeeBps = uint16(v.readUint(string.concat(p, ".order.protocolFeeBps")));
     }
 
     function test_everyVectorHashesAsFrozen() public view {

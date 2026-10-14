@@ -28,7 +28,7 @@ mod storage;
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, IntoVal, Symbol, Vec};
 
 use proofbridge_core::ttl;
 
@@ -99,6 +99,8 @@ impl RootAnchor {
         let old = storage::get_admin(&env);
         storage::set_admin(&env, &pending);
         storage::clear_pending_admin(&env);
+        // #586 D6: a handover voids the old admin's pending proposals.
+        proofbridge_core::timelock::bump_epoch(&env);
         events::AdminTransferred {
             from: old,
             to: pending,
@@ -107,14 +109,56 @@ impl RootAnchor {
         Ok(())
     }
 
+    // ── the 24-hour delay (#586) ─────────────────────────────────────────
+
+    /// Close the setup bypass for good. Admin only; not itself delayed.
+    pub fn activate_timelock(env: Env) -> Result<(), RootAnchorError> {
+        require_admin(&env)?;
+        proofbridge_core::timelock::activate(&env).map_err(timelock_error)
+    }
+
+    /// Queue a timelocked call: its function name and its argument list as XDR. Admin only; closes
+    /// the bypass if still open. Executable by anyone 24 hours later, for 14 days.
+    pub fn propose_action(
+        env: Env,
+        fn_name: Symbol,
+        args: Bytes,
+    ) -> Result<BytesN<32>, RootAnchorError> {
+        require_admin(&env)?;
+        proofbridge_core::timelock::propose(&env, fn_name, args).map_err(timelock_error)
+    }
+
+    /// Drop a pending proposal. Admin only.
+    pub fn cancel_action(env: Env, id: BytesN<32>) -> Result<(), RootAnchorError> {
+        require_admin(&env)?;
+        proofbridge_core::timelock::cancel(&env, id).map_err(timelock_error)
+    }
+
+    pub fn timelock_active(env: Env) -> bool {
+        proofbridge_core::timelock::is_active(&env)
+    }
+
+    /// The earliest execution time of a proposal that can still run; 0 = none.
+    pub fn timelock_eta(env: Env, id: BytesN<32>) -> u64 {
+        proofbridge_core::timelock::eta(&env, &id)
+    }
+
     /// Replace the notary set — the ladder rung (admin key → quorum → light client). Pending
-    /// approvals from the previous set stop counting.
+    /// approvals from the previous set stop counting. #586: under the 24-hour delay; a new signer
+    /// set is new trust in every anchored root.
     pub fn set_signers(
         env: Env,
         signers: Vec<Address>,
         threshold: u32,
     ) -> Result<(), RootAnchorError> {
-        require_admin(&env)?;
+        let admin = admin_of(&env)?;
+        proofbridge_core::timelock::gate(
+            &env,
+            &admin,
+            "set_signers",
+            (signers.clone(), threshold).into_val(&env),
+        )
+        .map_err(timelock_error)?;
         apply_signers(&env, &signers, threshold)
     }
 
@@ -153,7 +197,22 @@ impl RootAnchor {
         source_chain_id: u128,
         seq: u64,
     ) -> Result<(), RootAnchorError> {
-        require_admin(&env)?;
+        // #586: lowering the pin re-opens history, so it waits the delay; raising it only refuses more
+        // and stays instant (a brake that voids any pending lowering for the route).
+        let admin = admin_of(&env)?;
+        proofbridge_core::timelock::gate_unless(
+            &env,
+            &admin,
+            seq >= storage::get_latest_seq(&env, source_chain_id),
+            "reset_latest_seq",
+            (source_chain_id, seq).into_val(&env),
+            proofbridge_core::timelock::brake_key(
+                &env,
+                "reset_latest_seq",
+                source_chain_id.into_val(&env),
+            ),
+        )
+        .map_err(timelock_error)?;
         storage::set_latest_seq(&env, source_chain_id, seq);
         events::LatestSeqReset {
             chain_id: source_chain_id,
@@ -170,7 +229,21 @@ impl RootAnchor {
         source_chain_id: u128,
         delay: u64,
     ) -> Result<(), RootAnchorError> {
-        require_admin(&env)?;
+        // #586: a cut shortens the watchtower's window, so it waits the delay; a raise is a brake.
+        let admin = admin_of(&env)?;
+        proofbridge_core::timelock::gate_unless(
+            &env,
+            &admin,
+            delay >= storage::get_delay(&env, source_chain_id),
+            "set_anchor_delay",
+            (source_chain_id, delay).into_val(&env),
+            proofbridge_core::timelock::brake_key(
+                &env,
+                "set_anchor_delay",
+                source_chain_id.into_val(&env),
+            ),
+        )
+        .map_err(timelock_error)?;
         if delay > MAX_ANCHOR_DELAY {
             return Err(RootAnchorError::DelayTooLong);
         }
@@ -183,8 +256,18 @@ impl RootAnchor {
         Ok(())
     }
 
+    /// #586: switching the sequence check off waits the delay; switching it on is a brake.
     pub fn set_monotonic(env: Env, monotonic: bool) -> Result<(), RootAnchorError> {
-        require_admin(&env)?;
+        let admin = admin_of(&env)?;
+        proofbridge_core::timelock::gate_unless(
+            &env,
+            &admin,
+            monotonic,
+            "set_monotonic",
+            (monotonic,).into_val(&env),
+            proofbridge_core::timelock::brake_key(&env, "set_monotonic", ().into_val(&env)),
+        )
+        .map_err(timelock_error)?;
         storage::set_monotonic(&env, monotonic);
         events::MonotonicSet { monotonic }.publish(&env);
         Ok(())
@@ -348,6 +431,28 @@ impl RootAnchor {
 
     pub fn is_initialized(env: Env) -> bool {
         storage::is_initialized(&env)
+    }
+}
+
+/// The admin, without requiring its auth (a timelock gate decides whose auth a setter needs).
+fn admin_of(env: &Env) -> Result<Address, RootAnchorError> {
+    if !storage::is_initialized(env) {
+        return Err(RootAnchorError::NotInitialized);
+    }
+    Ok(storage::get_admin(env))
+}
+
+/// #586: the shared timelock's refusals as this contract's errors.
+fn timelock_error(f: proofbridge_core::escrow_ops::Fault) -> RootAnchorError {
+    use proofbridge_core::escrow_ops::Fault::*;
+    match f {
+        TimelockAlreadyActive => RootAnchorError::TimelockAlreadyActive,
+        TimelockAlreadyProposed => RootAnchorError::TimelockAlreadyProposed,
+        TimelockTooEarly => RootAnchorError::TimelockTooEarly,
+        TimelockBadArgs => RootAnchorError::TimelockBadArgs,
+        TimelockExpired => RootAnchorError::TimelockExpired,
+        TimelockCancelledByBrake => RootAnchorError::TimelockCancelledByBrake,
+        _ => RootAnchorError::TimelockNotProposed,
     }
 }
 

@@ -106,10 +106,10 @@ const DOMAIN_TYPEHASH_MIN = keccak256(
 const NAME_HASH = keccak256(Buffer.from("Proofbridge"));
 // keccak256("1")
 const VERSION_HASH = keccak256(Buffer.from("1"));
-// keccak256 of the 17-field order type string (test-vectors/order-hash-v2.json)
+// keccak256 of the 19-field order type string (test-vectors/order-hash-v2.json)
 const ORDER_TYPEHASH = keccak256(
   Buffer.from(
-    "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt,uint8 orderDecimals,uint8 adDecimals,uint256 deadline,bytes32 adSettlementSigner)"
+    "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt,uint8 orderDecimals,uint8 adDecimals,uint256 deadline,bytes32 adSettlementSigner,uint16 lpFeeBps,uint16 protocolFeeBps)"
   )
 );
 
@@ -187,6 +187,8 @@ function structHashOrder(params: {
   adDecimals: number;
   deadline: bigint;
   adSettlementSigner: string;
+  lpFeeBps: number;
+  protocolFeeBps: number;
 }): Buffer {
   const data = Buffer.concat([
     ORDER_TYPEHASH,
@@ -207,6 +209,8 @@ function structHashOrder(params: {
     abiEncodeUint256(BigInt(params.adDecimals)),
     abiEncodeUint256(params.deadline),
     abiEncodeAddress(params.adSettlementSigner),
+    abiEncodeUint256(BigInt(params.lpFeeBps)),
+    abiEncodeUint256(BigInt(params.protocolFeeBps)),
   ]);
   return keccak256(data);
 }
@@ -316,6 +320,8 @@ async function main() {
     adDecimals,
     deadline,
     adSettlementSigner: adSettlementSignerHex,
+    lpFeeBps: 0,
+    protocolFeeBps: 0,
   };
 
   const structHash = structHashOrder(orderParamsHex);
@@ -519,6 +525,62 @@ async function main() {
     root: regTree.root,
   };
 
+  // ----- The same order at the launch fee split (30 / 20): the fee rides in the hash -----
+  const FEE_LP = 30;
+  const FEE_PROTOCOL = 20;
+  const feeHash =
+    "0x" +
+    hashTypedDataV4(
+      structHashOrder({ ...orderParamsHex, lpFeeBps: FEE_LP, protocolFeeBps: FEE_PROTOCOL })
+    ).toString("hex");
+  const feeHashMod = modOrderHash(feeHash);
+  const feeOrderTree = await buildSideTree(feeHashMod.toString(), 1);
+  const feeNullifier = await bb.poseidon2Hash([leftField, feeHashMod]);
+  console.log("Generating fee-variant bridger proof...");
+  const { witness: feeWitness } = await noir.execute({
+    ...commonInput,
+    order_hash: feeHashMod.toString(),
+    ...leanInputs(feeOrderTree.merkleProof),
+    nullifier_hash: feeNullifier.toString(),
+    target_root: feeOrderTree.root,
+    leaf_domain: "1",
+  });
+  const feeProof = await honk.generateProof(feeWitness, { keccak: true });
+  fs.writeFileSync(path.join(OUTPUT_DIR, "proof_bridger_fees.bin"), Buffer.from(feeProof.proof));
+  console.log("Generating fee-variant SETTLED claim (domain 3)...");
+  const feeSettledTree = await buildSideTree(feeHashMod.toString(), 3);
+  const { witness: feeSettledWitness } = await noir.execute({
+    nullifier_hash: "0",
+    order_hash: feeHashMod.toString(),
+    target_root: feeSettledTree.root,
+    leaf_domain: "3",
+    secret: "0",
+    ...leanInputs(feeSettledTree.merkleProof),
+  });
+  const feeSettled = await honk.generateProof(feeSettledWitness, { keccak: true });
+  fs.writeFileSync(path.join(OUTPUT_DIR, "event_claim_3_fees.bin"), Buffer.from(feeSettled.proof));
+  console.log("Generating fee-variant CANCEL claim (domain 2)...");
+  const feeCancelTree = await buildSideTree(feeHashMod.toString(), 2);
+  const { witness: feeCancelWitness } = await noir.execute({
+    nullifier_hash: "0",
+    order_hash: feeHashMod.toString(),
+    target_root: feeCancelTree.root,
+    leaf_domain: "2",
+    secret: "0",
+    ...leanInputs(feeCancelTree.merkleProof),
+  });
+  const feeCancel = await honk.generateProof(feeCancelWitness, { keccak: true });
+  fs.writeFileSync(path.join(OUTPUT_DIR, "event_claim_2_fees.bin"), Buffer.from(feeCancel.proof));
+  const fees = {
+    lpFeeBps: FEE_LP,
+    protocolFeeBps: FEE_PROTOCOL,
+    orderHash: feeHash,
+    orderRoot: feeOrderTree.root,
+    bridgerNullifier: feeNullifier.toString(),
+    settledRoot: feeSettledTree.root,
+    cancelRoot: feeCancelTree.root,
+  };
+
   // Write test params (Stellar strkey addresses for display, used by Rust tests)
   const testParams = {
     secret: secretHex,
@@ -527,6 +589,7 @@ async function main() {
     adRoot,
     orderRoot,
     eventRoots,
+    fees,
     registration,
     bridgerNullifier: bridgerNullifier.toString(),
     adCreatorNullifier: adCreatorNullifier.toString(),
@@ -556,6 +619,8 @@ async function main() {
       adDecimals,
       deadline: deadline.toString(),
       adSettlementSigner,
+      lpFeeBps: 0,
+      protocolFeeBps: 0,
     },
     chainIds: {
       orderChainId: Number(orderChainId),

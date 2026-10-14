@@ -152,6 +152,8 @@ mod validation_tests {
             ad_decimals: 7,
             deadline: 4_102_444_800,
             ad_settlement_signer: make_bytes32(env, 0x77),
+            lp_fee_bps: 0,
+            protocol_fee_bps: 0,
         }
     }
 
@@ -483,7 +485,7 @@ mod order_lifecycle_tests {
     }
 }
 
-// 17-field EIP-712 order-hash parity (T-19, T-66) against the frozen 2.5b fixture; the same file
+// 19-field EIP-712 order-hash parity (T-19, T-66) against the frozen 2.5b fixture; the same file
 // drives the EVM and relayer suites.
 mod order_hash_parity {
     extern crate std;
@@ -545,6 +547,8 @@ mod order_hash_parity {
                 ad_decimals: o["adDecimals"].as_u64().unwrap() as u32,
                 deadline: s("deadline").parse::<u64>().unwrap(),
                 ad_settlement_signer: bn32(&env, s("adSettlementSigner")),
+                lp_fee_bps: o["lpFeeBps"].as_u64().unwrap() as u32,
+                protocol_fee_bps: o["protocolFeeBps"].as_u64().unwrap() as u32,
             };
             let order_chain_id = s("orderChainId").parse::<u128>().unwrap();
             let order_portal = bn32(&env, s("orderPortal"));
@@ -630,6 +634,13 @@ fn fault_codes_never_move() {
             DisputeAlreadyResponded => 92,
             DisputeZeroResponse => 92,
             DisputeAlreadyRuled => 92,
+            TimelockAlreadyActive => 108,
+            TimelockAlreadyProposed => 109,
+            TimelockNotProposed => 110,
+            TimelockTooEarly => 111,
+            TimelockBadArgs => 112,
+            TimelockExpired => 114,
+            TimelockCancelledByBrake => 115,
         }
     }
     // `Fault::ALL` is generated with the enum, so it names every variant.

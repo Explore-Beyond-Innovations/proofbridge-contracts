@@ -188,6 +188,8 @@ fn params(f: &Fixture) -> OrderParams {
         ad_decimals: 7,
         deadline: 4_102_444_800,
         ad_settlement_signer: f.signer.clone(),
+        lp_fee_bps: 0,
+        protocol_fee_bps: 0,
     }
 }
 
@@ -1000,15 +1002,16 @@ fn bad_args_fail_closed() {
 }
 
 /// F4a: the decoder reads only the keys the policy needs, so a shape wider
-/// than the 15-key order passes unchanged.
+/// than the order (#586 grew it to 17 keys) passes unchanged.
 #[test]
 fn wider_order_shape_decodes() {
     let f = fixture();
     let mut m = lock_map(&f);
+    let base = m.len();
     for k in ["extra_a", "extra_b"] {
         m.set(Symbol::new(&f.env, k), b32(&f.env, 0x33).into_val(&f.env));
     }
-    assert_eq!(m.len(), 17);
+    assert_eq!(m.len(), base + 2);
     agent_check(
         &f,
         &lock_ctx(
@@ -1402,6 +1405,8 @@ fn escrow_params(e: &Escrow, amount: u128) -> OrderParams {
         // #453: inside the escrow's 7-day order window.
         deadline: T0 + 86_400,
         ad_settlement_signer: address_to_bytes32(&e.env, &e.account),
+        lp_fee_bps: 0,
+        protocol_fee_bps: 0,
     }
 }
 

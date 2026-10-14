@@ -305,7 +305,7 @@ contract ProofBridge is Test {
     }
 
     function getTypedHash(Order memory order) public returns (bytes32 typedHash) {
-        string[] memory inputs = new string[](20);
+        string[] memory inputs = new string[](22);
 
         inputs[0] = "npx";
         inputs[1] = "tsx";
@@ -327,6 +327,8 @@ contract ProofBridge is Test {
         inputs[17] = vm.toString(uint256(order.adDecimals));
         inputs[18] = vm.toString(order.deadline);
         inputs[19] = vm.toString(order.adSettlementSigner);
+        inputs[20] = "0"; // lpFeeBps (#586): this suite's orders are fee-free
+        inputs[21] = "0"; // protocolFeeBps
 
         bytes memory result = vm.ffi(inputs);
 

@@ -181,6 +181,24 @@ pub enum AdManagerError {
     SlotNotUsable = 88,
     /// Plan 12 C: no re-pin consent for this order from its current pin.
     NoRepin = 89,
+    /// #586: a fee above 1%, or a protocol fee with no pool to pay it to.
+    InvalidFee = 90,
+    /// #586: the timelock is already active.
+    TimelockAlreadyActive = 91,
+    /// #586: this exact call is already proposed.
+    TimelockAlreadyProposed = 92,
+    /// #586: no pending proposal for this exact call.
+    TimelockNotProposed = 93,
+    /// #586: the proposal's 24 hours have not passed.
+    TimelockTooEarly = 94,
+    /// #586: a proposal's argument bytes are not the XDR of an argument list.
+    TimelockBadArgs = 95,
+    /// #586: the order's fee (fixed at the bridger's deposit) is not the ad-manager's live fee.
+    FeeMismatch = 96,
+    /// #586: the proposal's 14-day window to run has passed.
+    TimelockExpired = 97,
+    /// #586: a brake on what the proposal would re-enable was pulled after it was proposed.
+    TimelockCancelledByBrake = 98,
 }
 
 /// The shared escrow code reports an opaque reason; this is where it becomes this contract's own
@@ -227,6 +245,13 @@ impl From<proofbridge_core::escrow_ops::Fault> for AdManagerError {
             DecimalOverflow => AdManagerError::DecimalOverflow,
             InvalidAccountAddress => AdManagerError::InvalidAccountAddress,
             TransferShort => AdManagerError::TransferShort,
+            TimelockAlreadyActive => AdManagerError::TimelockAlreadyActive,
+            TimelockAlreadyProposed => AdManagerError::TimelockAlreadyProposed,
+            TimelockNotProposed => AdManagerError::TimelockNotProposed,
+            TimelockTooEarly => AdManagerError::TimelockTooEarly,
+            TimelockBadArgs => AdManagerError::TimelockBadArgs,
+            TimelockExpired => AdManagerError::TimelockExpired,
+            TimelockCancelledByBrake => AdManagerError::TimelockCancelledByBrake,
         }
     }
 }

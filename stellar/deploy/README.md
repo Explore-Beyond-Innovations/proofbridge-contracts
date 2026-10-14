@@ -19,7 +19,7 @@ Node CLI wrapping the `stellar` command line. Emits a
 
 Deploys (or reuses) Verifier, MerkleManager, native XLM SAC
 (`w_native_token`), AdManager, OrderPortal. Calls `initialize` on each
-and wires `set_manager` on MerkleManager for both AdManager + OrderPortal.
+and wires `set_escrow_appender` on MerkleManager for both AdManager + OrderPortal.
 The Registrar is deployed but not made a manager: that is a step of proof
 registration's T3 flip (`set_manager(registrar, true)`).
 
@@ -89,6 +89,48 @@ A one-off check (review 50-4): each pre-signed retirement in the relayer vault's
 registry as a simulated `set_valid_until` and listed as `current`, `stale-format` (signed under an
 older RetireKey message; collect it again), `no-slot` or `already-shorter`. Exits 1 when any row is
 stale or could not be checked.
+
+### `timelock status` / `timelock activate --confirm` / `timelock {propose|execute|cancel}`
+
+The 24-hour admin delay (#586) on the ad-manager, the order-portal, the merkle-manager, the
+dispute-manager, the root-anchor and the bls-key-registry. Until `activate`, their setters are the
+admin's and instant: that setup window is how `deploy` and `link` configure a fresh chain. `timelock
+activate --confirm` closes it for good on every one of them (the manifest records
+`timelock.activatedAt` once all are on). From then on a change is proposed by the admin, waits 24 hours,
+and is executed by anyone with exactly the proposed arguments; the admin may cancel it first. Pause,
+unpause and the admin handover stay instant.
+
+- **Grants wait, revocations do not.** On the root-anchor and the bls-key-registry only the setters
+  that add trust are delayed (a new signer set, a shorter anchor delay, a lower sequence pin, switching
+  the sequence check off, the position guards, enabling proof registration, an upgrade). Revoking an
+  anchor, raising a delay or a pin, switching the check on and disabling proof registration stay
+  instant. On the merkle-manager, removing a non-escrow appender (`set_manager(x, false)`) is instant;
+  the escrows are escrow appenders, added and removed only through the delayed `set_escrow_appender`.
+- **Unwiring a root verifier is instant.** `unset_root_verifier(chain_id)` on either escrow unwires
+  that chain's root verifier at once, so its unlocks fail closed; wiring one again waits the delay.
+- **A brake voids what would undo it.** An instant revocation voids every pending proposal that would
+  reverse it. The voided proposal still holds its id: cancel it, then propose again.
+- **Proposals expire.** A proposal can run for 14 days after its 24 hours are up, then never; propose
+  it again. An admin handover voids every proposal the previous admin made.
+- **Activation is checked.** Outside `local`, `activate` refuses a manifest missing any of the six
+  contracts before sending anything. If any contract fails to activate, the command exits 1 naming
+  each one, and does not record the activation. It prints `status` at the end either way.
+- **A redeploy into an activated chain activates what it adds.** A contract `deploy` deploys into a
+  chain whose manifest records the activation is wired while still in setup, then activated in the
+  same run. `status` flags any contract still in setup on an activated chain.
+
+`deploy` and `link` follow the delay on their own: on a contract whose delay is on, a call they would
+have sent is proposed instead (or, when the signer is not the admin, the `propose_action` is described),
+the command exits 2, and the same command re-run after 24 hours executes it. The fee pool and the fee
+split are proposed in the same run, so one 24-hour round sets both. For a change neither makes, use the
+commands directly; `--args` names each argument, and the CLI encodes the list the
+contract keys the proposal by:
+
+```bash
+stellar-deploy timelock propose --contract AdManager --fn set_fee_bps --args '{"lp_bps": 30, "protocol_bps": 20}'
+stellar-deploy timelock execute --contract AdManager --fn set_fee_bps --args '{"lp_bps": 30, "protocol_bps": 20}'   # 24 hours later, any key
+stellar-deploy timelock cancel  --contract AdManager --fn set_fee_bps --args '{"lp_bps": 30, "protocol_bps": 20}'   # admin, before then
+```
 
 ## Moving to a new key registry
 
@@ -161,6 +203,10 @@ orchestrator.
 | `GIT_COMMIT` | `unknown` | `meta.commit` |
 | `DISPUTE_ARBITER` | admin (`local` only) | The only account that may rule a dispute (2.3g). Must not be the admin outside `local`: its whole containment is that it holds no escrow powers |
 | `DISPUTE_FEE_POOL` | admin (`local` only) | Where forfeited bonds go. Unset, every forfeited bond returns to the filer |
+| `PROTOCOL_FEE_POOL` | admin (`local` only) | #586: where the ad-manager pays the protocol fee: a Stellar account (G…), paid like a payout recipient. Its own setting, even when it names the same address as `DISPUTE_FEE_POOL` |
+| `LP_FEE_BPS` | `30` (`local` only) | #586: the maker's share of the bridge fee, kept in the ad, in bps (at most 100) |
+| `PROTOCOL_FEE_BPS` | `20` (`local` only) | #586: the protocol's share, paid to the pool, in bps (at most 100; above 0 needs the pool) |
+| `DISPUTE_TOKEN_BONDS` | unset | #586 (`link`): `{"<pairKey>": {"minBond": "<base units>", "bondBps": <0..500>}}` — routes whose dispute bond is `max(minBond, amount × bondBps / 10,000)` in the order's own token. A route not named keeps `DISPUTE_BOND_FLOOR` in native |
 | `DISPUTE_CHALLENGE_PERIOD_S` | `3600` (`local` only) | How long the arbiter has to rule. A floor, never a licence to finish early — no dispute completes before the order's own `deadline + buffer` |
 | `DISPUTE_BOND_FLOOR` | `1` (`local` only) | The route's dispute bond, flat for every order, in wrapped-native base units. Must be ≥ 1; the contract rejects zero. No default outside `local`, and there it must be at least `10000000` (1 XLM): the floor is the whole bond, so a dust floor would make disputes free. A sanity bound, not the tuned value (the operating rules size each route) |
 | `DISPUTE_BOND_BPS` | — | Removed: the bond is the flat floor. `link` refuses to run while it is still set |

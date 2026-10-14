@@ -153,7 +153,9 @@ contract AgentPolicyRealEscrowTest is AgentPolicyBase {
             orderDecimals: 18,
             adDecimals: 18,
             deadline: block.timestamp + 1 days,
-            adSettlementSigner: settlementSigner
+            adSettlementSigner: settlementSigner,
+            lpFeeBps: 0,
+            protocolFeeBps: 0
         });
     }
 
@@ -177,7 +179,9 @@ contract AgentPolicyRealEscrowTest is AgentPolicyBase {
                 orderDecimals: p.orderDecimals,
                 adDecimals: p.adDecimals,
                 deadline: p.deadline,
-                adSettlementSigner: p.adSettlementSigner
+                adSettlementSigner: p.adSettlementSigner,
+                lpFeeBps: p.lpFeeBps,
+                protocolFeeBps: p.protocolFeeBps
             })
         );
     }

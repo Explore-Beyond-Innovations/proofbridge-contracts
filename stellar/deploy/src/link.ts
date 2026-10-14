@@ -4,9 +4,20 @@ import {
   type ChainDeploymentManifest,
   type RouteTiming,
   type DisputeParams,
+  type TokenBondConfig,
+  TokenBondConfigSchema,
   duplicatePairKeys,
 } from "@proofbridge/deployment-manifest";
-import { Acting, assertStellarNetworkForEnv, getAddress, invokeContract, readView, type DescribedCall } from "./stellar-cli.js";
+import {
+  Acting,
+  assertStellarNetworkForEnv,
+  getAddress,
+  invokeContract,
+  readView,
+  type DescribedCall,
+  type PendingCall,
+} from "./stellar-cli.js";
+import { timelockedOf } from "./timelock.js";
 import { assertOneRegistry, linkCheckStep, verifierRegistry } from "./one-registry.js";
 import { stellarEscrowChain } from "./escrow-chain.js";
 import { adminsOf, foreignAdmins } from "./handover.js";
@@ -36,6 +47,8 @@ export interface StellarLinkResult {
   routeTxs: number;
   /** Calls the source account could not make because the admin was handed over; empty when all sent. */
   described: DescribedCall[];
+  /** #586: calls under the 24-hour delay, proposed by this run or still waiting; re-run after them. */
+  pending: PendingCall[];
 }
 
 /** Wires set_chain + set_token_route on this chain's AdManager + OrderPortal from the peer manifest. Idempotent. */
@@ -70,6 +83,7 @@ export async function link(
   // Every clock and dispute param is read before anything is sent: a missing one refuses the link up front.
   routeTimingFromEnv(local.meta.env);
   if (local.contracts.disputeManager) disputeParamsFromEnv(local.meta.env);
+  const tokenBonds = tokenBondsFromEnv();
   assertPeerCompatible(local, peer);
 
   const registryOf = (v: string): string => readView(v, "registry") as string;
@@ -79,7 +93,8 @@ export async function link(
   // when its value is on chain — already there, or sent by this run — so a described call leaves
   // the section it would have set as it was.
   const held = adminsOf(local.contracts, ["adManager", "orderPortal", "rootAnchor", "disputeManager"]);
-  const acting = new Acting(foreignAdmins(getAddress(), held, "stellar-link"), "link");
+  // #586: on a contract whose delay is on, every call below is proposed, and sent by a later run.
+  const acting = new Acting(foreignAdmins(getAddress(), held, "stellar-link"), "link", timelockedOf(local.contracts));
   const record = async () => writeManifest(localPath, local);
 
   // ── Chain-level linking ────────────────────────────────────────────
@@ -180,8 +195,10 @@ export async function link(
     if (onChain) {
       console.log(`  [skip] RootAnchor.set_anchor_delay(${peerChainId}) already ${delay}s`);
     } else {
+      // #586: a raise only lengthens the watchtower's window, so it is instant even under the delay.
       onChain = acting.call(local.contracts.rootAnchor.address, "RootAnchor", "set_anchor_delay",
-        ["--source_chain_id", peerChainId, "--delay", delay], `RootAnchor.set_anchor_delay(${peerChainId}, ${delay}s)`);
+        ["--source_chain_id", peerChainId, "--delay", delay], `RootAnchor.set_anchor_delay(${peerChainId}, ${delay}s)`,
+        BigInt(delay) > BigInt(cur.replace(/"/g, "") || "0"));
       if (onChain) chainTxs++;
     }
     if (onChain && local.rootAnchorConfig) {
@@ -384,13 +401,41 @@ export async function link(
       continue;
     }
 
-    if (acting.call(local.contracts.adManager.address, "AdManager", "set_token_route",
+    // Check-first (#586): under the delay a resend would propose again every run.
+    const routed = (escrow: string) =>
+      String(readView(escrow, "token_route", ["--token", stripHex(localTok.addressBytes32), "--peer_chain_id", peerChainId]) ?? "").toLowerCase() ===
+      stripHex(peerTok.addressBytes32).toLowerCase();
+    if (routed(local.contracts.adManager.address)) console.log(`  [skip] AdManager route "${localTok.pairKey}" already set`);
+    else if (acting.call(local.contracts.adManager.address, "AdManager", "set_token_route",
       ["--ad_token", stripHex(localTok.addressBytes32), "--order_token", stripHex(peerTok.addressBytes32), "--order_chain_id", peerChainId],
       `AdManager.set_token_route("${localTok.pairKey}")`)) routeTxs++;
-    if (acting.call(local.contracts.orderPortal.address, "OrderPortal", "set_token_route",
+    if (routed(local.contracts.orderPortal.address)) console.log(`  [skip] OrderPortal route "${localTok.pairKey}" already set`);
+    else if (acting.call(local.contracts.orderPortal.address, "OrderPortal", "set_token_route",
       ["--order_token", stripHex(localTok.addressBytes32), "--ad_chain_id", peerChainId, "--ad_token", stripHex(peerTok.addressBytes32)],
       `OrderPortal.set_token_route("${localTok.pairKey}")`)) routeTxs++;
     console.log(`  [link] route "${localTok.pairKey}": ${localTok.symbol} ↔ ${peerTok.symbol}`);
+
+    // #586: the route's dispute bond in the order's own token, when DISPUTE_TOKEN_BONDS names this
+    // pair. The dispute module keys a native route by the wrapped native token's contract.
+    const bond = tokenBonds[localTok.pairKey];
+    if (bond && local.contracts.disputeManager) {
+      const token = localTok.kind === "NATIVE" ? local.contracts.wNativeToken.address : localTok.address;
+      const cur = readView(local.contracts.disputeManager.address, "bond_config", ["--token", token, "--peer_chain_id", peerChainId]) as
+        | { min_bond?: string | number; bond_bps?: number }
+        | null;
+      let onChain = cur != null && BigInt(cur.min_bond ?? 0) === BigInt(bond.minBond) && Number(cur.bond_bps) === bond.bondBps;
+      if (onChain) console.log(`  [skip] DisputeManager.set_bond_config("${localTok.pairKey}") already set`);
+      else {
+        onChain = acting.call(local.contracts.disputeManager.address, "DisputeManager", "set_bond_config",
+          ["--token", token, "--peer_chain_id", peerChainId, "--config", JSON.stringify({ min_bond: bond.minBond, bond_bps: bond.bondBps })],
+          `DisputeManager.set_bond_config("${localTok.pairKey}", min_bond=${bond.minBond} bond_bps=${bond.bondBps})`);
+        if (onChain) routeTxs++;
+      }
+      if (onChain) {
+        (local.tokenBonds[peerChainId] ??= {})[token] = bond;
+        await record();
+      }
+    }
   }
 
   console.log(
@@ -403,7 +448,42 @@ export async function link(
     chainTxs,
     routeTxs,
     described: acting.described,
+    pending: acting.pending,
   };
+}
+
+/** The largest route bond ratio the DisputeManager accepts, in bps (5%): the manifest schema's bound. */
+export const MAX_BOND_BPS = TokenBondConfigSchema.shape.bondBps.maxValue!;
+
+/**
+ * #586: `DISPUTE_TOKEN_BONDS`, a JSON object `{ "<pairKey>": { "minBond": "<base units>", "bondBps": <n> } }`:
+ * the routes whose dispute bond is priced in the order's own token. Unset or `{}` = every route keeps
+ * the flat native floor. Checked here, before anything is sent, by the manifest's own schema.
+ */
+export function tokenBondsFromEnv(vars: Record<string, string | undefined> = process.env): Record<string, TokenBondConfig> {
+  const raw = vars.DISPUTE_TOKEN_BONDS;
+  if (raw === undefined || raw.trim() === "") return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`link: DISPUTE_TOKEN_BONDS is not JSON: ${raw}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("link: DISPUTE_TOKEN_BONDS must be an object keyed by pairKey");
+  }
+  const out: Record<string, TokenBondConfig> = {};
+  for (const [pairKey, v] of Object.entries(parsed as Record<string, unknown>)) {
+    const r = TokenBondConfigSchema.safeParse(v);
+    if (!r.success) {
+      const why = r.error.issues.map((i) => `${i.path.join(".") || "entry"}: ${i.message}`).join("; ");
+      throw new Error(
+        `link: DISPUTE_TOKEN_BONDS["${pairKey}"] is invalid (${why}); minBond is whole base units, at least 1, and bondBps a whole number 0..${MAX_BOND_BPS}`,
+      );
+    }
+    out[pairKey] = r.data;
+  }
+  return out;
 }
 
 export type { ChainDeploymentManifest };

@@ -18,4 +18,20 @@ pub enum MerkleError {
     // 5–9 retired (four never-returned MMR errors and `ContractPaused` with the pause); the
     // numbers stay unused so no surviving code moves.
     NotPendingAdmin = 10,
+    /// #586: the timelock is already active.
+    TimelockAlreadyActive = 11,
+    /// #586: this exact call is already proposed.
+    TimelockAlreadyProposed = 12,
+    /// #586: no pending proposal for this exact call.
+    TimelockNotProposed = 13,
+    /// #586: the proposal's 24 hours have not passed.
+    TimelockTooEarly = 14,
+    /// #586: a proposal's argument bytes are not the XDR of an argument list.
+    TimelockBadArgs = 15,
+    /// #586: the proposal's 14-day window to run has passed.
+    TimelockExpired = 16,
+    /// #586: a brake on what the proposal would re-enable was pulled after it was proposed.
+    TimelockCancelledByBrake = 17,
+    /// #586: an escrow appender changes only through `set_escrow_appender`, under the delay.
+    EscrowAppender = 18,
 }

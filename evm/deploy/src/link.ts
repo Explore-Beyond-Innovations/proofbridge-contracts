@@ -3,9 +3,11 @@ import {
   type ChainDeploymentManifest,
   type RouteTiming,
   type DisputeParams,
+  type TokenBondConfig,
+  TokenBondConfigSchema,
   duplicatePairKeys,
 } from "@proofbridge/deployment-manifest";
-import { Acting, adminsOf, connect, foreignAdmins, requireEnv, type DescribedCall } from "./common.js";
+import { Acting, adminsOf, connect, foreignAdmins, requireEnv, timelockedOf, type DescribedCall, type PendingCall } from "./common.js";
 import { attachContract } from "./artifacts.js";
 import { allPeers, assertOneRegistry, checkPeers, verifierRegistry, type EscrowWiring } from "./one-registry.js";
 import { assertSettleBondPairOnChain } from "./settle-bond-pair.js";
@@ -35,6 +37,8 @@ export interface LinkResult {
   routeTxs: number;
   /** Calls the signer could not make because the admin was handed over; empty when all were sent. */
   described: DescribedCall[];
+  /** #586: calls under the 24-hour delay, proposed by this run or still waiting; re-run after them. */
+  pending: PendingCall[];
 }
 
 /** Wires setPeerEscrow + setTokenRoute on this chain's AdManager + OrderPortal from the peer manifest. Idempotent. */
@@ -80,6 +84,7 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
   // Every clock and dispute param is read before anything is sent: a missing one refuses the link up front.
   routeTimingFromEnv(local.meta.env);
   if (local.contracts.disputeManager) disputeParamsFromEnv(local.meta.env);
+  const tokenBonds = tokenBondsFromEnv();
   assertPeerCompatible(local, peer);
   // The module link wires below is only usable if the escrow calls `settleBond` under the selector
   // the module dispatches: both from one build, read from the chain before anything is sent.
@@ -106,7 +111,9 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     ...(local.contracts.disputeManager ? [{ label: "DisputeManager", artifact: "DisputeManager", address: local.contracts.disputeManager.address }] : []),
   ];
   const held = await adminsOf(toConfigure, (a, f, n) => attachContract(a, f, n, signer));
-  const acting = new Acting(foreignAdmins(me, held, "evm-link"), nonces, "link");
+  // #586: on a contract whose delay is on, every call below is proposed, and sent by a later run.
+  const timelocked = await timelockedOf(toConfigure, (a, f, n) => attachContract(a, f, n, signer));
+  const acting = new Acting(foreignAdmins(me, held, "evm-link"), nonces, "link", timelocked);
   // A section of the manifest is written only when its value is on chain — already there, or
   // sent by this run. A described call was not made, so the section it would have set stays as
   // it was: what the manifest says was set has to have been.
@@ -211,7 +218,8 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     if (onChain) {
       console.log(`  [skip] RootAnchor.setAnchorDelay(${peerChainId}) already ${delay}s`);
     } else {
-      onChain = await acting.call(anchor, "RootAnchor", "setAnchorDelay", [peerChainId, delay], `RootAnchor.setAnchorDelay(${peerChainId}, ${delay}s)`);
+      // #586: a raise only lengthens the watchtower's window, so it is instant even under the delay.
+      onChain = await acting.call(anchor, "RootAnchor", "setAnchorDelay", [peerChainId, delay], `RootAnchor.setAnchorDelay(${peerChainId}, ${delay}s)`, delay > cur);
       if (onChain) chainTxs++;
     }
     if (onChain && local.rootAnchorConfig) {
@@ -390,6 +398,24 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     console.log(
       `  [link] route "${localTok.pairKey}": ${localTok.symbol} ↔ ${peerTok.symbol}`,
     );
+
+    // #586: the route's dispute bond in the order's own token, when DISPUTE_TOKEN_BONDS names this pair.
+    const bond = tokenBonds[localTok.pairKey];
+    if (bond && local.contracts.disputeManager) {
+      const dm = attachContract(local.contracts.disputeManager.address, "DisputeManager", "DisputeManager", signer);
+      const cur = await dm.getFunction("bondConfig")(localTok.address, peerChainId);
+      let onChain = BigInt(cur[0]) === BigInt(bond.minBond) && Number(cur[1]) === bond.bondBps;
+      if (onChain) console.log(`  [skip] DisputeManager.setBondConfig("${localTok.pairKey}") already set`);
+      else {
+        onChain = await acting.call(dm, "DisputeManager", "setBondConfig", [localTok.address, peerChainId, [bond.minBond, bond.bondBps]],
+          `DisputeManager.setBondConfig("${localTok.pairKey}", minBond=${bond.minBond} bondBps=${bond.bondBps})`);
+        if (onChain) routeTxs++;
+      }
+      if (onChain) {
+        (local.tokenBonds[peerChainId.toString()] ??= {})[localTok.address] = bond;
+        await record();
+      }
+    }
   }
 
   console.log(
@@ -402,7 +428,42 @@ export async function link(opts: LinkOptions): Promise<LinkResult> {
     chainTxs,
     routeTxs,
     described: acting.described,
+    pending: acting.pending,
   };
+}
+
+/** The largest route bond ratio the DisputeManager accepts, in bps (5%): the manifest schema's bound. */
+export const MAX_BOND_BPS = TokenBondConfigSchema.shape.bondBps.maxValue!;
+
+/**
+ * #586: `DISPUTE_TOKEN_BONDS`, a JSON object `{ "<pairKey>": { "minBond": "<base units>", "bondBps": <n> } }`:
+ * the routes whose dispute bond is priced in the order's own token. Unset or `{}` = every route keeps
+ * the flat native floor. Checked here, before anything is sent, by the manifest's own schema.
+ */
+export function tokenBondsFromEnv(vars: Record<string, string | undefined> = process.env): Record<string, TokenBondConfig> {
+  const raw = vars.DISPUTE_TOKEN_BONDS;
+  if (raw === undefined || raw.trim() === "") return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`link: DISPUTE_TOKEN_BONDS is not JSON: ${raw}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("link: DISPUTE_TOKEN_BONDS must be an object keyed by pairKey");
+  }
+  const out: Record<string, TokenBondConfig> = {};
+  for (const [pairKey, v] of Object.entries(parsed as Record<string, unknown>)) {
+    const r = TokenBondConfigSchema.safeParse(v);
+    if (!r.success) {
+      const why = r.error.issues.map((i) => `${i.path.join(".") || "entry"}: ${i.message}`).join("; ");
+      throw new Error(
+        `link: DISPUTE_TOKEN_BONDS["${pairKey}"] is invalid (${why}); minBond is whole base units, at least 1, and bondBps a whole number 0..${MAX_BOND_BPS}`,
+      );
+    }
+    out[pairKey] = r.data;
+  }
+  return out;
 }
 
 /** The route clocks from env: local deploys get the smallest legal set; elsewhere every var is required. */

@@ -13,9 +13,13 @@ import {
 import { namedOutsideLocal, requireDeployEnv, requireStellarChainId } from "./deploy-env.js";
 import { assertReusedVk, sha256Hex, vkRecord } from "./vk.js";
 import { WASM_MISMATCH_FLAG, WASM_MISMATCH_OVERRIDE, assertReusableWasm, wasmMismatchOverride, wasmSha256 } from "./wasm-reuse.js";
+import { StrKey } from "@stellar/stellar-sdk";
+import { FeeConfigSchema, type FeeConfig } from "@proofbridge/deployment-manifest";
+import { activateDeployed, timelockedOf } from "./timelock.js";
 import {
   Acting,
   type DescribedCall,
+  type PendingCall,
   deployContract,
   deploySAC,
   assertStellarNetworkForEnv,
@@ -53,6 +57,10 @@ export interface DeployStellarCoreResult {
   manifestPath: string;
   /** Admin-only calls the source account could not make (the admin was handed over); empty when all sent. */
   described: DescribedCall[];
+  /** #586: setters under the 24-hour delay, proposed by this run or still waiting; re-run after them. */
+  pending: PendingCall[];
+  /** #586: contracts this run deployed into an activated chain and activated before returning. */
+  activatedNow: string[];
   chainId: bigint;
   adminStrkey: string;
   contracts: {
@@ -114,6 +122,9 @@ export async function deployCore(
       "deploy-core: DISPUTE_ARBITER must not be the admin — the arbiter's containment is that it holds no escrow powers",
     );
   }
+  // #586: the bridge fee. Local gets the launch split with the source account as the pool; elsewhere
+  // every value is explicit. The pool is an account (G...), paid like a payout recipient.
+  const fee = feeConfigFromEnv(env, adminStrkey);
   // The bundle's VK; outside local a missing file refuses, so the manifest (and link's A-6 compare) has its hash.
   const vkRec = vkRecord(vk, env);
   // D3: a reused key registry must have been initialized for this environment.
@@ -159,7 +170,12 @@ export async function deployCore(
   // over is described, not sent; what this run deploys has the source account as admin and is
   // wired now (#424).
   const heldAdmins: HeldAdmin[] = existing ? adminsOf(existing.contracts) : [];
-  const acting = new Acting(foreignAdmins(adminStrkey, heldAdmins, "stellar-deploy"), "wire");
+  // #586: reused contracts whose 24-hour delay is on: their setters are proposed, not sent.
+  const acting = new Acting(
+    foreignAdmins(adminStrkey, heldAdmins, "stellar-deploy"),
+    "wire",
+    existing ? timelockedOf(existing.contracts) : [],
+  );
   const deployedNow: string[] = [];
 
   // C-27: each contract this run creates is written down as it lands, so a run that fails halfway
@@ -390,14 +406,36 @@ export async function deployCore(
     }
   }
 
-  // ── MerkleManager managers: the escrows (check first, then set) ─────
-  // The Registrar is deployed but made a manager only at proof registration's T3 flip.
+  // ── the bridge fee (#586) ─────────────────────────────────────────
+  // The pool first: the contract refuses a protocol fee with no pool to pay it to. Under the delay
+  // both are proposed in the same run and executed in this order on the re-run, so one 24-hour round
+  // sets both. Recorded only when the chain holds it.
+  let feeRecorded: FeeConfig | undefined = existing?.feeConfig;
+  {
+    const cur = readView(adManager, "fee_config") as { pool?: string | null; lp_bps?: number; protocol_bps?: number } | null;
+    const poolHex = Buffer.from(StrKey.decodeEd25519PublicKey(fee.pool)).toString("hex");
+    let poolOnChain = (cur?.pool ?? "").toLowerCase() === poolHex;
+    if (poolOnChain) console.log(`  [skip] AdManager.set_protocol_fee_pool already ${fee.pool}`);
+    else poolOnChain = acting.call(adManager, "AdManager", "set_protocol_fee_pool", ["--pool", poolHex], `AdManager.set_protocol_fee_pool(${fee.pool})`);
+    let bpsOnChain = Number(cur?.lp_bps ?? 0) === fee.lpBps && Number(cur?.protocol_bps ?? 0) === fee.protocolBps;
+    if (bpsOnChain) console.log(`  [skip] AdManager.set_fee_bps already ${fee.lpBps} / ${fee.protocolBps}`);
+    else {
+      bpsOnChain = acting.call(adManager, "AdManager", "set_fee_bps", ["--lp_bps", String(fee.lpBps), "--protocol_bps", String(fee.protocolBps)],
+        `AdManager.set_fee_bps(lp=${fee.lpBps}, protocol=${fee.protocolBps})`);
+    }
+    if (poolOnChain && bpsOnChain) feeRecorded = fee;
+  }
+
+  // ── MerkleManager appenders: the escrows (check first, then set) ─────
+  // As escrow appenders, which only the delayed `set_escrow_appender` can remove (#586). The
+  // Registrar is deployed but made a manager only at proof registration's T3 flip.
   for (const manager of appendersAtDeploy({ adManager, orderPortal, registrar })) {
-    if (readView(merkleManager, "is_manager", ["--addr", manager]) === true) {
-      console.log(`  [skip] MerkleManager.set_manager(${manager}) already true`);
+    if (readView(merkleManager, "is_escrow_appender", ["--addr", manager]) === true) {
+      console.log(`  [skip] MerkleManager.set_escrow_appender(${manager}) already true`);
       continue;
     }
-    acting.call(merkleManager, "MerkleManager", "set_manager", ["--manager", manager, "--status", "true"], `MerkleManager.set_manager(${manager}, true)`);
+    acting.call(merkleManager, "MerkleManager", "set_escrow_appender", ["--escrow", manager, "--enabled", "true"],
+      `MerkleManager.set_escrow_appender(${manager}, true)`);
   }
 
   // ── agent account wasm (2.1, C-4) ───────────────────────────────
@@ -416,6 +454,15 @@ export async function deployCore(
     agentAccountWasmHash = uploaded;
     console.log(`  [install] agent-account wasm: ${agentAccountWasmHash}`);
   }
+
+  // #586: a contract this run added to a chain already activated would otherwise keep instant
+  // setters behind an activated manifest. It is wired above while still in setup, then activated
+  // here, in the same run; later wiring of it (link) goes under the delay like the rest.
+  const ids: Record<string, string> = { AdManager: adManager, OrderPortal: orderPortal, MerkleManager: merkleManager,
+    DisputeManager: disputeManager, RootAnchor: rootAnchor, BLSKeyRegistry: blsKeyRegistry };
+  const activatedNow = existing?.timelock
+    ? activateDeployed(Object.fromEntries(deployedNow.filter((l) => l in ids).map((l) => [l, ids[l]!])))
+    : [];
 
   // ── manifest ───────────────────────────────────────────────────
   const manifest = buildManifest({
@@ -454,6 +501,9 @@ export async function deployCore(
     // Who holds admin, from what the chain answered for the reused contracts; the source account
     // for a fresh deploy. `handover` moves it.
     admin: adminBlockFromChain(existing?.admin, heldAdmins, adminStrkey, "stellar-deploy"),
+    feeConfig: feeRecorded,
+    tokenBonds: existing?.tokenBonds,
+    timelock: existing?.timelock,
     // Preserve tokens already in the manifest (test / curated). XLM entry is (re)set by deploy-test-tokens.
     tokens: (existing?.tokens.map((t) => ({
       pairKey: t.pairKey,
@@ -484,6 +534,8 @@ export async function deployCore(
   return {
     manifestPath: outPath,
     described: acting.described,
+    pending: acting.pending,
+    activatedNow,
     chainId,
     adminStrkey,
     contracts: {
@@ -504,4 +556,36 @@ export async function deployCore(
 /** Who the deploy makes a MerkleManager manager: the escrows. The Registrar waits for the T3 flip. */
 export function appendersAtDeploy(c: { adManager: string; orderPortal: string; registrar: string }): string[] {
   return [c.adManager, c.orderPortal];
+}
+
+/** The largest fee the AdManager accepts, per side, in bps (1%): the manifest schema's bound. */
+export const MAX_FEE_BPS = FeeConfigSchema.shape.lpBps.maxValue!;
+
+/**
+ * #586: the bridge fee from env. `local` defaults to the launch split (30 / 20) paid to the deployer;
+ * anywhere else `PROTOCOL_FEE_POOL`, `LP_FEE_BPS` and `PROTOCOL_FEE_BPS` are all required. Checked by
+ * the manifest's own schema, the same bounds the contract enforces.
+ */
+export function feeConfigFromEnv(env: string, localPool: string, vars: Record<string, string | undefined> = process.env): FeeConfig {
+  const isLocal = env === "local";
+  const read = (name: string, localDefault: string): string => {
+    const v = vars[name];
+    if (v !== undefined && v !== "") return v;
+    if (isLocal) return localDefault;
+    throw new Error(`deploy-core: ${name} is unset for DEPLOY_ENV=${env}; set PROTOCOL_FEE_POOL, LP_FEE_BPS and PROTOCOL_FEE_BPS`);
+  };
+  const pool = read("PROTOCOL_FEE_POOL", localPool);
+  if (!StrKey.isValidEd25519PublicKey(pool)) {
+    throw new Error(`deploy-core: PROTOCOL_FEE_POOL=${pool} must be a Stellar account (G...): the pool is paid like a payout recipient`);
+  }
+  const raw = { LP_FEE_BPS: read("LP_FEE_BPS", "30"), PROTOCOL_FEE_BPS: read("PROTOCOL_FEE_BPS", "20") };
+  const bps = (v: string): number => (/^\d+$/.test(v) ? Number(v) : NaN);
+  const r = FeeConfigSchema.safeParse({ pool, lpBps: bps(raw.LP_FEE_BPS), protocolBps: bps(raw.PROTOCOL_FEE_BPS) });
+  if (!r.success) {
+    const field = r.error.issues[0].path[0];
+    const name = field === "lpBps" ? "LP_FEE_BPS" : field === "protocolBps" ? "PROTOCOL_FEE_BPS" : "PROTOCOL_FEE_POOL";
+    const value = name === "PROTOCOL_FEE_POOL" ? pool : raw[name];
+    throw new Error(`deploy-core: ${name}="${value}" must be a whole number of bps, at most ${MAX_FEE_BPS} (1%)`);
+  }
+  return r.data;
 }

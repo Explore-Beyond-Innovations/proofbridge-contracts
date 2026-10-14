@@ -189,7 +189,7 @@ contract OrderPortal is EscrowBase, IOrderPortal {
                               INTERNAL LOGIC
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev The canonical 17-field order from this leg's params plus the order-chain context.
+    /// @dev The canonical 19-field order from this leg's params plus the order-chain context.
     function _hashOrder(OrderParams calldata p, uint256 orderChainId, address orderPortal)
         internal
         pure
@@ -212,7 +212,9 @@ contract OrderPortal is EscrowBase, IOrderPortal {
             orderDecimals: p.orderDecimals,
             adDecimals: p.adDecimals,
             deadline: p.deadline,
-            adSettlementSigner: p.adSettlementSigner
+            adSettlementSigner: p.adSettlementSigner,
+            lpFeeBps: p.lpFeeBps,
+            protocolFeeBps: p.protocolFeeBps
         });
         return ProofBridgeUtils.digest(o);
     }
@@ -238,6 +240,11 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         // Both signed decimals are checked here so a bad route fails at create time, not at unlock.
         ProofBridgeUtils.assertInRange(params.orderDecimals);
         ProofBridgeUtils.assertInRange(params.adDecimals);
+        // #586: the fee the bridger deposits against is fixed here, in the hash; the ad chain's lock
+        // refuses it unless it is that chain's live fee. Out of range can never lock, so refused now.
+        if (params.lpFeeBps > ProofBridgeUtils.MAX_FEE_BPS || params.protocolFeeBps > ProofBridgeUtils.MAX_FEE_BPS) {
+            revert OrderPortal__InvalidFee();
+        }
 
         // The peer AdManager named in the order must be the one wired for that chain.
         bytes32 peer = peerEscrow[params.adChainId];

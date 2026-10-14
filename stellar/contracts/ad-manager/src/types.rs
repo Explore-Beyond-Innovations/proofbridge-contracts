@@ -7,6 +7,16 @@ pub use proofbridge_core::types::{
     ClaimRecord, ContractConfig, DisputeOutcome, OrderRecord, RouteTiming, Status,
 };
 
+/// The bridge fee (#586), taken from the bridger's payout on this chain: `lp_bps` stays in the
+/// maker's ad, `protocol_bps` goes to `pool` (an account id, paid like any payout recipient).
+#[contracttype]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FeeConfig {
+    pub pool: Option<BytesN<32>>,
+    pub lp_bps: u32,
+    pub protocol_bps: u32,
+}
+
 /// Source chain configuration (present = supported)
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -75,6 +85,10 @@ pub struct OrderParams {
     pub deadline: u64,
     /// The account whose settlement key co-signs for the maker (envelope slot 0); hashed
     pub ad_settlement_signer: BytesN<32>,
+    /// #586: the bridge fee the bridger deposited against (in the order hash, so fixed at the
+    /// deposit); the ad-manager's lock requires it to equal the live fee and its payouts charge it.
+    pub lp_fee_bps: u32,
+    pub protocol_fee_bps: u32,
 }
 
 /// A maker's settlement halt (#422): `halted` refuses the co-signed unlock of every order against

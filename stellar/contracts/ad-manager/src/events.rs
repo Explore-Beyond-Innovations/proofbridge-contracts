@@ -171,3 +171,28 @@ pub struct DisputeFinalized {
     pub order_hash: BytesN<32>,
     pub outcome: crate::types::DisputeOutcome,
 }
+
+// =============================================================================
+// Fees (#586)
+// =============================================================================
+
+#[contractevent(topics = ["fee_pool"], data_format = "single-value")]
+pub struct ProtocolFeePoolSet {
+    pub pool: BytesN<32>,
+}
+
+#[contractevent(topics = ["fee_bps"], data_format = "vec")]
+pub struct FeeBpsSet {
+    pub lp_bps: u32,
+    pub protocol_bps: u32,
+}
+
+/// A payout's fee, at the bps the order locked under: `lp_fee` stayed in the ad, `protocol_fee`
+/// went to the pool.
+#[contractevent(topics = ["fee_chrg"], data_format = "vec")]
+pub struct FeeCharged {
+    #[topic]
+    pub order_hash: BytesN<32>,
+    pub lp_fee: u128,
+    pub protocol_fee: u128,
+}

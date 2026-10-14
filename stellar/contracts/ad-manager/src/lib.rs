@@ -46,12 +46,12 @@ use proofbridge_core::cross_contract::{
     LEAF_DOMAIN_CANCEL, LEAF_DOMAIN_FORFEIT, LEAF_DOMAIN_ORDER, LEAF_DOMAIN_SETTLED,
 };
 use proofbridge_core::escrow_ops as ops;
-use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, IntoVal, String, Symbol};
 
 pub use errors::AdManagerError;
 pub use types::{
-    Ad, ChainInfo, ClaimRecord, ContractConfig, DisputeOutcome, Halt, OrderParams, OrderRecord,
-    RouteTiming, Status, NATIVE_TOKEN_ADDRESS,
+    Ad, ChainInfo, ClaimRecord, ContractConfig, DisputeOutcome, FeeConfig, Halt, OrderParams,
+    OrderRecord, RouteTiming, Status, NATIVE_TOKEN_ADDRESS,
 };
 
 // =============================================================================
@@ -141,6 +141,100 @@ impl AdManagerContract {
         Ok(())
     }
 
+    // ── the 24-hour delay (#586) ─────────────────────────────────────────
+
+    /// Close the setup bypass for good. Admin only; not itself delayed.
+    pub fn activate_timelock(env: Env) -> Result<(), AdManagerError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        proofbridge_core::timelock::activate(&env)?;
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Queue a timelocked call: its function name and its exact argument list. Admin only; closes
+    /// the bypass if still open. Executable by anyone 24 hours later by calling the function itself.
+    pub fn propose_action(
+        env: Env,
+        fn_name: Symbol,
+        args: Bytes,
+    ) -> Result<BytesN<32>, AdManagerError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        let id = proofbridge_core::timelock::propose(&env, fn_name, args)?;
+        storage::extend_instance_ttl(&env);
+        Ok(id)
+    }
+
+    /// Drop a pending proposal. Admin only.
+    pub fn cancel_action(env: Env, id: BytesN<32>) -> Result<(), AdManagerError> {
+        let config = storage::get_config(&env)?;
+        config.admin.require_auth();
+        Ok(proofbridge_core::timelock::cancel(&env, id)?)
+    }
+
+    pub fn timelock_active(env: Env) -> bool {
+        proofbridge_core::timelock::is_active(&env)
+    }
+
+    /// The earliest execution time of a pending proposal; 0 = none.
+    pub fn timelock_eta(env: Env, id: BytesN<32>) -> u64 {
+        proofbridge_core::timelock::eta(&env, &id)
+    }
+
+    // ── the bridge fee (#586) ────────────────────────────────────────────
+
+    /// Where the protocol fee is paid (an account id). Timelocked; never zero once set.
+    pub fn set_protocol_fee_pool(env: Env, pool: BytesN<32>) -> Result<(), AdManagerError> {
+        let config = storage::get_config(&env)?;
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "set_protocol_fee_pool",
+            (pool.clone(),).into_val(&env),
+        )?;
+        if auth::is_zero_bytes32(&pool) {
+            return Err(AdManagerError::ZeroAddress);
+        }
+        let mut fees = storage::get_fees(&env);
+        fees.pool = Some(pool.clone());
+        storage::set_fees(&env, &fees);
+        events::ProtocolFeePoolSet { pool }.publish(&env);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// The fee split, each at most 1%; a protocol fee needs the pool set. Timelocked. Applies to
+    /// orders locked after it; a live order keeps the bps it locked under.
+    pub fn set_fee_bps(env: Env, lp_bps: u32, protocol_bps: u32) -> Result<(), AdManagerError> {
+        let config = storage::get_config(&env)?;
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "set_fee_bps",
+            (lp_bps, protocol_bps).into_val(&env),
+        )?;
+        let mut fees = storage::get_fees(&env);
+        if !proofbridge_core::fees::fees_valid(lp_bps, protocol_bps, fees.pool.is_some()) {
+            return Err(AdManagerError::InvalidFee);
+        }
+        fees.lp_bps = lp_bps;
+        fees.protocol_bps = protocol_bps;
+        storage::set_fees(&env, &fees);
+        events::FeeBpsSet {
+            lp_bps,
+            protocol_bps,
+        }
+        .publish(&env);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// The live fee config.
+    pub fn fee_config(env: Env) -> FeeConfig {
+        storage::get_fees(&env)
+    }
+
     /// Add or update a source chain configuration.
     pub fn set_chain(
         env: Env,
@@ -148,7 +242,12 @@ impl AdManagerContract {
         order_portal: BytesN<32>,
     ) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "set_chain",
+            (order_chain_id, order_portal.clone()).into_val(&env),
+        )?;
 
         // A stored entry is what makes the chain supported, so it must name a counterpart.
         if auth::is_zero_bytes32(&order_portal) {
@@ -177,8 +276,15 @@ impl AdManagerContract {
         module: Address,
     ) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
-        ops::set_root_verifier(&env, chain_id, module);
+        ops::set_root_verifier_gated(&env, &config.admin, chain_id, module)?;
+        Ok(())
+    }
+
+    /// #586: unwire `chain_id`'s root verifier, instantly (the brake): its unlocks fail closed, and
+    /// any pending proposal to wire one for it is void. Re-wiring goes through the delay.
+    pub fn unset_root_verifier(env: Env, chain_id: u128) -> Result<(), AdManagerError> {
+        let config = storage::get_config(&env)?;
+        ops::unset_root_verifier(&env, &config.admin, chain_id)?;
         Ok(())
     }
 
@@ -196,7 +302,12 @@ impl AdManagerContract {
     /// Set the key registry consulted when an ad's settlement signer is set (2.3c D2).
     pub fn set_key_registry(env: Env, registry: Address) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "set_key_registry",
+            (registry.clone(),).into_val(&env),
+        )?;
         let epoch = storage::set_key_registry(&env, &registry);
         events::KeyRegistrySet {
             registry: registry.clone(),
@@ -213,7 +324,12 @@ impl AdManagerContract {
         timing: RouteTiming,
     ) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "set_route_timing",
+            (chain_id, timing.clone()).into_val(&env),
+        )?;
         Ok(ops::set_route_timing(&env, chain_id, timing)?)
     }
 
@@ -221,7 +337,12 @@ impl AdManagerContract {
     /// which is a safe default rather than a broken one.
     pub fn set_dispute_manager(env: Env, manager: Address) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "set_dispute_manager",
+            (manager.clone(),).into_val(&env),
+        )?;
         storage::set_dispute_manager(&env, &manager);
         storage::extend_instance_ttl(&env);
         Ok(())
@@ -236,14 +357,24 @@ impl AdManagerContract {
     /// Set the notary the evidence paths read (2.3e D7). Settlement never touches it.
     pub fn set_root_anchor(env: Env, anchor: Address) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "set_root_anchor",
+            (anchor.clone(),).into_val(&env),
+        )?;
         ops::set_root_anchor(&env, anchor);
         Ok(())
     }
 
     pub fn remove_chain(env: Env, order_chain_id: u128) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "remove_chain",
+            (order_chain_id,).into_val(&env),
+        )?;
 
         storage::remove_chain(&env, order_chain_id);
 
@@ -266,7 +397,12 @@ impl AdManagerContract {
         order_chain_id: u128,
     ) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "set_token_route",
+            (ad_token.clone(), order_token.clone(), order_chain_id).into_val(&env),
+        )?;
 
         if auth::is_zero_bytes32(&ad_token) || auth::is_zero_bytes32(&order_token) {
             return Err(AdManagerError::TokenZeroAddress);
@@ -294,7 +430,12 @@ impl AdManagerContract {
         order_chain_id: u128,
     ) -> Result<(), AdManagerError> {
         let config = storage::get_config(&env)?;
-        config.admin.require_auth();
+        proofbridge_core::timelock::gate(
+            &env,
+            &config.admin,
+            "remove_token_route",
+            (ad_token.clone(), order_chain_id).into_val(&env),
+        )?;
 
         let order_token = storage::get_token_route(&env, &ad_token, order_chain_id)
             .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]));
@@ -636,6 +777,12 @@ impl AdManagerContract {
         let mut ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
 
         validation::validate_order(&env, &ad, &params)?;
+        // #586: the fee the bridger deposited against (in the order hash) is the one live now; a
+        // change since the deposit refuses the lock rather than charging a rate nobody agreed to.
+        let fees = storage::get_fees(&env);
+        if params.lp_fee_bps != fees.lp_bps || params.protocol_fee_bps != fees.protocol_bps {
+            return Err(AdManagerError::FeeMismatch);
+        }
         // A key retired after the ad was pointed at it (set_valid_until, a watchtower retirement)
         // must not take new locks: the bridger's deposit could never be unlocked (2.3c D2).
         validation::require_registered(&env, &ad.settlement_signer, &ad.maker)?;
@@ -804,7 +951,7 @@ impl AdManagerContract {
         // bond settles on what the proof shows, not on whatever the arbiter had ruled.
         Self::close_dispute(&env, &order_hash, DisputeOutcome::TradeProceeds, &params)?;
         Self::fill(&env, &order_hash, &params.ad_settlement_signer, false);
-        Self::pay_from_ad(&env, &config, &params)?;
+        Self::pay_from_ad(&env, &config, &params, &order_hash)?;
 
         events::OrderUnlocked {
             order_hash: order_hash.clone(),
@@ -863,6 +1010,13 @@ impl AdManagerContract {
         Self::require_party(&env, &filer, &ad.maker, &params.order_recipient)?;
         // The deadline is vouched for by the hash the caller had to reproduce; the module cannot do
         // that itself, which is why filing starts here.
+        // #586: the order's token and ad-chain amount, which a route's token bond is priced in.
+        let bond_token = if proofbridge_core::token::is_native_token(&ad.token) {
+            config.w_native_token.clone()
+        } else {
+            proofbridge_core::token::bytes32_to_token_address(&env, &ad.token)
+                .ok_or(AdManagerError::TokenZeroAddress)?
+        };
         let bond = ops::open_dispute(
             &env,
             &env.current_contract_address(),
@@ -871,6 +1025,8 @@ impl AdManagerContract {
             &filer,
             &evidence,
             params.deadline,
+            &bond_token,
+            Self::ad_amount(&params)?,
         )?;
         storage::extend_instance_ttl(&env);
         Ok(bond)
@@ -920,20 +1076,22 @@ impl AdManagerContract {
             Self::dispute_end(&env, &ad.maker, &params, &order_hash, outcome)?,
         )?;
         ad.locked -= ad_amount;
+        let mut payout = (0, 0);
         if outcome == DisputeOutcome::MakerForfeit {
             // The maker forfeits its stake: the locked amount leaves the ad for the order's
-            // recipient. Every other vacuum outcome releases the lock back to liquidity, which the
-            // decrement above already did.
-            ad.balance -= ad_amount;
+            // recipient, less the fee, as a settlement would (#586). Every other vacuum outcome
+            // releases the lock back to liquidity, which the decrement above already did.
+            payout = Self::charge_fee(&env, &mut ad, &params, &order_hash, ad_amount, true);
         }
         storage::set_ad(&env, &params.ad_id, &ad);
         if outcome == DisputeOutcome::MakerForfeit {
-            ops::pay_or_credit(
+            Self::pay_net(
                 &env,
-                &config.w_native_token,
+                &config,
                 &params.order_recipient,
                 &params.ad_chain_token,
-                ad_amount,
+                payout.0,
+                payout.1,
             );
         }
 
@@ -1116,7 +1274,7 @@ impl AdManagerContract {
         // bond settles on what the proof shows, not on whatever the arbiter had ruled.
         Self::close_dispute(&env, &order_hash, DisputeOutcome::TradeProceeds, &params)?;
         Self::fill(&env, &order_hash, &params.ad_settlement_signer, true);
-        Self::pay_from_ad(&env, &config, &params)?;
+        Self::pay_from_ad(&env, &config, &params, &order_hash)?;
         storage::extend_instance_ttl(&env);
         Ok(())
     }
@@ -1299,7 +1457,7 @@ impl AdManagerContract {
     // Internal Helpers
     // =========================================================================
 
-    /// The canonical 17-field order hash from this leg's params plus the ad-chain context.
+    /// The canonical 19-field order hash from this leg's params plus the ad-chain context.
     fn order_hash(env: &Env, config: &ContractConfig, params: &OrderParams) -> BytesN<32> {
         let contract_bytes = eip712::contract_address_to_bytes32(env);
         eip712::hash_order(env, params, config.chain_id, &contract_bytes)
@@ -1320,21 +1478,66 @@ impl AdManagerContract {
         env: &Env,
         config: &ContractConfig,
         params: &OrderParams,
+        order_hash: &BytesN<32>,
     ) -> Result<(), AdManagerError> {
         let ad_amount = Self::ad_amount(params)?;
         let mut ad = storage::get_ad(env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
         let ad_token = ad.token.clone();
         ad.locked -= ad_amount;
-        ad.balance -= ad_amount;
+        let (net, protocol_fee) =
+            Self::charge_fee(env, &mut ad, params, order_hash, ad_amount, false);
         storage::set_ad(env, &params.ad_id, &ad);
-        Self::pay_or_credit(
+        Self::pay_net(
             env,
-            &config.w_native_token,
+            config,
             &params.order_recipient,
             &ad_token,
-            ad_amount,
+            net,
+            protocol_fee,
         );
         Ok(())
+    }
+
+    /// #586: take the order's fee (the bps the bridger deposited against, in the order) out of a
+    /// released lock: the LP fee stays in the ad's balance, the rest leaves it. On a maker forfeit the
+    /// LP share goes to the bridger instead (the maker found at fault keeps nothing). Returns the
+    /// recipient's net and the protocol's fee.
+    fn charge_fee(
+        env: &Env,
+        ad: &mut Ad,
+        params: &OrderParams,
+        order_hash: &BytesN<32>,
+        ad_amount: u128,
+        forfeit: bool,
+    ) -> (u128, u128) {
+        let lp_bps = if forfeit { 0 } else { params.lp_fee_bps };
+        let (lp_fee, protocol_fee) =
+            proofbridge_core::fees::split_fee(ad_amount, lp_bps, params.protocol_fee_bps);
+        ad.balance -= ad_amount - lp_fee;
+        events::FeeCharged {
+            order_hash: order_hash.clone(),
+            lp_fee,
+            protocol_fee,
+        }
+        .publish(env);
+        (ad_amount - lp_fee - protocol_fee, protocol_fee)
+    }
+
+    /// The recipient's net, then the protocol's fee (never owed without a pool: `set_fee_bps`).
+    fn pay_net(
+        env: &Env,
+        config: &ContractConfig,
+        recipient: &BytesN<32>,
+        token: &BytesN<32>,
+        net: u128,
+        protocol_fee: u128,
+    ) {
+        Self::pay_or_credit(env, &config.w_native_token, recipient, token, net);
+        if protocol_fee != 0 {
+            if let Some(pool) = storage::get_fees(env).pool {
+                Self::pay_or_credit(env, &config.w_native_token, &pool, token, protocol_fee);
+            }
+        }
     }
 
     // ---- termination core (2.3e), mirrored by the order-portal ----

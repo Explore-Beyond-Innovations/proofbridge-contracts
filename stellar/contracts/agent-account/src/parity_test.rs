@@ -207,6 +207,8 @@ fn context(r: &Rig, lock: &Value) -> Context {
         ad_decimals: lock["adDecimals"].as_u64().unwrap() as u32,
         deadline: 4_102_444_800,
         ad_settlement_signer: signer,
+        lp_fee_bps: 0,
+        protocol_fee_bps: 0,
     };
     let target = match lock["target"].as_str().unwrap() {
         "pinned" => r.pinned.clone(),

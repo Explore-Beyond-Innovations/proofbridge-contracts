@@ -65,6 +65,9 @@ const CLEAN: Record<string, string | undefined> = {
   ANCHOR_PUBLISHER: undefined,
   DISPUTE_ARBITER: undefined,
   DISPUTE_FEE_POOL: undefined,
+  PROTOCOL_FEE_POOL: undefined,
+  LP_FEE_BPS: undefined,
+  PROTOCOL_FEE_BPS: undefined,
   FAKE_STELLAR_PASSPHRASE: undefined,
   FAKE_STELLAR_KEYS_ENV: undefined,
   FAKE_STELLAR_IDS: undefined,
@@ -97,7 +100,16 @@ async function withFake(vars: Record<string, string | undefined>, fn: () => Prom
 const sent = (calls: string[]) => calls.filter((c) => /^contract (deploy|upload|asset)|--send yes/.test(c));
 const deploy = (env: string, out: string, extra: { allowWasmMismatch?: boolean } = {}) =>
   deployCore({ env, manifestOut: path.join(tmp, out), wasmDir: wasmDirPath, ...extra });
-const NAMED = { ANCHOR_PUBLISHER: OTHER, DISPUTE_ARBITER: OTHER, DISPUTE_FEE_POOL: OTHER, STELLAR_EVENT_VK: vkFile };
+const NAMED = {
+  ANCHOR_PUBLISHER: OTHER,
+  DISPUTE_ARBITER: OTHER,
+  DISPUTE_FEE_POOL: OTHER,
+  STELLAR_EVENT_VK: vkFile,
+  // #586: the fee values a non-local deploy must name.
+  PROTOCOL_FEE_POOL: OTHER,
+  LP_FEE_BPS: "30",
+  PROTOCOL_FEE_BPS: "20",
+};
 /** What `console.warn` printed while `fn` ran. */
 async function warnedDuring(fn: () => Promise<unknown>): Promise<string[]> {
   const lines: string[] = [];
@@ -326,7 +338,13 @@ test("a fresh deploy records the bundle's registry, verifier and agent-account w
   const calls = await withFake({ ...LOCAL, FAKE_STELLAR_IDS: ids }, () => deploy("local", out));
   assert.ok(calls.some((c) => /^contract deploy --wasm \S*bls_key_registry\.wasm /.test(c)), "the registry was deployed");
   assert.ok(calls.some((c) => /^contract deploy --wasm \S*counterparty_verifier\.wasm /.test(c)), "the verifier was deployed");
-  const back = JSON.parse(fs.readFileSync(path.join(tmp, out), "utf8")) as { wasmHashes?: Record<string, string> };
+  // #586: the launch fee, the pool (the deployer's account, as 32 bytes) before the bps.
+  const poolHex = Buffer.from(StrKey.decodeEd25519PublicKey(DEPLOYER)).toString("hex");
+  const poolAt = calls.findIndex((c) => c.includes(`--send yes -- set_protocol_fee_pool --pool ${poolHex}`));
+  const bpsAt = calls.findIndex((c) => c.includes("--send yes -- set_fee_bps --lp_bps 30 --protocol_bps 20"));
+  assert.ok(poolAt >= 0 && bpsAt > poolAt, "the fee pool, then the fee bps, were set");
+  const back = JSON.parse(fs.readFileSync(path.join(tmp, out), "utf8")) as { wasmHashes?: Record<string, string>; feeConfig?: unknown };
+  assert.deepEqual(back.feeConfig, { pool: DEPLOYER, lpBps: 30, protocolBps: 20 });
   assert.deepEqual(back.wasmHashes, { ...BUNDLE_HASHES, agentAccount: wasmSha256(path.join(wasmDirPath, "agent_account.wasm")) });
   // the manifest it wrote: both reused under the same bundle, past the checks to the next read, no override
   const again = await withFake({ ...LOCAL, FAKE_STELLAR_KEYS_ENV: "local" }, () => assert.rejects(deploy("local", out), PAST_WASM_CHECKS));

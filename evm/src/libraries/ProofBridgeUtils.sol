@@ -7,6 +7,8 @@ import {IKeyRegistry} from "../interfaces/IKeyRegistry.sol";
 import {IAdManager} from "../interfaces/IAdManager.sol";
 import {IEscrow} from "../interfaces/IEscrow.sol";
 import {RouteTiming} from "./RouteTiming.sol";
+import {Timelock} from "./Timelock.sol";
+import {AddressCast} from "./AddressCast.sol";
 
 /// @title ProofBridgeUtils — the one deployed library both escrows link: today the order digest, the
 ///        width check and the decimal scaling, i.e. what both escrows must agree on about one order,
@@ -35,17 +37,114 @@ library ProofBridgeUtils {
         return OrderHash.digest(o);
     }
 
+    /// The ad leg's order hash: the canonical 19-field order from its params plus the ad-chain
+    /// context, here for EIP-170 headroom.
+    function adOrderHash(IAdManager.OrderParams calldata p, uint256 adChainId, address adManager)
+        public
+        pure
+        returns (bytes32)
+    {
+        return OrderHash.digest(
+            OrderHash.Order({
+                orderChainToken: p.orderChainToken,
+                adChainToken: p.adChainToken,
+                amount: p.amount,
+                bridger: p.bridger,
+                orderChainId: p.orderChainId,
+                orderPortal: p.srcOrderPortal,
+                orderRecipient: p.orderRecipient,
+                adChainId: adChainId,
+                adManager: bytes32(uint256(uint160(adManager))),
+                adId: p.adId,
+                adCreator: p.adCreator,
+                adRecipient: p.adRecipient,
+                salt: p.salt,
+                orderDecimals: p.orderDecimals,
+                adDecimals: p.adDecimals,
+                deadline: p.deadline,
+                adSettlementSigner: p.adSettlementSigner,
+                lpFeeBps: p.lpFeeBps,
+                protocolFeeBps: p.protocolFeeBps
+            })
+        );
+    }
+
+    /// The AdManager's lock-time rules, cheapest first, the registry read last; here for EIP-170
+    /// headroom. `peer` and `routed` are the AdManager's wired peer escrow and token route.
+    function validateLock(
+        IAdManager.Ad storage ad,
+        IAdManager.OrderParams calldata params,
+        bytes32 peer,
+        bytes32 routed,
+        IKeyRegistry registry,
+        uint32 signerSlot,
+        IAdManager.FeeConfig storage fees,
+        address verifier
+    ) public view returns (uint256 adAmount) {
+        if (!ad.open) revert IAdManager.AdManager__AdClosed();
+        // #586: the fee the bridger deposited against is the one live now; a change since the deposit
+        // refuses the lock (the trade cancels at no cost) rather than charging a rate nobody agreed to.
+        if (params.lpFeeBps != fees.lpBps || params.protocolFeeBps != fees.protocolBps) {
+            revert IAdManager.AdManager__FeeMismatch(fees.lpBps, fees.protocolBps);
+        }
+        if (params.amount == 0) revert IEscrow.Escrow__ZeroAmount();
+        if (params.bridger == bytes32(0)) revert IAdManager.AdManager__BridgerZero();
+        if (params.orderRecipient == bytes32(0)) revert IAdManager.AdManager__RecipientZero();
+        AddressCast.assertEvmAddress(params.orderRecipient);
+        DecimalScaling.assertInRange(params.orderDecimals);
+        DecimalScaling.assertInRange(params.adDecimals);
+
+        // The peer OrderPortal named in the order must be the one wired for that chain.
+        if (peer == bytes32(0)) revert IEscrow.Escrow__ChainNotSupported(params.orderChainId);
+        if (peer != params.srcOrderPortal) {
+            revert IAdManager.AdManager__OrderPortalMismatch(peer, params.srcOrderPortal);
+        }
+
+        // The ad serves exactly one chain and one route, committed at creation and still live.
+        if (params.orderChainId != ad.orderChainId) {
+            revert IAdManager.AdManager__OrderChainMismatch(ad.orderChainId, params.orderChainId);
+        }
+        if (params.orderChainToken != ad.orderChainToken) {
+            revert IAdManager.AdManager__RouteMismatch(ad.orderChainToken, params.orderChainToken);
+        }
+        if (routed == bytes32(0)) revert IEscrow.Escrow__MissingRoute(params.orderChainToken, params.orderChainId);
+        if (routed != params.orderChainToken) revert IEscrow.Escrow__PeerTokenMismatch(routed, params.orderChainToken);
+
+        // Identity: custody (adCreator == maker) and the settlement identity the ad declared (2.3c).
+        // A lock naming any other signer is refused here, not left to the maker's account policy.
+        bytes32 maker = AddressCast.toBytes32(ad.maker);
+        if (params.adCreator != maker) revert IAdManager.AdManager__NotMaker();
+        if (params.adSettlementSigner != ad.settlementSigner) {
+            revert IAdManager.AdManager__SettlementSignerMismatch(ad.settlementSigner, params.adSettlementSigner);
+        }
+        bytes32 token = AddressCast.toBytes32(ad.token);
+        if (params.adChainToken != token) revert IAdManager.AdManager__AdTokenMismatch(token, params.adChainToken);
+        if (params.adRecipient != ad.adRecipient) {
+            revert IAdManager.AdManager__AdRecipientMismatch(ad.adRecipient, params.adRecipient);
+        }
+        DecimalScaling.assertMatchesOnChain(ad.token, params.adDecimals);
+        OrderHash.checkWidths(params.amount, params.orderChainId, block.chainid, params.deadline);
+
+        // A key retired after the ad was pointed at it (setValidUntil, a watchtower retirement) must
+        // not take new locks: the bridger's deposit could never be unlocked (2.3c D2). Plan 12 C: the
+        // slot the lock pins must be the signer's and usable now, in the registry the order records.
+        _requireSettlementSigner(registry, ad.settlementSigner, maker);
+        _requireUsableSlot(registry, ad.settlementSigner, signerSlot);
+
+        // #464: no new order while the order chain's verifier reads another key registry.
+        (bool split, address verifierRegistry) = registrySplit(verifier, address(registry));
+        if (split) {
+            revert IAdManager.AdManager__RegistrySplit(params.orderChainId, address(registry), verifierRegistry);
+        }
+        // The signed amount is in order-chain units; the pool accounts in ad-chain units.
+        adAmount = DecimalScaling.scale(params.amount, params.orderDecimals, params.adDecimals);
+        if (adAmount > ad.balance - ad.locked) revert IEscrow.Escrow__InsufficientLiquidity();
+    }
+
     /// The AdManager's settlement-signer gate, here for EIP-170 headroom: a registry is wired, the
     /// signer is non-zero with a usable key, and it is the maker itself or has approved the maker.
     function requireSettlementSigner(IKeyRegistry registry, bytes32 signer, bytes32 maker) public view {
         _requireSettlementSigner(registry, signer, maker);
-    }
-
-    /// The lock's gate (2.7 plan 12 D7): the settlement-signer gate, and the slot it pins exists, is
-    /// usable now and is the signer's (`commitmentAt` answers).
-    function requireLockSigner(IKeyRegistry registry, bytes32 signer, bytes32 maker, uint32 slot) public view {
-        _requireSettlementSigner(registry, signer, maker);
-        _requireUsableSlot(registry, signer, slot);
     }
 
     /// The AdManager's re-pin (2.7 plan 12 D12, Q2), here for EIP-170 headroom: the order is `Open` and
@@ -112,6 +211,70 @@ library ProofBridgeUtils {
         if (split) return true;
         uint64 e = registry.expiredAt(signer, o.pinnedSlot);
         return e != 0 && e <= until;
+    }
+
+    /// The ceiling on each fee, in bps (1%).
+    uint16 internal constant MAX_FEE_BPS = 100;
+
+    /// The fee split on `amount`, each fee rounded down, so the rounding dust stays with the
+    /// recipient: `lpFee = amount × lpBps / 10,000`, `protocolFee = amount × protocolBps / 10,000`.
+    function splitFee(uint256 amount, uint16 lpBps, uint16 protocolBps)
+        public
+        pure
+        returns (uint256 lpFee, uint256 protocolFee)
+    {
+        lpFee = amount * lpBps / 10_000;
+        protocolFee = amount * protocolBps / 10_000;
+    }
+
+    /// The AdManager's `setFeeBps` (EIP-170 headroom): each at most `MAX_FEE_BPS`, and a protocol
+    /// fee only with a pool to pay it to (the pool can never be unset again).
+    function setFeeBps(IAdManager.FeeConfig storage f, uint16 lpBps, uint16 protocolBps) public {
+        if (lpBps > MAX_FEE_BPS || protocolBps > MAX_FEE_BPS || (protocolBps != 0 && f.pool == address(0))) {
+            revert IAdManager.AdManager__InvalidFee();
+        }
+        f.lpBps = lpBps;
+        f.protocolBps = protocolBps;
+        emit IAdManager.FeeBpsSet(lpBps, protocolBps);
+    }
+
+    /// The AdManager's fee on a released lock (EIP-170 headroom), at the bps the bridger deposited
+    /// against (in the order, so in its hash): the LP fee stays in the ad's balance, the rest of
+    /// `adAmount` leaves it. On a maker forfeit the LP share goes to the bridger instead (the maker
+    /// found at fault keeps nothing). Returns the recipient's net and the protocol's fee.
+    function chargeFee(
+        IAdManager.Ad storage ad,
+        IAdManager.OrderParams calldata p,
+        bytes32 orderHash,
+        uint256 adAmount,
+        bool forfeit
+    ) public returns (uint256 net, uint256 protocolFee) {
+        uint256 lpFee;
+        (lpFee, protocolFee) = splitFee(adAmount, forfeit ? 0 : p.lpFeeBps, p.protocolFeeBps);
+        ad.balance -= adAmount - lpFee;
+        net = adAmount - lpFee - protocolFee;
+        emit IAdManager.FeeCharged(orderHash, lpFee, protocolFee);
+    }
+
+    /// The escrows' timelock doors (EIP-170 headroom); the rules are `Timelock`'s.
+    function timelockActivate(Timelock.State storage s) public {
+        Timelock.activate(s);
+    }
+
+    function timelockPropose(Timelock.State storage s, bytes calldata data) public {
+        Timelock.propose(s, data);
+    }
+
+    function timelockCancel(Timelock.State storage s, bytes32 id) public {
+        Timelock.cancel(s, id);
+    }
+
+    function timelockConsume(Timelock.State storage s, bytes32 id, bytes32 key) public {
+        Timelock.consume(s, id, key);
+    }
+
+    function timelockEta(Timelock.State storage s, bytes32 id) public view returns (uint256) {
+        return Timelock.liveEta(s, id);
     }
 
     function _requireUsableSlot(IKeyRegistry registry, bytes32 signer, uint32 slot) private view {

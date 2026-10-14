@@ -28,6 +28,10 @@ interface IOrderPortal is IEscrow {
         uint8 adDecimals;
         uint256 deadline;
         bytes32 adSettlementSigner;
+        /// #586: the bridge fee the bridger deposited against (in the order hash, so it is fixed at the
+        /// deposit); the AdManager's lock requires it to equal the live fee and its payouts charge it.
+        uint16 lpFeeBps;
+        uint16 protocolFeeBps;
     }
 
     event OrderCreated(
@@ -51,6 +55,8 @@ interface IOrderPortal is IEscrow {
 
     error OrderPortal__AdManagerMismatch(bytes32 expected);
     error OrderPortal__BridgerMustBeSender();
+    /// @notice #586: an order fee share above 1% (the ad chain could never lock it).
+    error OrderPortal__InvalidFee();
 
     function createOrder(OrderParams calldata params) external payable returns (bytes32 orderHash);
     /// @notice The maker's co-signed settlement: `Open` only, until `deadline − claimStagger` (the

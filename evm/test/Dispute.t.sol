@@ -208,7 +208,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
             adManager.dispute{value: BOND_FLOOR + 1}(p, bytes32("evidence"));
             vm.prank(filer);
             adManager.dispute{value: BOND_FLOOR}(p, bytes32("evidence"));
-            (, uint128 bond,,,,,,) = dm.disputes(h);
+            (, uint128 bond,,,,,,,) = dm.disputes(h);
             assertEq(bond, BOND_FLOOR, "filing took the floor");
         }
     }
@@ -579,7 +579,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
         vm.prank(maker);
         adManager.respondToDispute(p, bytes32("response"));
-        (,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        (,,,, bytes32 responderEvidence,,,,) = dm.disputes(h);
         assertEq(responderEvidence, bytes32("response"), "the counterparty's hash is recorded");
     }
 
@@ -594,7 +594,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__AlreadyResponded.selector, h));
         adManager.respondToDispute(p, bytes32("second"));
-        (,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        (,,,, bytes32 responderEvidence,,,,) = dm.disputes(h);
         assertEq(responderEvidence, bytes32("first"), "the first answer stands");
     }
 
@@ -641,7 +641,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__AlreadyRuled.selector, h));
         adManager.respondToDispute(p, bytes32("too late"));
-        (,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        (,,,, bytes32 responderEvidence,,,,) = dm.disputes(h);
         assertEq(responderEvidence, bytes32(0), "nothing recorded");
     }
 
@@ -652,7 +652,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         vm.prank(maker);
         vm.expectRevert(DisputeManager.DisputeManager__ZeroResponse.selector);
         adManager.respondToDispute(p, bytes32(0));
-        (,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        (,,,, bytes32 responderEvidence,,,,) = dm.disputes(h);
         assertEq(responderEvidence, bytes32(0));
     }
 
@@ -1021,7 +1021,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
 
         vm.prank(maker);
         adManager.respondToDispute(p, bytes32("response"));
-        (,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        (,,,, bytes32 responderEvidence,,,,) = dm.disputes(h);
         assertEq(responderEvidence, bytes32("response"), "the response landed in A");
 
         vm.prank(arbiter);
@@ -1178,7 +1178,7 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         adManager.respondToDispute(p, bytes32("mine too"));
         vm.prank(maker);
         adManager.respondToDispute(p, bytes32("theirs"));
-        (,,,, bytes32 responderEvidence,,,) = dm.disputes(h);
+        (,,,, bytes32 responderEvidence,,,,) = dm.disputes(h);
         assertEq(responderEvidence, bytes32("theirs"));
     }
 
@@ -1213,15 +1213,15 @@ contract DisputeTest is AdManagerTest, CancellationHarness {
         vm.deal(stranger, 2 * bond);
         vm.prank(stranger);
         vm.expectRevert(DisputeManager.DisputeManager__NotEscrow.selector);
-        dm.openDispute{value: bond}(h, orderChainId, stranger, bytes32(0), 0, 0);
+        dm.openDispute{value: bond}(h, orderChainId, stranger, bytes32(0), 0, 0, address(0), 0);
 
         vm.prank(admin);
         dm.setEscrow(stranger, true);
         vm.prank(stranger);
-        dm.openDispute{value: bond}(h, orderChainId, filer, bytes32(0), 0, 0);
+        dm.openDispute{value: bond}(h, orderChainId, filer, bytes32(0), 0, 0, address(0), 0);
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(DisputeManager.DisputeManager__DisputeExists.selector, h));
-        dm.openDispute{value: bond}(h, orderChainId, filer, bytes32(0), 0, 0);
+        dm.openDispute{value: bond}(h, orderChainId, filer, bytes32(0), 0, 0, address(0), 0);
 
         // Settling a bond or recording a response is for the escrow that opened it, nobody else.
         vm.expectRevert(DisputeManager.DisputeManager__NotEscrow.selector);

@@ -19,11 +19,11 @@ pub const DOMAIN_TYPEHASH_MIN: [u8; 32] = [
     0xd4, 0x94, 0x03, 0xeb, 0x4a, 0x12, 0xf3, 0x6d, 0xe8, 0xd3, 0xf9, 0xf3, 0xcb, 0x8e, 0x15, 0xc3,
 ];
 
-/// keccak256 of the 17-field order type string (test-vectors/order-hash-v2.json `_meta.orderTypeString`);
+/// keccak256 of the 19-field order type string (test-vectors/order-hash-v2.json `_meta.orderTypeString`);
 /// the escrows' parity tests assert this equals keccak256 of that string.
 pub const ORDER_TYPEHASH: [u8; 32] = [
-    0x1c, 0x94, 0x56, 0x50, 0x71, 0x10, 0xc9, 0x56, 0x45, 0xe3, 0x59, 0x53, 0xa6, 0xeb, 0xe0, 0x53,
-    0xbf, 0x02, 0x1d, 0x7f, 0xac, 0xb3, 0xe3, 0x78, 0xf0, 0x19, 0x9a, 0xd6, 0xd5, 0x9d, 0x68, 0xc7,
+    0xb5, 0xd3, 0x3c, 0x95, 0xa1, 0x3e, 0xb6, 0x9f, 0x0c, 0x2f, 0x76, 0x19, 0xa8, 0x87, 0x80, 0xa8,
+    0x62, 0x2a, 0xfc, 0x36, 0x17, 0xfa, 0xf7, 0x9c, 0x4b, 0xc4, 0x41, 0x7e, 0x70, 0x3c, 0x74, 0xb9,
 ];
 
 /// Precomputed: keccak256("Proofbridge")
@@ -109,7 +109,7 @@ pub fn domain_separator_proofbridge() -> [u8; 32] {
 }
 
 // =============================================================================
-// The canonical 17-field Order
+// The canonical 19-field Order
 // =============================================================================
 
 /// The signed order, field for field in type-string order. Each escrow fills it from its own
@@ -132,12 +132,15 @@ pub struct Order {
     pub ad_decimals: u32,
     pub deadline: u64,
     pub ad_settlement_signer: [u8; 32],
+    /// #586: the bridge fee the bridger deposited against, words 18 and 19.
+    pub lp_fee_bps: u32,
+    pub protocol_fee_bps: u32,
 }
 
-/// EIP-712 struct hash: keccak256 of the typehash and the 17 words (576 bytes). The word list is
+/// EIP-712 struct hash: keccak256 of the typehash and the 19 words (640 bytes). The word list is
 /// an array literal of fixed length, so a missing or extra field does not compile.
 pub fn struct_hash_order(o: &Order) -> [u8; 32] {
-    let words: [[u8; 32]; 18] = [
+    let words: [[u8; 32]; 20] = [
         ORDER_TYPEHASH,
         o.order_chain_token,
         o.ad_chain_token,
@@ -156,8 +159,10 @@ pub fn struct_hash_order(o: &Order) -> [u8; 32] {
         abi_encode_uint256(o.ad_decimals as u128),
         abi_encode_uint256(o.deadline as u128),
         o.ad_settlement_signer,
+        abi_encode_uint256(o.lp_fee_bps as u128),
+        abi_encode_uint256(o.protocol_fee_bps as u128),
     ];
-    let mut data = [0u8; 576];
+    let mut data = [0u8; 640];
     for (i, w) in words.iter().enumerate() {
         data[i * 32..i * 32 + 32].copy_from_slice(w);
     }

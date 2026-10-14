@@ -77,6 +77,15 @@ pub struct DisputeParams {
     pub bond_floor: u128,
 }
 
+/// A route's bond in the order's own token (#586): `max(min_bond, amount × bond_bps / 10,000)`.
+/// Unset means the route posts the flat `DisputeParams::bond_floor` in wrapped native.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BondConfig {
+    pub min_bond: u128,
+    pub bond_bps: u32,
+}
+
 /// One dispute, keyed by order hash.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +104,9 @@ pub struct DisputeRecord {
     /// (D3, T-50) — without them a third party could cancel an order with a week still to run.
     pub order_deadline: u64,
     pub buffer: u64,
+    /// The bond's token (#586): the wrapped native token for the flat floor, else the order's token
+    /// on a route with a `BondConfig`. Payouts and credits are in this token.
+    pub bond_token: Address,
 }
 
 /// The order's leg on this chain.

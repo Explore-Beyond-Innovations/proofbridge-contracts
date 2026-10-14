@@ -10,7 +10,7 @@
 //! returns [`Fault`], an opaque reason, and each contract converts it once through `From` — one
 //! small `match` per crate rather than a trait that grows a constructor per check.
 
-use soroban_sdk::{Address, BytesN, Env};
+use soroban_sdk::{Address, BytesN, Env, IntoVal};
 
 use crate::cross_contract;
 use crate::escrow_events;
@@ -97,6 +97,20 @@ faults! {
     /// token) leaves it short of what it owes; more is a balance it did not record. Refused either
     /// way, exactly `amount` or nothing.
     TransferShort,
+    /// #586: `activate_timelock` on an already active timelock.
+    TimelockAlreadyActive,
+    /// #586: the call is already proposed (its clock stands).
+    TimelockAlreadyProposed,
+    /// #586: no pending proposal for this exact call.
+    TimelockNotProposed,
+    /// #586: the proposal's 24 hours have not passed.
+    TimelockTooEarly,
+    /// #586: a proposal's argument bytes are not the XDR of an argument list.
+    TimelockBadArgs,
+    /// #586: the proposal's 14-day window to run has passed.
+    TimelockExpired,
+    /// #586: a brake on what the proposal would re-enable was pulled after it was proposed.
+    TimelockCancelledByBrake,
 }
 
 impl From<crate::decimal_scaling::DecimalScalingError> for Fault {
@@ -164,6 +178,8 @@ pub fn accept_admin(env: &Env, config: &mut ContractConfig, pending: Address) {
     let old = core::mem::replace(&mut config.admin, pending.clone());
     storage::set_config(env, config);
     storage::clear_pending_admin(env);
+    // #586 D6: a handover voids the old admin's pending proposals.
+    crate::timelock::bump_epoch(env);
     escrow_events::AdminTransferred {
         from: old,
         to: pending,
@@ -179,6 +195,51 @@ pub fn set_root_verifier(env: &Env, chain_id: u128, module: Address) {
     storage::set_root_verifier(env, chain_id, &module);
     storage::add_wired_chain(env, chain_id);
     escrow_events::RootVerifierSet { chain_id, module }.publish(env);
+}
+
+/// #586: the brake key naming a chain's root verifier: an unwire voids every earlier proposal to
+/// wire one for that chain.
+fn root_verifier_key(env: &Env, chain_id: u128) -> BytesN<32> {
+    crate::timelock::brake_key(env, "set_root_verifier", chain_id.into_val(env))
+}
+
+/// #586: wiring a chain's root verifier waits the delay once it is active, and is refused when an
+/// unwire of that chain came at or after the proposal.
+pub fn set_root_verifier_gated(
+    env: &Env,
+    admin: &Address,
+    chain_id: u128,
+    module: Address,
+) -> Result<(), Fault> {
+    crate::timelock::gate_keyed(
+        env,
+        admin,
+        "set_root_verifier",
+        (chain_id, module.clone()).into_val(env),
+        Some(root_verifier_key(env, chain_id)),
+    )?;
+    set_root_verifier(env, chain_id, module);
+    Ok(())
+}
+
+/// #586: the instant brake, the admin's at any time (EVM `setRootVerifier(chain, 0)`): the chain's
+/// unlocks fail closed until a verifier is wired again, under the delay.
+pub fn unset_root_verifier(env: &Env, admin: &Address, chain_id: u128) -> Result<(), Fault> {
+    crate::timelock::gate_unless(
+        env,
+        admin,
+        true,
+        "set_root_verifier",
+        soroban_sdk::Vec::new(env),
+        root_verifier_key(env, chain_id),
+    )?;
+    storage::remove_root_verifier(env, chain_id);
+    escrow_events::RootVerifierUnset {
+        chain_id,
+        at: env.ledger().timestamp(),
+    }
+    .publish(env);
+    Ok(())
 }
 
 /// Set the termination clocks for a peer chain (2.3e D6) as a new version: validated, never edited in
@@ -399,6 +460,8 @@ pub fn open_dispute(
     filer: &Address,
     evidence: &BytesN<32>,
     deadline: u64,
+    token: &Address,
+    amount: u128,
 ) -> Result<u128, Fault> {
     match storage::get_order_status(env, order_hash) {
         Status::Open | Status::Claimed => {}
@@ -421,6 +484,8 @@ pub fn open_dispute(
             evidence,
             &deadline,
             &buffer,
+            token,
+            &amount,
         )
         .map_err(dispute_module_fault)?
         .map_err(|_| Fault::DisputeModuleRejected)?;

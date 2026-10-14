@@ -9,6 +9,9 @@
 //   stellar-deploy link --peer <peer-manifest> [--in <local-manifest>]
 //   stellar-deploy handover --to <G...> | --verify   [--in <manifest-path>] [--chain-id <n>]
 //   stellar-deploy retirements-audit --file <vault-export.json> [--in <manifest-path>] [--chain-id <n>]
+//   stellar-deploy timelock status|activate --confirm [--in <manifest-path>] [--chain-id <n>]
+//   stellar-deploy timelock propose|execute|cancel --contract <AdManager|OrderPortal|MerkleManager|DisputeManager|RootAnchor|BLSKeyRegistry>
+//                  --fn <setter> --args '<JSON object of the setter's arguments by name>' [--in] [--chain-id]
 //
 // Reads the `stellar` CLI environment:
 //   STELLAR_NETWORK (required; `local` by default for DEPLOY_ENV=local only), STELLAR_SOURCE_ACCOUNT (default: admin)
@@ -23,6 +26,7 @@ import { formatAudit, retirementsAudit } from "../src/keys-env.js";
 import { manifestPath, readManifest } from "../src/manifest.js";
 import { requireDeployEnv, requireStellarChainId } from "../src/deploy-env.js";
 import { WASM_MISMATCH_FLAG } from "../src/wasm-reuse.js";
+import { timelockActivate, timelockCancel, timelockExecute, timelockPropose, timelockStatus, TIMELOCK_CONTRACTS } from "../src/timelock.js";
 
 function parseFlag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
@@ -46,7 +50,8 @@ async function main(): Promise<void> {
         ...(rest.includes(WASM_MISMATCH_FLAG) ? { allowWasmMismatch: true } : {}),
       });
       // Described, not sent: the admin has calls to make. Not a success a script may build on.
-      if (r.described.length) process.exit(2);
+      // Pending (#586): proposed under the 24-hour delay; a re-run after it executes them.
+      if (r.described.length || r.pending.length) process.exit(2);
       return;
     }
     case "deploy-test-tokens": {
@@ -67,7 +72,7 @@ async function main(): Promise<void> {
         localManifest: parseFlag(rest, "--in"),
         localChainId: parseChainId(rest),
       });
-      if (r.described.length) process.exit(2);
+      if (r.described.length || r.pending.length) process.exit(2);
       return;
     }
     case "handover": {
@@ -98,10 +103,45 @@ async function main(): Promise<void> {
       if (rows.some((r) => r.status === "stale-format" || r.status === "error")) process.exit(1);
       return;
     }
+    case "timelock": {
+      // #586: the 24-hour admin delay.
+      const [sub] = rest;
+      const manifest = parseFlag(rest, "--in") ?? manifestPath(requireStellarChainId(parseChainId(rest), requireDeployEnv()));
+      if (sub === "status") {
+        await timelockStatus({ manifest });
+        return;
+      }
+      if (sub === "activate") {
+        // Permanent: the setup window never reopens. Asked for in so many words.
+        if (!rest.includes("--confirm")) {
+          console.error("timelock activate is permanent: every later admin change waits 24 hours. Re-run with --confirm");
+          process.exit(2);
+        }
+        // A partial activation throws (exit 1, naming each contract); the status prints either way.
+        try {
+          await timelockActivate({ manifest });
+        } finally {
+          await timelockStatus({ manifest });
+        }
+        return;
+      }
+      const contract = parseFlag(rest, "--contract");
+      const fn = parseFlag(rest, "--fn");
+      if (!contract || !(contract in TIMELOCK_CONTRACTS) || !fn || !["propose", "execute", "cancel"].includes(sub ?? "")) {
+        console.error("timelock: status | activate --confirm | {propose|execute|cancel} --contract <name> --fn <setter> --args '<JSON object>'");
+        process.exit(2);
+      }
+      const named = JSON.parse(parseFlag(rest, "--args") ?? "{}");
+      const call = { manifest, contract: contract as keyof typeof TIMELOCK_CONTRACTS, fn, named };
+      if (sub === "propose") await timelockPropose(call);
+      else if (sub === "execute") await timelockExecute(call);
+      else await timelockCancel(call);
+      return;
+    }
     default:
       console.error(
         `Unknown command '${cmd ?? ""}'.\n` +
-          "Usage: stellar-deploy {deploy|deploy-test-tokens|link|handover|retirements-audit} [flags]",
+          "Usage: stellar-deploy {deploy|deploy-test-tokens|link|handover|retirements-audit|timelock} [flags]",
       );
       process.exit(2);
   }

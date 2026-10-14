@@ -80,6 +80,45 @@ export async function connect(
   return { provider, signer, nonces, chainId: network.chainId, address };
 }
 
+/** #586: the delay every timelocked setter waits, in seconds (`TIMELOCK_DELAY` on chain). */
+export const TIMELOCK_DELAY_S = 86_400n;
+
+/** #586: the artifacts that carry the 24-hour delay. */
+export const TIMELOCKED = new Set(["AdManager", "OrderPortal", "MerkleManager", "DisputeManager", "RootAnchor", "BLSKeyRegistry"]);
+
+/** #586: a call under the delay: proposed by this run, or waiting out an earlier proposal. */
+export interface PendingCall {
+  label: string;
+  to: string;
+  fn: string;
+  args: string[];
+  /** `keccak256` of the calldata: the proposal id. */
+  id: string;
+  /** Unix seconds from which anyone may execute it. */
+  eta: string;
+  proposedNow: boolean;
+}
+
+/**
+ * #586: the addresses among `contracts` whose delay is active, read from chain. A contract built
+ * before the delay existed has no `timelockActive()`, so it reads as not timelocked.
+ */
+export async function timelockedOf(
+  contracts: { artifact: string; address: string }[],
+  attach: (address: string, file: string, name: string) => ethers.Contract,
+): Promise<string[]> {
+  const out: string[] = [];
+  for (const c of contracts) {
+    if (!TIMELOCKED.has(c.artifact)) continue;
+    try {
+      if (await attach(c.address, c.artifact, c.artifact).getFunction("timelockActive")()) out.push(c.address);
+    } catch {
+      // pre-#586 bytecode: no delay to respect
+    }
+  }
+  return out;
+}
+
 /** One call the CLI would have made, for the admin to make instead (#424). */
 export interface DescribedCall {
   label: string;
@@ -105,15 +144,24 @@ const show = (v: unknown): string =>
  */
 export class Acting {
   readonly described: DescribedCall[] = [];
+  /** #586: calls on a timelocked contract that were proposed, or are waiting out their delay. */
+  readonly pending: PendingCall[] = [];
   private readonly foreign: Set<string>;
+  private readonly timelocked: Set<string>;
 
-  /** @param foreign addresses whose `admin()` is not the signer (lower-cased or not; compared case-insensitively). */
+  /**
+   * @param foreign addresses whose `admin()` is not the signer (lower-cased or not; compared case-insensitively).
+   * @param timelocked addresses whose 24-hour delay is active (#586): a call to one is proposed, and
+   *   sent only once its proposal is ripe — re-running the command after the delay executes it.
+   */
   constructor(
     foreign: Iterable<string>,
     private readonly nonces: NonceTracker,
     private readonly tag: string,
+    timelocked: Iterable<string> = [],
   ) {
     this.foreign = new Set([...foreign].map((a) => a.toLowerCase()));
+    this.timelocked = new Set([...timelocked].map((a) => a.toLowerCase()));
   }
 
   /** Whether a call to `address` would be sent. */
@@ -126,15 +174,20 @@ export class Acting {
     return this.foreign.size === 0;
   }
 
-  /** Send `fn(args)` on `contract`, or describe it. Returns whether it was sent. */
+  /**
+   * Send `fn(args)` on `contract`, or describe it. Returns whether it was sent. `instant` marks a
+   * brake (a call the contract runs without the delay, such as a tightening): never proposed.
+   */
   async call(
     contract: ethers.Contract,
     label: string,
     fn: string,
     args: unknown[],
     line: string,
+    instant = false,
   ): Promise<boolean> {
     const to = await contract.getAddress();
+    if (!instant && this.timelocked.has(to.toLowerCase())) return this.callTimelocked(contract, label, fn, args, line, to);
     if (!this.canSendTo(to)) {
       this.described.push({
         label,
@@ -152,8 +205,64 @@ export class Acting {
     return true;
   }
 
+  /**
+   * #586: the delay is active on `to`. A ripe proposal for this exact call is executed (anyone may);
+   * a younger one is reported with its time; none is proposed (or, when the signer is not the admin,
+   * the `proposeAction` is described for the admin). Returns whether the setter itself ran.
+   */
+  private async callTimelocked(
+    contract: ethers.Contract,
+    label: string,
+    fn: string,
+    args: unknown[],
+    line: string,
+    to: string,
+  ): Promise<boolean> {
+    const data = contract.interface.encodeFunctionData(fn, args);
+    const id = ethers.keccak256(data);
+    const eta = BigInt(await contract.getFunction("timelockEta")(id));
+    if (eta !== 0n) {
+      const now = BigInt((await (contract.runner as ethers.Signer).provider!.getBlock("latest"))!.timestamp);
+      if (now >= eta) {
+        const tx = await contract.getFunction(fn)(...args, { nonce: this.nonces.next() });
+        await tx.wait();
+        console.log(`  [execute] ${line}`);
+        return true;
+      }
+      this.pending.push({ label, to, fn, args: args.map(show), id, eta: eta.toString(), proposedNow: false });
+      console.log(`  [pending] ${line} - executable from ${new Date(Number(eta) * 1000).toISOString()}`);
+      return false;
+    }
+    if (!this.canSendTo(to)) {
+      this.described.push({
+        label,
+        to,
+        fn: "proposeAction",
+        args: [data],
+        data: contract.interface.encodeFunctionData("proposeAction", [data]),
+      });
+      console.log(`  [describe] propose ${line}`);
+      return false;
+    }
+    const tx = await contract.getFunction("proposeAction")(data, { nonce: this.nonces.next() });
+    const receipt = await tx.wait();
+    const at = BigInt((await (contract.runner as ethers.Signer).provider!.getBlock(receipt!.blockNumber))!.timestamp);
+    const ready = at + TIMELOCK_DELAY_S;
+    this.pending.push({ label, to, fn, args: args.map(show), id, eta: ready.toString(), proposedNow: true });
+    console.log(`  [propose] ${line} - executable from ${new Date(Number(ready) * 1000).toISOString()}`);
+    return false;
+  }
+
   /** Print what the admin has to do. Nothing to print means everything was sent (or already set). */
   report(): void {
+    if (this.pending.length > 0) {
+      console.log(
+        `\n[${this.tag}] ${this.pending.length} call(s) are under the 24-hour delay; re-run this command after their time to execute them:`,
+      );
+      for (const p of this.pending) {
+        console.log(`  ${p.label}.${p.fn}(${p.args.join(", ")})  id ${p.id}  from ${new Date(Number(p.eta) * 1000).toISOString()}`);
+      }
+    }
     if (this.described.length === 0) return;
     console.log(
       `\n[${this.tag}] the signer is not the admin, so nothing was sent. The admin has to make these ${this.described.length} call(s):`,

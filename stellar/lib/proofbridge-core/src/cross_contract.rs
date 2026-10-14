@@ -38,6 +38,8 @@ pub trait DisputeManagerInterface {
         evidence: BytesN<32>,
         deadline: u64,
         buffer: u64,
+        token: Address,
+        amount: u128,
     ) -> u128;
     fn settle_bond(
         env: Env,

@@ -11,6 +11,8 @@ import {
   type RootAnchorConfig,
   type RouteTiming,
   type DisputeParams,
+  type FeeConfig,
+  type TokenBondConfig,
 } from "@proofbridge/deployment-manifest";
 import { deploymentsDir, evmAddressToBytes32 } from "./common.js";
 
@@ -88,6 +90,12 @@ export interface BuildManifestInput {
   disputeParams?: Record<string, DisputeParams>;
   /** Who holds admin (#424): the deployer until `handover`; preserved across redeploys. */
   admin?: AdminHandover;
+  /** #586: the AdManager's fee, as the chain holds it after this run. */
+  feeConfig?: FeeConfig;
+  /** #586: per peer chain → per local token → the route's token bond; written by link. */
+  tokenBonds?: Record<string, Record<string, TokenBondConfig>>;
+  /** #586: when the 24-hour delay was switched on; preserved. */
+  timelock?: { activatedAt: string };
 }
 
 export function buildManifest(
@@ -149,6 +157,9 @@ export function buildManifest(
     routeTiming: input.routeTiming ?? {},
     disputeParams: input.disputeParams ?? {},
     ...(input.admin ? { admin: input.admin } : {}),
+    ...(input.feeConfig ? { feeConfig: input.feeConfig } : {}),
+    tokenBonds: input.tokenBonds ?? {},
+    ...(input.timelock ? { timelock: input.timelock } : {}),
     meta: {
       deployedAt: new Date().toISOString(),
       deployer: input.deployer,

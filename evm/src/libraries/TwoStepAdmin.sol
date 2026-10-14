@@ -43,6 +43,10 @@ abstract contract TwoStepAdmin {
         address old = admin;
         admin = msg.sender;
         pendingAdmin = address(0);
+        _afterAdminAccepted();
         emit AdminTransferred(old, msg.sender);
     }
+
+    /// @dev Hook for what a handover resets (the timelock's admin epoch, #586).
+    function _afterAdminAccepted() internal virtual {}
 }

@@ -10,7 +10,7 @@ import {RouteTiming} from "../libraries/RouteTiming.sol";
 
 /**
  * @title IEscrow — what both escrows (AdManager, OrderPortal) share.
- * @notice One order = one 17-field EIP-712 hash on both chains; each escrow holds one leg of it,
+ * @notice One order = one 19-field EIP-712 hash on both chains; each escrow holds one leg of it,
  *         appends that leg's leaf to the chain's MMR, and settles it on a proof about the other
  *         leg. The types, events and errors here are the shared half; each escrow's own
  *         interface adds its leg.

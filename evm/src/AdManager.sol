@@ -73,6 +73,9 @@ contract AdManager is EscrowBase, IAdManager {
     ///         moves the reference.
     mapping(address maker => uint64) public lastResumedAt;
 
+    /// @inheritdoc IAdManager
+    FeeConfig public feeConfig;
+
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -86,7 +89,7 @@ contract AdManager is EscrowBase, IAdManager {
     //////////////////////////////////////////////////////////////*/
 
     /// @inheritdoc IAdManager
-    function setKeyRegistry(IKeyRegistry registry) external onlyAdmin {
+    function setKeyRegistry(IKeyRegistry registry) external timelocked {
         if (address(registry) == address(0)) revert Escrow__ZeroAddress();
         keyRegistry = registry;
         uint32 epoch = registryEpoch + 1;
@@ -94,6 +97,18 @@ contract AdManager is EscrowBase, IAdManager {
         registryAt[epoch] = registry;
         emit KeyRegistrySet(address(registry));
         emit KeyRegistryEpoch(epoch, address(registry));
+    }
+
+    /// @inheritdoc IAdManager
+    function setProtocolFeePool(address pool) external timelocked {
+        if (pool == address(0)) revert Escrow__ZeroAddress();
+        feeConfig.pool = pool;
+        emit ProtocolFeePoolSet(pool);
+    }
+
+    /// @inheritdoc IAdManager
+    function setFeeBps(uint16 lpBps, uint16 protocolBps) external timelocked {
+        ProofBridgeUtils.setFeeBps(feeConfig, lpBps, protocolBps);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -213,16 +228,20 @@ contract AdManager is EscrowBase, IAdManager {
         returns (bytes32 orderHash)
     {
         Ad storage ad = _getAdOwned(params.adId, msg.sender);
-        orderHash = _validateOrder(ad, params, signerSlot);
+        // The lock-time rules, the registry split (#464) and the liquidity check run in the linked
+        // library; it returns the signed amount in ad-chain units, what the pool accounts in.
+        uint256 adAmount = ProofBridgeUtils.validateLock(
+            ad,
+            params,
+            peerEscrow[params.orderChainId],
+            tokenRoute[ad.token][params.orderChainId],
+            keyRegistry,
+            signerSlot,
+            feeConfig,
+            address(rootVerifier[params.orderChainId])
+        );
+        orderHash = _orderHash(params);
         uint32 version = _requireMinWindow(params.orderChainId, params.deadline);
-        // #464: no new order while the order chain's verifier reads another key registry.
-        (bool split, address verifierRegistry) =
-            ProofBridgeUtils.registrySplit(address(rootVerifier[params.orderChainId]), address(keyRegistry));
-        if (split) revert AdManager__RegistrySplit(params.orderChainId, address(keyRegistry), verifierRegistry);
-
-        // The signed amount is in order-chain units; the pool accounts in ad-chain units.
-        uint256 adAmount = _adAmount(params);
-        if (adAmount > ad.balance - ad.locked) revert Escrow__InsufficientLiquidity();
 
         Order storage o = _openOrder(orderHash, version);
         // #465: the registry this order is judged against, whatever is wired later.
@@ -287,7 +306,7 @@ contract AdManager is EscrowBase, IAdManager {
         // this path can terminate a disputed order and must close its dispute like any other.
         _closeDisputeByEvidence(params, orderHash, maker);
         _settle(orderHash, nullifierHash, params.adSettlementSigner);
-        _payFromAd(params);
+        _payFromAd(params, orderHash);
 
         emit OrderUnlocked(orderHash, params.orderRecipient, nullifierHash);
     }
@@ -340,7 +359,9 @@ contract AdManager is EscrowBase, IAdManager {
             params.orderChainId,
             evidence,
             uint64(params.deadline),
-            _orderTiming(orderHash, params.orderChainId).buffer
+            _orderTiming(orderHash, params.orderChainId).buffer,
+            _adOf(params).token,
+            _adAmount(params)
         );
     }
 
@@ -370,11 +391,13 @@ contract AdManager is EscrowBase, IAdManager {
         Ad storage ad = _adOf(params);
         uint256 adAmount = _adAmount(params);
         ad.locked -= adAmount;
+        uint256 net;
+        uint256 protocolFee;
         if (outcome == Dispute.Outcome.MakerForfeit) {
             // The maker forfeits its stake: the locked amount leaves the ad for the order's
-            // recipient. Every other vacuum outcome just releases the lock back to liquidity,
-            // which the decrement above already did.
-            ad.balance -= adAmount;
+            // recipient, less the fee, as a settlement would. Every other vacuum outcome just
+            // releases the lock back to liquidity, which the decrement above already did.
+            (net, protocolFee) = ProofBridgeUtils.chargeFee(ad, params, orderHash, adAmount, true);
         }
 
         _resolve(orderHash, params.adSettlementSigner);
@@ -383,7 +406,7 @@ contract AdManager is EscrowBase, IAdManager {
         m.settleBond(orderHash, outcome, initiator != ad.maker, false);
         // Pay once the order and the dispute are closed, so the recipient's hook sees no mid-transition state.
         if (outcome == Dispute.Outcome.MakerForfeit) {
-            _payOrCredit(params.orderRecipient.toAddressChecked(), ad.token, adAmount);
+            _payNet(params.orderRecipient.toAddressChecked(), ad.token, net, protocolFee);
         }
 
         // Broadcast the outcome to the follower, which has no dispute of its own and acts only on
@@ -413,7 +436,7 @@ contract AdManager is EscrowBase, IAdManager {
     mapping(bytes32 orderHash => IDisputeManager) public disputeModuleOf;
 
     /// @inheritdoc IAdManager
-    function setDisputeManager(IDisputeManager manager) external onlyAdmin {
+    function setDisputeManager(IDisputeManager manager) external timelocked {
         if (address(manager) == address(0)) revert Escrow__ZeroAddress();
         disputeManager = manager;
         emit DisputeManagerSet(address(manager));
@@ -427,9 +450,15 @@ contract AdManager is EscrowBase, IAdManager {
      *      it does not need one, because filing has to start here anyway — only this contract can
      *      hash an order and vouch for its deadline, which the leg does not store. So the trust edge runs one way and carries no callback.
      */
-    function _openDispute(bytes32 orderHash, uint256 peerChainId, bytes32 evidence, uint64 deadline, uint64 buffer)
-        internal
-    {
+    function _openDispute(
+        bytes32 orderHash,
+        uint256 peerChainId,
+        bytes32 evidence,
+        uint64 deadline,
+        uint64 buffer,
+        address token,
+        uint256 amount
+    ) internal {
         Order storage o = _orders[orderHash];
         if (o.status != Status.Open && o.status != Status.Claimed) revert Escrow__NotDisputable(orderHash, o.status);
         // D4: no filing once the primary's window closed (claimed window end once `Claimed`). The
@@ -446,7 +475,7 @@ contract AdManager is EscrowBase, IAdManager {
         // arbitrary call sequences; this ordering is what makes the bad direction unreachable.
         IDisputeManager m = disputeManager;
         if (address(m) == address(0)) revert Escrow__NoDisputeManager();
-        m.openDispute{value: msg.value}(orderHash, peerChainId, msg.sender, evidence, deadline, buffer);
+        m.openDispute{value: msg.value}(orderHash, peerChainId, msg.sender, evidence, deadline, buffer, token, amount);
         disputeModuleOf[orderHash] = m;
         o.status = Status.Disputed;
         // A `Claimed` leg's window is over once disputed: nothing reads the claim again, so it goes now
@@ -557,7 +586,7 @@ contract AdManager is EscrowBase, IAdManager {
         // bond settles on what the proof shows, not on whatever the arbiter had ruled.
         _closeDisputeByEvidence(params, orderHash, _adOf(params).maker);
         _fill(orderHash, params.adSettlementSigner, true);
-        _payFromAd(params);
+        _payFromAd(params, orderHash);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -575,32 +604,13 @@ contract AdManager is EscrowBase, IAdManager {
                               INTERNAL LOGIC
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev The canonical 17-field order from this leg's params plus the ad-chain context.
+    /// @dev The canonical 19-field order from this leg's params plus the ad-chain context.
     function _hashOrder(OrderParams calldata p, uint256 adChainId, address dstAdManager)
         internal
         pure
         returns (bytes32)
     {
-        OrderHash.Order memory o = OrderHash.Order({
-            orderChainToken: p.orderChainToken,
-            adChainToken: p.adChainToken,
-            amount: p.amount,
-            bridger: p.bridger,
-            orderChainId: p.orderChainId,
-            orderPortal: p.srcOrderPortal,
-            orderRecipient: p.orderRecipient,
-            adChainId: adChainId,
-            adManager: dstAdManager.toBytes32(),
-            adId: p.adId,
-            adCreator: p.adCreator,
-            adRecipient: p.adRecipient,
-            salt: p.salt,
-            orderDecimals: p.orderDecimals,
-            adDecimals: p.adDecimals,
-            deadline: p.deadline,
-            adSettlementSigner: p.adSettlementSigner
-        });
-        return ProofBridgeUtils.digest(o);
+        return ProofBridgeUtils.adOrderHash(p, adChainId, dstAdManager);
     }
 
     /// @dev This escrow's hash of `p`: the ad-chain context is this chain and this contract.
@@ -618,13 +628,19 @@ contract AdManager is EscrowBase, IAdManager {
         return ProofBridgeUtils.scale(p.amount, p.orderDecimals, p.adDecimals);
     }
 
-    /// @dev Pay the bridger's recipient from the ad, in the units the lock reserved.
-    function _payFromAd(OrderParams calldata p) private {
+    /// @dev Pay the bridger's recipient from the ad, in the units the lock reserved, less the fee.
+    function _payFromAd(OrderParams calldata p, bytes32 orderHash) private {
         Ad storage ad = _adOf(p);
         uint256 adAmount = _adAmount(p);
-        ad.balance -= adAmount;
         ad.locked -= adAmount;
-        _payOrCredit(p.orderRecipient.toAddressChecked(), ad.token, adAmount);
+        (uint256 net, uint256 protocolFee) = ProofBridgeUtils.chargeFee(ad, p, orderHash, adAmount, false);
+        _payNet(p.orderRecipient.toAddressChecked(), ad.token, net, protocolFee);
+    }
+
+    /// @dev The recipient's net, then the protocol's fee (never owed without a pool: `setFeeBps`).
+    function _payNet(address recipient, address token, uint256 net, uint256 protocolFee) private {
+        _payOrCredit(recipient, token, net);
+        if (protocolFee != 0) _payOrCredit(feeConfig.pool, token, protocolFee);
     }
 
     /// @dev The first second the co-signed unlock is refused (D2): the window's end minus the margin,
@@ -756,58 +772,5 @@ contract AdManager is EscrowBase, IAdManager {
         ad = ads[adId];
         if (ad.maker == address(0)) revert AdManager__AdNotFound();
         if (ad.maker != maker) revert AdManager__NotMaker();
-    }
-
-    /// @dev Every lock-time rule, cheapest first; the cross-contract registry read last.
-    function _validateOrder(Ad storage ad, OrderParams calldata params, uint32 signerSlot)
-        private
-        view
-        returns (bytes32 orderHash)
-    {
-        if (!ad.open) revert AdManager__AdClosed();
-        if (params.amount == 0) revert Escrow__ZeroAmount();
-        if (params.bridger == bytes32(0)) revert AdManager__BridgerZero();
-        if (params.orderRecipient == bytes32(0)) revert AdManager__RecipientZero();
-        params.orderRecipient.assertEvmAddress();
-        ProofBridgeUtils.assertInRange(params.orderDecimals);
-        ProofBridgeUtils.assertInRange(params.adDecimals);
-
-        // The peer OrderPortal named in the order must be the one wired for that chain.
-        bytes32 peer = peerEscrow[params.orderChainId];
-        if (peer == bytes32(0)) revert Escrow__ChainNotSupported(params.orderChainId);
-        if (peer != params.srcOrderPortal) revert AdManager__OrderPortalMismatch(peer, params.srcOrderPortal);
-
-        // The ad serves exactly one chain and one route, committed at creation and still live.
-        if (params.orderChainId != ad.orderChainId) {
-            revert AdManager__OrderChainMismatch(ad.orderChainId, params.orderChainId);
-        }
-        if (params.orderChainToken != ad.orderChainToken) {
-            revert AdManager__RouteMismatch(ad.orderChainToken, params.orderChainToken);
-        }
-        bytes32 routed = tokenRoute[ad.token][params.orderChainId];
-        if (routed == bytes32(0)) revert Escrow__MissingRoute(params.orderChainToken, params.orderChainId);
-        if (routed != params.orderChainToken) revert Escrow__PeerTokenMismatch(routed, params.orderChainToken);
-
-        // Identity: custody (adCreator == maker) and the settlement identity the ad declared (2.3c).
-        // A lock naming any other signer is refused here, not left to the maker's account policy.
-        if (params.adCreator != ad.maker.toBytes32()) revert AdManager__NotMaker();
-        if (params.adSettlementSigner != ad.settlementSigner) {
-            revert AdManager__SettlementSignerMismatch(ad.settlementSigner, params.adSettlementSigner);
-        }
-        if (params.adChainToken != ad.token.toBytes32()) {
-            revert AdManager__AdTokenMismatch(ad.token.toBytes32(), params.adChainToken);
-        }
-        if (params.adRecipient != ad.adRecipient) {
-            revert AdManager__AdRecipientMismatch(ad.adRecipient, params.adRecipient);
-        }
-        ProofBridgeUtils.assertMatchesOnChain(ad.token, params.adDecimals);
-        ProofBridgeUtils.checkWidths(params.amount, params.orderChainId, block.chainid, params.deadline);
-
-        // A key retired after the ad was pointed at it (setValidUntil, a watchtower retirement) must
-        // not take new locks: the bridger's deposit could never be unlocked (2.3c D2). Plan 12 C: the
-        // slot the lock pins must be the signer's and usable now, in the registry the order records.
-        ProofBridgeUtils.requireLockSigner(keyRegistry, ad.settlementSigner, ad.maker.toBytes32(), signerSlot);
-
-        orderHash = _orderHash(params);
     }
 }

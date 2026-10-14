@@ -8,7 +8,7 @@
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol};
 
 use crate::errors::AdManagerError;
-use crate::types::{Ad, ChainInfo, ContractConfig, Halt};
+use crate::types::{Ad, ChainInfo, ContractConfig, FeeConfig, Halt};
 
 pub use proofbridge_core::escrow_storage::*;
 
@@ -23,6 +23,16 @@ const KEY_REGEPOCH: Symbol = symbol_short!("regepoch");
 const KEY_REGAT: Symbol = symbol_short!("regat");
 /// Prefix for a maker's settlement halt (#422).
 const KEY_HALT: Symbol = symbol_short!("halt");
+/// #586: the fee config (instance). Absent = fees off.
+const KEY_FEES: Symbol = symbol_short!("fees");
+
+pub fn get_fees(env: &Env) -> FeeConfig {
+    env.storage().instance().get(&KEY_FEES).unwrap_or_default()
+}
+
+pub fn set_fees(env: &Env, f: &FeeConfig) {
+    env.storage().instance().set(&KEY_FEES, f);
+}
 
 /// The config, or this contract's own `NotInitialized`.
 pub fn get_config(env: &Env) -> Result<ContractConfig, AdManagerError> {

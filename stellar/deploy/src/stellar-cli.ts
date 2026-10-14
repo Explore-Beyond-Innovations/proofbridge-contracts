@@ -2,6 +2,7 @@
 
 import { execFileSync } from "child_process";
 import { StrKey } from "@stellar/stellar-sdk";
+import { encodeCall, flagsToNamed } from "./timelock.js";
 import type { DeployEnv } from "./deploy-env.js";
 
 /** The passphrase each environment's network answers with (RPC `getNetwork`). */
@@ -263,9 +264,23 @@ export function readView(contractId: string, fn: string, args: string[] = []): u
   return JSON.parse(last);
 }
 
+/** #586: a call under the 24-hour delay: proposed by this run, or waiting out an earlier proposal. */
+export interface PendingCall {
+  label: string;
+  contractId: string;
+  fn: string;
+  args: string[];
+  /** The proposal id (hex). */
+  id: string;
+  proposedNow: boolean;
+}
+
 export class Acting {
   readonly described: DescribedCall[] = [];
+  /** #586: calls on a timelocked contract that were proposed, or are waiting out their delay. */
+  readonly pending: PendingCall[] = [];
   private readonly foreign: Set<string>;
+  private readonly timelocked: Set<string>;
 
   /**
    * @param foreign contract ids whose admin is not the source account. The decision is per
@@ -273,8 +288,9 @@ export class Acting {
    * contract deployed in this run (its admin is the source account) is wired whatever happened to
    * the rest (#424 H1).
    */
-  constructor(foreign: Iterable<string>, private readonly tag: string) {
+  constructor(foreign: Iterable<string>, private readonly tag: string, timelocked: Iterable<string> = []) {
     this.foreign = new Set(foreign);
+    this.timelocked = new Set(timelocked);
   }
 
   canSendTo(contractId: string): boolean {
@@ -286,8 +302,12 @@ export class Acting {
     return this.foreign.size === 0;
   }
 
-  /** Send `fn(args)` on `contractId`, or describe it. Returns whether it was sent. */
-  call(contractId: string, label: string, fn: string, args: string[], line: string): boolean {
+  /**
+   * Send `fn(args)` on `contractId`, or describe it. Returns whether it was sent. `instant` marks a
+   * brake (a call the contract runs without the delay, such as a tightening): never proposed.
+   */
+  call(contractId: string, label: string, fn: string, args: string[], line: string, instant = false): boolean {
+    if (!instant && this.timelocked.has(contractId)) return this.callTimelocked(contractId, label, fn, args, line);
     if (!this.canSendTo(contractId)) {
       this.described.push({ label, contractId, fn, args });
       console.log(`  [describe] ${line}`);
@@ -298,7 +318,45 @@ export class Acting {
     return true;
   }
 
+  /**
+   * #586: the delay is on for `contractId`. A pending proposal for this exact call is executed if its
+   * delay is over (the setter's own simulation says so), else reported; none is proposed (or, when
+   * the source account is not the admin, the `propose_action` is described). Returns whether the
+   * setter itself ran.
+   */
+  private callTimelocked(contractId: string, label: string, fn: string, args: string[], line: string): boolean {
+    const enc = encodeCall(label, fn, flagsToNamed(args));
+    if (Number(readView(contractId, "timelock_eta", ["--id", enc.id])) !== 0) {
+      try {
+        invokeContract(contractId, fn, args, { send: false });
+      } catch {
+        this.pending.push({ label, contractId, fn, args, id: enc.id, proposedNow: false });
+        console.log(`  [pending] ${line} - proposal ${enc.id} is not executable yet`);
+        return false;
+      }
+      invokeContract(contractId, fn, args);
+      console.log(`  [execute] ${line}`);
+      return true;
+    }
+    const proposeArgs = ["--fn_name", fn, "--args", enc.argsXdr];
+    if (!this.canSendTo(contractId)) {
+      this.described.push({ label, contractId, fn: "propose_action", args: proposeArgs });
+      console.log(`  [describe] propose ${line}`);
+      return false;
+    }
+    invokeContract(contractId, "propose_action", proposeArgs);
+    this.pending.push({ label, contractId, fn, args, id: enc.id, proposedNow: true });
+    console.log(`  [propose] ${line} - proposal ${enc.id}, executable in 24 hours`);
+    return false;
+  }
+
   report(): void {
+    if (this.pending.length > 0) {
+      console.log(
+        `\n[${this.tag}] ${this.pending.length} call(s) are under the 24-hour delay; re-run this command after it to execute them:`,
+      );
+      for (const p of this.pending) console.log(`  ${p.label}.${p.fn}  proposal ${p.id}`);
+    }
     if (this.described.length === 0) return;
     console.log(
       `\n[${this.tag}] the source account is not the admin of every contract, so these ${this.described.length} call(s) were not sent. The admin has to make them:`,
