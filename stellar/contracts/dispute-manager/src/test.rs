@@ -195,6 +195,24 @@ fn params_fail_closed() {
         ),
         Err(Ok(Error::InvalidBondFloor))
     );
+    // #586: the floor is moved as an i128, so one past i128's maximum could never be pulled.
+    assert_eq!(
+        f.client.try_set_dispute_params(
+            &CHAIN,
+            &DisputeParams {
+                challenge_period: CHALLENGE,
+                bond_floor: i128::MAX as u128 + 1,
+            }
+        ),
+        Err(Ok(Error::InvalidBondFloor))
+    );
+    f.client.set_dispute_params(
+        &CHAIN,
+        &DisputeParams {
+            challenge_period: CHALLENGE,
+            bond_floor: i128::MAX as u128,
+        },
+    );
 }
 
 /// Parameter validation from the shared vector both chains loop over: each row either writes or fails

@@ -200,6 +200,7 @@ struct FeeVariantJson {
     order_root: String,
     bridger_nullifier: String,
     settled_root: String,
+    cancel_root: String,
 }
 
 #[derive(Deserialize)]
@@ -285,6 +286,7 @@ struct FeeVariant {
     order_root: [u8; 32],
     bridger_nullifier: [u8; 32],
     settled_root: [u8; 32],
+    cancel_root: [u8; 32],
 }
 
 fn hex_to_array(hex_str: &str) -> [u8; 32] {
@@ -349,6 +351,7 @@ fn load_test_params() -> TestParams {
             order_root: hex_to_array(&json.fees.order_root),
             bridger_nullifier: hex_to_array(&json.fees.bridger_nullifier),
             settled_root: hex_to_array(&json.fees.settled_root),
+            cancel_root: hex_to_array(&json.fees.cancel_root),
         },
     }
 }
@@ -10743,6 +10746,7 @@ const FEE_POOL_KEY: [u8; 32] = [0x99; 32];
 
 const PROOF_BRIDGER_FEES: &[u8] = include_bytes!("fixtures/proof_bridger_fees.bin");
 const SETTLED_CLAIM_FEES: &[u8] = include_bytes!("fixtures/event_claim_3_fees.bin");
+const CANCEL_CLAIM_FEES: &[u8] = include_bytes!("fixtures/event_claim_2_fees.bin");
 
 /// Sets the pool and the split, with the pool an account.
 fn wire_fees(s: &TestSetup, lp: u32, protocol: u32) -> Address {
@@ -10762,6 +10766,7 @@ fn fee_setup() -> (TestSetup<'static>, Address) {
     s.tp.order_root = v.order_root;
     s.tp.bridger_nullifier = v.bridger_nullifier;
     s.tp.event_roots[1] = v.settled_root;
+    s.tp.event_roots[0] = v.cancel_root;
     s.tp.lp_fee_bps = lp;
     s.tp.protocol_fee_bps = protocol;
     let pool = wire_fees(&s, lp, protocol);
@@ -11560,4 +11565,54 @@ fn test_586_only_the_admin_unwires_a_root_verifier() {
         .order_portal
         .try_unset_root_verifier(&s.tp.ad_chain_id)
         .is_err());
+}
+
+/// End to end on one chain pair: the bridger deposits under 30 / 20, the ad chain's fee rises before
+/// the maker locks, the lock is refused (`FeeMismatch`), and at the deadline the never-locked cancel
+/// writes the CANCEL leaf that refunds the bridger's whole deposit on the order chain.
+#[test]
+fn test_586_a_fee_change_before_the_lock_refunds_the_bridger() {
+    let (s, pool) = fee_setup();
+    let anchor = wire_anchor(&s);
+    let bridger = account_addr(&s, &s.tp.bridger);
+    let order_token = TokenContractClient::new(&s.env, &s.order_token_addr);
+    let q = created_portal_order(&s);
+    let after_deposit = order_token.balance(&bridger);
+
+    s.ad_manager.set_fee_bps(&30, &25);
+    let p = ad_manager_order_params(&s.env, &s.tp);
+    assert_eq!(
+        s.ad_manager.try_lock_for_order(&p, &0),
+        Err(Ok(AdErr::FeeMismatch)),
+        "the lock is refused"
+    );
+
+    warp(&s, p.deadline);
+    let order_root = bytes32_to_bytesn(&s.env, &s.tp.order_root);
+    notarize(&s, &anchor, s.tp.order_chain_id, &order_root);
+    s.ad_manager.cancel_never_locked(
+        &p,
+        &order_root,
+        &bytes32_to_bytesn(&s.env, &s.tp.bridger_nullifier),
+        &Bytes::from_slice(&s.env, PROOF_BRIDGER_FEES),
+    );
+    assert_eq!(ad_status(&s), ad_manager_contract::Status::Cancelled);
+
+    let cancel_root = bytes32_to_bytesn(&s.env, &s.tp.event_roots[0]);
+    notarize(&s, &anchor, s.tp.ad_chain_id, &cancel_root);
+    s.order_portal.refund_by_cancel(
+        &q,
+        &cancel_root,
+        &Bytes::from_slice(&s.env, CANCEL_CLAIM_FEES),
+    );
+    assert_eq!(
+        order_token.balance(&bridger),
+        after_deposit + s.tp.amount as i128,
+        "the whole deposit comes back"
+    );
+    assert_eq!(
+        TokenContractClient::new(&s.env, &s.ad_token_addr).balance(&pool),
+        0,
+        "no fee was taken"
+    );
 }

@@ -90,6 +90,22 @@ contract RouteBondTest is Phase3Base {
         dm.setBondConfig(address(0), ORDER_CHAIN, Dispute.BondConfig(1, 0));
     }
 
+    /// The flat floor's validation from the shared vector: any non-zero uint128 here (Soroban's i128
+    /// cap is its own, marked `stellarValid` in the vector).
+    function test_bondFloorValidationMatchesTheSharedVector() public {
+        string memory v = vm.readFile("../test-vectors/fees-bonds.json");
+        uint256 n = vm.parseJsonUint(v, ".counts.bondFloorValidation");
+        assertGt(n, 0);
+        for (uint256 i = 0; i < n; i++) {
+            string memory at = string.concat(".bondFloorValidation[", vm.toString(i), "]");
+            uint128 floor_ = uint128(vm.parseJsonUint(v, string.concat(at, ".bondFloor")));
+            bool valid = vm.parseJsonBool(v, string.concat(at, ".valid"));
+            vm.prank(admin);
+            if (!valid) vm.expectRevert(abi.encodeWithSelector(Dispute.Dispute__InvalidParams.selector, 2));
+            dm.setDisputeParams(ORDER_CHAIN, Dispute.Params(2 hours, floor_));
+        }
+    }
+
     /// A route with no config posts plan 09's flat floor in native, whatever the order.
     function test_anUnconfiguredRouteKeepsTheNativeFloor() public {
         (address t, uint256 b) = dm.routeBond(ORDER_CHAIN, address(adToken), 1e24);

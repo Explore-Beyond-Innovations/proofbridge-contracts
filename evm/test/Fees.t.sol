@@ -11,6 +11,7 @@ import {Dispute} from "src/libraries/Dispute.sol";
 import {ProofBridgeUtils} from "src/libraries/ProofBridgeUtils.sol";
 import {Timelock} from "src/libraries/Timelock.sol";
 import {Phase3Base} from "./utils/Phase3Base.sol";
+import {statusOf} from "test/utils/OrderStatus.sol";
 
 /// #586 (plan 2.6 doc 24, D5–D8): the bridge fee on the ad chain's payouts.
 contract FeeTest is Phase3Base {
@@ -118,6 +119,31 @@ contract FeeTest is Phase3Base {
         vm.prank(maker);
         vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__FeeMismatch.selector, 100, 100));
         adManager.lockForOrder(p, 0);
+    }
+
+    /// The ad-chain half of a refused lock, end to end: the fee rises after the deposit, the lock is
+    /// refused, and at the deadline the never-locked cancel writes the CANCEL leaf that refunds the
+    /// bridger on the order chain (the refund itself: Soroban's joined test and the refundByCancel suites).
+    function test_aFeeChangeBeforeTheLockEndsInTheNeverLockedCancel() public {
+        _fees(30, 20);
+        IAdManager.OrderParams memory p = _params(false, 1_000_000_000, 12);
+        p.deadline = block.timestamp + 1 days;
+        vm.prank(admin);
+        adManager.setFeeBps(30, 25);
+        vm.prank(maker);
+        vm.expectRevert(abi.encodeWithSelector(IAdManager.AdManager__FeeMismatch.selector, 30, 25));
+        adManager.lockForOrder(p, 0);
+
+        (uint256 balanceBefore,) = _adBalance(AD);
+        uint256 size = mmr.getSize();
+        vm.warp(p.deadline);
+        adManager.cancelNeverLocked(p, EVIDENCE_ROOT, bytes32(uint256(7)), hex"");
+        assertEq(uint256(statusOf(address(adManager), _hash(p))), uint256(IEscrow.Status.Cancelled));
+        assertGt(mmr.getSize(), size, "the CANCEL leaf");
+        (uint256 balanceAfter, uint256 locked) = _adBalance(AD);
+        assertEq(balanceAfter, balanceBefore, "the ad lost nothing");
+        assertEq(locked, 0);
+        assertEq(adToken.balanceOf(pool), 0, "no fee was taken");
     }
 
     /// The native ad pays its fee in native: the pool receives value.

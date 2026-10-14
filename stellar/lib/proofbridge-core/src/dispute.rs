@@ -35,8 +35,9 @@ pub fn validate(p: &DisputeParams) -> Result<(), u8> {
     if p.challenge_period < MIN_CHALLENGE_PERIOD || p.challenge_period > MAX_CHALLENGE_PERIOD {
         return Err(1);
     }
-    // No ceiling on the floor: it is in the route token's units, so no one number fits every token.
-    if p.bond_floor == 0 {
+    // No business ceiling on the floor: it is in the route token's units, so no one number fits every
+    // token. It is moved as an i128, though, so a floor above i128's maximum could never be pulled (#586).
+    if p.bond_floor == 0 || p.bond_floor > i128::MAX as u128 {
         return Err(2);
     }
     Ok(())

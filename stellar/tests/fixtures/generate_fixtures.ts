@@ -559,6 +559,18 @@ async function main() {
   });
   const feeSettled = await honk.generateProof(feeSettledWitness, { keccak: true });
   fs.writeFileSync(path.join(OUTPUT_DIR, "event_claim_3_fees.bin"), Buffer.from(feeSettled.proof));
+  console.log("Generating fee-variant CANCEL claim (domain 2)...");
+  const feeCancelTree = await buildSideTree(feeHashMod.toString(), 2);
+  const { witness: feeCancelWitness } = await noir.execute({
+    nullifier_hash: "0",
+    order_hash: feeHashMod.toString(),
+    target_root: feeCancelTree.root,
+    leaf_domain: "2",
+    secret: "0",
+    ...leanInputs(feeCancelTree.merkleProof),
+  });
+  const feeCancel = await honk.generateProof(feeCancelWitness, { keccak: true });
+  fs.writeFileSync(path.join(OUTPUT_DIR, "event_claim_2_fees.bin"), Buffer.from(feeCancel.proof));
   const fees = {
     lpFeeBps: FEE_LP,
     protocolFeeBps: FEE_PROTOCOL,
@@ -566,6 +578,7 @@ async function main() {
     orderRoot: feeOrderTree.root,
     bridgerNullifier: feeNullifier.toString(),
     settledRoot: feeSettledTree.root,
+    cancelRoot: feeCancelTree.root,
   };
 
   // Write test params (Stellar strkey addresses for display, used by Rust tests)

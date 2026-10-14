@@ -9,7 +9,8 @@
     "feeSplit": 9,
     "feeValidation": 7,
     "routeBond": 9,
-    "bondConfigValidation": 8
+    "bondConfigValidation": 8,
+    "bondFloorValidation": 4
   },
   "constants": {
     "maxFeeBps": 100,
@@ -265,6 +266,29 @@
       "bondBps": 0,
       "valid": true,
       "stellarValid": false
+    }
+  ],
+  "bondFloorValidation": [
+    {
+      "label": "a floor of one base unit",
+      "bondFloor": "1",
+      "valid": true
+    },
+    {
+      "label": "the largest floor Soroban can pull",
+      "bondFloor": "170141183460469231731687303715884105727",
+      "valid": true
+    },
+    {
+      "label": "a floor one past i128",
+      "bondFloor": "170141183460469231731687303715884105728",
+      "valid": true,
+      "stellarValid": false
+    },
+    {
+      "label": "no floor",
+      "bondFloor": "0",
+      "valid": false
     }
   ]
 }

@@ -120,6 +120,19 @@ fn the_route_bond_matches_the_shared_vectors() {
 }
 
 #[test]
+fn bond_floor_validation_matches_the_shared_vectors() {
+    let v = vectors();
+    for row in rows(&v, "bondFloorValidation") {
+        let label = row["label"].as_str().unwrap();
+        let p = crate::types::DisputeParams {
+            challenge_period: dispute::MIN_CHALLENGE_PERIOD,
+            bond_floor: u128_of(row, "bondFloor"),
+        };
+        assert_eq!(dispute::validate(&p).is_ok(), stellar_valid(row), "{label}");
+    }
+}
+
+#[test]
 fn bond_config_validation_matches_the_shared_vectors() {
     let v = vectors();
     for row in rows(&v, "bondConfigValidation") {
