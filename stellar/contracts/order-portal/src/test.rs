@@ -485,7 +485,7 @@ mod order_lifecycle_tests {
     }
 }
 
-// 17-field EIP-712 order-hash parity (T-19, T-66) against the frozen 2.5b fixture; the same file
+// 19-field EIP-712 order-hash parity (T-19, T-66) against the frozen 2.5b fixture; the same file
 // drives the EVM and relayer suites.
 mod order_hash_parity {
     extern crate std;

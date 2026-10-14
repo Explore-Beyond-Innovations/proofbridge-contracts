@@ -106,7 +106,7 @@ const DOMAIN_TYPEHASH_MIN = keccak256(
 const NAME_HASH = keccak256(Buffer.from("Proofbridge"));
 // keccak256("1")
 const VERSION_HASH = keccak256(Buffer.from("1"));
-// keccak256 of the 17-field order type string (test-vectors/order-hash-v2.json)
+// keccak256 of the 19-field order type string (test-vectors/order-hash-v2.json)
 const ORDER_TYPEHASH = keccak256(
   Buffer.from(
     "Order(bytes32 orderChainToken,bytes32 adChainToken,uint256 amount,bytes32 bridger,uint256 orderChainId,bytes32 orderPortal,bytes32 orderRecipient,uint256 adChainId,bytes32 adManager,string adId,bytes32 adCreator,bytes32 adRecipient,uint256 salt,uint8 orderDecimals,uint8 adDecimals,uint256 deadline,bytes32 adSettlementSigner,uint16 lpFeeBps,uint16 protocolFeeBps)"

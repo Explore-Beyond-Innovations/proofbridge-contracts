@@ -2,7 +2,7 @@
 //!
 //! The lock argument is read as a `Map<Symbol, Val>` and only the keys the
 //! policy needs are decoded (F4a), so the account is width-agnostic: the 2.3b
-//! 17-field order decodes the same way. A missing key or a wrong type is
+//! 19-field order (#586) decodes the same way. A missing key or a wrong type is
 //! `BadArgs` (fail closed).
 
 use soroban_sdk::{

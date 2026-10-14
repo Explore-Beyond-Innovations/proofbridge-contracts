@@ -12,7 +12,7 @@ contract WidthHarness {
     }
 }
 
-/// 17-field EIP-712 order-hash parity (T-19, T-66) against the frozen 2.5b fixture. The same file
+/// 19-field EIP-712 order-hash parity (T-19, T-66) against the frozen 2.5b fixture. The same file
 /// drives the Soroban and relayer suites; each recomputes every vector's committed hashes.
 contract OrderHashParityTest is Test {
     using stdJson for string;
