@@ -376,6 +376,45 @@ contract AgentPolicyEnforcementTest is AgentPolicyBase {
         module.setAgentPolicy(agentId, defaultPolicy());
     }
 
+    /// OE-100: an off-chain reader learns a policy's expiry from this view, not from the set logs.
+    function test_policyMetaOfReportsTheLivePolicysFingerprintAndExpiry() public {
+        uint64 expiry = uint64(block.timestamp + 1 days);
+        bytes memory dated = policyBytes(false, expiry, MAX_PER_ORDER, CAPACITY, REFILL);
+        _asAccount(abi.encodeCall(module.setAgentPolicy, (agentId, dated)));
+        (bytes32 fingerprint, uint64 validUntil) = module.policyMetaOf(instance.account, agentId);
+        assertEq(fingerprint, keccak256(dated));
+        assertEq(validUntil, expiry);
+
+        // written again with no expiry: the new fingerprint, and 0 for "never expires"
+        bytes memory open = policyBytes(false, 0, MAX_PER_ORDER, CAPACITY, REFILL);
+        _asAccount(abi.encodeCall(module.setAgentPolicy, (agentId, open)));
+        (fingerprint, validUntil) = module.policyMetaOf(instance.account, agentId);
+        assertEq(fingerprint, keccak256(open));
+        assertEq(validUntil, 0);
+    }
+
+    function test_policyMetaOfReadsNothingOnceRevoked() public {
+        _asAccount(
+            abi.encodeCall(
+                module.setAgentPolicy,
+                (agentId, policyBytes(false, uint64(block.timestamp + 1 days), MAX_PER_ORDER, CAPACITY, REFILL))
+            )
+        );
+        _asAccount(abi.encodeCall(module.revokeAgent, (agentId)));
+        (bytes32 fingerprint, uint64 validUntil) = module.policyMetaOf(instance.account, agentId);
+        assertEq(fingerprint, bytes32(0));
+        assertEq(validUntil, 0, "the revoked policy's stored expiry does not show through");
+    }
+
+    function test_policyMetaOfReadsNothingForAStranger() public view {
+        (bytes32 fingerprint, uint64 validUntil) = module.policyMetaOf(address(0xBEEF), agentId);
+        assertEq(fingerprint, bytes32(0));
+        assertEq(validUntil, 0);
+        (fingerprint, validUntil) = module.policyMetaOf(instance.account, bytes32(uint256(0xdead)));
+        assertEq(fingerprint, bytes32(0));
+        assertEq(validUntil, 0);
+    }
+
     function test_anExpiredPolicyIsRefused() public {
         uint64 expiry = uint64(block.timestamp + 100);
         _asAccount(
@@ -489,6 +528,9 @@ contract AgentPolicyEnforcementTest is AgentPolicyBase {
         instance.installModule(TYPE_HOOK, address(module), bytes.concat(bytes32(TYPE_HOOK)));
 
         assertEq(module.fingerprintOf(instance.account, agentId), bytes32(0), "the old policy is unreachable");
+        (bytes32 fingerprint, uint64 validUntil) = module.policyMetaOf(instance.account, agentId);
+        assertEq(fingerprint, bytes32(0), "OE-100: the old epoch's policy reads as none");
+        assertEq(validUntil, 0);
         UserOpData memory op = _agentOp(lockCall(1));
         instance.expect4337Revert();
         op.execUserOps();

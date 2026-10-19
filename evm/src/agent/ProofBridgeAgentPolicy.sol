@@ -708,6 +708,18 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         return _revoked[agentId][account];
     }
 
+    /// @notice The live policy's fingerprint and expiry (0 = none); both 0 when no policy is live. A
+    /// revoke zeroes only the fingerprint, so the expiry is read only behind it.
+    function policyMetaOf(address account, bytes32 agentId)
+        external
+        view
+        returns (bytes32 fingerprint, uint64 validUntil)
+    {
+        bytes32 aKey = _agentKey(_epoch[account], agentId);
+        fingerprint = _fingerprint[aKey][account];
+        if (fingerprint != bytes32(0)) validUntil = _meta[aKey][account].validUntil;
+    }
+
     function agentLimit(address account, bytes32 agentId, bytes32 token) external view returns (TokenLimitRow memory) {
         bytes32 aKey = _agentKey(_epoch[account], agentId);
         return _agentLimit[_tokenKey(_versionKey(aKey, _version[aKey][account]), token)][account];
