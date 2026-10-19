@@ -708,6 +708,19 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         return _revoked[agentId][account];
     }
 
+    /// @notice The fingerprint and expiry of the policy set in the account's current epoch and not revoked;
+    /// both 0 otherwise. Does not check the hook is mounted. `validUntil` is exclusive (usable while
+    /// `now < validUntil`), 0 = never expires; a revoke zeroes only the fingerprint, so it is read behind it.
+    function policyMetaOf(address account, bytes32 agentId)
+        external
+        view
+        returns (bytes32 fingerprint, uint64 validUntil)
+    {
+        bytes32 aKey = _agentKey(_epoch[account], agentId);
+        fingerprint = _fingerprint[aKey][account];
+        if (fingerprint != bytes32(0)) validUntil = _meta[aKey][account].validUntil;
+    }
+
     function agentLimit(address account, bytes32 agentId, bytes32 token) external view returns (TokenLimitRow memory) {
         bytes32 aKey = _agentKey(_epoch[account], agentId);
         return _agentLimit[_tokenKey(_versionKey(aKey, _version[aKey][account]), token)][account];
