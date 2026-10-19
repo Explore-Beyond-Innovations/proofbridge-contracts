@@ -393,6 +393,34 @@ contract AgentPolicyEnforcementTest is AgentPolicyBase {
         assertEq(validUntil, 0);
     }
 
+    /// 77-1: the relayer's expired-policy warning reads the past expiry; an expired policy is not "none".
+    function test_policyMetaOfStillReportsAnExpiredPolicy() public {
+        uint64 expiry = uint64(block.timestamp + 100);
+        bytes memory dated = policyBytes(false, expiry, MAX_PER_ORDER, CAPACITY, REFILL);
+        _asAccount(abi.encodeCall(module.setAgentPolicy, (agentId, dated)));
+
+        vm.warp(expiry);
+        (bytes32 fingerprint, uint64 validUntil) = module.policyMetaOf(instance.account, agentId);
+        assertEq(fingerprint, keccak256(dated), "at the expiry");
+        assertEq(validUntil, expiry, "at the expiry");
+
+        vm.warp(expiry + 1 days);
+        (fingerprint, validUntil) = module.policyMetaOf(instance.account, agentId);
+        assertEq(fingerprint, keccak256(dated), "past the expiry");
+        assertEq(validUntil, expiry, "past the expiry");
+    }
+
+    /// 77-2: with only the hook uninstalled the policy is suspended, not dead (the epoch holds), so it reads as set.
+    function test_policyMetaOfReportsAPolicySuspendedByAnUnmountedHook() public {
+        uint64 expiry = uint64(block.timestamp + 1 days);
+        bytes memory dated = policyBytes(false, expiry, MAX_PER_ORDER, CAPACITY, REFILL);
+        _asAccount(abi.encodeCall(module.setAgentPolicy, (agentId, dated)));
+        instance.uninstallModule(TYPE_HOOK, address(module), bytes.concat(bytes32(TYPE_HOOK)));
+        (bytes32 fingerprint, uint64 validUntil) = module.policyMetaOf(instance.account, agentId);
+        assertEq(fingerprint, keccak256(dated));
+        assertEq(validUntil, expiry);
+    }
+
     function test_policyMetaOfReadsNothingOnceRevoked() public {
         _asAccount(
             abi.encodeCall(
