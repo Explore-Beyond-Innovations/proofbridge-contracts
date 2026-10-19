@@ -100,6 +100,7 @@ contract AgentPolicyParityTest is AgentPolicyBase {
         string name;
         uint256 startTime;
         bytes policy;
+        uint64 validUntil;
         Ceiling[] ceilings;
         uint256 steps;
         bool installs;
@@ -253,11 +254,17 @@ contract AgentPolicyParityTest is AgentPolicyBase {
             _setCeilings(setup.ceilings);
             (bool installed, bytes memory err) = _install(setup.policy);
 
+            (bytes32 fingerprint, uint64 validUntil) = module.policyMetaOf(instance.account, agentId);
             if (setup.installs) {
                 assertTrue(installed, setup.name);
+                // The view reads back the installed policy and the expiry the fixture gives Soroban too.
+                assertEq(fingerprint, keccak256(setup.policy), setup.name);
+                assertEq(validUntil, setup.validUntil, setup.name);
             } else {
                 assertFalse(installed, setup.name);
                 assertEq(bytes4(err), setup.installError, setup.name);
+                assertEq(fingerprint, bytes32(0), setup.name);
+                assertEq(validUntil, 0, setup.name);
             }
             vm.revertToState(snapshot);
             ++ran;
@@ -363,6 +370,7 @@ contract AgentPolicyParityTest is AgentPolicyBase {
         setup.name = vectors.readString(string.concat(at, ".name"));
         setup.startTime = vectors.readUint(string.concat(at, ".startTime"));
         setup.policy = vectors.readBytes(string.concat(at, ".evmPolicyHex"));
+        setup.validUntil = uint64(vectors.readUint(string.concat(at, ".policy.validUntil")));
 
         string memory ceilings = string.concat(at, ".accountCeilings");
         uint256 n;
