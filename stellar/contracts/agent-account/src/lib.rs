@@ -25,10 +25,11 @@ mod auth;
 mod errors;
 mod escrow;
 mod events;
+mod owner;
 mod policy;
 
 use soroban_sdk::{
-    auth::{Context, CustomAccountInterface},
+    auth::{Context, CustomAccountInterface, InvokerContractAuthEntry},
     contract, contractimpl,
     crypto::Hash,
     vec, Address, BytesN, ContractExecutable, Env, IntoVal, String, Symbol, TryFromVal, Val, Vec,
@@ -43,7 +44,7 @@ pub use errors::AccountError;
 pub use escrow::settlement_signer_of;
 pub use policy::{
     lock_for_order, AccountVolume, AgentId, AgentPolicy, Schedule, Scope, MAX_AD_ID_BYTES,
-    MAX_AD_SCOPE, MAX_TARGETS, MAX_WHITELIST_TOKENS, SCHEMA_VERSION,
+    MAX_AD_SCOPE, MAX_TARGETS, MAX_VALID_UNTIL, MAX_WHITELIST_TOKENS, SCHEMA_VERSION,
 };
 
 #[contract]
@@ -119,6 +120,10 @@ impl AgentAccount {
     ) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
+        // An all-zero id is no key at all; the EVM module refuses it too (plan 46 D11).
+        if proofbridge_core::auth::is_zero_bytes32(&agent_id) {
+            return Err(AccountError::BadPolicy);
+        }
         if policy::get_policy(&env, &agent_id).is_some_and(|p| p.revoked) {
             return Err(AccountError::AgentRevoked);
         }
@@ -529,6 +534,108 @@ impl AgentAccount {
         Ok(SCHEMA_VERSION)
     }
 
+    // ---- the owner's ad actions (plan 46) ----
+
+    /// Owner-only. Opens an ad with this account as its maker, funded from the owner's wallet in
+    /// this one call: the amount comes in from the owner and goes straight on to the escrow, so the
+    /// account holds nothing before or after (plan 46 D2). `ad_manager` must be a pinned target.
+    /// `token` is the contract the escrow pulls: the ad token's own, or the escrow's wrapped native
+    /// token for XLM (`get_config`); any mismatch fails the escrow's pull and reverts everything.
+    pub fn create_ad(
+        env: Env,
+        ad_manager: Address,
+        token: Address,
+        ad_id: String,
+        ad_token: BytesN<32>,
+        amount: u128,
+        order_chain_id: u128,
+        ad_recipient: BytesN<32>,
+        settlement_signer: BytesN<32>,
+    ) -> Result<(), AccountError> {
+        let owner = policy::get_owner(&env);
+        owner.require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        owner::require_target(&env, &ad_manager)?;
+        owner::require_ad_token(&env, &token, &ad_token)?;
+        let me = env.current_contract_address();
+        let args: Vec<Val> = vec![
+            &env,
+            me.to_val(),
+            ad_id.to_val(),
+            ad_token.to_val(),
+            amount.into_val(&env),
+            order_chain_id.into_val(&env),
+            ad_recipient.to_val(),
+            settlement_signer.to_val(),
+        ];
+        owner::pay_through(&env, &owner, &token, amount, &ad_manager, |env| {
+            env.invoke_contract::<()>(&ad_manager, &Symbol::new(env, "create_ad"), args);
+        })
+    }
+
+    /// Owner-only. Adds liquidity to one of this account's ads, from the owner's wallet in this one
+    /// call, as `create_ad`. `token` as there.
+    pub fn fund_ad(
+        env: Env,
+        ad_manager: Address,
+        token: Address,
+        ad_id: String,
+        amount: u128,
+    ) -> Result<(), AccountError> {
+        let owner = policy::get_owner(&env);
+        owner.require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        owner::require_target(&env, &ad_manager)?;
+        let args: Vec<Val> = vec![&env, ad_id.to_val(), amount.into_val(&env)];
+        owner::pay_through(&env, &owner, &token, amount, &ad_manager, |env| {
+            env.invoke_contract::<()>(&ad_manager, &Symbol::new(env, "fund_ad"), args);
+        })
+    }
+
+    /// Owner-only. Any other call on a pinned escrow as this account: withdraw, close, a manual
+    /// lock, a dispute and its response, the settlement signer, halt and resume. The guard rail runs
+    /// first (an extractive call on a guarded ad needs its matured schedule).
+    ///
+    /// `pay` optionally brings `(token, amount)` in from the owner's wallet for the call (a dispute's
+    /// bond). `approvals` are the nested calls the escrow will make as this account, as simulating
+    /// the call reports them: a token `transfer` from this account, or an `open_dispute` whose
+    /// nested calls are only such transfers. The account's balance of every token involved must be
+    /// the same afterwards, so an approval only ever forwards what this call paid in.
+    pub fn call(
+        env: Env,
+        target: Address,
+        fn_name: Symbol,
+        args: Vec<Val>,
+        pay: Option<(Address, u128)>,
+        approvals: Vec<InvokerContractAuthEntry>,
+    ) -> Result<Val, AccountError> {
+        let owner = policy::get_owner(&env);
+        owner.require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        owner::require_target(&env, &target)?;
+        escrow::check_owner_call(&env, &fn_name, &args)?;
+        owner::call_with(&env, &owner, &target, &fn_name, args, pay, approvals)
+    }
+
+    /// Owner-only. The one way out for funds at rest in the account (a refunded dispute bond, a
+    /// claimed credit). While any ad is guarded it needs a matured
+    /// `schedule(Account, sweep, [token, to, amount])` for exactly this call.
+    pub fn sweep(env: Env, token: Address, to: Address, amount: u128) -> Result<(), AccountError> {
+        policy::get_owner(&env).require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        if policy::any_guarded(&env) {
+            let now = env.ledger().timestamp();
+            let args: Vec<Val> = vec![&env, token.to_val(), to.to_val(), amount.into_val(&env)];
+            spend(&env, &Scope::Account, &policy::act_sweep(&env), &args, now)?;
+        }
+        soroban_sdk::token::TokenClient::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &to,
+            &owner::to_i128(amount)?,
+        );
+        Ok(())
+    }
+
     // ---- views ----
 
     pub fn owner(env: Env) -> Address {
@@ -546,6 +653,12 @@ impl AgentAccount {
     /// True iff a policy exists and is revoked (the sticky tombstone).
     pub fn is_revoked(env: Env, agent_id: BytesN<32>) -> bool {
         policy::get_policy(&env, &agent_id).is_some_and(|p| p.revoked)
+    }
+
+    /// The account-wide volume limit and its live bucket for one token (plan 46 D11, as the EVM
+    /// module's `accountLimit` / `accountBucket`).
+    pub fn account_volume(env: Env, token: BytesN<32>) -> Option<AccountVolume> {
+        policy::get_account_volume(&env, &token)
     }
 
     pub fn schema_version(env: Env) -> u32 {
@@ -586,26 +699,10 @@ impl CustomAccountInterface for AgentAccount {
     ) -> Result<(), AccountError> {
         proofbridge_core::ttl::extend_instance(&env);
         let agent_id = match signature {
-            AccountSig::Owner => {
-                // The owner authorizes this exact payload (not the whole
-                // __check_auth frame) in its own auth entry. Sovereign: no context
-                // inspection, so create_ad/fund_ad's token transfer sub-context passes.
-                let payload: BytesN<32> = signature_payload.to_bytes();
-                policy::get_owner(&env).require_auth_for_args(vec![&env, payload.into_val(&env)]);
-                // 2.1e: the owner path used to stop here. It still authorizes everything the owner
-                // could do before — only the two extractive escrow calls, and only on a guarded ad,
-                // now have to have been announced first.
-                // Every contract context, not just the pinned escrows. Filtering on `targets` here
-                // meant `set_targets` — owner-only and instant — could point them elsewhere and
-                // remove the guard without touching it. `check_owner_call` keys on the selector and
-                // the ad, so an unrelated contract is only ever refused for an ad this owner armed.
-                for ctx in auth_contexts.iter() {
-                    if let Context::Contract(c) = ctx {
-                        escrow::check_owner_call(&env, &c)?;
-                    }
-                }
-                return Ok(());
-            }
+            // Plan 46: the owner acts through `create_ad` / `fund_ad` / `call` / `sweep`, never by
+            // signing as the account. Accepting it here would let a direct token transfer out of the
+            // account past the guard rail, and needs an auth entry xBull and LOBSTR can't sign.
+            AccountSig::Owner => return Err(AccountError::OwnerPathRetired),
             AccountSig::Agent(s) => auth::verify_ed25519(&env, &signature_payload, &s),
             AccountSig::AgentSecp(s) => auth::verify_secp(&env, &signature_payload, &s)?,
         };

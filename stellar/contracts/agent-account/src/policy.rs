@@ -21,6 +21,8 @@ pub const MAX_AD_SCOPE: u32 = 16;
 /// share, so one policy means the same on both chains. 512 so the largest policy's `PolicySet`
 /// (12,712 bytes) fits the network's 16,384-byte event limit; at 1,024 it did not.
 pub const MAX_AD_ID_BYTES: u32 = 512;
+/// The latest `valid_until` a policy may name: the EVM module's 48-bit bound, kept on both chains.
+pub const MAX_VALID_UNTIL: u64 = 1 << 48;
 /// Guarded ads per account. The roster lives in the instance, which is loaded on every call, so it
 /// is bounded for the same reason the token lists are.
 pub const MAX_GUARDED_ADS: u32 = 16;
@@ -375,6 +377,11 @@ pub fn act_set_targets(env: &Env) -> Symbol {
     Symbol::new(env, "set_targets")
 }
 
+/// Plan 46 D8: funds at rest (a refunded bond, a claimed credit) leave only through `sweep`.
+pub fn act_sweep(env: &Env) -> Symbol {
+    Symbol::new(env, "sweep")
+}
+
 /// The per-ad calls an owner announces on a guarded ad.
 pub fn ad_actions(env: &Env) -> [Symbol; 4] {
     [
@@ -660,7 +667,10 @@ pub fn validate(env: &Env, policy: &AgentPolicy) -> Result<(), AccountError> {
     if proofbridge_core::auth::is_zero_bytes32(&policy.settlement_signer) {
         return Err(AccountError::BadPolicy);
     }
-    if policy.valid_until != 0 && policy.valid_until <= env.ledger().timestamp() {
+    // Past, or beyond the 48 bits the EVM module can carry (plan 46 D11: one bound on both chains).
+    if policy.valid_until != 0
+        && (policy.valid_until <= env.ledger().timestamp() || policy.valid_until > MAX_VALID_UNTIL)
+    {
         return Err(AccountError::BadPolicy);
     }
 

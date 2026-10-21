@@ -88,6 +88,12 @@ pub fn check_account_call(env: &Env, action: &Symbol, args: &Vec<Val>) -> Result
         arity(args, 2)?;
         arg::<BytesN<32>>(env, args, 0)?;
         arg::<Limit>(env, args, 1)?;
+    } else if *action == policy::act_sweep(env) {
+        // (token, to, amount), as `sweep` takes them.
+        arity(args, 3)?;
+        arg::<Address>(env, args, 0)?;
+        arg::<Address>(env, args, 1)?;
+        arg::<u128>(env, args, 2)?;
     } else if *action == policy::act_set_policy(env) {
         // (agent_id, allowed_action, ad_tokens, order_tokens, valid_until, settlement_signer,
         // ad_scope), as `set_policy` takes them.

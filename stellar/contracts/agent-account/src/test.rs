@@ -126,7 +126,8 @@ fn fixture() -> Fixture {
     env.ledger().set_protocol_version(PROTOCOL);
 
     let owner = Address::generate(&env);
-    let target = Address::generate(&env);
+    // A stand-in escrow, so the owner's `call` (plan 46) reaches a real contract.
+    let target = env.register(StubEscrow, ());
     let (account, client) = deploy(&env, &owner, &vec![&env, target.clone()]);
 
     let agent = Agent::new(7);
@@ -1068,9 +1069,11 @@ fn cap85_external_executable_is_a_clean_refusal_for_agents_and_invisible_to_the_
             agent_check(&f, &vec![&f.env, ctx.clone()]),
             AccountError::UnsupportedContext,
         );
-        // Owner path: mock_all_auths satisfies the nested owner auth; the
-        // context is never decoded, so the new executable type cannot break it.
-        check(&f, AccountSig::Owner, &vec![&f.env, ctx]).unwrap();
+        // Plan 46: there is no owner signature path to break; it is refused whatever the context.
+        expect_err(
+            check(&f, AccountSig::Owner, &vec![&f.env, ctx]),
+            AccountError::OwnerPathRetired,
+        );
     }
 }
 
@@ -1230,8 +1233,10 @@ fn secp256k1_agent_authorizes_and_wrong_signer_has_no_policy() {
 // owner path (direct)
 // ---------------------------------------------------------------------------
 
+/// Plan 46: the owner acts through the account's own functions; signing as the account is refused,
+/// even with the owner's authorization, whatever it carries.
 #[test]
-fn owner_path_accepts_any_context_including_token_transfer() {
+fn the_owner_signature_path_is_retired() {
     let f = fixture();
     let token = Address::generate(&f.env);
     let ctxs = vec![
@@ -1247,11 +1252,11 @@ fn owner_path_accepts_any_context_including_token_transfer() {
             args: vec![&f.env],
         }),
     ];
-    // mock_all_auths satisfies the nested owner.require_auth_for_args.
-    check(&f, AccountSig::Owner, &ctxs).unwrap();
-    // Owner sig without owner authorization: rejected.
-    f.env.set_auths(&[]);
-    assert!(check(&f, AccountSig::Owner, &ctxs).is_err());
+    // mock_all_auths would satisfy the owner's nested authorization; refused anyway.
+    expect_err(
+        check(&f, AccountSig::Owner, &ctxs),
+        AccountError::OwnerPathRetired,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1565,14 +1570,46 @@ fn agent_lock_e2e(creds: Creds) {
     assert_eq!(liquidity(&e), 4_600_000);
 }
 
-/// Owner path end to end: the account authorizes `withdraw_from_ad` with
-/// `AccountSig::Owner`, and the (contract) owner authorizes
-/// `account.__check_auth(payload)` in a second entry.
+/// The owner's withdraw end to end (plan 46): the owner authorizes the account's own `call`, which
+/// calls the escrow as the account (the direct invoker, so the escrow's `maker.require_auth` passes).
+/// Without the owner's authorization it fails, and so does the retired "sign as the account" route.
 fn owner_withdraw_e2e(creds: Creds) {
     let e = escrow_fixture();
     let exp = e.env.ledger().sequence() + 100;
     let to = Address::generate(&e.env);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    let withdraw = Symbol::new(&e.env, "withdraw_from_ad");
+    let args: Vec<Val> = vec![
+        &e.env,
+        e.ad_id.clone().into_val(&e.env),
+        1_000_000_u128.into_val(&e.env),
+        to.clone().into_val(&e.env),
+    ];
+    let none: Option<(Address, u128)> = None;
+    let approvals: Vec<InvokerContractAuthEntry> = Vec::new(&e.env);
+    let owner_inv = invocation(
+        &e.account,
+        "call",
+        std::vec![
+            sc_val(&e.env, e.ad_manager.to_val()),
+            sc_val(&e.env, withdraw.to_val()),
+            sc_val(&e.env, args.to_val()),
+            sc_val(&e.env, none.into_val(&e.env)),
+            sc_val(&e.env, approvals.to_val()),
+        ],
+    );
+    e.env
+        .set_auths(&[entry(&e.owner, owner_inv, 7, exp, ScVal::Void, creds)]);
+    client.call(&e.ad_manager, &withdraw, &args, &none, &approvals);
+    assert_eq!(liquidity(&e), 4_000_000);
 
+    // No owner authorization: refused, nothing moves.
+    e.env.set_auths(&[]);
+    assert!(client
+        .try_call(&e.ad_manager, &withdraw, &args, &none, &approvals)
+        .is_err());
+
+    // The retired route: the account's `Owner` entry plus the owner's nested entry.
     let inv = invocation(
         &e.ad_manager,
         "withdraw_from_ad",
@@ -1582,8 +1619,8 @@ fn owner_withdraw_e2e(creds: Creds) {
             sc_val(&e.env, to.clone().into_val(&e.env)),
         ],
     );
-    let payload = payload_hash(&e.env, &e.account, &inv, 7, exp, creds);
-    let owner_inv = invocation(
+    let payload = payload_hash(&e.env, &e.account, &inv, 8, exp, creds);
+    let nested = invocation(
         &e.account,
         "__check_auth",
         std::vec![ScVal::Bytes(ScBytes(
@@ -1594,52 +1631,21 @@ fn owner_withdraw_e2e(creds: Creds) {
         entry(
             &e.account,
             inv,
-            7,
+            8,
             exp,
             sc_val(&e.env, AccountSig::Owner.into_val(&e.env)),
             creds,
         ),
-        // MockAuthContract accepts any signature; Void keeps the entry minimal.
-        entry(&e.owner, owner_inv, 8, exp, ScVal::Void, creds),
+        entry(&e.owner, nested, 9, exp, ScVal::Void, creds),
     ]);
-    let _: () = e.env.invoke_contract(
+    let r = e.env.try_invoke_contract::<(), soroban_sdk::Error>(
         &e.ad_manager,
-        &Symbol::new(&e.env, "withdraw_from_ad"),
+        &withdraw,
         vec![
             &e.env,
             e.ad_id.clone().into_val(&e.env),
             1_000_000_u128.into_val(&e.env),
             to.into_val(&e.env),
-        ],
-    );
-    assert_eq!(liquidity(&e), 4_000_000);
-
-    // Same call with only the account entry (no owner authorization) fails.
-    let inv = invocation(
-        &e.ad_manager,
-        "withdraw_from_ad",
-        std::vec![
-            sc_val(&e.env, e.ad_id.clone().into_val(&e.env)),
-            sc_val(&e.env, 1_000_000_u128.into_val(&e.env)),
-            sc_val(&e.env, Address::generate(&e.env).into_val(&e.env)),
-        ],
-    );
-    e.env.set_auths(&[entry(
-        &e.account,
-        inv,
-        9,
-        exp,
-        sc_val(&e.env, AccountSig::Owner.into_val(&e.env)),
-        creds,
-    )]);
-    let r = e.env.try_invoke_contract::<(), soroban_sdk::Error>(
-        &e.ad_manager,
-        &Symbol::new(&e.env, "withdraw_from_ad"),
-        vec![
-            &e.env,
-            e.ad_id.clone().into_val(&e.env),
-            1_000_000_u128.into_val(&e.env),
-            Address::generate(&e.env).into_val(&e.env),
         ],
     );
     assert!(r.is_err());
@@ -1693,6 +1699,21 @@ fn e2e_credential_type_and_preimage_must_match() {
     );
     assert!(r.is_err());
     assert_eq!(liquidity(&e), 5_000_000);
+}
+
+/// Stands in for the escrow in the unit fixture: the owner's `call` needs a contract to reach, and
+/// these tests are about the account's guard rail, not the escrow.
+#[soroban_sdk::contract]
+pub struct StubEscrow;
+
+#[soroban_sdk::contractimpl]
+impl StubEscrow {
+    pub fn withdraw_from_ad(_env: Env, _ad_id: String, _amount: u128, _to: Address) {}
+    pub fn close_ad(_env: Env, _ad_id: String, _to: Address) {}
+    pub fn lock_for_order(_env: Env, _params: Map<Symbol, Val>, _slot: u32) {}
+    pub fn set_settlement_signer(_env: Env, _ad_id: String, _signer: BytesN<32>) {}
+    /// Takes nothing: an escrow that doesn't pull what the account paid in.
+    pub fn fund_ad(_env: Env, _ad_id: String, _amount: u128) {}
 }
 
 /// Stands in for bls-key-registry.has_usable_slot for the escrow fixture (2.3c): an account is
@@ -2415,8 +2436,16 @@ fn close_ctx(f: &Fixture, to: &Address) -> Vec<Context> {
     ]
 }
 
+/// The guard rail as the owner meets it since plan 46: each escrow call through the account's own
+/// `call`, which runs the check before it calls the (stub) escrow.
 fn owner_check(f: &Fixture, ctxs: &Vec<Context>) -> Result<(), Result<AccountError, InvokeError>> {
-    check(f, AccountSig::Owner, ctxs)
+    for ctx in ctxs.iter() {
+        let Context::Contract(c) = ctx else { continue };
+        f.client
+            .try_call(&c.contract, &c.fn_name, &c.args, &None, &Vec::new(&f.env))
+            .map(|_| ())?;
+    }
+    Ok(())
 }
 
 /// An unguarded ad behaves exactly as it did before 2.1e — which is every ad that exists today.
@@ -2636,7 +2665,9 @@ fn t52_repointing_targets_does_not_remove_the_guard() {
             ],
         }),
     ];
-    expect_err(owner_check(&f, &ctx), AccountError::NotScheduled);
+    // Since plan 46 the owner reaches escrows only through `call`, which takes pinned targets only:
+    // the escrow the account was pointed away from can't be called as the account at all.
+    expect_err(owner_check(&f, &ctx), AccountError::TargetNotAllowed);
 }
 
 /// K2. The settings entry is persistent and archives after ~180 days of no writes. An ad left that
@@ -3863,6 +3894,57 @@ fn c9_every_owner_only_entry_point_refuses_a_non_owner() {
         ("revoke_agent", vec![e, id.to_val()]),
         ("upgrade", vec![e, b32(e, 0x42).to_val()]),
         ("migrate", vec![e]),
+        // Plan 46: the owner's ad actions.
+        (
+            "create_ad",
+            vec![
+                e,
+                f.target.to_val(),
+                proofbridge_core::token::bytes32_to_token_address(e, &f.ad_token)
+                    .unwrap()
+                    .to_val(),
+                ad(e).to_val(),
+                f.ad_token.to_val(),
+                1_u128.into_val(e),
+                1_u128.into_val(e),
+                b32(e, 0xCC).to_val(),
+                f.signer.to_val()
+            ]
+        ),
+        (
+            "fund_ad",
+            vec![
+                e,
+                f.target.to_val(),
+                proofbridge_core::token::bytes32_to_token_address(e, &f.ad_token)
+                    .unwrap()
+                    .to_val(),
+                ad(e).to_val(),
+                1_u128.into_val(e)
+            ]
+        ),
+        (
+            "call",
+            vec![
+                e,
+                f.target.to_val(),
+                sym_of(e, "close_ad").to_val(),
+                close_args(e, &f.owner).to_val(),
+                Option::<(Address, u128)>::None.into_val(e),
+                Vec::<InvokerContractAuthEntry>::new(e).to_val()
+            ]
+        ),
+        (
+            "sweep",
+            vec![
+                e,
+                proofbridge_core::token::bytes32_to_token_address(e, &f.ad_token)
+                    .unwrap()
+                    .to_val(),
+                f.owner.to_val(),
+                1_u128.into_val(e)
+            ]
+        ),
     ];
     let views = [
         "__constructor",
@@ -3874,6 +3956,7 @@ fn c9_every_owner_only_entry_point_refuses_a_non_owner() {
         "targets",
         "policy",
         "is_revoked",
+        "account_volume",
         "schema_version",
     ];
     let mut listed: std::collections::BTreeSet<std::string::String> = views
@@ -3924,6 +4007,9 @@ fn c9_every_owner_only_entry_point_refuses_a_non_owner() {
     for (name, args) in owner_only.iter() {
         if *name == "upgrade" {
             continue; // a made-up hash traps in the host; covered by the C-5 tests.
+        }
+        if ["create_ad", "fund_ad", "sweep"].contains(name) {
+            continue; // the fixture's token is not a contract; covered by the p46 tests' real tokens.
         }
         let r = e
             .try_invoke_contract::<Val, soroban_sdk::Error>(
@@ -4839,4 +4925,495 @@ fn policy_set_carries_the_cross_chain_vector_fields() {
             c["name"]
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// plan 46: the owner's ad actions — funds pass through, never rest
+// ---------------------------------------------------------------------------
+
+/// The account's error from a `try_call`, if that is how it failed.
+fn call_err<T, C>(
+    r: Result<Result<T, C>, Result<AccountError, InvokeError>>,
+) -> Option<AccountError> {
+    match r {
+        Err(Ok(e)) => Some(e),
+        _ => None,
+    }
+}
+
+/// The fixture's token contract and a client for it.
+fn token_of(e: &Escrow) -> (Address, test_token::TokenContractClient<'static>) {
+    let t = proofbridge_core::token::bytes32_to_token_address(&e.env, &e.ad_token).unwrap();
+    (t.clone(), test_token::TokenContractClient::new(&e.env, &t))
+}
+
+/// An invocation with nested ones (the owner's call, then the token pull it spawns).
+fn invocation_with(
+    contract: &Address,
+    fn_name: &str,
+    args: std::vec::Vec<ScVal>,
+    subs: std::vec::Vec<SorobanAuthorizedInvocation>,
+) -> SorobanAuthorizedInvocation {
+    let mut inv = invocation(contract, fn_name, args);
+    inv.sub_invocations = subs.try_into().unwrap();
+    inv
+}
+
+fn transfer_inv(
+    e: &Escrow,
+    token: &Address,
+    from: &Address,
+    to: &Address,
+    amount: i128,
+) -> SorobanAuthorizedInvocation {
+    invocation(
+        token,
+        "transfer",
+        std::vec![
+            sc_val(&e.env, from.to_val()),
+            sc_val(&e.env, to.to_val()),
+            sc_val(&e.env, amount.into_val(&e.env)),
+        ],
+    )
+}
+
+fn liquidity_of(e: &Escrow, ad_id: &String) -> u128 {
+    e.env.invoke_contract(
+        &e.ad_manager,
+        &Symbol::new(&e.env, "available_liquidity"),
+        vec![&e.env, ad_id.clone().into_val(&e.env)],
+    )
+}
+
+fn create_args(e: &Escrow, ad_id: &String, amount: u128) -> Vec<Val> {
+    vec![
+        &e.env,
+        e.account.to_val(),
+        ad_id.to_val(),
+        e.ad_token.to_val(),
+        amount.into_val(&e.env),
+        e.order_chain_id.into_val(&e.env),
+        b32(&e.env, 0xCC).to_val(),
+        address_to_bytes32(&e.env, &e.account).to_val(),
+    ]
+}
+
+/// D2: `create_ad` takes the deposit from the owner's wallet and hands it to the escrow in the same
+/// call. The ad is the account's; the account's own balance doesn't move.
+#[test]
+fn p46_create_ad_passes_the_owners_funds_straight_to_the_escrow() {
+    let e = escrow_fixture();
+    let (token, tc) = token_of(&e);
+    tc.mint(&e.owner, &2_000_000_i128);
+    let account_before = tc.balance(&e.account);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    let ad2 = String::from_str(&e.env, "ad-2");
+    let exp = e.env.ledger().sequence() + 100;
+
+    let owner_inv = invocation_with(
+        &e.account,
+        "create_ad",
+        std::vec![
+            sc_val(&e.env, e.ad_manager.to_val()),
+            sc_val(&e.env, token.to_val()),
+            sc_val(&e.env, ad2.to_val()),
+            sc_val(&e.env, e.ad_token.to_val()),
+            sc_val(&e.env, 2_000_000_u128.into_val(&e.env)),
+            sc_val(&e.env, e.order_chain_id.into_val(&e.env)),
+            sc_val(&e.env, b32(&e.env, 0xCC).to_val()),
+            sc_val(&e.env, address_to_bytes32(&e.env, &e.account).to_val()),
+        ],
+        std::vec![transfer_inv(&e, &token, &e.owner, &e.account, 2_000_000)],
+    );
+    e.env
+        .set_auths(&[entry(&e.owner, owner_inv, 11, exp, ScVal::Void, Creds::V2)]);
+    client.create_ad(
+        &e.ad_manager,
+        &token,
+        &ad2,
+        &e.ad_token,
+        &2_000_000_u128,
+        &e.order_chain_id,
+        &b32(&e.env, 0xCC),
+        &address_to_bytes32(&e.env, &e.account),
+    );
+    assert_eq!(liquidity_of(&e, &ad2), 2_000_000);
+    assert_eq!(tc.balance(&e.owner), 0, "the deposit came from the wallet");
+    assert_eq!(
+        tc.balance(&e.account),
+        account_before,
+        "and never stayed in the account"
+    );
+
+    // Without the owner's authorization: refused.
+    e.env.set_auths(&[]);
+    let ad3 = String::from_str(&e.env, "ad-3");
+    assert!(client
+        .try_create_ad(
+            &e.ad_manager,
+            &token,
+            &ad3,
+            &e.ad_token,
+            &1_u128,
+            &e.order_chain_id,
+            &b32(&e.env, 0xCC),
+            &address_to_bytes32(&e.env, &e.account),
+        )
+        .is_err());
+}
+
+/// D3, the reason the pre-approval exists: the escrow pulls the deposit from the account, a call the
+/// account doesn't make itself. With real authorization (no mocks: they would cover the account too),
+/// the same `create_ad` through `call` is refused by the host without the approval, and passes with
+/// exactly that transfer approved.
+#[test]
+fn p46_the_escrows_pull_needs_the_accounts_pre_approval_and_nothing_more() {
+    let e = escrow_fixture();
+    let (token, tc) = token_of(&e);
+    tc.mint(&e.owner, &2_000_000_i128);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    let ad2 = String::from_str(&e.env, "ad-2");
+    let create = Symbol::new(&e.env, "create_ad");
+    let pay = Some((token.clone(), 1_000_000_u128));
+    let exp = e.env.ledger().sequence() + 100;
+    let owner_auth = |nonce: i64, approvals: &Vec<InvokerContractAuthEntry>| {
+        let inv = invocation_with(
+            &e.account,
+            "call",
+            std::vec![
+                sc_val(&e.env, e.ad_manager.to_val()),
+                sc_val(&e.env, create.to_val()),
+                sc_val(&e.env, create_args(&e, &ad2, 1_000_000).to_val()),
+                sc_val(&e.env, pay.clone().into_val(&e.env)),
+                sc_val(&e.env, approvals.to_val()),
+            ],
+            std::vec![transfer_inv(&e, &token, &e.owner, &e.account, 1_000_000)],
+        );
+        entry(&e.owner, inv, nonce, exp, ScVal::Void, Creds::V2)
+    };
+
+    let none: Vec<InvokerContractAuthEntry> = Vec::new(&e.env);
+    e.env.set_auths(&[owner_auth(21, &none)]);
+    assert!(client
+        .try_call(
+            &e.ad_manager,
+            &create,
+            &create_args(&e, &ad2, 1_000_000),
+            &pay,
+            &none
+        )
+        .is_err());
+    assert_eq!(liquidity_of(&e, &ad2), 0);
+    assert_eq!(tc.balance(&e.owner), 2_000_000, "nothing moved");
+
+    let approval = vec![
+        &e.env,
+        InvokerContractAuthEntry::Contract(soroban_sdk::auth::SubContractInvocation {
+            context: ContractContext {
+                contract: token.clone(),
+                fn_name: Symbol::new(&e.env, "transfer"),
+                args: vec![
+                    &e.env,
+                    e.account.to_val(),
+                    e.ad_manager.to_val(),
+                    1_000_000_i128.into_val(&e.env),
+                ],
+            },
+            sub_invocations: Vec::new(&e.env),
+        }),
+    ];
+    e.env.set_auths(&[owner_auth(22, &approval)]);
+    client.call(
+        &e.ad_manager,
+        &create,
+        &create_args(&e, &ad2, 1_000_000),
+        &pay,
+        &approval,
+    );
+    assert_eq!(liquidity_of(&e, &ad2), 1_000_000);
+    assert_eq!(tc.balance(&e.owner), 1_000_000);
+}
+
+/// `fund_ad` the same way: the top-up goes wallet → escrow, the account's balance unchanged.
+#[test]
+fn p46_fund_ad_passes_the_top_up_through() {
+    let e = escrow_fixture();
+    let (token, tc) = token_of(&e);
+    tc.mint(&e.owner, &300_000_i128);
+    let account_before = tc.balance(&e.account);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    client.fund_ad(&e.ad_manager, &token, &e.ad_id, &300_000_u128);
+    assert_eq!(liquidity(&e), 5_300_000);
+    assert_eq!(tc.balance(&e.owner), 0);
+    assert_eq!(tc.balance(&e.account), account_before);
+}
+
+/// The account forwards only what the call paid in: paying in more than the escrow takes leaves funds
+/// behind, and the whole call is refused (`FundsLeft`), the payment included.
+#[test]
+fn p46_a_call_that_leaves_funds_in_the_account_is_refused() {
+    let e = escrow_fixture();
+    let (token, tc) = token_of(&e);
+    tc.mint(&e.owner, &500_001_i128);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    let approval = vec![
+        &e.env,
+        InvokerContractAuthEntry::Contract(soroban_sdk::auth::SubContractInvocation {
+            context: ContractContext {
+                contract: token.clone(),
+                fn_name: Symbol::new(&e.env, "transfer"),
+                args: vec![
+                    &e.env,
+                    e.account.to_val(),
+                    e.ad_manager.to_val(),
+                    500_000_i128.into_val(&e.env),
+                ],
+            },
+            sub_invocations: Vec::new(&e.env),
+        }),
+    ];
+    let r = client.try_call(
+        &e.ad_manager,
+        &Symbol::new(&e.env, "fund_ad"),
+        &vec![&e.env, e.ad_id.to_val(), 500_000_u128.into_val(&e.env)],
+        &Some((token.clone(), 500_001_u128)),
+        &approval,
+    );
+    assert_eq!(call_err(r), Some(AccountError::FundsLeft));
+    assert_eq!(
+        tc.balance(&e.owner),
+        500_001,
+        "the payment reverted with the call"
+    );
+    assert_eq!(liquidity(&e), 5_000_000);
+}
+
+/// An approval is a token transfer from this account, or an `open_dispute` over such transfers.
+/// An `approve` (an allowance outlives the call) or a transfer from someone else is refused.
+#[test]
+fn p46_only_transfers_from_the_account_can_be_approved() {
+    let e = escrow_fixture();
+    let (token, _) = token_of(&e);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    let one = |fn_name: &str, from: &Address, subs: Vec<InvokerContractAuthEntry>| {
+        vec![
+            &e.env,
+            InvokerContractAuthEntry::Contract(soroban_sdk::auth::SubContractInvocation {
+                context: ContractContext {
+                    contract: token.clone(),
+                    fn_name: Symbol::new(&e.env, fn_name),
+                    args: vec![
+                        &e.env,
+                        from.to_val(),
+                        e.ad_manager.to_val(),
+                        1_i128.into_val(&e.env),
+                    ],
+                },
+                sub_invocations: subs,
+            }),
+        ]
+    };
+    let empty = Vec::new(&e.env);
+    let fund = Symbol::new(&e.env, "fund_ad");
+    let fund_args = vec![&e.env, e.ad_id.to_val(), 1_u128.into_val(&e.env)];
+    for approvals in [
+        one("approve", &e.account, empty.clone()),
+        one("transfer", &e.owner, empty.clone()),
+        one(
+            "transfer",
+            &e.account,
+            one("transfer", &e.account, empty.clone()),
+        ),
+        one("burn", &e.account, empty.clone()),
+    ] {
+        assert_eq!(
+            call_err(client.try_call(&e.ad_manager, &fund, &fund_args, &None, &approvals)),
+            Some(AccountError::BadApproval)
+        );
+    }
+}
+
+/// The owner's escrow calls reach pinned targets only, so no other contract (a token above all) can
+/// be called as the account.
+#[test]
+fn p46_call_reaches_pinned_targets_only() {
+    let e = escrow_fixture();
+    let (token, _) = token_of(&e);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    let r = client.try_call(
+        &token,
+        &Symbol::new(&e.env, "transfer"),
+        &vec![
+            &e.env,
+            e.account.to_val(),
+            e.owner.to_val(),
+            1_i128.into_val(&e.env),
+        ],
+        &None,
+        &Vec::new(&e.env),
+    );
+    assert_eq!(call_err(r), Some(AccountError::TargetNotAllowed));
+    let ad2 = String::from_str(&e.env, "ad-2");
+    assert_eq!(
+        client.try_create_ad(
+            &Address::generate(&e.env),
+            &token,
+            &ad2,
+            &e.ad_token,
+            &1_u128,
+            &e.order_chain_id,
+            &b32(&e.env, 0xCC),
+            &address_to_bytes32(&e.env, &e.account),
+        ),
+        Err(Ok(AccountError::TargetNotAllowed))
+    );
+    // A token that isn't the ad's is refused before anything moves.
+    assert_eq!(
+        client.try_create_ad(
+            &e.ad_manager,
+            &Address::generate(&e.env),
+            &ad2,
+            &e.ad_token,
+            &1_u128,
+            &e.order_chain_id,
+            &b32(&e.env, 0xCC),
+            &address_to_bytes32(&e.env, &e.account),
+        ),
+        Err(Ok(AccountError::BadArgs))
+    );
+}
+
+/// `sweep` is the one way out for funds at rest. Instant on an unguarded account; while any ad is
+/// guarded it needs a matured schedule for exactly that call.
+#[test]
+fn p46_sweep_empties_funds_at_rest_and_waits_on_a_guarded_account() {
+    let e = escrow_fixture();
+    let (token, tc) = token_of(&e);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    let held = tc.balance(&e.account);
+    client.sweep(&token, &e.owner, &1_000_u128);
+    assert_eq!(tc.balance(&e.account), held - 1_000);
+
+    client.set_guard_rail(
+        &e.ad_id,
+        &Some(GuardRail {
+            threshold: 0,
+            delay: 3_600,
+            window: 86_400,
+            rate: Limit {
+                capacity: 1,
+                refill_per_second: 1,
+            },
+            bucket: Bucket {
+                level: 0,
+                last_ts: 0,
+            },
+        }),
+    );
+    assert_eq!(
+        client.try_sweep(&token, &e.owner, &1_000_u128),
+        Err(Ok(AccountError::NotScheduled))
+    );
+    client.schedule(
+        &Scope::Account,
+        &Symbol::new(&e.env, "sweep"),
+        &vec![
+            &e.env,
+            token.to_val(),
+            e.owner.to_val(),
+            1_000_u128.into_val(&e.env),
+        ],
+    );
+    e.env.ledger().set_timestamp(T0 + 3_600);
+    client.sweep(&token, &e.owner, &1_000_u128);
+    assert_eq!(tc.balance(&e.account), held - 2_000);
+}
+
+/// The pass-through's own check: if the escrow doesn't take what the owner paid in, the funds would
+/// stay in the account, so the call is refused and the payment reverts with it.
+#[test]
+fn p46_funds_the_escrow_does_not_take_never_stay_in_the_account() {
+    let f = fixture();
+    let admin = Address::generate(&f.env);
+    let token = f.env.register(
+        test_token::TokenContract,
+        (
+            admin,
+            0_i128,
+            7_u32,
+            String::from_str(&f.env, "Test"),
+            String::from_str(&f.env, "TST"),
+        ),
+    );
+    let tc = test_token::TokenContractClient::new(&f.env, &token);
+    tc.mint(&f.owner, &1_000_i128);
+    let r = f.client.try_fund_ad(
+        &f.target,
+        &token,
+        &String::from_str(&f.env, "ad-1"),
+        &1_000_u128,
+    );
+    assert_eq!(r, Err(Ok(AccountError::FundsLeft)));
+    assert_eq!(tc.balance(&f.owner), 1_000);
+    assert_eq!(tc.balance(&f.account), 0);
+}
+
+/// Plan 46 D11, one bound on both chains: an all-zero agent id and an expiry past the EVM module's
+/// 48 bits are refused at install; the account-wide volume is readable.
+#[test]
+fn p46_parity_install_bounds_and_the_volume_view() {
+    let f = fixture();
+    let install = |agent_id: &BytesN<32>, valid_until: u64| {
+        f.client.try_set_policy(
+            agent_id,
+            &lock_for_order(&f.env),
+            &vec![&f.env, tl(&f.ad_token, 1, 1, 1)],
+            &vec![&f.env, f.order_token.clone()],
+            &valid_until,
+            &f.signer,
+            &None,
+        )
+    };
+    assert_eq!(
+        install(&b32(&f.env, 0), 0),
+        Err(Ok(AccountError::BadPolicy))
+    );
+    let other = Agent::new(9).id(&f.env);
+    assert_eq!(
+        install(&other, MAX_VALID_UNTIL + 1),
+        Err(Ok(AccountError::BadPolicy))
+    );
+    assert!(install(&other, MAX_VALID_UNTIL).is_ok());
+    let v = f
+        .client
+        .account_volume(&f.ad_token)
+        .expect("set by the fixture");
+    assert_eq!(v.limit.capacity, u128::MAX / 2);
+    assert!(f.client.account_volume(&b32(&f.env, 0x99)).is_none());
+}
+
+/// Plan 46 D11: a lock with an undecodable field is `BadArgs` even when its settlement signer is also
+/// wrong. Every field is decoded before any reach check, the EVM module's order. (The shared fixture
+/// can't express a missing field on both chains, so each chain pins this itself.)
+#[test]
+fn p46_a_malformed_lock_is_bad_args_before_any_reach_check() {
+    let f = fixture();
+    let mut m = lock_map(&f);
+    m.set(
+        Symbol::new(&f.env, "ad_settlement_signer"),
+        b32(&f.env, 0x77).to_val(),
+    );
+    m.remove(Symbol::new(&f.env, "amount"));
+    expect_err(
+        agent_check(
+            &f,
+            &lock_ctx(&f.env, &f.target, vec![&f.env, m.to_val(), 0_u32.into()]),
+        ),
+        AccountError::BadArgs,
+    );
 }
