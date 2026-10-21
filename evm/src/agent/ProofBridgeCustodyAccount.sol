@@ -2,25 +2,36 @@
 pragma solidity ^0.8.34;
 
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IAdManager} from "../interfaces/IAdManager.sol";
+import {AddressCast} from "../libraries/AddressCast.sol";
+import {CustodyGuardRail, IAgentPolicyAdmin} from "./CustodyGuardRail.sol";
 
-/// @dev The two policy-module calls the account makes itself; the owner reaches the rest through `execute`.
+/// @dev The policy-module calls the account makes itself; the owner reaches the setters through `execute`.
 interface IAgentPolicyDirect {
     function onInstall(bytes calldata data) external;
     function authorizeDirect(bytes32 agentId, bytes calldata callData) external;
+    function isTargetPinned(address account, address target) external view returns (bool);
 }
 
 /**
  * @title ProofBridgeCustodyAccount
  * @author Proofbridge
  * @custom:security-contact security@proofbridge.xyz
- * @notice A maker's custody account on EVM (plan 45): owned by the maker's wallet, it holds the ad's funds and is
- *         the ad's maker on `AdManager`. The owner acts through `execute` with ordinary transactions. An agent acts
+ * @notice A maker's custody account on EVM (plans 45, 46): owned by the maker's wallet, it is the ad's maker on
+ *         `AdManager` and an authorization gateway. It never holds funds between calls: the funding functions
+ *         take the amount from the owner's wallet and hand it to the escrow in the same call. The owner acts with
+ *         ordinary transactions; the guard rail (`CustodyGuardRail`) runs on every extractive one. An agent acts
  *         through `executeAsAgent`, which `ProofBridgeAgentPolicy` checks and counts before the call runs — the
  *         same rules the module applies to a 7702 account's UserOps, without an EntryPoint or a bundler.
  * @dev An EIP-1167 clone made by `CustodyAccountFactory`; the implementation itself is never initialised. No upgrade
  *      path: a new version is a new account the owner moves to.
  */
-contract ProofBridgeCustodyAccount is ReentrancyGuardTransient {
+contract ProofBridgeCustodyAccount is ReentrancyGuardTransient, CustodyGuardRail {
+    using SafeERC20 for IERC20;
+    using AddressCast for address;
+
     struct Call {
         address target;
         uint256 value;
@@ -42,14 +53,19 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient {
     event AgentExecuted(bytes32 indexed agentId, address indexed target, bytes4 selector);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event Swept(address indexed token, address indexed to, uint256 amount);
 
     error CustodyAccount__NotOwner();
     error CustodyAccount__NotFactory();
     error CustodyAccount__AlreadyInitialized();
     error CustodyAccount__ZeroOwner();
     error CustodyAccount__NotPendingOwner();
+    error CustodyAccount__NotPinned(address target);
+    error CustodyAccount__ValueMismatch(uint256 sent, uint256 amount);
+    /// @notice A funding call left the account holding a different balance than it started with.
+    error CustodyAccount__FundsLeft(address token);
 
-    modifier onlyOwner() {
+    modifier onlyOwner() override {
         if (msg.sender != owner) revert CustodyAccount__NotOwner();
         _;
     }
@@ -72,7 +88,55 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient {
         module.onInstall(abi.encode(MODULE_TYPE_HOOK));
     }
 
-    /// @notice Any call, as the account: fund and open ads, configure the module, withdraw, close.
+    /*//////////////////////////////////////////////////////////////
+                           THE OWNER'S AD ACTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Open an ad with this account as its maker, funded from the owner's wallet in this one call. For an
+    ///         ERC-20 the owner approves this account for the token first; for native, send the amount as value.
+    function createAdFunded(
+        IAdManager adManager,
+        string calldata adId,
+        address adToken,
+        uint256 amount,
+        uint256 orderChainId,
+        bytes32 adRecipient,
+        bytes32 settlementSigner
+    ) external payable onlyOwner nonReentrant {
+        uint256 before = _payIn(adManager, adToken, amount, address(adManager));
+        adManager.createAd{value: msg.value}(adId, adToken, amount, orderChainId, adRecipient, settlementSigner);
+        _payDone(adToken, before);
+    }
+
+    /// @notice Add liquidity to one of this account's ads from the owner's wallet, as `createAdFunded`.
+    function fundAdFunded(IAdManager adManager, string calldata adId, address adToken, uint256 amount)
+        external
+        payable
+        onlyOwner
+        nonReentrant
+    {
+        uint256 before = _payIn(adManager, adToken, amount, address(adManager));
+        adManager.fundAd{value: msg.value}(adId, amount);
+        _payDone(adToken, before);
+    }
+
+    /// @notice File a dispute as the ad's maker, the bond paid from the owner's wallet in this one call.
+    ///         `bondToken` is the token the dispute module takes (the native sentinel for native).
+    function disputeFunded(
+        IAdManager adManager,
+        IAdManager.OrderParams calldata params,
+        bytes32 evidence,
+        address bondToken,
+        uint256 bond
+    ) external payable onlyOwner nonReentrant {
+        address disputeModule = address(adManager.disputeManager());
+        uint256 before = _payIn(adManager, bondToken, bond, disputeModule);
+        adManager.dispute{value: msg.value}(params, evidence);
+        _payDone(bondToken, before);
+    }
+
+    /// @notice Any other call, as the account: withdraw, close, a manual lock, the response to a dispute, the
+    ///         settlement signer, halt and resume, the module's setters. The guard rail runs first.
     function execute(address target, uint256 value, bytes calldata data)
         external
         payable
@@ -80,15 +144,35 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient {
         nonReentrant
         returns (bytes memory)
     {
+        _gate(target, value, data);
         return _call(target, value, data);
     }
 
-    /// @notice Several calls in one transaction (approve, then `createAd`). All or nothing.
+    /// @notice Several calls in one transaction. All or nothing; each passes the guard rail.
     function executeBatch(Call[] calldata calls) external payable onlyOwner nonReentrant {
         for (uint256 i = 0; i < calls.length; ++i) {
+            _gate(calls[i].target, calls[i].value, calls[i].data);
             _call(calls[i].target, calls[i].value, calls[i].data);
         }
     }
+
+    /// @notice The way out for funds at rest in the account (a refunded dispute bond, a claimed credit). While any
+    ///         ad is guarded it needs a matured schedule for exactly this call. `token` is the native sentinel for
+    ///         native value.
+    function sweep(address token, address to, uint256 amount) external onlyOwner nonReentrant {
+        _gateSelf(this.sweep.selector);
+        if (token.isNative()) {
+            (bool ok, bytes memory ret) = to.call{value: amount}("");
+            if (!ok) _bubble(ret);
+        } else {
+            IERC20(token).safeTransfer(to, amount);
+        }
+        emit Swept(token, to, amount);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                 THE AGENT
+    //////////////////////////////////////////////////////////////*/
 
     /**
      * @notice An agent's call. The agent is the caller; the module refuses anything its policy does not allow
@@ -112,7 +196,13 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient {
         return module_ == address(module) && (moduleTypeId == MODULE_TYPE_VALIDATOR || moduleTypeId == MODULE_TYPE_HOOK);
     }
 
+    /*//////////////////////////////////////////////////////////////
+                                 OWNERSHIP
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Two steps. While any ad is guarded, starting a transfer needs a matured schedule for this call.
     function transferOwnership(address newOwner) external onlyOwner {
+        _gateSelf(this.transferOwnership.selector);
         pendingOwner = newOwner;
         emit OwnershipTransferStarted(owner, newOwner);
     }
@@ -126,6 +216,36 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient {
 
     receive() external payable {}
 
+    /*//////////////////////////////////////////////////////////////
+                                 INTERNALS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev The escrow must be pinned. Native: the value is the amount. ERC-20: pull from the owner, approve exactly
+    ///      `spender`. Returns the balance to end at.
+    function _payIn(IAdManager adManager, address token, uint256 amount, address spender)
+        private
+        returns (uint256 before)
+    {
+        if (!module.isTargetPinned(address(this), address(adManager))) {
+            revert CustodyAccount__NotPinned(address(adManager));
+        }
+        if (token.isNative()) {
+            if (msg.value != amount) revert CustodyAccount__ValueMismatch(msg.value, amount);
+            return address(this).balance - msg.value;
+        }
+        if (msg.value != 0) revert CustodyAccount__ValueMismatch(msg.value, 0);
+        before = IERC20(token).balanceOf(address(this));
+        IERC20(token).safeTransferFrom(owner, address(this), amount);
+        IERC20(token).forceApprove(spender, amount);
+    }
+
+    /// @dev Nothing stays behind. The escrow or dispute module pulls exactly the approved amount, which spends the
+    ///      approval to zero; one that pulled less would leave a balance, and this reverts the call, approval and all.
+    function _payDone(address token, uint256 before) private view {
+        uint256 balance = token.isNative() ? address(this).balance : IERC20(token).balanceOf(address(this));
+        if (balance != before) revert CustodyAccount__FundsLeft(token);
+    }
+
     function _call(address target, uint256 value, bytes calldata data) internal returns (bytes memory ret) {
         bool ok;
         (ok, ret) = target.call{value: value}(data);
@@ -137,5 +257,17 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient {
         assembly ("memory-safe") {
             revert(add(ret, 32), mload(ret))
         }
+    }
+
+    function _policyModule() internal view override returns (IAgentPolicyAdmin) {
+        return IAgentPolicyAdmin(address(module));
+    }
+
+    function _sweepSelector() internal pure override returns (bytes4) {
+        return this.sweep.selector;
+    }
+
+    function _transferOwnershipSelector() internal pure override returns (bytes4) {
+        return this.transferOwnership.selector;
     }
 }
