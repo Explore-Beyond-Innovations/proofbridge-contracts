@@ -90,6 +90,7 @@ export interface DeployCoreResult {
     disputeManager: string;
     agentPolicyCodec: string;
     agentPolicy: string;
+    custodyAccountFactory: string;
     proofBridgeUtils: string;
   };
 }
@@ -656,6 +657,21 @@ async function deployCoreRun(
     },
   );
 
+  // ── custody account factory (plan 46): makers' agent accounts, clones bound to the module ──
+  // Reused only when it was made for this module: its implementation names the module it mounts.
+  let reusedFactory = existing?.contracts.custodyAccountFactory?.address;
+  if (reusedFactory) {
+    const factory = attachContract(reusedFactory, "CustodyAccountFactory", "CustodyAccountFactory", signer);
+    const impl = attachContract(await factory.implementation(), "ProofBridgeCustodyAccount", "ProofBridgeCustodyAccount", signer);
+    if (((await impl.module()) as string).toLowerCase() !== agentPolicyAddr.toLowerCase()) reusedFactory = undefined;
+  }
+  const custodyAccountFactoryAddr = await deployIfMissing("CustodyAccountFactory", reusedFactory, async () => {
+    const f = contractFactory("CustodyAccountFactory", "CustodyAccountFactory", signer);
+    const c = await f.deploy(agentPolicyAddr, { nonce: nonces.next() });
+    await c.deploymentTransaction()?.wait();
+    return c as ethers.Contract;
+  });
+
   // ── wire the escrows as the registry's revoke guards ──────────────
   // Re-set every run (idempotent); guards only gate key revocation/rotation. Whether this can be
   // sent was decided up front; a revert here is a failure, not a warning.
@@ -794,6 +810,7 @@ async function deployCoreRun(
       disputeManager: disputeManagerAddr,
       agentPolicyCodec: agentPolicyCodecAddr,
       agentPolicy: agentPolicyAddr,
+      custodyAccountFactory: custodyAccountFactoryAddr,
       proofBridgeUtils: proofBridgeUtilsAddr,
     },
     // Preserve tokens already in the manifest (added by deploy-test-tokens / hand-curation).
@@ -847,6 +864,7 @@ async function deployCoreRun(
       disputeManager: disputeManagerAddr,
       agentPolicyCodec: agentPolicyCodecAddr,
       agentPolicy: agentPolicyAddr,
+      custodyAccountFactory: custodyAccountFactoryAddr,
       proofBridgeUtils: proofBridgeUtilsAddr,
     },
   };

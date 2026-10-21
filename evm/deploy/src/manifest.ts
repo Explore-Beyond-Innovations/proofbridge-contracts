@@ -80,6 +80,8 @@ export interface BuildManifestInput {
     disputeManager?: string;
     agentPolicyCodec?: string;
     agentPolicy?: string;
+    /** Plan 46: the factory makers' custody accounts are cloned from, bound to `agentPolicy`. */
+    custodyAccountFactory?: string;
     proofBridgeUtils?: string;
   };
   tokens: EvmTokenInput[];
@@ -147,6 +149,9 @@ export function buildManifest(
         : {}),
       ...(input.contracts.agentPolicy
         ? { agentPolicy: evmContractEntry(input.contracts.agentPolicy) }
+        : {}),
+      ...(input.contracts.custodyAccountFactory
+        ? { custodyAccountFactory: evmContractEntry(input.contracts.custodyAccountFactory) }
         : {}),
       ...(input.contracts.proofBridgeUtils
         ? { proofBridgeUtils: evmContractEntry(input.contracts.proofBridgeUtils) }
