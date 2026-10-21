@@ -1,13 +1,18 @@
 //! AgentAccount — a maker's Soroban custom account (2.1c, #325).
 //!
-//! Custody stays here (`ad.maker` on the AdManager escrow). Two ways to
-//! authorize a call on this account:
-//!   - the **owner** (any `Address`, G or C, never this account) authorizes
-//!     `__check_auth(payload)` itself, and may do anything;
+//! The account is the ad's maker on the AdManager escrow and an authorization gateway: it never
+//! holds funds between calls (plan 46). Two parties act through it:
+//!   - the **owner** (any `Address`, G or C, never this account) calls the account's own
+//!     functions with ordinary transactions: the configuration setters, and the ad actions
+//!     `create_ad` / `fund_ad` / `call` / `sweep` (owner.rs). Money the owner pays in goes from the
+//!     owner's wallet to the escrow in the same call. The guard rail runs on every extractive one;
 //!   - an **agent** signs the Soroban auth payload and may only make calls that
 //!     pass `check_contract_call`: a pinned escrow, the policy's action, and
 //!     lock args inside its policy (ad and order token lists, per-order cap,
 //!     settlement identity). Never guarded by open orders; `revoke_agent` is instant.
+//!
+//! The owner no longer signs *as* the account (`AccountSig::Owner` is refused): that path let a
+//! direct token transfer out past the guard rail, and needs an auth entry some wallets can't sign.
 //!
 //! The account is owner-upgradeable (`upgrade`): the owner is already sovereign
 //! over every fund movement, so code control adds no trust, and it is what lets
