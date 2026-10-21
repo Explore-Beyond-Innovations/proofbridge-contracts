@@ -42,7 +42,7 @@ contract AgentPolicyParityTest is AgentPolicyBase {
 
     /// The base rig's account, module and pinned escrow, with no ceilings and no policy: the
     /// fixture brings those, case by case.
-    function setUp() public override {
+    function setUp() public virtual override {
         instance = makeAccountInstance("agent-policy-parity");
         vm.deal(instance.account, 1_000_000 ether);
 
@@ -277,7 +277,7 @@ contract AgentPolicyParityTest is AgentPolicyBase {
                                 ONE LOCK
     //////////////////////////////////////////////////////////////*/
 
-    function _judge(Loaded memory step) internal {
+    function _judge(Loaded memory step) internal virtual {
         UserOpData memory op;
         if (step.request) {
             // The EVM refuses a batch until its hook has charged the agent once (`HookNotProven`), a
