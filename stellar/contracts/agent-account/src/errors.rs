@@ -57,4 +57,13 @@ pub enum AccountError {
     /// `schedule` on an ad scope whose args name a different ad (`args[0]`, or the order's
     /// `ad_id`): a schedule that could never be spent, and an event that would mislead a watcher.
     ScopeMismatch = 23,
+    /// Plan 46: `AccountSig::Owner` is no longer accepted. The owner acts through the account's own
+    /// functions (`create_ad`, `fund_ad`, `call`, `sweep`), which every wallet can sign.
+    OwnerPathRetired = 24,
+    /// Plan 46 D2: an owner call left the account holding a different balance of a token it touched.
+    /// The account forwards what the owner pays in and never keeps or releases funds at rest.
+    FundsLeft = 25,
+    /// Plan 46: an approval passed to `call` is not a token `transfer` from this account, or an
+    /// `open_dispute` whose nested calls are only such transfers.
+    BadApproval = 26,
 }

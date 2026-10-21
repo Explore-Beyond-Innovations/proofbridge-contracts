@@ -1,0 +1,164 @@
+//! The owner's ad actions (plan 46): what `create_ad`, `fund_ad`, `call` and `sweep` share.
+//!
+//! The account is the ad's maker and an authorization gateway; it never holds funds between calls.
+//! Money the owner pays in (a deposit, a top-up, a dispute bond) comes from the owner's wallet and
+//! goes on to the escrow in the same call. The escrow pulls it *from the account*, a call the
+//! account doesn't make itself, so the host asks the account to authorize it: the account
+//! pre-approves exactly that transfer (`authorize_as_current_contract`), and nothing else. Every
+//! touched token's balance is checked unchanged afterwards.
+
+use soroban_sdk::{
+    auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
+    token::TokenClient,
+    vec, Address, BytesN, Env, IntoVal, Symbol, TryFromVal, Val, Vec,
+};
+
+use crate::errors::AccountError;
+use crate::policy;
+
+/// The escrow calls go only to a pinned target, so no other contract (a token above all) can be
+/// reached as this account through the owner's functions.
+pub fn require_target(env: &Env, target: &Address) -> Result<(), AccountError> {
+    if policy::get_targets(env).contains(target) {
+        Ok(())
+    } else {
+        Err(AccountError::TargetNotAllowed)
+    }
+}
+
+/// `token` is the ad token's own contract. For native XLM it is the escrow's wrapped native token,
+/// which the account can't read; a wrong one fails the escrow's pull and reverts the call.
+pub fn require_ad_token(
+    env: &Env,
+    token: &Address,
+    ad_token: &BytesN<32>,
+) -> Result<(), AccountError> {
+    if proofbridge_core::token::is_native_token(ad_token) {
+        return Ok(());
+    }
+    match proofbridge_core::token::bytes32_to_token_address(env, ad_token) {
+        Some(t) if t == *token => Ok(()),
+        _ => Err(AccountError::BadArgs),
+    }
+}
+
+pub fn to_i128(amount: u128) -> Result<i128, AccountError> {
+    i128::try_from(amount).map_err(|_| AccountError::BadArgs)
+}
+
+/// `amount` of `token` in from the owner, approved on to `payee`, then `f` (the escrow call that
+/// pulls it). The account's balance of `token` must end where it started.
+pub fn pay_through<F: FnOnce(&Env)>(
+    env: &Env,
+    owner: &Address,
+    token: &Address,
+    amount: u128,
+    payee: &Address,
+    f: F,
+) -> Result<(), AccountError> {
+    let me = env.current_contract_address();
+    let client = TokenClient::new(env, token);
+    let before = client.balance(&me);
+    let amount = to_i128(amount)?;
+    client.transfer(owner, &me, &amount);
+    env.authorize_as_current_contract(vec![env, transfer_approval(env, token, &me, payee, amount)]);
+    f(env);
+    if client.balance(&me) != before {
+        return Err(AccountError::FundsLeft);
+    }
+    Ok(())
+}
+
+fn transfer_approval(
+    env: &Env,
+    token: &Address,
+    from: &Address,
+    to: &Address,
+    amount: i128,
+) -> InvokerContractAuthEntry {
+    InvokerContractAuthEntry::Contract(SubContractInvocation {
+        context: ContractContext {
+            contract: token.clone(),
+            fn_name: Symbol::new(env, "transfer"),
+            args: vec![env, from.to_val(), to.to_val(), amount.into_val(env)],
+        },
+        sub_invocations: Vec::new(env),
+    })
+}
+
+/// `call`'s body: the optional payment in, the approvals, the escrow call, then the balance check
+/// on every token the payment or an approval names.
+pub fn call_with(
+    env: &Env,
+    owner: &Address,
+    target: &Address,
+    fn_name: &Symbol,
+    args: Vec<Val>,
+    pay: Option<(Address, u128)>,
+    approvals: Vec<InvokerContractAuthEntry>,
+) -> Result<Val, AccountError> {
+    let me = env.current_contract_address();
+    let mut tokens: Vec<Address> = Vec::new(env);
+    for a in approvals.iter() {
+        approved_tokens(env, &me, &a, true, &mut tokens)?;
+    }
+    if let Some((t, _)) = &pay {
+        if !tokens.contains(t) {
+            tokens.push_back(t.clone());
+        }
+    }
+    let mut before: Vec<i128> = Vec::new(env);
+    for t in tokens.iter() {
+        before.push_back(TokenClient::new(env, &t).balance(&me));
+    }
+    if let Some((t, amount)) = &pay {
+        TokenClient::new(env, t).transfer(owner, &me, &to_i128(*amount)?);
+    }
+    if !approvals.is_empty() {
+        env.authorize_as_current_contract(approvals);
+    }
+    let ret: Val = env.invoke_contract(target, fn_name, args);
+    for (i, t) in tokens.iter().enumerate() {
+        if TokenClient::new(env, &t).balance(&me) != before.get(i as u32).unwrap_or_default() {
+            return Err(AccountError::FundsLeft);
+        }
+    }
+    Ok(ret)
+}
+
+/// An approval is a token `transfer` from this account with nothing nested, or (at the root) an
+/// `open_dispute` whose nested calls are only such transfers. Anything else, an `approve` above all
+/// (an allowance outlives the call), is refused. Collects the tokens the transfers name.
+fn approved_tokens(
+    env: &Env,
+    me: &Address,
+    entry: &InvokerContractAuthEntry,
+    root: bool,
+    tokens: &mut Vec<Address>,
+) -> Result<(), AccountError> {
+    let InvokerContractAuthEntry::Contract(inv) = entry else {
+        return Err(AccountError::BadApproval);
+    };
+    let c = &inv.context;
+    if c.fn_name == Symbol::new(env, "transfer") {
+        let from = c
+            .args
+            .get(0)
+            .and_then(|v| Address::try_from_val(env, &v).ok())
+            .ok_or(AccountError::BadApproval)?;
+        if from != *me || !inv.sub_invocations.is_empty() {
+            return Err(AccountError::BadApproval);
+        }
+        if !tokens.contains(&c.contract) {
+            tokens.push_back(c.contract.clone());
+        }
+        return Ok(());
+    }
+    if root && c.fn_name == Symbol::new(env, "open_dispute") {
+        for s in inv.sub_invocations.iter() {
+            approved_tokens(env, me, &s, false, tokens)?;
+        }
+        return Ok(());
+    }
+    Err(AccountError::BadApproval)
+}
