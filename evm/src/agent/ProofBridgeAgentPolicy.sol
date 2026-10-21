@@ -647,6 +647,32 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
     function postCheck(bytes calldata) external {}
 
     /*//////////////////////////////////////////////////////////////
+                              DIRECT CALLS
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice A custody account's agent call, checked and counted in one step: the account calls this
+     *         with the request it is about to run, then runs it. No EntryPoint, so no validate/execute
+     *         split: the gate is `preflight`'s (it may read the clock, so expiry is checked here) and the
+     *         walk is the hook's, buckets debited. A revert in the call that follows rolls the debit back.
+     * @param callData the account's single-call `execute(mode, target ‖ value ‖ data)`, as `preflight` reads it.
+     * @dev One call only: the batch rules (`SinglesOnly`, `HookNotProven`) exist for the 4337 split.
+     *      The tally and the marker queue are never touched, so a mount the account also drives through
+     *      an EntryPoint keeps its own accounting.
+     */
+    function authorizeDirect(bytes32 agentId, bytes calldata callData) external {
+        address account = msg.sender;
+        Gate memory gate = _gate(account, agentId, Mode.Dry);
+        if (gate.refusal != Refusal.None) revert AgentPolicy__RefusedAtExecution(NO_CALL, gate.refusal);
+        (bool ok, bytes32 mode,) = _executeArgs(callData, false);
+        if (!ok || uint8(mode[0]) != CALLTYPE_SINGLE) {
+            revert AgentPolicy__RefusedAtExecution(NO_CALL, Refusal.MalformedRequest);
+        }
+        (Refusal refusal, uint256 callIndex) = _walk(account, gate, callData, Mode.Commit);
+        if (refusal != Refusal.None) revert AgentPolicy__RefusedAtExecution(callIndex, refusal);
+    }
+
+    /*//////////////////////////////////////////////////////////////
                            HOOK MULTIPLEXING
     //////////////////////////////////////////////////////////////*/
 
