@@ -255,6 +255,14 @@ contract AgentPolicyCodecTest is Test {
     }
 
     /// 512 bytes is the shared ad-id bound (Soroban `validate`, `order-params`): it parses, 513 does not.
+    /// Plan 46 D11: a policy must name a settlement signer, as the Soroban account requires.
+    function test_aZeroSettlementSignerIsRefused() public {
+        bytes memory policy =
+            bytes.concat(_head(_row(T1, 1, 1, 1), 1, bytes.concat(T2), 1), hex"0000", bytes8(uint64(0)), bytes32(0));
+        vm.expectRevert(IAgentPolicyCodecErrors.AgentPolicyCodec__ZeroSettlementSigner.selector);
+        codec.parse(policy);
+    }
+
     function test_anAdIdIsAtMost512Bytes() public {
         assertEq(codec.parse(_scopedWithId(512)).adScopeCount, 1);
         vm.expectRevert(IAgentPolicyCodecErrors.AgentPolicyCodec__BadAdScope.selector);
@@ -272,7 +280,7 @@ contract AgentPolicyCodecTest is Test {
             bytes2(uint16(len)),
             id,
             bytes8(uint64(0)),
-            bytes32(0)
+            SIGNER
         );
     }
 
@@ -370,6 +378,7 @@ contract AgentPolicyCodecTest is Test {
 
     bytes32 internal constant T1 = hex"1111111111111111111111111111111111111111111111111111111111111111";
     bytes32 internal constant T2 = hex"2222222222222222222222222222222222222222222222222222222222222222";
+    bytes32 internal constant SIGNER = bytes32(uint256(0x5161));
 
     function _row(bytes32 token, uint256 maxPerOrder, uint256 capacity, uint256 refill)
         internal
@@ -401,7 +410,7 @@ contract AgentPolicyCodecTest is Test {
         pure
         returns (bytes memory)
     {
-        return bytes.concat(_head(adRows, adCount, orderList, orderCount), hex"0000", bytes8(uint64(0)), bytes32(0));
+        return bytes.concat(_head(adRows, adCount, orderList, orderCount), hex"0000", bytes8(uint64(0)), SIGNER);
     }
 
     function _oneRow(bytes32 token, uint256 maxPerOrder, uint256 capacity, uint256 refill)

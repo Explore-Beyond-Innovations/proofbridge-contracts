@@ -15,6 +15,8 @@ interface IAgentPolicyCodecErrors {
     error AgentPolicyCodec__TrailingBytes(uint256 got, uint256 want);
     error AgentPolicyCodec__LimitTooWide();
     error AgentPolicyCodec__UnknownAction(uint8 id);
+    /// @notice Plan 46: a policy must name a settlement signer, as the Soroban account requires.
+    error AgentPolicyCodec__ZeroSettlementSigner();
 }
 
 /**
@@ -223,6 +225,7 @@ library AgentPolicyCodec {
         v.validUntil = uint64(bytes8(policy[at:at + 8]));
         at += 8;
         v.settlementSigner = bytes32(policy[at:at + 32]);
+        if (v.settlementSigner == bytes32(0)) revert IAgentPolicyCodecErrors.AgentPolicyCodec__ZeroSettlementSigner();
         at += 32;
 
         // A parse that stopped early would call two different byte strings the same policy, which
