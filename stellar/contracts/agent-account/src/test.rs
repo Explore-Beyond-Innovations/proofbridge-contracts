@@ -6322,7 +6322,7 @@ fn p46_p2_the_last_guarded_ad_keeps_the_account_gated() {
 
     assert_eq!(
         client.try_disarm_closed_ad(&e.ad_manager, &e.ad_id),
-        Err(Ok(AccountError::LastGuardRail)),
+        Err(Ok(AccountError::DisarmLowersTimelock)),
         "the last rail waits out its delay"
     );
     assert!(client.guarded_ads().contains(&e.ad_id));
@@ -6351,6 +6351,156 @@ fn p46_p2_a_closed_ad_disarms_at_once_while_another_ad_is_guarded() {
         f.client.try_sweep(&f.target, &f.owner, &1_u128),
         Err(Ok(AccountError::NotScheduled))
     );
+}
+
+fn guarded_rail(delay: u64, window: u64) -> Option<GuardRail> {
+    Some(GuardRail {
+        threshold: 0,
+        delay,
+        window,
+        rate: Limit {
+            capacity: u128::MAX / 2,
+            refill_per_second: 1,
+        },
+        bucket: Bucket {
+            level: 0,
+            last_ts: 0,
+        },
+    })
+}
+
+/// P3-80-a: arming a made-up ad is instant, so it can pad the roster. The closed ad's rail still
+/// can't come off at once when the ghost's 1-second delay would become the account's.
+#[test]
+fn p46_p3_a_ghost_ad_cannot_lower_the_timelock() {
+    let e = escrow_fixture();
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    arm(&e, &client);
+    let withdraw = Symbol::new(&e.env, "withdraw_from_ad");
+    let withdraw_args = vec![
+        &e.env,
+        e.ad_id.to_val(),
+        5_000_000_u128.into_val(&e.env),
+        e.owner.to_val(),
+    ];
+    client.schedule(&Scope::Ad(e.ad_id.clone()), &withdraw, &withdraw_args);
+    e.env.ledger().set_timestamp(T0 + 3_600);
+    client.call(
+        &e.ad_manager,
+        &withdraw,
+        &withdraw_args,
+        &None,
+        &Vec::new(&e.env),
+    );
+    let close = Symbol::new(&e.env, "close_ad");
+    let close_args = vec![&e.env, e.ad_id.to_val(), e.owner.to_val()];
+    client.schedule(&Scope::Ad(e.ad_id.clone()), &close, &close_args);
+    e.env.ledger().set_timestamp(T0 + 7_200);
+    client.call(&e.ad_manager, &close, &close_args, &None, &Vec::new(&e.env));
+    let (token, tc) = token_of(&e);
+    tc.mint(&e.account, &777_i128);
+    let thief = Address::generate(&e.env);
+    let ghost = String::from_str(&e.env, "ghost");
+    client.set_guard_rail(&ghost, &guarded_rail(1, 3_600));
+
+    assert_eq!(
+        client.try_disarm_closed_ad(&e.ad_manager, &e.ad_id),
+        Err(Ok(AccountError::DisarmLowersTimelock)),
+        "the ghost's 1 s would become the account's delay"
+    );
+    assert!(client.guarded_ads().contains(&e.ad_id));
+    let sweep = Symbol::new(&e.env, "sweep");
+    client.schedule(
+        &Scope::Account,
+        &sweep,
+        &vec![
+            &e.env,
+            token.to_val(),
+            thief.to_val(),
+            777_u128.into_val(&e.env),
+        ],
+    );
+    e.env.ledger().set_timestamp(T0 + 7_201);
+    assert_eq!(
+        client.try_sweep(&token, &thief, &777_u128),
+        Err(Ok(AccountError::NotScheduled)),
+        "the sweep still waits out the closed ad's delay"
+    );
+    assert_eq!(tc.balance(&thief), 0);
+}
+
+/// P3-80-a: two real ads. The closed one holds the longest delay, or the shortest window: taking it
+/// off at once would loosen the account, so it is refused.
+#[test]
+fn p46_p3_a_closed_ad_holding_the_tightest_timelock_is_refused() {
+    let other = |f: &Fixture| String::from_str(&f.env, "other");
+    for (closed, open) in [
+        ((2_592_000, 86_400), (3_600, 86_400)), // the closed ad's delay is the longest
+        ((3_600, 3_600), (3_600, 86_400)),      // the closed ad's window is the shortest
+    ] {
+        let f = fixture();
+        guard(&f, 0, closed.0, closed.1);
+        f.client
+            .set_guard_rail(&other(&f), &guarded_rail(open.0, open.1));
+        StubEscrowClient::new(&f.env, &f.target).set_ad_shape(&f.account, &false, &0, &0);
+        assert_eq!(
+            f.client.try_disarm_closed_ad(&f.target, &ad(&f.env)),
+            Err(Ok(AccountError::DisarmLowersTimelock)),
+            "closed {closed:?}, open {open:?}"
+        );
+        assert!(f.client.guard_rail(&ad(&f.env)).is_some());
+    }
+}
+
+/// P3-80-a: a closed ad that neither holds the longest delay nor the shortest window comes off at
+/// once, ties included: the account's timelock stays the same.
+#[test]
+fn p46_p3_a_closed_ad_that_loosens_nothing_disarms_at_once() {
+    for (closed, open) in [
+        ((3_600, 86_400), (7_200, 3_600)),  // looser on both
+        ((3_600, 86_400), (3_600, 86_400)), // a tie on both
+    ] {
+        let f = fixture();
+        guard(&f, 0, closed.0, closed.1);
+        let other = String::from_str(&f.env, "other");
+        f.client
+            .set_guard_rail(&other, &guarded_rail(open.0, open.1));
+        StubEscrowClient::new(&f.env, &f.target).set_ad_shape(&f.account, &false, &0, &0);
+        f.client.disarm_closed_ad(&f.target, &ad(&f.env));
+        assert!(
+            f.client.guard_rail(&ad(&f.env)).is_none(),
+            "closed {closed:?}, open {open:?}"
+        );
+        assert_eq!(f.client.guarded_ads(), vec![&f.env, other]);
+    }
+}
+
+/// P3-80-a: the views the Policy tab reads agree with the check: a refused disarm loosens the view's
+/// timelock, an allowed one doesn't.
+#[test]
+fn p46_p3_the_timelock_views_agree_with_the_check() {
+    let f = fixture();
+    assert_eq!(f.client.account_timelock(), (0, u64::MAX));
+    guard(&f, 0, 2_592_000, 86_400);
+    let other = String::from_str(&f.env, "other");
+    f.client
+        .set_guard_rail(&other, &guarded_rail(3_600, 86_400));
+    StubEscrowClient::new(&f.env, &f.target).set_ad_shape(&f.account, &false, &0, &0);
+    let (d, w) = f.client.account_timelock();
+    let (dw, ww) = f.client.account_timelock_without(&ad(&f.env));
+    assert_eq!(d, 2_592_000);
+    assert!(dw < d || ww > w, "refused: the view shows the loosening");
+    assert_eq!(
+        f.client.try_disarm_closed_ad(&f.target, &ad(&f.env)),
+        Err(Ok(AccountError::DisarmLowersTimelock))
+    );
+    f.client
+        .set_guard_rail(&other, &guarded_rail(2_592_000, 86_400));
+    let (d, w) = f.client.account_timelock();
+    let (dw, ww) = f.client.account_timelock_without(&ad(&f.env));
+    assert!(!(dw < d || ww > w), "allowed: the view shows no loosening");
+    f.client.disarm_closed_ad(&f.target, &ad(&f.env));
 }
 
 /// 81-7: "closed" is every field at once. A closed-looking ad still holding a balance, or with
