@@ -134,6 +134,7 @@ abstract contract CustodyGuardRail {
     error GuardRail__WindowTooShort();
     /// @notice R3: while any ad is guarded, a call the allowlist doesn't name.
     error GuardRail__NotAllowed();
+    error GuardRail__AdStillOpen();
 
     modifier onlyOwner() virtual;
 
@@ -199,6 +200,25 @@ abstract contract CustodyGuardRail {
         bytes32 key = keccak256(bytes(adId));
         if (!_guards[key].armed) revert GuardRail__NoGuardRail();
         _spend(key, this.disarmGuardRail.selector, address(this), 0, msg.data);
+        _disarm(key, adId);
+    }
+
+    /**
+     * @notice Take the rail off an ad this account closed on a pinned escrow, at once (81-7). A closed ad with
+     *         nothing in it has nothing left to extract, so the wait protects nothing; this frees its slot in the
+     *         roster of `MAX_GUARDED_ADS`.
+     */
+    function disarmClosedAd(IAdManager adManager, string calldata adId) external onlyOwner {
+        bytes32 key = keccak256(bytes(adId));
+        if (!_guards[key].armed) revert GuardRail__NoGuardRail();
+        if (!_policyModule().isTargetPinned(address(this), address(adManager))) revert GuardRail__NotAllowed();
+        (address maker, bool open,,,,,, uint256 balance, uint256 locked) = adManager.ads(adId);
+        if (maker != address(this)) revert GuardRail__NotAllowed();
+        if (open || balance != 0 || locked != 0) revert GuardRail__AdStillOpen();
+        _disarm(key, adId);
+    }
+
+    function _disarm(bytes32 key, string calldata adId) private {
         delete _guards[key];
         for (uint256 i = 0; i < _guarded.length; ++i) {
             if (_guarded[i] == key) {

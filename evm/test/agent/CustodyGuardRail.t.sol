@@ -459,6 +459,27 @@ contract CustodyGuardRailTest is Test {
         _expectNotScheduled(w); // expired under the new window
     }
 
+    /// 81-7: a closed, empty ad has nothing left to extract, so taking its rail off is instant. That frees its slot
+    /// in the roster of 16 without waiting out a delay; an open ad, or an escrow the account doesn't pin, still waits.
+    function test_r81_7_disarmingAClosedEmptyAdIsInstant() public {
+        _createAd("dead", 10);
+        _guard("dead", 0);
+        vm.startPrank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__AdStillOpen.selector);
+        account.disarmClosedAd(adManager, "dead");
+        bytes memory close = abi.encodeCall(IAdManager.closeAd, ("dead", owner));
+        account.schedule(_adKey("dead"), address(adManager), 0, close);
+        vm.warp(block.timestamp + DELAY);
+        account.execute(address(adManager), 0, close);
+        IAdManager notPinned = IAdManager(address(new Sink()));
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.disarmClosedAd(notPinned, "dead");
+        account.disarmClosedAd(adManager, "dead");
+        vm.stopPrank();
+        assertFalse(account.guardRail("dead").armed);
+        assertEq(account.guardedAds().length, 0);
+    }
+
     /// 81-4 (R1): a guard rail is bounded, so neither a stolen key nor a slip can freeze an ad: a delay of at most
     /// 30 days and a window of at least an hour. Inside the bounds, arming and tightening stay instant.
     function test_r81_4_aGuardRailIsBoundedSoItCannotFreezeTheAd() public {
