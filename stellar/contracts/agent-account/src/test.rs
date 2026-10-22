@@ -6476,6 +6476,33 @@ fn p46_p3_a_closed_ad_that_loosens_nothing_disarms_at_once() {
     }
 }
 
+/// P3-80-a: the views the Policy tab reads agree with the check: a refused disarm loosens the view's
+/// timelock, an allowed one doesn't.
+#[test]
+fn p46_p3_the_timelock_views_agree_with_the_check() {
+    let f = fixture();
+    assert_eq!(f.client.account_timelock(), (0, u64::MAX));
+    guard(&f, 0, 2_592_000, 86_400);
+    let other = String::from_str(&f.env, "other");
+    f.client
+        .set_guard_rail(&other, &guarded_rail(3_600, 86_400));
+    StubEscrowClient::new(&f.env, &f.target).set_ad_shape(&f.account, &false, &0, &0);
+    let (d, w) = f.client.account_timelock();
+    let (dw, ww) = f.client.account_timelock_without(&ad(&f.env));
+    assert_eq!(d, 2_592_000);
+    assert!(dw < d || ww > w, "refused: the view shows the loosening");
+    assert_eq!(
+        f.client.try_disarm_closed_ad(&f.target, &ad(&f.env)),
+        Err(Ok(AccountError::DisarmLowersTimelock))
+    );
+    f.client
+        .set_guard_rail(&other, &guarded_rail(2_592_000, 86_400));
+    let (d, w) = f.client.account_timelock();
+    let (dw, ww) = f.client.account_timelock_without(&ad(&f.env));
+    assert!(!(dw < d || ww > w), "allowed: the view shows no loosening");
+    f.client.disarm_closed_ad(&f.target, &ad(&f.env));
+}
+
 /// 81-7: "closed" is every field at once. A closed-looking ad still holding a balance, or with
 /// something locked, isn't closed. (The real escrow can't produce either, so the stub does.)
 #[test]

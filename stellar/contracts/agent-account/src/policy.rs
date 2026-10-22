@@ -254,33 +254,26 @@ pub fn any_guarded(env: &Env) -> bool {
 /// The delay and window an account-wide change must honour: the longest delay and the shortest
 /// window across every guarded ad, so no one ad's brake can be stepped around through the account.
 pub fn account_timelock(env: &Env) -> Result<(u64, u64), AccountError> {
-    let roster = guarded_ads(env);
-    if roster.is_empty() {
+    if guarded_ads(env).is_empty() {
         return Err(AccountError::NoGuardRail);
     }
+    timelock_without(env, None)
+}
+
+/// P3-80-a: (longest delay, shortest window) across the guarded ads, leaving `skip` out; (0, u64::MAX)
+/// when none is left. `disarm_closed_ad` and the timelock views read this one function.
+pub fn timelock_without(env: &Env, skip: Option<&String>) -> Result<(u64, u64), AccountError> {
     let mut delay = 0u64;
     let mut window = u64::MAX;
-    for ad in roster.iter() {
+    for ad in guarded_ads(env).iter() {
+        if skip == Some(&ad) {
+            continue;
+        }
         let g = get_guard_rail(env, &ad).ok_or(AccountError::GuardRailArchived)?;
         delay = delay.max(g.delay);
         window = window.min(g.window);
     }
     Ok((delay, window))
-}
-
-/// P3-80-a: whether taking `ad_id` off the roster keeps the account's timelock as it is: another ad
-/// still holds a delay at least as long and a window at least as short. The last ad never does.
-pub fn timelock_holds_without(env: &Env, ad_id: &String) -> Result<bool, AccountError> {
-    let (delay, window) = account_timelock(env)?;
-    let mut held = (false, false);
-    for other in guarded_ads(env).iter() {
-        if other == *ad_id {
-            continue;
-        }
-        let g = get_guard_rail(env, &other).ok_or(AccountError::GuardRailArchived)?;
-        held = (held.0 || g.delay >= delay, held.1 || g.window <= window);
-    }
-    Ok(held.0 && held.1)
 }
 
 pub fn get_guard_rail(env: &Env, ad_id: &String) -> Option<GuardRail> {

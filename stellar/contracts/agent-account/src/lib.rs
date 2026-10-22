@@ -401,7 +401,9 @@ impl AgentAccount {
         }
         // P3-80-a: never at once if it lowers the account's delay or shortens its window (the last ad
         // always does); arming is instant and unchecked, so the roster's size proves nothing
-        if !policy::timelock_holds_without(&env, &ad_id)? {
+        let (delay, window) = policy::timelock_without(&env, None)?;
+        let (delay_after, window_after) = policy::timelock_without(&env, Some(&ad_id))?;
+        if delay_after < delay || window_after > window {
             return Err(AccountError::DisarmLowersTimelock);
         }
         policy::remove_guard_rail(&env, &ad_id);
@@ -531,6 +533,17 @@ impl AgentAccount {
 
     pub fn guard_rail(env: Env, ad_id: String) -> Option<GuardRail> {
         policy::get_guard_rail(&env, &ad_id)
+    }
+
+    /// The account-wide (longest delay, shortest window); (0, u64::MAX) with nothing guarded.
+    pub fn account_timelock(env: Env) -> Result<(u64, u64), AccountError> {
+        policy::timelock_without(&env, None)
+    }
+
+    /// The same with `ad_id` left out: `disarm_closed_ad` refuses when its delay is lower or its window
+    /// longer.
+    pub fn account_timelock_without(env: Env, ad_id: String) -> Result<(u64, u64), AccountError> {
+        policy::timelock_without(&env, Some(&ad_id))
     }
 
     pub fn guarded_ads(env: Env) -> Vec<String> {
