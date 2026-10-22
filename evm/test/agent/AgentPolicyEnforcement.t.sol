@@ -118,9 +118,17 @@ contract AgentPolicyEnforcementTest is AgentPolicyBase {
         );
         bytes[] memory table = _ownerOnlyCalls();
         // Not owner-gated by design: install/uninstall act on the caller, validation and the hook
-        // are the account's own 4337 calls, and clearing a forwarder only clears the caller's entry.
-        string[6] memory ungated =
-            ["onInstall", "onUninstall", "validateUserOp", "preCheck", "postCheck", "clearTrustedForwarder"];
+        // are the account's own 4337 calls, clearing a forwarder only clears the caller's entry, and a
+        // custody account's direct check (plan 45) debits only the caller's own buckets.
+        string[7] memory ungated = [
+            "onInstall",
+            "onUninstall",
+            "validateUserOp",
+            "preCheck",
+            "postCheck",
+            "clearTrustedForwarder",
+            "authorizeDirect"
+        ];
         assertGt(writers.length, ungated.length, "the ABI read found nothing");
         for (uint256 i = 0; i < writers.length; ++i) {
             bool known;
