@@ -5614,3 +5614,124 @@ fn p46_disarming_clears_a_pending_sweep() {
     f.client.set_guard_rail(&ad(&f.env), &None);
     assert!(f.client.scheduled(&Scope::Account, &sweep).is_none());
 }
+
+/// An `open_dispute` approval as the escrow would make it: filed by this account against the escrow
+/// being called, with `subs` nested under it.
+fn open_dispute_approval(
+    e: &Escrow,
+    subs: Vec<InvokerContractAuthEntry>,
+) -> InvokerContractAuthEntry {
+    InvokerContractAuthEntry::Contract(soroban_sdk::auth::SubContractInvocation {
+        context: ContractContext {
+            contract: Address::generate(&e.env),
+            fn_name: Symbol::new(&e.env, "open_dispute"),
+            args: vec![
+                &e.env,
+                e.ad_manager.to_val(),
+                b32(&e.env, 0x01).to_val(),
+                e.order_chain_id.into_val(&e.env),
+                e.account.to_val(),
+            ],
+        },
+        sub_invocations: subs,
+    })
+}
+
+fn token_call(
+    e: &Escrow,
+    token: &Address,
+    fn_name: &str,
+    from: &Address,
+    amount: i128,
+) -> InvokerContractAuthEntry {
+    InvokerContractAuthEntry::Contract(soroban_sdk::auth::SubContractInvocation {
+        context: ContractContext {
+            contract: token.clone(),
+            fn_name: Symbol::new(&e.env, fn_name),
+            args: vec![
+                &e.env,
+                from.to_val(),
+                e.ad_manager.to_val(),
+                amount.into_val(&e.env),
+            ],
+        },
+        sub_invocations: Vec::new(&e.env),
+    })
+}
+
+/// 80-4: `open_dispute` is accepted only at the root, and only over transfers from this account. A
+/// nested one, or one carrying an `approve` or someone else's transfer, is refused.
+#[test]
+fn p46_an_open_dispute_approval_is_rooted_and_carries_only_the_accounts_transfers() {
+    let e = escrow_fixture();
+    let (token, _) = token_of(&e);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    let fund = Symbol::new(&e.env, "fund_ad");
+    let fund_args = vec![&e.env, e.ad_id.to_val(), 1_u128.into_val(&e.env)];
+    let nested = vec![
+        &e.env,
+        open_dispute_approval(
+            &e,
+            vec![&e.env, open_dispute_approval(&e, Vec::new(&e.env))],
+        ),
+    ];
+    let with_approve = vec![
+        &e.env,
+        open_dispute_approval(
+            &e,
+            vec![&e.env, token_call(&e, &token, "approve", &e.account, 1)],
+        ),
+    ];
+    let others_transfer = vec![
+        &e.env,
+        open_dispute_approval(
+            &e,
+            vec![&e.env, token_call(&e, &token, "transfer", &e.owner, 1)],
+        ),
+    ];
+    for approvals in [nested, with_approve, others_transfer] {
+        assert_eq!(
+            call_err(client.try_call(&e.ad_manager, &fund, &fund_args, &None, &approvals)),
+            Some(AccountError::BadApproval)
+        );
+    }
+}
+
+/// 80-4: the balance check runs both ways. An approval that lets the escrow pull funds already at
+/// rest in the account (no payment in) leaves its balance lower, and is refused.
+#[test]
+fn p46_an_approval_cannot_spend_funds_at_rest() {
+    let e = escrow_fixture();
+    let (token, tc) = token_of(&e);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    let held = tc.balance(&e.account);
+    assert!(held >= 1_000, "the fixture leaves funds at rest");
+    let r = client.try_call(
+        &e.ad_manager,
+        &Symbol::new(&e.env, "fund_ad"),
+        &vec![&e.env, e.ad_id.to_val(), 1_000_u128.into_val(&e.env)],
+        &None,
+        &vec![
+            &e.env,
+            token_call(&e, &token, "transfer", &e.account, 1_000),
+        ],
+    );
+    assert_eq!(call_err(r), Some(AccountError::FundsLeft));
+    assert_eq!(tc.balance(&e.account), held);
+    assert_eq!(liquidity(&e), 5_000_000);
+}
+
+/// 80-4: `fund_ad` reaches a pinned escrow only.
+#[test]
+fn p46_fund_ad_reaches_pinned_targets_only() {
+    let e = escrow_fixture();
+    let (token, _) = token_of(&e);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    assert_eq!(
+        client.try_fund_ad(&Address::generate(&e.env), &token, &e.ad_id, &1_u128),
+        Err(Ok(AccountError::TargetNotAllowed))
+    );
+}
