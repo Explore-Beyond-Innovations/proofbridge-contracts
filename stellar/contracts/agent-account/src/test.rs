@@ -1716,14 +1716,28 @@ impl StubEscrow {
     pub fn resume_settlement(_env: Env, _maker: Address) {}
     /// Takes nothing: an escrow that doesn't pull what the account paid in.
     pub fn fund_ad(_env: Env, _ad_id: String, _amount: u128) {}
-    /// The ad's token, as a test set it (`fund_ad` reads it, 80-8).
+    /// The ad as a test set it: its token (`fund_ad` reads it, 80-8), or a whole shape
+    /// (`disarm_closed_ad` reads it, 81-7).
     pub fn get_ad(env: Env, _ad_id: String) -> Option<Map<Symbol, Val>> {
+        let shape: Option<Map<Symbol, Val>> =
+            env.storage().instance().get(&Symbol::new(&env, "ad"));
+        if shape.is_some() {
+            return shape;
+        }
         let token: Option<BytesN<32>> = env.storage().instance().get(&Symbol::new(&env, "tok"));
         token.map(|t| {
             let mut m = Map::new(&env);
             m.set(Symbol::new(&env, "token"), t.to_val());
             m
         })
+    }
+    pub fn set_ad_shape(env: Env, maker: Address, open: bool, balance: u128, locked: u128) {
+        let mut m = Map::new(&env);
+        m.set(Symbol::new(&env, "maker"), maker.to_val());
+        m.set(Symbol::new(&env, "open"), open.into_val(&env));
+        m.set(Symbol::new(&env, "balance"), balance.into_val(&env));
+        m.set(Symbol::new(&env, "locked"), locked.into_val(&env));
+        env.storage().instance().set(&Symbol::new(&env, "ad"), &m);
     }
     pub fn set_ad_token(env: Env, token: BytesN<32>) {
         env.storage()
@@ -3958,6 +3972,10 @@ fn c9_every_owner_only_entry_point_refuses_a_non_owner() {
                 1_u128.into_val(e)
             ]
         ),
+        (
+            "disarm_closed_ad",
+            vec![e, f.target.to_val(), ad(e).to_val()]
+        ),
     ];
     let views = [
         "__constructor",
@@ -6120,4 +6138,116 @@ fn p46_a_shorter_window_clamps_pending_schedules() {
     assert_eq!(short.expires_at, T0 + 10 + 3_600 + day);
     guard(&f, 0, 3_600, day);
     assert_eq!(f.client.scheduled(&Scope::Account, &up).unwrap(), short);
+}
+
+/// 81-7 parity: the rail on an ad this account closed comes off at once (`disarm_closed_ad`), so a
+/// dead ad never holds the roster or the account-wide delay. Closed means on a pinned escrow, made
+/// by this account, not open, empty and with nothing locked; anything else still needs its schedule.
+#[test]
+fn p46_a_closed_ads_rail_comes_off_at_once() {
+    let e = escrow_fixture();
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    arm(&e, &client);
+    assert_eq!(
+        client.try_disarm_closed_ad(&e.ad_manager, &e.ad_id),
+        Err(Ok(AccountError::AdNotClosed)),
+        "a live ad's rail comes off only through its schedule"
+    );
+    assert_eq!(
+        client.try_disarm_closed_ad(&Address::generate(&e.env), &e.ad_id),
+        Err(Ok(AccountError::TargetNotAllowed))
+    );
+    // Another maker's closed ad, under an id this account armed: not this account's to call closed.
+    let am = ad_manager::AdManagerContractClient::new(&e.env, &e.ad_manager);
+    let (_, tc) = token_of(&e);
+    let stranger = Address::generate(&e.env);
+    tc.mint(&stranger, &1_000_i128);
+    let their_signer = address_to_bytes32(&e.env, &stranger);
+    MockKeyRegistryClient::new(&e.env, &am.key_registry().unwrap()).set(&their_signer, &true);
+    let theirs = String::from_str(&e.env, "theirs");
+    am.create_ad(
+        &stranger,
+        &theirs,
+        &e.ad_token,
+        &1_000_u128,
+        &e.order_chain_id,
+        &b32(&e.env, 0xCC),
+        &their_signer,
+    );
+    am.close_ad(&theirs, &stranger);
+    client.set_guard_rail(&theirs, &client.guard_rail(&e.ad_id));
+    assert_eq!(
+        client.try_disarm_closed_ad(&e.ad_manager, &theirs),
+        Err(Ok(AccountError::AdNotClosed))
+    );
+
+    // Emptied but still open is not closed.
+    let withdraw = Symbol::new(&e.env, "withdraw_from_ad");
+    let withdraw_args = vec![
+        &e.env,
+        e.ad_id.to_val(),
+        5_000_000_u128.into_val(&e.env),
+        e.owner.to_val(),
+    ];
+    client.schedule(&Scope::Ad(e.ad_id.clone()), &withdraw, &withdraw_args);
+    e.env.ledger().set_timestamp(T0 + 3_600);
+    client.call(
+        &e.ad_manager,
+        &withdraw,
+        &withdraw_args,
+        &None,
+        &Vec::new(&e.env),
+    );
+    assert_eq!(liquidity(&e), 0);
+    assert_eq!(
+        client.try_disarm_closed_ad(&e.ad_manager, &e.ad_id),
+        Err(Ok(AccountError::AdNotClosed))
+    );
+
+    // Close it (announced and waited out, as on any guarded ad), then the rail comes off at once.
+    let close = Symbol::new(&e.env, "close_ad");
+    let close_args = vec![&e.env, e.ad_id.to_val(), e.owner.to_val()];
+    client.schedule(&Scope::Ad(e.ad_id.clone()), &close, &close_args);
+    e.env.ledger().set_timestamp(T0 + 7_200);
+    client.call(&e.ad_manager, &close, &close_args, &None, &Vec::new(&e.env));
+    let sweep = Symbol::new(&e.env, "sweep");
+    let (token, _) = token_of(&e);
+    client.schedule(
+        &Scope::Account,
+        &sweep,
+        &vec![
+            &e.env,
+            token.to_val(),
+            e.owner.to_val(),
+            1_u128.into_val(&e.env),
+        ],
+    );
+    client.disarm_closed_ad(&e.ad_manager, &e.ad_id);
+    assert!(client.guard_rail(&e.ad_id).is_none());
+    assert!(!client.guarded_ads().contains(&e.ad_id), "off the roster");
+    assert!(
+        client.scheduled(&Scope::Account, &sweep).is_none(),
+        "its schedules go with it"
+    );
+}
+
+/// 81-7: "closed" is every field at once. A closed-looking ad still holding a balance, or with
+/// something locked, isn't closed. (The real escrow can't produce either, so the stub does.)
+#[test]
+fn p46_a_closed_ad_holds_nothing_and_locks_nothing() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let stub = StubEscrowClient::new(&f.env, &f.target);
+    for (balance, locked) in [(1_u128, 0_u128), (0, 1)] {
+        stub.set_ad_shape(&f.account, &false, &balance, &locked);
+        assert_eq!(
+            f.client.try_disarm_closed_ad(&f.target, &ad(&f.env)),
+            Err(Ok(AccountError::AdNotClosed)),
+            "balance {balance}, locked {locked}"
+        );
+    }
+    stub.set_ad_shape(&f.account, &false, &0, &0);
+    f.client.disarm_closed_ad(&f.target, &ad(&f.env));
+    assert!(f.client.guard_rail(&ad(&f.env)).is_none());
 }

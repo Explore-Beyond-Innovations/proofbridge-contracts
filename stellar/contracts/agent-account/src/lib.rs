@@ -383,6 +383,34 @@ impl AgentAccount {
         Ok(())
     }
 
+    /// Owner-only. 81-7: take the rail off an ad this account closed, at once. The ad must be on a
+    /// pinned escrow, this account's, not open, empty and with nothing locked: a dead ad has nothing
+    /// left to extract, so its rail only holds the roster (16 ads at most) and the account-wide delay.
+    /// Its schedules go with it, as on any disarm. A live ad's rail still comes off only through
+    /// `set_guard_rail(None)` and its matured schedule.
+    pub fn disarm_closed_ad(env: Env, escrow: Address, ad_id: String) -> Result<(), AccountError> {
+        policy::get_owner(&env).require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        owner::require_target(&env, &escrow)?;
+        if !policy::is_guarded(&env, &ad_id) {
+            return Err(AccountError::NoGuardRail);
+        }
+        if !owner::is_closed_ad(&env, &escrow, &ad_id)? {
+            return Err(AccountError::AdNotClosed);
+        }
+        policy::remove_guard_rail(&env, &ad_id);
+        policy::clear_all_schedules(&env, &ad_id);
+        events::GuardRailSet {
+            ad_id,
+            armed: false,
+            threshold: 0,
+            delay: 0,
+            window: 0,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     /// Owner-only. Announce a delayed call and start its clock.
     ///
     /// The account cannot delay a call (`__check_auth` answers yes or no), so the timelock is two

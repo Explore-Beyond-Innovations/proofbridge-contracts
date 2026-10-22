@@ -60,6 +60,26 @@ pub fn ad_token_of(
         .ok_or(AccountError::BadArgs)
 }
 
+/// 81-7: whether `escrow` holds `ad_id` as this account's closed ad: not open, empty, nothing locked.
+pub fn is_closed_ad(
+    env: &Env,
+    escrow: &Address,
+    ad_id: &soroban_sdk::String,
+) -> Result<bool, AccountError> {
+    let ad: Option<soroban_sdk::Map<Symbol, Val>> = env.invoke_contract(
+        escrow,
+        &Symbol::new(env, "get_ad"),
+        vec![env, ad_id.to_val()],
+    );
+    let Some(m) = ad else { return Ok(false) };
+    let get = |k: &str| m.get(Symbol::new(env, k)).ok_or(AccountError::BadArgs);
+    let maker = Address::try_from_val(env, &get("maker")?).map_err(|_| AccountError::BadArgs)?;
+    let open = bool::try_from_val(env, &get("open")?).map_err(|_| AccountError::BadArgs)?;
+    let balance = u128::try_from_val(env, &get("balance")?).map_err(|_| AccountError::BadArgs)?;
+    let locked = u128::try_from_val(env, &get("locked")?).map_err(|_| AccountError::BadArgs)?;
+    Ok(maker == env.current_contract_address() && !open && balance == 0 && locked == 0)
+}
+
 pub fn to_i128(amount: u128) -> Result<i128, AccountError> {
     i128::try_from(amount).map_err(|_| AccountError::BadArgs)
 }

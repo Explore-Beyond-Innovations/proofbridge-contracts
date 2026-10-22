@@ -76,4 +76,7 @@ pub enum AccountError {
     /// `MIN_GUARD_WINDOW` (1 hour). Tightening is instant, so an unbounded one would freeze the ad:
     /// removing the rail waits out the current delay.
     GuardRailOutOfBounds = 28,
+    /// 81-7: `disarm_closed_ad` on an ad that isn't closed: on the named escrow it isn't this
+    /// account's, or is still open, holds a balance or has something locked.
+    AdNotClosed = 29,
 }
