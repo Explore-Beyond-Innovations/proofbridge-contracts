@@ -137,6 +137,8 @@ abstract contract CustodyGuardRail {
     /// @notice R3: while any ad is guarded, a call the allowlist doesn't name.
     error GuardRail__NotAllowed();
     error GuardRail__AdStillOpen();
+    /// P2-81-a: the last guarded ad's rail comes off only through its schedule; an empty roster ends the account-wide gate.
+    error GuardRail__LastGuardRail();
 
     modifier onlyOwner() {
         _checkOwner();
@@ -213,7 +215,8 @@ abstract contract CustodyGuardRail {
     /**
      * @notice Take the rail off an ad this account closed on a pinned escrow, at once (81-7). A closed ad with
      *         nothing in it has nothing left to extract, so the wait protects nothing; this frees its slot in the
-     *         roster of `MAX_GUARDED_ADS`.
+     *         roster of `MAX_GUARDED_ADS`. Never the last guarded ad (P2-81-a): the account-wide gate ends with the
+     *         roster, so the last rail comes off only through `disarmGuardRail` and its schedule.
      */
     function disarmClosedAd(IAdManager adManager, string calldata adId) external onlyOwner {
         bytes32 key = keccak256(bytes(adId));
@@ -222,6 +225,7 @@ abstract contract CustodyGuardRail {
         (address maker, bool open,,,,,, uint256 balance, uint256 locked) = adManager.ads(adId);
         if (maker != address(this)) revert GuardRail__NotAllowed();
         if (open || balance != 0 || locked != 0) revert GuardRail__AdStillOpen();
+        if (_guarded.length == 1) revert GuardRail__LastGuardRail();
         _disarm(key, adId);
     }
 
