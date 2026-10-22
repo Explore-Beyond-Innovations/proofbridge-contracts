@@ -1712,8 +1712,38 @@ impl StubEscrow {
     pub fn close_ad(_env: Env, _ad_id: String, _to: Address) {}
     pub fn lock_for_order(_env: Env, _params: Map<Symbol, Val>, _slot: u32) {}
     pub fn set_settlement_signer(_env: Env, _ad_id: String, _signer: BytesN<32>) {}
+    pub fn halt_settlement(_env: Env, _maker: Address) {}
+    pub fn resume_settlement(_env: Env, _maker: Address) {}
     /// Takes nothing: an escrow that doesn't pull what the account paid in.
     pub fn fund_ad(_env: Env, _ad_id: String, _amount: u128) {}
+    /// The ad as a test set it: its token (`fund_ad` reads it, 80-8), or a whole shape
+    /// (`disarm_closed_ad` reads it, 81-7).
+    pub fn get_ad(env: Env, _ad_id: String) -> Option<Map<Symbol, Val>> {
+        let shape: Option<Map<Symbol, Val>> =
+            env.storage().instance().get(&Symbol::new(&env, "ad"));
+        if shape.is_some() {
+            return shape;
+        }
+        let token: Option<BytesN<32>> = env.storage().instance().get(&Symbol::new(&env, "tok"));
+        token.map(|t| {
+            let mut m = Map::new(&env);
+            m.set(Symbol::new(&env, "token"), t.to_val());
+            m
+        })
+    }
+    pub fn set_ad_shape(env: Env, maker: Address, open: bool, balance: u128, locked: u128) {
+        let mut m = Map::new(&env);
+        m.set(Symbol::new(&env, "maker"), maker.to_val());
+        m.set(Symbol::new(&env, "open"), open.into_val(&env));
+        m.set(Symbol::new(&env, "balance"), balance.into_val(&env));
+        m.set(Symbol::new(&env, "locked"), locked.into_val(&env));
+        env.storage().instance().set(&Symbol::new(&env, "ad"), &m);
+    }
+    pub fn set_ad_token(env: Env, token: BytesN<32>) {
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "tok"), &token);
+    }
 }
 
 /// Stands in for bls-key-registry.has_usable_slot for the escrow fixture (2.3c): an account is
@@ -2516,10 +2546,10 @@ fn t52_a_schedule_authorizes_exactly_what_it_named() {
 fn t52_a_schedule_expires() {
     let f = fixture();
     let to = Address::generate(&f.env);
-    guard(&f, 0, 3_600, 600);
+    guard(&f, 0, 3_600, 3_600);
     schedule_withdraw(&f, 1, &to);
 
-    f.env.ledger().set_timestamp(T0 + 3_600 + 600);
+    f.env.ledger().set_timestamp(T0 + 3_600 + 3_600);
     expect_err(
         owner_check(&f, &withdraw_ctx(&f, 1, &to)),
         AccountError::NotScheduled,
@@ -2560,20 +2590,17 @@ fn t52_protective_actions_are_never_delayed_on_a_guarded_ad() {
     let f = fixture();
     guard(&f, 0, 86_400, 86_400);
 
-    // Lever 3: re-point the ad's settlement identity, through the escrow.
-    let repoint = vec![
+    // Halting settlement, through the escrow: the incident response. (Re-pointing the settlement
+    // identity and resuming were here too; since R2 they wait out the delay.)
+    let halt = vec![
         &f.env,
         Context::Contract(ContractContext {
             contract: f.target.clone(),
-            fn_name: Symbol::new(&f.env, "set_settlement_signer"),
-            args: vec![
-                &f.env,
-                ad(&f.env).into_val(&f.env),
-                f.signer.into_val(&f.env),
-            ],
+            fn_name: Symbol::new(&f.env, "halt_settlement"),
+            args: vec![&f.env, f.account.to_val()],
         }),
     ];
-    owner_check(&f, &repoint).expect("re-pointing is protective");
+    owner_check(&f, &halt).expect("halting is protective");
 
     // Lever 1 is a call on the account itself, so it never reaches the context loop — but it must
     // still work with a guardrail armed.
@@ -2824,8 +2851,8 @@ fn t52_guardrail_input_is_validated() {
     );
     // And only the ad's extractive selectors can be scheduled on an ad: not a protective call,
     // and not an account-wide one.
-    guard(&f, 0, 1, 1);
-    for name in ["set_settlement_signer", "upgrade", "set_policy"] {
+    guard(&f, 0, 1, 3_600);
+    for name in ["halt_settlement", "upgrade", "set_policy"] {
         assert_eq!(
             f.client
                 .try_schedule(&ad_scope(&f.env), &Symbol::new(&f.env, name), &vec![&f.env],),
@@ -3173,7 +3200,7 @@ fn d6_account_schedules_take_the_strictest_guardrail() {
             "{name} is per ad"
         );
     }
-    guard(&f, 0, 86_400, 600);
+    guard(&f, 0, 86_400, 3_600);
     f.client.set_guard_rail(
         &String::from_str(&f.env, "ad-2"),
         &Some(GuardRail {
@@ -3193,7 +3220,7 @@ fn d6_account_schedules_take_the_strictest_guardrail() {
     f.client.schedule(&Scope::Account, &up, &one);
     let s = f.client.scheduled(&Scope::Account, &up).unwrap();
     assert_eq!(s.ready_at, T0 + 86_400);
-    assert_eq!(s.expires_at, T0 + 86_400 + 600);
+    assert_eq!(s.expires_at, T0 + 86_400 + 3_600);
 
     f.client.cancel(&Scope::Account, &up);
     assert!(f.client.scheduled(&Scope::Account, &up).is_none());
@@ -3635,7 +3662,7 @@ fn c33_set_guard_rail_refuses_an_archived_row() {
             &Some(GuardRail {
                 threshold: u128::MAX,
                 delay: 1,
-                window: 1,
+                window: 3_600,
                 rate: Limit {
                     capacity: 1,
                     refill_per_second: 1,
@@ -3944,6 +3971,10 @@ fn c9_every_owner_only_entry_point_refuses_a_non_owner() {
                 f.owner.to_val(),
                 1_u128.into_val(e)
             ]
+        ),
+        (
+            "disarm_closed_ad",
+            vec![e, f.target.to_val(), ad(e).to_val()]
         ),
     ];
     let views = [
@@ -4557,12 +4588,13 @@ fn a_maximal_set_policy_schedule_fits_the_event_limit() {
 }
 
 /// The next-largest event: an owner lock carries the whole order. A guarded ad's id is bounded by
-/// the 250-byte ledger-key limit (`Schedule(Ad(id), "withdraw_from_ad")` is the longest key, 128
-/// bytes plus the id, XDR-padded to 4), so 120 bytes is the longest id that can be armed at all.
+/// the 250-byte ledger-key limit: `Schedule(Ad(id), "set_settlement_signer")` is the longest key
+/// since R2 (136 bytes plus the id, XDR-padded to 4), so 112 bytes is the longest id that can be
+/// armed at all, and a longer one fails closed. (Ad ids are 36-byte UUIDs.)
 #[test]
 fn a_lock_schedule_on_the_longest_schedulable_ad_id_fits_the_event_limit() {
     let f = fixture();
-    let long = "y".repeat(120);
+    let long = "y".repeat(112);
     let ad_id = String::from_str(&f.env, &long);
     f.client.set_guard_rail(&ad_id, &Some(rail(0, 1_000)));
     let mut order = params(&f);
@@ -4575,7 +4607,7 @@ fn a_lock_schedule_on_the_longest_schedulable_ad_id_fits_the_event_limit() {
     );
     let r = f.env.cost_estimate().resources();
     std::println!(
-        "lock on a 120-byte ad id: Scheduled event {} bytes (limit 16384)",
+        "lock on a 112-byte ad id: Scheduled event {} bytes (limit 16384)",
         r.contract_events_size_bytes
     );
     assert!(r.contract_events_size_bytes <= 16_384);
@@ -5352,6 +5384,7 @@ fn p46_funds_the_escrow_does_not_take_never_stay_in_the_account() {
     );
     let tc = test_token::TokenContractClient::new(&f.env, &token);
     tc.mint(&f.owner, &1_000_i128);
+    StubEscrowClient::new(&f.env, &f.target).set_ad_token(&address_to_bytes32(&f.env, &token));
     let r = f.client.try_fund_ad(
         &f.target,
         &token,
@@ -5416,4 +5449,805 @@ fn p46_a_malformed_lock_is_bad_args_before_any_reach_check() {
         ),
         AccountError::BadArgs,
     );
+}
+
+// ---------------------------------------------------------------------------
+// plan 46 review pass 1: the maker account's side of a dispute, against the real dispute manager
+// ---------------------------------------------------------------------------
+
+/// The escrow fixture with the real dispute manager wired in, an order locked on the account's ad,
+/// and the bridger's dispute filed against it. Returns (dispute manager, the order's params, its
+/// hash).
+fn disputed_order(e: &Escrow) -> (Address, OrderParams, BytesN<32>) {
+    let admin = Address::generate(&e.env);
+    let dm = e.env.register(dispute_manager::DisputeManagerContract, ());
+    let dmc = dispute_manager::DisputeManagerContractClient::new(&e.env, &dm);
+    let (token, tc) = token_of(e);
+    dmc.initialize(&admin, &token);
+    dmc.set_escrow(&e.ad_manager, &true);
+    dmc.set_arbiter(&Address::generate(&e.env));
+    dmc.set_protocol_fee_pool(&Address::generate(&e.env));
+    dmc.set_dispute_params(
+        &e.order_chain_id,
+        &proofbridge_core::types::DisputeParams {
+            challenge_period: 3_600,
+            bond_floor: 1_000,
+        },
+    );
+    let am = ad_manager::AdManagerContractClient::new(&e.env, &e.ad_manager);
+    am.set_dispute_manager(&dm);
+
+    let p = escrow_params(e, 400_000);
+    let order_hash: BytesN<32> = e.env.invoke_contract(
+        &e.ad_manager,
+        &Symbol::new(&e.env, "lock_for_order"),
+        vec![&e.env, p.clone().into_val(&e.env), 0u32.into_val(&e.env)],
+    );
+    let bridger =
+        proofbridge_core::token::bytes32_to_account_address(&e.env, &p.order_recipient).unwrap();
+    tc.mint(&bridger, &1_000_000_i128);
+    // the bridger authorizes the module's nested pull of its bond
+    e.env.mock_all_auths_allowing_non_root_auth();
+    am.dispute(&p, &bridger, &b32(&e.env, 0xE1));
+    (dm, p, order_hash)
+}
+
+/// 80-1: the maker account answers a dispute through `call`. The dispute manager asks the responder
+/// itself to authorize (`record_response`), which the account isn't the direct caller of, so the
+/// account pre-approves exactly that call: rooted, nothing nested, this account as the responder,
+/// for the escrow being called. With real authorization, end to end.
+#[test]
+fn p46_a_maker_account_answers_a_dispute_through_call() {
+    let e = escrow_fixture();
+    let (dm, p, order_hash) = disputed_order(&e);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    let respond = Symbol::new(&e.env, "respond_to_dispute");
+    let evidence = b32(&e.env, 0xE2);
+    let args = vec![
+        &e.env,
+        p.clone().into_val(&e.env),
+        e.account.to_val(),
+        evidence.to_val(),
+    ];
+    let approval_for = |escrow: &Address, responder: &Address| {
+        vec![
+            &e.env,
+            InvokerContractAuthEntry::Contract(soroban_sdk::auth::SubContractInvocation {
+                context: ContractContext {
+                    contract: dm.clone(),
+                    fn_name: Symbol::new(&e.env, "record_response"),
+                    args: vec![
+                        &e.env,
+                        escrow.to_val(),
+                        order_hash.to_val(),
+                        responder.to_val(),
+                        evidence.to_val(),
+                    ],
+                },
+                sub_invocations: Vec::new(&e.env),
+            }),
+        ]
+    };
+    let exp = e.env.ledger().sequence() + 100;
+    let owner_auth = |nonce: i64, approvals: &Vec<InvokerContractAuthEntry>| {
+        let inv = invocation(
+            &e.account,
+            "call",
+            std::vec![
+                sc_val(&e.env, e.ad_manager.to_val()),
+                sc_val(&e.env, respond.to_val()),
+                sc_val(&e.env, args.to_val()),
+                sc_val(&e.env, Option::<(Address, u128)>::None.into_val(&e.env)),
+                sc_val(&e.env, approvals.to_val()),
+            ],
+        );
+        entry(&e.owner, inv, nonce, exp, ScVal::Void, Creds::V2)
+    };
+
+    // No approval: the host refuses the responder's nested authorization.
+    let none: Vec<InvokerContractAuthEntry> = Vec::new(&e.env);
+    e.env.set_auths(&[owner_auth(31, &none)]);
+    assert!(client
+        .try_call(&e.ad_manager, &respond, &args, &None, &none)
+        .is_err());
+
+    // An approval naming someone else as the responder, or another escrow, is the account's to
+    // refuse.
+    // ...or one carrying a nested call (a transfer from the account riding on the answer).
+    let (token, _) = token_of(&e);
+    let mut with_child = approval_for(&e.ad_manager, &e.account);
+    if let InvokerContractAuthEntry::Contract(mut inv) = with_child.get(0).unwrap() {
+        inv.sub_invocations = vec![
+            &e.env,
+            InvokerContractAuthEntry::Contract(soroban_sdk::auth::SubContractInvocation {
+                context: ContractContext {
+                    contract: token.clone(),
+                    fn_name: Symbol::new(&e.env, "transfer"),
+                    args: vec![
+                        &e.env,
+                        e.account.to_val(),
+                        dm.to_val(),
+                        1_i128.into_val(&e.env),
+                    ],
+                },
+                sub_invocations: Vec::new(&e.env),
+            }),
+        ];
+        with_child.set(0, InvokerContractAuthEntry::Contract(inv));
+    }
+    for (nonce, wrong) in [
+        (32, approval_for(&e.ad_manager, &e.owner)),
+        (34, approval_for(&Address::generate(&e.env), &e.account)),
+        (35, with_child),
+    ] {
+        e.env.set_auths(&[owner_auth(nonce, &wrong)]);
+        assert_eq!(
+            call_err(client.try_call(&e.ad_manager, &respond, &args, &None, &wrong)),
+            Some(AccountError::BadApproval)
+        );
+    }
+
+    let right = approval_for(&e.ad_manager, &e.account);
+    e.env.set_auths(&[owner_auth(33, &right)]);
+    client.call(&e.ad_manager, &respond, &args, &None, &right);
+    let d = dispute_manager::DisputeManagerContractClient::new(&e.env, &dm)
+        .get_dispute(&order_hash)
+        .expect("the dispute is open");
+    assert_eq!(
+        d.responder_evidence, evidence,
+        "the maker's answer is recorded"
+    );
+}
+
+fn sweep_args(f: &Fixture) -> Vec<Val> {
+    vec![
+        &f.env,
+        Address::generate(&f.env).to_val(),
+        f.owner.to_val(),
+        1_000_u128.into_val(&f.env),
+    ]
+}
+
+/// 80-2, 49S-1 for funds at rest: a pending sweep waits a raised delay like every other account-wide
+/// change, or a stolen key's 1-hour sweep lands after the owner arms a 7-day guard.
+#[test]
+fn p46_a_pending_sweep_waits_a_raised_delay() {
+    let f = fixture();
+    let sweep = sym_of(&f.env, "sweep");
+    guard(&f, 0, 3_600, 7 * 86_400);
+    f.client.schedule(&Scope::Account, &sweep, &sweep_args(&f));
+    assert_eq!(
+        f.client
+            .scheduled(&Scope::Account, &sweep)
+            .unwrap()
+            .ready_at,
+        T0 + 3_600
+    );
+    guard(&f, 0, 7 * 86_400, 7 * 86_400);
+    assert_eq!(
+        f.client
+            .scheduled(&Scope::Account, &sweep)
+            .unwrap()
+            .ready_at,
+        T0 + 7 * 86_400,
+        "the pending sweep waits the new delay"
+    );
+}
+
+/// 80-2: disarming clears a pending sweep with every other schedule, so a re-armed account can't be
+/// emptied by a row made under settings that are gone.
+#[test]
+fn p46_disarming_clears_a_pending_sweep() {
+    let f = fixture();
+    let sweep = sym_of(&f.env, "sweep");
+    guard(&f, 0, 3_600, 86_400);
+    f.client.schedule(&Scope::Account, &sweep, &sweep_args(&f));
+    schedule_guard(&f, &None);
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    f.client.set_guard_rail(&ad(&f.env), &None);
+    assert!(f.client.scheduled(&Scope::Account, &sweep).is_none());
+}
+
+/// An `open_dispute` approval as the escrow would make it: filed by this account against the escrow
+/// being called, with `subs` nested under it.
+fn open_dispute_approval(
+    e: &Escrow,
+    subs: Vec<InvokerContractAuthEntry>,
+) -> InvokerContractAuthEntry {
+    InvokerContractAuthEntry::Contract(soroban_sdk::auth::SubContractInvocation {
+        context: ContractContext {
+            contract: Address::generate(&e.env),
+            fn_name: Symbol::new(&e.env, "open_dispute"),
+            args: vec![
+                &e.env,
+                e.ad_manager.to_val(),
+                b32(&e.env, 0x01).to_val(),
+                e.order_chain_id.into_val(&e.env),
+                e.account.to_val(),
+            ],
+        },
+        sub_invocations: subs,
+    })
+}
+
+fn token_call(
+    e: &Escrow,
+    token: &Address,
+    fn_name: &str,
+    from: &Address,
+    amount: i128,
+) -> InvokerContractAuthEntry {
+    InvokerContractAuthEntry::Contract(soroban_sdk::auth::SubContractInvocation {
+        context: ContractContext {
+            contract: token.clone(),
+            fn_name: Symbol::new(&e.env, fn_name),
+            args: vec![
+                &e.env,
+                from.to_val(),
+                e.ad_manager.to_val(),
+                amount.into_val(&e.env),
+            ],
+        },
+        sub_invocations: Vec::new(&e.env),
+    })
+}
+
+/// 80-4: `open_dispute` is accepted only at the root, and only over transfers from this account. A
+/// nested one, or one carrying an `approve` or someone else's transfer, is refused.
+#[test]
+fn p46_an_open_dispute_approval_is_rooted_and_carries_only_the_accounts_transfers() {
+    let e = escrow_fixture();
+    let (token, _) = token_of(&e);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    let fund = Symbol::new(&e.env, "fund_ad");
+    let fund_args = vec![&e.env, e.ad_id.to_val(), 1_u128.into_val(&e.env)];
+    let nested = vec![
+        &e.env,
+        open_dispute_approval(
+            &e,
+            vec![&e.env, open_dispute_approval(&e, Vec::new(&e.env))],
+        ),
+    ];
+    let with_approve = vec![
+        &e.env,
+        open_dispute_approval(
+            &e,
+            vec![&e.env, token_call(&e, &token, "approve", &e.account, 1)],
+        ),
+    ];
+    let others_transfer = vec![
+        &e.env,
+        open_dispute_approval(
+            &e,
+            vec![&e.env, token_call(&e, &token, "transfer", &e.owner, 1)],
+        ),
+    ];
+    for approvals in [nested, with_approve, others_transfer] {
+        assert_eq!(
+            call_err(client.try_call(&e.ad_manager, &fund, &fund_args, &None, &approvals)),
+            Some(AccountError::BadApproval)
+        );
+    }
+}
+
+/// 80-4: the balance check runs both ways. An approval that lets the escrow pull funds already at
+/// rest in the account (no payment in) leaves its balance lower, and is refused.
+#[test]
+fn p46_an_approval_cannot_spend_funds_at_rest() {
+    let e = escrow_fixture();
+    let (token, tc) = token_of(&e);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    let held = tc.balance(&e.account);
+    assert!(held >= 1_000, "the fixture leaves funds at rest");
+    let r = client.try_call(
+        &e.ad_manager,
+        &Symbol::new(&e.env, "fund_ad"),
+        &vec![&e.env, e.ad_id.to_val(), 1_000_u128.into_val(&e.env)],
+        &None,
+        &vec![
+            &e.env,
+            token_call(&e, &token, "transfer", &e.account, 1_000),
+        ],
+    );
+    assert_eq!(call_err(r), Some(AccountError::FundsLeft));
+    assert_eq!(tc.balance(&e.account), held);
+    assert_eq!(liquidity(&e), 5_000_000);
+}
+
+/// 80-4: `fund_ad` reaches a pinned escrow only.
+#[test]
+fn p46_fund_ad_reaches_pinned_targets_only() {
+    let e = escrow_fixture();
+    let (token, _) = token_of(&e);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    assert_eq!(
+        client.try_fund_ad(&Address::generate(&e.env), &token, &e.ad_id, &1_u128),
+        Err(Ok(AccountError::TargetNotAllowed))
+    );
+}
+
+fn arm(e: &Escrow, client: &AgentAccountClient) {
+    client.set_guard_rail(
+        &e.ad_id,
+        &Some(GuardRail {
+            threshold: 0,
+            delay: 3_600,
+            window: 86_400,
+            rate: Limit {
+                capacity: 1,
+                refill_per_second: 1,
+            },
+            bucket: Bucket {
+                level: 0,
+                last_ts: 0,
+            },
+        }),
+    );
+}
+
+/// 80-3: no token is reached as the account through `call`, whatever the targets say. With a token
+/// pinned (a misconfiguration the target list allows), its transfer, approve and burn functions are
+/// refused, so funds at rest still leave only through `sweep`.
+#[test]
+fn p46_call_never_reaches_a_token_function_even_on_a_pinned_token() {
+    let e = escrow_fixture();
+    let (token, tc) = token_of(&e);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    client.set_targets(&vec![&e.env, e.ad_manager.clone(), token.clone()]);
+    let held = tc.balance(&e.account);
+    let thief = Address::generate(&e.env);
+    for (name, args) in [
+        (
+            "transfer",
+            vec![
+                &e.env,
+                e.account.to_val(),
+                thief.to_val(),
+                1_i128.into_val(&e.env),
+            ],
+        ),
+        (
+            "transfer_from",
+            vec![
+                &e.env,
+                e.account.to_val(),
+                e.account.to_val(),
+                thief.to_val(),
+                1_i128.into_val(&e.env),
+            ],
+        ),
+        (
+            "approve",
+            vec![
+                &e.env,
+                e.account.to_val(),
+                thief.to_val(),
+                1_i128.into_val(&e.env),
+                1_000_u32.into_val(&e.env),
+            ],
+        ),
+        (
+            "burn",
+            vec![&e.env, e.account.to_val(), 1_i128.into_val(&e.env)],
+        ),
+        (
+            "burn_from",
+            vec![
+                &e.env,
+                e.account.to_val(),
+                e.account.to_val(),
+                1_i128.into_val(&e.env),
+            ],
+        ),
+    ] {
+        let r = client.try_call(
+            &token,
+            &Symbol::new(&e.env, name),
+            &args,
+            &None,
+            &Vec::new(&e.env),
+        );
+        assert_eq!(
+            call_err(r),
+            Some(AccountError::FunctionNotAllowed),
+            "{name}"
+        );
+    }
+    assert_eq!(tc.balance(&e.account), held);
+}
+
+/// R3 (plan 46 review pass 1): while any ad is guarded, `call` reaches only the escrow functions the
+/// account knows. A protective one passes at once; anything not on the list is refused, so a stolen
+/// key can't reach a function nobody classified.
+#[test]
+fn p46_a_guarded_account_calls_only_known_escrow_functions() {
+    let e = escrow_fixture();
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    let unknown = Symbol::new(&e.env, "set_fee_bps");
+    let unknown_args = vec![&e.env, 1_u32.into_val(&e.env), 1_u32.into_val(&e.env)];
+    let none = Vec::new(&e.env);
+    // Unguarded: the account doesn't judge it (the escrow refuses it, as it isn't the admin).
+    assert_ne!(
+        call_err(client.try_call(&e.ad_manager, &unknown, &unknown_args, &None, &none)),
+        Some(AccountError::FunctionNotAllowed)
+    );
+    arm(&e, &client);
+    assert_eq!(
+        call_err(client.try_call(&e.ad_manager, &unknown, &unknown_args, &None, &none)),
+        Some(AccountError::FunctionNotAllowed)
+    );
+    // Halting is the incident response: never delayed, never refused.
+    client.call(
+        &e.ad_manager,
+        &Symbol::new(&e.env, "halt_settlement"),
+        &vec![&e.env, e.account.to_val()],
+        &None,
+        &none,
+    );
+    let halt = ad_manager::AdManagerContractClient::new(&e.env, &e.ad_manager)
+        .halt_of(&e.account)
+        .unwrap();
+    assert!(halt.halted);
+}
+
+/// R2 (plan 46 review pass 1): on a guarded ad, re-pointing its settlement signer and resuming
+/// settlement wait out the delay. Either is a drain path for a stolen key (a signer it holds, or
+/// settlement turned back on after the owner halted), so neither may skip the guard. Halting stays
+/// instant.
+#[test]
+fn p46_resuming_and_repointing_the_signer_wait_out_the_delay() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let none = Vec::new(&f.env);
+    let repoint = Symbol::new(&f.env, "set_settlement_signer");
+    let repoint_args = vec![&f.env, ad(&f.env).to_val(), b32(&f.env, 0x4f).to_val()];
+    let resume = Symbol::new(&f.env, "resume_settlement");
+    let resume_args = vec![&f.env, f.account.to_val()];
+    let run = |name: &Symbol, args: &Vec<Val>| {
+        f.client
+            .try_call(&f.target, name, args, &None, &none)
+            .map(|_| ())
+    };
+    assert_eq!(
+        run(&repoint, &repoint_args),
+        Err(Ok(AccountError::NotScheduled))
+    );
+    assert_eq!(
+        run(&resume, &resume_args),
+        Err(Ok(AccountError::NotScheduled))
+    );
+    f.client.call(
+        &f.target,
+        &Symbol::new(&f.env, "halt_settlement"),
+        &vec![&f.env, f.account.to_val()],
+        &None,
+        &none,
+    );
+
+    f.client
+        .schedule(&ad_scope(&f.env), &repoint, &repoint_args);
+    f.client.schedule(&Scope::Account, &resume, &resume_args);
+    assert_eq!(
+        run(&repoint, &repoint_args),
+        Err(Ok(AccountError::NotScheduled)),
+        "not matured"
+    );
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    // A schedule names the exact call: another signer isn't covered.
+    let other = vec![&f.env, ad(&f.env).to_val(), b32(&f.env, 0x50).to_val()];
+    assert_eq!(run(&repoint, &other), Err(Ok(AccountError::NotScheduled)));
+    assert_eq!(run(&repoint, &repoint_args), Ok(()));
+    assert_eq!(run(&resume, &resume_args), Ok(()));
+    assert_eq!(
+        run(&resume, &resume_args),
+        Err(Ok(AccountError::NotScheduled)),
+        "single use"
+    );
+}
+
+/// R1 (plan 46 review pass 1): tightening is instant, so it is bounded. A delay over 30 days or a
+/// window under an hour would freeze the ad (removing the rail waits out the current delay), and
+/// is refused, whether arming or tightening. The bounds themselves are accepted.
+#[test]
+fn p46_a_guard_rail_cannot_freeze_the_ad() {
+    let f = fixture();
+    let day = 86_400;
+    let set = |delay: u64, window: u64| {
+        f.client.try_set_guard_rail(
+            &ad(&f.env),
+            &Some(GuardRail {
+                threshold: 0,
+                delay,
+                window,
+                rate: Limit {
+                    capacity: u128::MAX / 2,
+                    refill_per_second: 1,
+                },
+                bucket: Bucket {
+                    level: 0,
+                    last_ts: 0,
+                },
+            }),
+        )
+    };
+    assert_eq!(
+        set(30 * day + 1, day),
+        Err(Ok(AccountError::GuardRailOutOfBounds))
+    );
+    assert_eq!(
+        set(3_600, 3_599),
+        Err(Ok(AccountError::GuardRailOutOfBounds))
+    );
+    assert!(set(3_600, 3_600).is_ok(), "the shortest window");
+    // Tightening from there: a longer delay is instant, up to the bound and not past it.
+    assert!(set(30 * day, 3_600).is_ok(), "the longest delay");
+    assert_eq!(
+        set(1_000 * 365 * day, 3_600),
+        Err(Ok(AccountError::GuardRailOutOfBounds))
+    );
+    assert_eq!(f.client.guard_rail(&ad(&f.env)).unwrap().delay, 30 * day);
+    // A change that could never be made can't be announced either.
+    let frozen = Some(GuardRail {
+        threshold: 0,
+        delay: 3_600,
+        window: 1,
+        rate: Limit {
+            capacity: 1,
+            refill_per_second: 1,
+        },
+        bucket: Bucket {
+            level: 0,
+            last_ts: 0,
+        },
+    });
+    assert_eq!(
+        f.client.try_schedule(
+            &ad_scope(&f.env),
+            &sym_of(&f.env, "set_guard_rail"),
+            &guard_args(&f.env, &frozen),
+        ),
+        Err(Ok(AccountError::GuardRailOutOfBounds))
+    );
+}
+
+/// 80-5: an `open_dispute` approval is consent to one filing: by this account, against the escrow
+/// being called. Another filer, or another escrow, is refused.
+#[test]
+fn p46_an_open_dispute_approval_names_this_account_and_the_called_escrow() {
+    let e = escrow_fixture();
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    let fund = Symbol::new(&e.env, "fund_ad");
+    let fund_args = vec![&e.env, e.ad_id.to_val(), 1_u128.into_val(&e.env)];
+    let filing = |escrow: &Address, filer: &Address| {
+        vec![
+            &e.env,
+            InvokerContractAuthEntry::Contract(soroban_sdk::auth::SubContractInvocation {
+                context: ContractContext {
+                    contract: Address::generate(&e.env),
+                    fn_name: Symbol::new(&e.env, "open_dispute"),
+                    args: vec![
+                        &e.env,
+                        escrow.to_val(),
+                        b32(&e.env, 0x01).to_val(),
+                        e.order_chain_id.into_val(&e.env),
+                        filer.to_val(),
+                    ],
+                },
+                sub_invocations: Vec::new(&e.env),
+            }),
+        ]
+    };
+    for approvals in [
+        filing(&Address::generate(&e.env), &e.account),
+        filing(&e.ad_manager, &e.owner),
+    ] {
+        assert_eq!(
+            call_err(client.try_call(&e.ad_manager, &fund, &fund_args, &None, &approvals)),
+            Some(AccountError::BadApproval)
+        );
+    }
+    // The well-formed one passes the account (the stub filing never runs, so nothing else fails).
+    assert_ne!(
+        call_err(client.try_call(
+            &e.ad_manager,
+            &fund,
+            &fund_args,
+            &None,
+            &filing(&e.ad_manager, &e.account)
+        )),
+        Some(AccountError::BadApproval)
+    );
+}
+
+/// 80-7: `set_policy` refuses an all-zero agent id, so a schedule for one could never be spent and
+/// its `Scheduled` event would read as a pending change. `schedule` refuses it too.
+#[test]
+fn p46_a_set_policy_schedule_for_a_zero_agent_is_refused() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let tokens = vec![&f.env, f.ad_token.clone()];
+    let args = policy_args(
+        &f.env,
+        &b32(&f.env, 0),
+        &tokens,
+        0,
+        &f.signer,
+        &None,
+        &wide(&f.env, &tokens),
+    );
+    assert_eq!(
+        f.client
+            .try_schedule(&Scope::Account, &sym_of(&f.env, "set_policy"), &args),
+        Err(Ok(AccountError::BadPolicy))
+    );
+}
+
+/// 80-8: `fund_ad` reads the ad's token from the escrow and refuses another one before anything
+/// moves, as `create_ad` does.
+#[test]
+fn p46_fund_ad_refuses_a_token_that_isnt_the_ads() {
+    let e = escrow_fixture();
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    let other = e.env.register(
+        test_token::TokenContract,
+        (
+            Address::generate(&e.env),
+            0_i128,
+            7_u32,
+            String::from_str(&e.env, "Other"),
+            String::from_str(&e.env, "OTH"),
+        ),
+    );
+    test_token::TokenContractClient::new(&e.env, &other).mint(&e.owner, &1_000_i128);
+    assert_eq!(
+        client.try_fund_ad(&e.ad_manager, &other, &e.ad_id, &1_000_u128),
+        Err(Ok(AccountError::BadArgs))
+    );
+    assert_eq!(liquidity(&e), 5_000_000);
+}
+
+/// 81-6 parity: a shorter window is a tightening, and applies to what is pending. Each pending row
+/// on the ad, and each account-wide row when the account's window shrinks, expires no later than
+/// its open time plus the new window. A row is never lengthened.
+#[test]
+fn p46_a_shorter_window_clamps_pending_schedules() {
+    let f = fixture();
+    let day = 86_400;
+    guard(&f, 0, 3_600, 7 * day);
+    let (up, _) = schedule_one_of_each(&f);
+    assert_eq!(clocks(&f, &up)[1], (T0 + 3_600, T0 + 3_600 + 7 * day));
+    guard(&f, 0, 3_600, day);
+    let want = (T0 + 3_600, T0 + 3_600 + day);
+    assert_eq!(
+        clocks(&f, &up),
+        [want; 4],
+        "every row now closes a day after it opens"
+    );
+    // A row whose own close is already sooner keeps it.
+    f.env.ledger().set_timestamp(T0 + 10);
+    f.client
+        .schedule(&Scope::Account, &up, &vec![&f.env, b32(&f.env, 9).to_val()]);
+    let short = f.client.scheduled(&Scope::Account, &up).unwrap();
+    assert_eq!(short.expires_at, T0 + 10 + 3_600 + day);
+    guard(&f, 0, 3_600, day);
+    assert_eq!(f.client.scheduled(&Scope::Account, &up).unwrap(), short);
+}
+
+/// 81-7 parity: the rail on an ad this account closed comes off at once (`disarm_closed_ad`), so a
+/// dead ad never holds the roster or the account-wide delay. Closed means on a pinned escrow, made
+/// by this account, not open, empty and with nothing locked; anything else still needs its schedule.
+#[test]
+fn p46_a_closed_ads_rail_comes_off_at_once() {
+    let e = escrow_fixture();
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    arm(&e, &client);
+    assert_eq!(
+        client.try_disarm_closed_ad(&e.ad_manager, &e.ad_id),
+        Err(Ok(AccountError::AdNotClosed)),
+        "a live ad's rail comes off only through its schedule"
+    );
+    assert_eq!(
+        client.try_disarm_closed_ad(&Address::generate(&e.env), &e.ad_id),
+        Err(Ok(AccountError::TargetNotAllowed))
+    );
+    // Another maker's closed ad, under an id this account armed: not this account's to call closed.
+    let am = ad_manager::AdManagerContractClient::new(&e.env, &e.ad_manager);
+    let (_, tc) = token_of(&e);
+    let stranger = Address::generate(&e.env);
+    tc.mint(&stranger, &1_000_i128);
+    let their_signer = address_to_bytes32(&e.env, &stranger);
+    MockKeyRegistryClient::new(&e.env, &am.key_registry().unwrap()).set(&their_signer, &true);
+    let theirs = String::from_str(&e.env, "theirs");
+    am.create_ad(
+        &stranger,
+        &theirs,
+        &e.ad_token,
+        &1_000_u128,
+        &e.order_chain_id,
+        &b32(&e.env, 0xCC),
+        &their_signer,
+    );
+    am.close_ad(&theirs, &stranger);
+    client.set_guard_rail(&theirs, &client.guard_rail(&e.ad_id));
+    assert_eq!(
+        client.try_disarm_closed_ad(&e.ad_manager, &theirs),
+        Err(Ok(AccountError::AdNotClosed))
+    );
+
+    // Emptied but still open is not closed.
+    let withdraw = Symbol::new(&e.env, "withdraw_from_ad");
+    let withdraw_args = vec![
+        &e.env,
+        e.ad_id.to_val(),
+        5_000_000_u128.into_val(&e.env),
+        e.owner.to_val(),
+    ];
+    client.schedule(&Scope::Ad(e.ad_id.clone()), &withdraw, &withdraw_args);
+    e.env.ledger().set_timestamp(T0 + 3_600);
+    client.call(
+        &e.ad_manager,
+        &withdraw,
+        &withdraw_args,
+        &None,
+        &Vec::new(&e.env),
+    );
+    assert_eq!(liquidity(&e), 0);
+    assert_eq!(
+        client.try_disarm_closed_ad(&e.ad_manager, &e.ad_id),
+        Err(Ok(AccountError::AdNotClosed))
+    );
+
+    // Close it (announced and waited out, as on any guarded ad), then the rail comes off at once.
+    let close = Symbol::new(&e.env, "close_ad");
+    let close_args = vec![&e.env, e.ad_id.to_val(), e.owner.to_val()];
+    client.schedule(&Scope::Ad(e.ad_id.clone()), &close, &close_args);
+    e.env.ledger().set_timestamp(T0 + 7_200);
+    client.call(&e.ad_manager, &close, &close_args, &None, &Vec::new(&e.env));
+    let sweep = Symbol::new(&e.env, "sweep");
+    let (token, _) = token_of(&e);
+    client.schedule(
+        &Scope::Account,
+        &sweep,
+        &vec![
+            &e.env,
+            token.to_val(),
+            e.owner.to_val(),
+            1_u128.into_val(&e.env),
+        ],
+    );
+    client.disarm_closed_ad(&e.ad_manager, &e.ad_id);
+    assert!(client.guard_rail(&e.ad_id).is_none());
+    assert!(!client.guarded_ads().contains(&e.ad_id), "off the roster");
+    assert!(
+        client.scheduled(&Scope::Account, &sweep).is_none(),
+        "its schedules go with it"
+    );
+}
+
+/// 81-7: "closed" is every field at once. A closed-looking ad still holding a balance, or with
+/// something locked, isn't closed. (The real escrow can't produce either, so the stub does.)
+#[test]
+fn p46_a_closed_ad_holds_nothing_and_locks_nothing() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let stub = StubEscrowClient::new(&f.env, &f.target);
+    for (balance, locked) in [(1_u128, 0_u128), (0, 1)] {
+        stub.set_ad_shape(&f.account, &false, &balance, &locked);
+        assert_eq!(
+            f.client.try_disarm_closed_ad(&f.target, &ad(&f.env)),
+            Err(Ok(AccountError::AdNotClosed)),
+            "balance {balance}, locked {locked}"
+        );
+    }
+    stub.set_ad_shape(&f.account, &false, &0, &0);
+    f.client.disarm_closed_ad(&f.target, &ad(&f.env));
+    assert!(f.client.guard_rail(&ad(&f.env)).is_none());
 }

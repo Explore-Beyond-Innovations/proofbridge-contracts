@@ -1,7 +1,9 @@
 //! AgentAccount — a maker's Soroban custom account (2.1c, #325).
 //!
 //! The account is the ad's maker on the AdManager escrow and an authorization gateway: it never
-//! holds funds between calls (plan 46). Two parties act through it:
+//! holds what the owner pays in (plan 46). Funds can still come to rest in it, a withdrawal or close
+//! paid to the account itself, a refunded dispute bond, a claimed credit, and leave only through
+//! `sweep`, timed while any ad is guarded. Two parties act through it:
 //!   - the **owner** (any `Address`, G or C, never this account) calls the account's own
 //!     functions with ordinary transactions: the configuration setters, and the ad actions
 //!     `create_ad` / `fund_ad` / `call` / `sweep` (owner.rs). Money the owner pays in goes from the
@@ -49,7 +51,8 @@ pub use errors::AccountError;
 pub use escrow::settlement_signer_of;
 pub use policy::{
     lock_for_order, AccountVolume, AgentId, AgentPolicy, Schedule, Scope, MAX_AD_ID_BYTES,
-    MAX_AD_SCOPE, MAX_TARGETS, MAX_VALID_UNTIL, MAX_WHITELIST_TOKENS, SCHEMA_VERSION,
+    MAX_AD_SCOPE, MAX_GUARD_DELAY, MAX_TARGETS, MAX_VALID_UNTIL, MAX_WHITELIST_TOKENS,
+    MIN_GUARD_WINDOW, SCHEMA_VERSION,
 };
 
 #[contract]
@@ -267,6 +270,9 @@ impl AgentAccount {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
         let now = env.ledger().timestamp();
+        if let Some(g) = &guard_rail {
+            policy::check_guard_bounds(g)?;
+        }
         let current = policy::get_guard_rail(&env, &ad_id);
         // On the roster with no row is archived, not unarmed: refuse, as the owner path does (C-33).
         if current.is_none() && policy::is_guarded(&env, &ad_id) {
@@ -322,10 +328,12 @@ impl AgentAccount {
                     },
                     ..g
                 };
-                // The delays pending rows were timed under, read before this write changes them.
+                // The delays and windows pending rows were timed under, read before this write
+                // changes them.
                 let ad_delay_before = current.as_ref().map(|c| c.delay).unwrap_or(0);
-                let account_delay_before =
-                    policy::account_timelock(&env).map(|(d, _)| d).unwrap_or(0);
+                let ad_window_before = current.as_ref().map(|c| c.window).unwrap_or(u64::MAX);
+                let (account_delay_before, account_window_before) =
+                    policy::account_timelock(&env).unwrap_or((0, u64::MAX));
                 policy::put_guard_rail(&env, &ad_id, &armed)?;
                 // Settings the schedules were made under are gone, so the schedules go with them.
                 if loosening {
@@ -339,6 +347,15 @@ impl AgentAccount {
                     }
                     if armed.delay > account_delay_before {
                         policy::restamp(&env, &Scope::Account, now + armed.delay);
+                    }
+                    // 81-6: and closes within the NEW window, after any restamp moved it.
+                    if armed.window < ad_window_before {
+                        policy::clamp_windows(&env, &Scope::Ad(ad_id.clone()), armed.window);
+                    }
+                    if let Ok((_, w)) = policy::account_timelock(&env) {
+                        if w < account_window_before {
+                            policy::clamp_windows(&env, &Scope::Account, w);
+                        }
                     }
                 }
                 events::GuardRailSet {
@@ -366,6 +383,34 @@ impl AgentAccount {
         Ok(())
     }
 
+    /// Owner-only. 81-7: take the rail off an ad this account closed, at once. The ad must be on a
+    /// pinned escrow, this account's, not open, empty and with nothing locked: a dead ad has nothing
+    /// left to extract, so its rail only holds the roster (16 ads at most) and the account-wide delay.
+    /// Its schedules go with it, as on any disarm. A live ad's rail still comes off only through
+    /// `set_guard_rail(None)` and its matured schedule.
+    pub fn disarm_closed_ad(env: Env, escrow: Address, ad_id: String) -> Result<(), AccountError> {
+        policy::get_owner(&env).require_auth();
+        proofbridge_core::ttl::extend_instance(&env);
+        owner::require_target(&env, &escrow)?;
+        if !policy::is_guarded(&env, &ad_id) {
+            return Err(AccountError::NoGuardRail);
+        }
+        if !owner::is_closed_ad(&env, &escrow, &ad_id)? {
+            return Err(AccountError::AdNotClosed);
+        }
+        policy::remove_guard_rail(&env, &ad_id);
+        policy::clear_all_schedules(&env, &ad_id);
+        events::GuardRailSet {
+            ad_id,
+            armed: false,
+            threshold: 0,
+            delay: 0,
+            window: 0,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     /// Owner-only. Announce a delayed call and start its clock.
     ///
     /// The account cannot delay a call (`__check_auth` answers yes or no), so the timelock is two
@@ -373,11 +418,12 @@ impl AgentAccount {
     /// argument list of that call, in call order; only `args_commitment(args)` is stored, and the
     /// call must match it. Per scope:
     ///   - `Ad(ad_id)`: `withdraw_from_ad [ad_id, amount, to]`, `close_ad [ad_id, to]`,
-    ///     `lock_for_order [order]`, `set_guard_rail [ad_id, Option<GuardRail>]`; timed by that
-    ///     ad's guardrail.
-    ///   - `Account`: `upgrade [new_wasm_hash]`, and the loosening `set_policy` /
-    ///     `set_account_limit` / `set_targets` with their own arguments; timed by the longest delay
-    ///     and shortest window across every guarded ad (D6).
+    ///     `lock_for_order [order]`, `set_guard_rail [ad_id, Option<GuardRail>]`,
+    ///     `set_settlement_signer [ad_id, identity]` (R2); timed by that ad's guardrail.
+    ///   - `Account`: `upgrade [new_wasm_hash]`, `sweep [token, to, amount]`,
+    ///     `resume_settlement [maker]` (R2), and the loosening `set_policy` / `set_account_limit` /
+    ///     `set_targets` with their own arguments; timed by the longest delay and shortest window
+    ///     across every guarded ad (D6).
     ///
     /// The args must have the call's shape (`BadArgs`) and, on an ad, name that ad
     /// (`ScopeMismatch`). `set_guard_rail` is committed with its bucket zeroed (live state the
@@ -409,6 +455,10 @@ impl AgentAccount {
                         .get(1)
                         .and_then(|v| Option::<GuardRail>::try_from_val(&env, &v).ok())
                         .ok_or(AccountError::BadArgs)?;
+                    // R1: a change that could never be made can't be announced either.
+                    if let Some(next) = &g {
+                        policy::check_guard_bounds(next)?;
+                    }
                     args = args::guard_rail_args(&env, ad_id, &g);
                 }
                 let g = guard_rail_for_schedule(&env, ad_id)?;
@@ -579,7 +629,7 @@ impl AgentAccount {
     }
 
     /// Owner-only. Adds liquidity to one of this account's ads, from the owner's wallet in this one
-    /// call, as `create_ad`. `token` as there.
+    /// call, as `create_ad`. `token` as there, checked against the ad the escrow holds (80-8).
     pub fn fund_ad(
         env: Env,
         ad_manager: Address,
@@ -591,6 +641,11 @@ impl AgentAccount {
         owner.require_auth();
         proofbridge_core::ttl::extend_instance(&env);
         owner::require_target(&env, &ad_manager)?;
+        owner::require_ad_token(
+            &env,
+            &token,
+            &owner::ad_token_of(&env, &ad_manager, &ad_id)?,
+        )?;
         let args: Vec<Val> = vec![&env, ad_id.to_val(), amount.into_val(&env)];
         owner::pay_through(&env, &owner, &token, amount, &ad_manager, |env| {
             env.invoke_contract::<()>(&ad_manager, &Symbol::new(env, "fund_ad"), args);

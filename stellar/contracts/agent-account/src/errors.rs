@@ -60,10 +60,23 @@ pub enum AccountError {
     /// Plan 46: `AccountSig::Owner` is no longer accepted. The owner acts through the account's own
     /// functions (`create_ad`, `fund_ad`, `call`, `sweep`), which every wallet can sign.
     OwnerPathRetired = 24,
-    /// Plan 46 D2: an owner call left the account holding a different balance of a token it touched.
-    /// The account forwards what the owner pays in and never keeps or releases funds at rest.
+    /// Plan 46 D2: an owner call left the account holding a different balance of a token it touched
+    /// (one its payment or an approval named). The account forwards what the owner pays in, and an
+    /// approval can't release funds at rest; those leave through `sweep`.
     FundsLeft = 25,
-    /// Plan 46: an approval passed to `call` is not a token `transfer` from this account, or an
-    /// `open_dispute` whose nested calls are only such transfers.
+    /// Plan 46: an approval passed to `call` is not a token `transfer` from this account, an
+    /// `open_dispute` whose nested calls are only such transfers, or this account's own
+    /// `record_response` for the escrow being called.
     BadApproval = 26,
+    /// `call` named a function the account doesn't make: a token's own functions always (no token is
+    /// reached as the account; funds at rest leave through `sweep`), and, while any ad is guarded,
+    /// any escrow function not on the account's list.
+    FunctionNotAllowed = 27,
+    /// R1: a guard rail's delay is over `MAX_GUARD_DELAY` (30 days) or its window under
+    /// `MIN_GUARD_WINDOW` (1 hour). Tightening is instant, so an unbounded one would freeze the ad:
+    /// removing the rail waits out the current delay.
+    GuardRailOutOfBounds = 28,
+    /// 81-7: `disarm_closed_ad` on an ad that isn't closed: on the named escrow it isn't this
+    /// account's, or is still open, holds a balance or has something locked.
+    AdNotClosed = 29,
 }

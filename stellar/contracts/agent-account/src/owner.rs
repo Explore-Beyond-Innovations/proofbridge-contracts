@@ -1,8 +1,9 @@
 //! The owner's ad actions (plan 46): what `create_ad`, `fund_ad`, `call` and `sweep` share.
 //!
-//! The account is the ad's maker and an authorization gateway; it never holds funds between calls.
-//! Money the owner pays in (a deposit, a top-up, a dispute bond) comes from the owner's wallet and
-//! goes on to the escrow in the same call. The escrow pulls it *from the account*, a call the
+//! The account is the ad's maker and an authorization gateway; it never holds what the owner pays
+//! in. Money the owner pays in (a deposit, a top-up, a dispute bond) comes from the owner's wallet
+//! and goes on to the escrow in the same call. (Funds can still come to rest here, a payout to the
+//! account or a refunded bond; they leave through `sweep`.) The escrow pulls it *from the account*, a call the
 //! account doesn't make itself, so the host asks the account to authorize it: the account
 //! pre-approves exactly that transfer (`authorize_as_current_contract`), and nothing else. Every
 //! touched token's balance is checked unchanged afterwards.
@@ -40,6 +41,43 @@ pub fn require_ad_token(
         Some(t) if t == *token => Ok(()),
         _ => Err(AccountError::BadArgs),
     }
+}
+
+/// The ad's token as the escrow holds it (`get_ad(ad_id).token`). Read as a map, so the account
+/// stays independent of the escrow's types. An ad the escrow doesn't know is `BadArgs`.
+pub fn ad_token_of(
+    env: &Env,
+    ad_manager: &Address,
+    ad_id: &soroban_sdk::String,
+) -> Result<BytesN<32>, AccountError> {
+    let ad: Option<soroban_sdk::Map<Symbol, Val>> = env.invoke_contract(
+        ad_manager,
+        &Symbol::new(env, "get_ad"),
+        vec![env, ad_id.to_val()],
+    );
+    ad.and_then(|m| m.get(Symbol::new(env, "token")))
+        .and_then(|v| BytesN::<32>::try_from_val(env, &v).ok())
+        .ok_or(AccountError::BadArgs)
+}
+
+/// 81-7: whether `escrow` holds `ad_id` as this account's closed ad: not open, empty, nothing locked.
+pub fn is_closed_ad(
+    env: &Env,
+    escrow: &Address,
+    ad_id: &soroban_sdk::String,
+) -> Result<bool, AccountError> {
+    let ad: Option<soroban_sdk::Map<Symbol, Val>> = env.invoke_contract(
+        escrow,
+        &Symbol::new(env, "get_ad"),
+        vec![env, ad_id.to_val()],
+    );
+    let Some(m) = ad else { return Ok(false) };
+    let get = |k: &str| m.get(Symbol::new(env, k)).ok_or(AccountError::BadArgs);
+    let maker = Address::try_from_val(env, &get("maker")?).map_err(|_| AccountError::BadArgs)?;
+    let open = bool::try_from_val(env, &get("open")?).map_err(|_| AccountError::BadArgs)?;
+    let balance = u128::try_from_val(env, &get("balance")?).map_err(|_| AccountError::BadArgs)?;
+    let locked = u128::try_from_val(env, &get("locked")?).map_err(|_| AccountError::BadArgs)?;
+    Ok(maker == env.current_contract_address() && !open && balance == 0 && locked == 0)
 }
 
 pub fn to_i128(amount: u128) -> Result<i128, AccountError> {
@@ -100,7 +138,7 @@ pub fn call_with(
     let me = env.current_contract_address();
     let mut tokens: Vec<Address> = Vec::new(env);
     for a in approvals.iter() {
-        approved_tokens(env, &me, &a, true, &mut tokens)?;
+        approved_tokens(env, &me, target, &a, true, &mut tokens)?;
     }
     if let Some((t, _)) = &pay {
         if !tokens.contains(t) {
@@ -126,12 +164,19 @@ pub fn call_with(
     Ok(ret)
 }
 
-/// An approval is a token `transfer` from this account with nothing nested, or (at the root) an
-/// `open_dispute` whose nested calls are only such transfers. Anything else, an `approve` above all
-/// (an allowance outlives the call), is refused. Collects the tokens the transfers name.
+/// An approval is one of:
+///   - a token `transfer` from this account, with nothing nested;
+///   - at the root, an `open_dispute` filed by this account against the escrow being called, whose
+///     nested calls are only such transfers;
+///   - at the root, a `record_response` with nothing nested, this account as the responder, for
+///     the escrow being called (80-1: the dispute manager asks the responder itself to authorize).
+///
+/// Anything else, an `approve` above all (an allowance outlives the call), is refused. Collects the
+/// tokens the transfers name.
 fn approved_tokens(
     env: &Env,
     me: &Address,
+    target: &Address,
     entry: &InvokerContractAuthEntry,
     root: bool,
     tokens: &mut Vec<Address>,
@@ -154,9 +199,27 @@ fn approved_tokens(
         }
         return Ok(());
     }
+    let addr = |i: u32| {
+        c.args
+            .get(i)
+            .and_then(|v| Address::try_from_val(env, &v).ok())
+            .ok_or(AccountError::BadApproval)
+    };
+    // `open_dispute(escrow, order_hash, peer_chain_id, filer, …)`: one filing, by this account,
+    // against the escrow being called (80-5); the nested transfers carry the bond.
     if root && c.fn_name == Symbol::new(env, "open_dispute") {
+        if addr(0)? != *target || addr(3)? != *me {
+            return Err(AccountError::BadApproval);
+        }
         for s in inv.sub_invocations.iter() {
-            approved_tokens(env, me, &s, false, tokens)?;
+            approved_tokens(env, me, target, &s, false, tokens)?;
+        }
+        return Ok(());
+    }
+    // `record_response(escrow, order_hash, responder, evidence)`: moves nothing.
+    if root && c.fn_name == Symbol::new(env, "record_response") {
+        if !inv.sub_invocations.is_empty() || addr(0)? != *target || addr(2)? != *me {
+            return Err(AccountError::BadApproval);
         }
         return Ok(());
     }

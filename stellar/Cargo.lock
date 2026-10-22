@@ -17,6 +17,7 @@ name = "agent-account"
 version = "0.1.0"
 dependencies = [
  "ad-manager",
+ "dispute-manager",
  "ed25519-dalek",
  "k256",
  "merkle-manager",
