@@ -557,6 +557,23 @@ contract CustodyGuardRailTest is Test {
         vm.stopPrank();
     }
 
+    /// P2-81-b: a closed ad that isn't this account's is refused, even on a pinned escrow.
+    function test_p2_81_b_anotherMakersClosedAdIsRefused() public {
+        _guard(AD, 0);
+        _guard("theirs", 0);
+        address stranger = makeAddr("p2-stranger");
+        keys.approve(signer, _b32(stranger), true);
+        adToken.mint(stranger, 10);
+        vm.startPrank(stranger);
+        adToken.approve(address(adManager), 10);
+        adManager.createAd("theirs", address(adToken), 10, ORDER_CHAIN_ID, _b32(adRecipient), signer);
+        adManager.closeAd("theirs", stranger);
+        vm.stopPrank();
+        vm.prank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.disarmClosedAd(adManager, "theirs");
+    }
+
     /// 81-4 (R1): a guard rail is bounded, so neither a stolen key nor a slip can freeze an ad: a delay of at most
     /// 30 days and a window of at least an hour. Inside the bounds, arming and tightening stay instant.
     function test_r81_4_aGuardRailIsBoundedSoItCannotFreezeTheAd() public {
