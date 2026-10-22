@@ -128,7 +128,8 @@ pub fn call_with(
 
 /// An approval is one of:
 ///   - a token `transfer` from this account, with nothing nested;
-///   - at the root, an `open_dispute` whose nested calls are only such transfers;
+///   - at the root, an `open_dispute` filed by this account against the escrow being called, whose
+///     nested calls are only such transfers;
 ///   - at the root, a `record_response` with nothing nested, this account as the responder, for
 ///     the escrow being called (80-1: the dispute manager asks the responder itself to authorize).
 ///
@@ -160,7 +161,18 @@ fn approved_tokens(
         }
         return Ok(());
     }
+    let addr = |i: u32| {
+        c.args
+            .get(i)
+            .and_then(|v| Address::try_from_val(env, &v).ok())
+            .ok_or(AccountError::BadApproval)
+    };
+    // `open_dispute(escrow, order_hash, peer_chain_id, filer, …)`: one filing, by this account,
+    // against the escrow being called (80-5); the nested transfers carry the bond.
     if root && c.fn_name == Symbol::new(env, "open_dispute") {
+        if addr(0)? != *target || addr(3)? != *me {
+            return Err(AccountError::BadApproval);
+        }
         for s in inv.sub_invocations.iter() {
             approved_tokens(env, me, target, &s, false, tokens)?;
         }
@@ -168,12 +180,6 @@ fn approved_tokens(
     }
     // `record_response(escrow, order_hash, responder, evidence)`: moves nothing.
     if root && c.fn_name == Symbol::new(env, "record_response") {
-        let addr = |i: u32| {
-            c.args
-                .get(i)
-                .and_then(|v| Address::try_from_val(env, &v).ok())
-                .ok_or(AccountError::BadApproval)
-        };
         if !inv.sub_invocations.is_empty() || addr(0)? != *target || addr(2)? != *me {
             return Err(AccountError::BadApproval);
         }

@@ -5981,3 +5981,53 @@ fn p46_a_guard_rail_cannot_freeze_the_ad() {
         Err(Ok(AccountError::GuardRailOutOfBounds))
     );
 }
+
+/// 80-5: an `open_dispute` approval is consent to one filing: by this account, against the escrow
+/// being called. Another filer, or another escrow, is refused.
+#[test]
+fn p46_an_open_dispute_approval_names_this_account_and_the_called_escrow() {
+    let e = escrow_fixture();
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    let fund = Symbol::new(&e.env, "fund_ad");
+    let fund_args = vec![&e.env, e.ad_id.to_val(), 1_u128.into_val(&e.env)];
+    let filing = |escrow: &Address, filer: &Address| {
+        vec![
+            &e.env,
+            InvokerContractAuthEntry::Contract(soroban_sdk::auth::SubContractInvocation {
+                context: ContractContext {
+                    contract: Address::generate(&e.env),
+                    fn_name: Symbol::new(&e.env, "open_dispute"),
+                    args: vec![
+                        &e.env,
+                        escrow.to_val(),
+                        b32(&e.env, 0x01).to_val(),
+                        e.order_chain_id.into_val(&e.env),
+                        filer.to_val(),
+                    ],
+                },
+                sub_invocations: Vec::new(&e.env),
+            }),
+        ]
+    };
+    for approvals in [
+        filing(&Address::generate(&e.env), &e.account),
+        filing(&e.ad_manager, &e.owner),
+    ] {
+        assert_eq!(
+            call_err(client.try_call(&e.ad_manager, &fund, &fund_args, &None, &approvals)),
+            Some(AccountError::BadApproval)
+        );
+    }
+    // The well-formed one passes the account (the stub filing never runs, so nothing else fails).
+    assert_ne!(
+        call_err(client.try_call(
+            &e.ad_manager,
+            &fund,
+            &fund_args,
+            &None,
+            &filing(&e.ad_manager, &e.account)
+        )),
+        Some(AccountError::BadApproval)
+    );
+}
