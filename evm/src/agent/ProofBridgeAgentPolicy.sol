@@ -325,6 +325,8 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
     /// @notice The hook was called by `caller`, which is neither an account with this module nor a
     ///         forwarder an account nominated, and an approved agent trade is waiting for this call.
     error AgentPolicy__UnknownHookCaller(address caller);
+    /// @notice Plan 46: a pinned target can't be zero, the account itself or this module.
+    error AgentPolicy__BadTarget(address target);
 
     /*//////////////////////////////////////////////////////////////
                              MODULE PLUMBING
@@ -363,8 +365,7 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
             address[] memory targets = abi.decode(extra, (address[]));
             uint256 e = _epoch[msg.sender];
             for (uint256 i = 0; i < targets.length; ++i) {
-                _flag[_targetKey(e, targets[i])][msg.sender] = true;
-                emit TargetSet(msg.sender, targets[i], true);
+                _pin(e, targets[i], true);
             }
         }
         emit Installed(msg.sender, moduleTypeId, _epoch[msg.sender]);
@@ -422,9 +423,17 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         _requireInstalled();
         uint256 e = _epoch[msg.sender];
         for (uint256 i = 0; i < targets.length; ++i) {
-            _flag[_targetKey(e, targets[i])][msg.sender] = allowed;
-            emit TargetSet(msg.sender, targets[i], allowed);
+            _pin(e, targets[i], allowed);
         }
+    }
+
+    /// @dev One rule for both ways in: never zero, the account itself or this module (plan 46).
+    function _pin(uint256 e, address target, bool allowed) internal {
+        if (allowed && (target == address(0) || target == msg.sender || target == address(this))) {
+            revert AgentPolicy__BadTarget(target);
+        }
+        _flag[_targetKey(e, target)][msg.sender] = allowed;
+        emit TargetSet(msg.sender, target, allowed);
     }
 
     /// @notice The account-wide ceiling for one token, shared by every agent this account installs.
@@ -764,6 +773,11 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
     {
         bytes32 aKey = _agentKey(_epoch[account], agentId);
         return _agentBucket[_tokenKey(_versionKey(aKey, _version[aKey][account]), token)][account];
+    }
+
+    /// @notice The account-wide limit for one token (plan 46: the custody account's guard rail reads it).
+    function accountLimit(address account, bytes32 token) external view returns (AgentRateLimit.Limit memory) {
+        return _accountLimit[_ceilKey(_epoch[account], token)][account];
     }
 
     function accountBucket(address account, bytes32 token) external view returns (AgentRateLimit.Bucket memory) {

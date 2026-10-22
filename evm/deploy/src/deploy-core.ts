@@ -90,6 +90,7 @@ export interface DeployCoreResult {
     disputeManager: string;
     agentPolicyCodec: string;
     agentPolicy: string;
+    custodyAccountFactory: string;
     proofBridgeUtils: string;
   };
 }
@@ -226,6 +227,7 @@ async function deployCoreRun(
   const manifestUtils = existing?.contracts.proofBridgeUtils?.address;
   let reusedUtils: string | undefined;
   let foreign: string[] = [];
+  let recordedFactoryModule: string | undefined;
   let timelocked: string[] = [];
   let heldAdmins: Awaited<ReturnType<typeof adminsOf>> = [];
   if (existing) {
@@ -255,6 +257,9 @@ async function deployCoreRun(
     // A reused MerkleManager must have the manager list, and every reused appender must be bound
     // (immutably) to it: an older escrow expects an append return the newer MerkleManager no longer gives.
     await assertMerkleManagerReusable(existing.contracts, signer);
+    // 81-10: a recorded factory must answer as one before anything is sent; the module it mounts is compared below.
+    const recorded = existing.contracts.custodyAccountFactory?.address;
+    if (recorded) recordedFactoryModule = await factoryModuleOf(recorded, signer, outPath);
 
     // Who holds admin on what is reused. After a handover the deployer is not the admin, and every
     // admin-only wiring call below is described for the admin instead of sent (#424).
@@ -656,6 +661,17 @@ async function deployCoreRun(
     },
   );
 
+  // ── custody account factory (plan 46): makers' agent accounts, clones bound to the module ──
+  // Reused only when it was made for this module: its implementation names the module it mounts.
+  let reusedFactory = existing?.contracts.custodyAccountFactory?.address;
+  if (reusedFactory && recordedFactoryModule!.toLowerCase() !== agentPolicyAddr.toLowerCase()) reusedFactory = undefined;
+  const custodyAccountFactoryAddr = await deployIfMissing("CustodyAccountFactory", reusedFactory, async () => {
+    const f = contractFactory("CustodyAccountFactory", "CustodyAccountFactory", signer);
+    const c = await f.deploy(agentPolicyAddr, { nonce: nonces.next() });
+    await c.deploymentTransaction()?.wait();
+    return c as ethers.Contract;
+  });
+
   // ── wire the escrows as the registry's revoke guards ──────────────
   // Re-set every run (idempotent); guards only gate key revocation/rotation. Whether this can be
   // sent was decided up front; a revert here is a failure, not a warning.
@@ -794,6 +810,7 @@ async function deployCoreRun(
       disputeManager: disputeManagerAddr,
       agentPolicyCodec: agentPolicyCodecAddr,
       agentPolicy: agentPolicyAddr,
+      custodyAccountFactory: custodyAccountFactoryAddr,
       proofBridgeUtils: proofBridgeUtilsAddr,
     },
     // Preserve tokens already in the manifest (added by deploy-test-tokens / hand-curation).
@@ -847,6 +864,7 @@ async function deployCoreRun(
       disputeManager: disputeManagerAddr,
       agentPolicyCodec: agentPolicyCodecAddr,
       agentPolicy: agentPolicyAddr,
+      custodyAccountFactory: custodyAccountFactoryAddr,
       proofBridgeUtils: proofBridgeUtilsAddr,
     },
   };
@@ -963,5 +981,19 @@ async function isAgentPolicyCodec(address: string, signer: ethers.Wallet): Promi
     return (decoded.settlementSigner as string).toLowerCase() === signerField.toLowerCase();
   } catch {
     return false;
+  }
+}
+
+/** The module a recorded CustodyAccountFactory mounts, or a named error when the address answers as no factory. */
+async function factoryModuleOf(address: string, signer: ethers.Wallet, outPath: string): Promise<string> {
+  try {
+    const factory = attachContract(address, "CustodyAccountFactory", "CustodyAccountFactory", signer);
+    const impl = attachContract(await factory.implementation(), "ProofBridgeCustodyAccount", "ProofBridgeCustodyAccount", signer);
+    return (await impl.module()) as string;
+  } catch (e) {
+    throw new Error(
+      `${outPath} records custodyAccountFactory ${address}, which does not answer as a CustodyAccountFactory ` +
+        `(${(e as Error).message.split("\n")[0]}). Correct the entry, or remove it to deploy a new factory.`,
+    );
   }
 }
