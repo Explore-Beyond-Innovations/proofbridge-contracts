@@ -615,9 +615,12 @@ contract CustodyGuardRailTest is Test {
         );
         vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
         account.execute(address(sink), 0, abi.encodeWithSignature("send(address,uint256,bytes)", thief, 1, ""));
-        // An escrow function the list doesn't name (the wrappers fund ads, not execute).
+        // An escrow function the list doesn't name.
         vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
-        account.execute(address(adManager), 0, abi.encodeCall(IAdManager.fundAd, (AD, 1)));
+        account.execute(address(adManager), 0, abi.encodeCall(IAdManager.setFeeBps, (0, 0)));
+        // The dispute module's permissionless claims pay only their own recipient: called from the wallet, not here.
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.execute(address(sink), 0, abi.encodeWithSignature("claim(address)", address(account)));
         // A per-ad selector on a target that isn't a pinned escrow.
         vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
         account.execute(address(sink), 0, abi.encodeCall(IAdManager.withdrawFromAd, (AD, 1, thief)));
@@ -642,6 +645,36 @@ contract CustodyGuardRailTest is Test {
         assertTrue(adManager.halted(address(account)));
         _exec2(address(module), abi.encodeCall(module.revokeAgent, (agentId)));
         assertTrue(module.isRevoked(address(account), agentId));
+    }
+
+    /// R3, parity with Soroban's `instant_escrow_calls`: the escrow calls that pay nobody but their own parties pass
+    /// the gate at once while guarded. Here they are refused by the escrow for their own reasons (no such order),
+    /// never by the allowlist.
+    function test_r3_theInstantEscrowCallsPassTheGate() public {
+        _guard(AD, 0);
+        IAdManager.OrderParams memory p = _order(AD, 1, 1);
+        bytes[] memory calls = new bytes[](13);
+        calls[0] = abi.encodeCall(IAdManager.createAd, ("x", address(adToken), 1, ORDER_CHAIN_ID, bytes32(0), signer));
+        calls[1] = abi.encodeCall(IAdManager.fundAd, (AD, 0));
+        calls[2] = abi.encodeCall(IAdManager.dispute, (p, bytes32(0)));
+        calls[3] = abi.encodeCall(IAdManager.respondToDispute, (p, bytes32(0)));
+        calls[4] = abi.encodeCall(IAdManager.finalizeDispute, (p));
+        calls[5] = abi.encodeCall(IAdManager.claimCancel, (p));
+        calls[6] = abi.encodeCall(IAdManager.finalizeCancel, (p));
+        calls[7] = abi.encodeCall(IAdManager.cancelNeverLocked, (p, bytes32(0), bytes32(0), bytes("")));
+        calls[8] = abi.encodeCall(IAdManager.repinOrder, (p));
+        calls[9] = abi.encodeCall(IAdManager.unlock, (p, bytes32(0), bytes32(0), bytes(""), bytes("")));
+        calls[10] = abi.encodeCall(IAdManager.presentSettled, (p, bytes32(0), bytes("")));
+        calls[11] = abi.encodeCall(IAdManager.recordSettled, (p));
+        calls[12] = abi.encodeWithSignature("claim(address,address)", address(account), address(adToken));
+        for (uint256 i = 0; i < calls.length; ++i) {
+            vm.prank(owner);
+            try account.execute(address(adManager), 0, calls[i]) {}
+            catch (bytes memory err) {
+                assertTrue(bytes4(err) != CustodyGuardRail.GuardRail__NotAllowed.selector, vm.toString(i));
+                assertTrue(bytes4(err) != CustodyGuardRail.GuardRail__NotScheduled.selector, vm.toString(i));
+            }
+        }
     }
 
     /// 81-2: the dispute module's own credit claims are announced and waited out, like the escrow's `claimTo`.

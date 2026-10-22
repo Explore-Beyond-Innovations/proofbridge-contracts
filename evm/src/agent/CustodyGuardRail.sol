@@ -44,9 +44,10 @@ interface IAgentPolicyAdmin {
  *           | any | native value | delayed (`NATIVE_OUT`) |
  *           | a pinned escrow | `withdrawFromAd`, `closeAd`, `lockForOrder` | per ad (above) |
  *           | a pinned escrow | `setSettlementSigner` | per ad: always announced on a guarded ad (R2) |
- *           | a pinned escrow | `haltSettlement`, `dispute`, `respondToDispute` | instant |
+ *           | a pinned escrow | `createAd`, `fundAd`, `haltSettlement`, `dispute`, `respondToDispute`, `finalizeDispute`, `claimCancel`, `finalizeCancel`, `cancelNeverLocked`, `repinOrder`, `unlock`, `presentSettled`, `recordSettled`, `claim(recipient, token)` | instant (Soroban `instant_escrow_calls`) |
  *           | a pinned escrow | `claimTo(token, to)`, `resumeSettlement` (R2) | delayed |
  *           | any | the dispute module's `claimTo(to)`, `claimTokenTo(token, to)` | delayed |
+ *           | any | the dispute module's permissionless `claim`, `claimToken` | refused: they pay only their recipient, so call them from the wallet |
  *           | the policy module | `revokeAgent`, `clearTrustedForwarder`, unpinning, a lower account limit | instant |
  *           | the policy module | any other policy write, pinning, a higher limit, install, uninstall, forwarder, gas budget, tally reset | delayed |
  *           | this account | `sweep`, `transferOwnership` | delayed |
@@ -343,11 +344,18 @@ abstract contract CustodyGuardRail {
         if (adKey != bytes32(0)) return Kind.PerAd;
         // R2: undoing a halt waits; halting itself is instant.
         if (action == IEscrow.claimTo.selector || action == IAdManager.resumeSettlement.selector) return Kind.Delayed;
-        if (
-            action == IAdManager.haltSettlement.selector || action == IAdManager.dispute.selector
-                || action == IAdManager.respondToDispute.selector
-        ) return Kind.Instant;
-        return Kind.Refused;
+        return _isInstantEscrowCall(action) ? Kind.Instant : Kind.Refused;
+    }
+
+    /// @dev Parity with Soroban's `instant_escrow_calls`: the escrow calls that pay nobody but their own parties.
+    function _isInstantEscrowCall(bytes4 a) private pure returns (bool) {
+        return a == IAdManager.createAd.selector || a == IAdManager.fundAd.selector
+            || a == IAdManager.haltSettlement.selector || a == IAdManager.dispute.selector
+            || a == IAdManager.respondToDispute.selector || a == IAdManager.finalizeDispute.selector
+            || a == IAdManager.claimCancel.selector || a == IAdManager.finalizeCancel.selector
+            || a == IAdManager.cancelNeverLocked.selector || a == IAdManager.repinOrder.selector
+            || a == IAdManager.unlock.selector || a == IAdManager.presentSettled.selector
+            || a == IAdManager.recordSettled.selector || a == IEscrow.claim.selector;
     }
 
     function _moduleKind(IAgentPolicyAdmin m, bytes4 action, bytes calldata data) private view returns (Kind) {
