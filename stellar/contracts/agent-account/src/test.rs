@@ -6031,3 +6031,26 @@ fn p46_an_open_dispute_approval_names_this_account_and_the_called_escrow() {
         Some(AccountError::BadApproval)
     );
 }
+
+/// 80-7: `set_policy` refuses an all-zero agent id, so a schedule for one could never be spent and
+/// its `Scheduled` event would read as a pending change. `schedule` refuses it too.
+#[test]
+fn p46_a_set_policy_schedule_for_a_zero_agent_is_refused() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let tokens = vec![&f.env, f.ad_token.clone()];
+    let args = policy_args(
+        &f.env,
+        &b32(&f.env, 0),
+        &tokens,
+        0,
+        &f.signer,
+        &None,
+        &wide(&f.env, &tokens),
+    );
+    assert_eq!(
+        f.client
+            .try_schedule(&Scope::Account, &sym_of(&f.env, "set_policy"), &args),
+        Err(Ok(AccountError::BadPolicy))
+    );
+}
