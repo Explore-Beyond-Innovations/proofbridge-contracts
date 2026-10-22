@@ -42,6 +42,23 @@ pub fn require_ad_token(
     }
 }
 
+/// The ad's token as the escrow holds it (`get_ad(ad_id).token`). Read as a map, so the account
+/// stays independent of the escrow's types. An ad the escrow doesn't know is `BadArgs`.
+pub fn ad_token_of(
+    env: &Env,
+    ad_manager: &Address,
+    ad_id: &soroban_sdk::String,
+) -> Result<BytesN<32>, AccountError> {
+    let ad: Option<soroban_sdk::Map<Symbol, Val>> = env.invoke_contract(
+        ad_manager,
+        &Symbol::new(env, "get_ad"),
+        vec![env, ad_id.to_val()],
+    );
+    ad.and_then(|m| m.get(Symbol::new(env, "token")))
+        .and_then(|v| BytesN::<32>::try_from_val(env, &v).ok())
+        .ok_or(AccountError::BadArgs)
+}
+
 pub fn to_i128(amount: u128) -> Result<i128, AccountError> {
     i128::try_from(amount).map_err(|_| AccountError::BadArgs)
 }

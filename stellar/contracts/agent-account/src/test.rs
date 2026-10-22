@@ -1716,6 +1716,20 @@ impl StubEscrow {
     pub fn resume_settlement(_env: Env, _maker: Address) {}
     /// Takes nothing: an escrow that doesn't pull what the account paid in.
     pub fn fund_ad(_env: Env, _ad_id: String, _amount: u128) {}
+    /// The ad's token, as a test set it (`fund_ad` reads it, 80-8).
+    pub fn get_ad(env: Env, _ad_id: String) -> Option<Map<Symbol, Val>> {
+        let token: Option<BytesN<32>> = env.storage().instance().get(&Symbol::new(&env, "tok"));
+        token.map(|t| {
+            let mut m = Map::new(&env);
+            m.set(Symbol::new(&env, "token"), t.to_val());
+            m
+        })
+    }
+    pub fn set_ad_token(env: Env, token: BytesN<32>) {
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "tok"), &token);
+    }
 }
 
 /// Stands in for bls-key-registry.has_usable_slot for the escrow fixture (2.3c): an account is
@@ -5352,6 +5366,7 @@ fn p46_funds_the_escrow_does_not_take_never_stay_in_the_account() {
     );
     let tc = test_token::TokenContractClient::new(&f.env, &token);
     tc.mint(&f.owner, &1_000_i128);
+    StubEscrowClient::new(&f.env, &f.target).set_ad_token(&address_to_bytes32(&f.env, &token));
     let r = f.client.try_fund_ad(
         &f.target,
         &token,
@@ -6053,4 +6068,29 @@ fn p46_a_set_policy_schedule_for_a_zero_agent_is_refused() {
             .try_schedule(&Scope::Account, &sym_of(&f.env, "set_policy"), &args),
         Err(Ok(AccountError::BadPolicy))
     );
+}
+
+/// 80-8: `fund_ad` reads the ad's token from the escrow and refuses another one before anything
+/// moves, as `create_ad` does.
+#[test]
+fn p46_fund_ad_refuses_a_token_that_isnt_the_ads() {
+    let e = escrow_fixture();
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    let other = e.env.register(
+        test_token::TokenContract,
+        (
+            Address::generate(&e.env),
+            0_i128,
+            7_u32,
+            String::from_str(&e.env, "Other"),
+            String::from_str(&e.env, "OTH"),
+        ),
+    );
+    test_token::TokenContractClient::new(&e.env, &other).mint(&e.owner, &1_000_i128);
+    assert_eq!(
+        client.try_fund_ad(&e.ad_manager, &other, &e.ad_id, &1_000_u128),
+        Err(Ok(AccountError::BadArgs))
+    );
+    assert_eq!(liquidity(&e), 5_000_000);
 }

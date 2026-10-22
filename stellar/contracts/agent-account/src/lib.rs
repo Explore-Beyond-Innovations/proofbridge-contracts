@@ -588,7 +588,7 @@ impl AgentAccount {
     }
 
     /// Owner-only. Adds liquidity to one of this account's ads, from the owner's wallet in this one
-    /// call, as `create_ad`. `token` as there.
+    /// call, as `create_ad`. `token` as there, checked against the ad the escrow holds (80-8).
     pub fn fund_ad(
         env: Env,
         ad_manager: Address,
@@ -600,6 +600,11 @@ impl AgentAccount {
         owner.require_auth();
         proofbridge_core::ttl::extend_instance(&env);
         owner::require_target(&env, &ad_manager)?;
+        owner::require_ad_token(
+            &env,
+            &token,
+            &owner::ad_token_of(&env, &ad_manager, &ad_id)?,
+        )?;
         let args: Vec<Val> = vec![&env, ad_id.to_val(), amount.into_val(&env)];
         owner::pay_through(&env, &owner, &token, amount, &ad_manager, |env| {
             env.invoke_contract::<()>(&ad_manager, &Symbol::new(env, "fund_ad"), args);
