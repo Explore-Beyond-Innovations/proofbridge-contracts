@@ -53,3 +53,16 @@ test("deploy: a recorded factory made for another module is replaced, not reused
   assert.notEqual(again.contracts.custodyAccountFactory, r.contracts.custodyAccountFactory, "so a new factory");
   assert.equal((await moduleOf(again.contracts.custodyAccountFactory)).toLowerCase(), again.contracts.agentPolicy.toLowerCase());
 });
+
+test("deploy: a recorded factory that isn't one is refused up front, before anything is sent (81-10)", async () => {
+  const r = await deploy("wrong.json");
+  // Point the record at a live contract that is no factory: the escrow.
+  const m = manifest("wrong.json");
+  m.contracts.custodyAccountFactory = { ...m.contracts.custodyAccountFactory, address: m.contracts.adManager.address, addressBytes32: m.contracts.adManager.addressBytes32 };
+  fs.writeFileSync(path.join(tmp, "wrong.json"), JSON.stringify(m, null, 2));
+  const p = new ethers.JsonRpcProvider(a.url, undefined, { staticNetwork: true, cacheTimeout: -1 });
+  const nonceBefore = await p.getTransactionCount(new ethers.Wallet(K0).address);
+  await assert.rejects(deploy("wrong.json"), /custodyAccountFactory .* does not answer as a CustodyAccountFactory/);
+  assert.equal(await p.getTransactionCount(new ethers.Wallet(K0).address), nonceBefore, "nothing was sent");
+  p.destroy();
+});

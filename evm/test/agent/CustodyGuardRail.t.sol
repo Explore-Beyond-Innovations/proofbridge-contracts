@@ -23,14 +23,27 @@ import {CustodyAccountFactory} from "src/agent/CustodyAccountFactory.sol";
 import {MockVerifier} from "../mocks/MockVerifier.sol";
 import {MockKeyRegistry} from "../mocks/MockKeyRegistry.sol";
 import {MockRootVerifier} from "../mocks/MockRootVerifier.sol";
+import {DisputeManager} from "src/DisputeManager.sol";
+import {IDisputeManager} from "src/interfaces/IDisputeManager.sol";
+import {Dispute} from "src/libraries/Dispute.sol";
 
 /// An escrow that doesn't take what it is paid, and a dispute module that takes a bond from the filer: the two
 /// cases the real `AdManager` can't produce for the pass-through's own checks.
 contract SkimEscrow {
     address public disputeManager;
+    address internal token;
 
-    constructor(address dm) {
+    constructor(address dm, address t) {
         disputeManager = dm;
+        token = t;
+    }
+
+    function ads(string calldata)
+        external
+        view
+        returns (address, bool, address, uint256, bytes32, bytes32, bytes32, uint256, uint256)
+    {
+        return (msg.sender, true, token, 0, bytes32(0), bytes32(0), bytes32(0), 0, 0);
     }
 
     function fundAd(string calldata, uint256) external payable {}
@@ -56,6 +69,11 @@ contract BondTaker {
 
 /// Plan 46 on the EVM custody account: funds pass from the owner's wallet to the escrow in one call and never
 /// stay; the owner's guard rail (A5); the parity fixes (A6). Real `AdManager` throughout, except the stubs above.
+/// A contract that takes any call and any value: where a drain would land.
+contract Sink {
+    fallback() external payable {}
+}
+
 contract CustodyGuardRailTest is Test {
     using AddressCast for address;
 
@@ -131,7 +149,7 @@ contract CustodyGuardRailTest is Test {
 
     function test_a4_fundAdFundedTopsUpTheSameWay() public {
         vm.prank(owner);
-        account.fundAdFunded(adManager, AD, address(adToken), 1_000);
+        account.fundAdFunded(adManager, AD, 1_000);
         assertEq(adManager.availableLiquidity(AD), AD_FUNDS + 1_000);
         assertEq(adToken.balanceOf(address(account)), 0);
         assertEq(adToken.allowance(address(account), address(adManager)), 0);
@@ -144,6 +162,11 @@ contract CustodyGuardRailTest is Test {
         );
         assertEq(adManager.availableLiquidity("native-ad"), 1 ether);
         assertEq(address(account).balance, 0);
+        // 81-8: a top-up reads the ad's own token, so a native ad's value rides on the call the same way.
+        vm.prank(owner);
+        account.fundAdFunded{value: 1 ether}(adManager, "native-ad", 1 ether);
+        assertEq(adManager.availableLiquidity("native-ad"), 2 ether);
+        assertEq(address(account).balance, 0);
 
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ProofBridgeCustodyAccount.CustodyAccount__ValueMismatch.selector, 1, 2));
@@ -155,12 +178,12 @@ contract CustodyGuardRailTest is Test {
     function test_a4_onlyTheOwnerFundsAndOnlyAPinnedEscrow() public {
         vm.prank(thief);
         vm.expectRevert(ProofBridgeCustodyAccount.CustodyAccount__NotOwner.selector);
-        account.fundAdFunded(adManager, AD, address(adToken), 1);
+        account.fundAdFunded(adManager, AD, 1);
 
         address other = makeAddr("not-pinned");
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ProofBridgeCustodyAccount.CustodyAccount__NotPinned.selector, other));
-        account.fundAdFunded(IAdManager(other), AD, address(adToken), 1);
+        account.fundAdFunded(IAdManager(other), AD, 1);
     }
 
     /// The pass-through's own check: an escrow that doesn't take what was paid in leaves funds in the account,
@@ -171,7 +194,7 @@ contract CustodyGuardRailTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(ProofBridgeCustodyAccount.CustodyAccount__FundsLeft.selector, address(adToken))
         );
-        acct.fundAdFunded(IAdManager(address(skim)), AD, address(adToken), 500);
+        acct.fundAdFunded(IAdManager(address(skim)), AD, 500);
         assertEq(adToken.balanceOf(address(acct)), 0);
     }
 
@@ -344,6 +367,190 @@ contract CustodyGuardRailTest is Test {
         _exec(w);
     }
 
+    /*//////////////////////////////////////////////////////////////
+          81-5: THE RULES NO TEST PINNED (each red under its mutation)
+    //////////////////////////////////////////////////////////////*/
+
+    /// M11: a shorter delay is a loosening, so it waits out the current one.
+    function test_r81_5_aShorterDelayIsALoosening() public {
+        _setRail(AD, _rail(0, DELAY * 2));
+        vm.prank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        account.setGuardRail(AD, _rail(0, DELAY));
+    }
+
+    /// M13: a longer delay restamps a pending account-wide schedule (a sweep), not only the ad's own.
+    function test_r81_5_aLongerDelayRestampsAPendingSweep() public {
+        _guard(AD, 0);
+        adToken.mint(address(account), 10);
+        bytes memory sw = abi.encodeCall(ProofBridgeCustodyAccount.sweep, (address(adToken), owner, 10));
+        vm.prank(owner);
+        account.schedule(ACCOUNT, address(account), 0, sw);
+        _setRail(AD, _rail(0, DELAY * 3));
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        account.sweep(address(adToken), owner, 10);
+        vm.warp(block.timestamp + DELAY * 2);
+        vm.prank(owner);
+        account.sweep(address(adToken), owner, 10);
+    }
+
+    /// M14: a loosening clears the account-wide schedules too: the settings they were made under are gone.
+    function test_r81_5_aLooseningClearsAPendingSweep() public {
+        _guard(AD, 0);
+        bytes memory sw = abi.encodeCall(ProofBridgeCustodyAccount.sweep, (address(adToken), owner, 10));
+        CustodyGuardRail.GuardRail memory looser = _rail(50, DELAY);
+        bytes memory loosen = abi.encodeCall(CustodyGuardRail.setGuardRail, (AD, looser));
+        vm.startPrank(owner);
+        account.schedule(ACCOUNT, address(account), 0, sw);
+        account.schedule(_adKey(AD), address(account), 0, loosen);
+        vm.warp(block.timestamp + DELAY);
+        account.setGuardRail(AD, looser);
+        vm.stopPrank();
+        assertEq(account.scheduled(ACCOUNT, ProofBridgeCustodyAccount.sweep.selector).readyAt, 0, "cleared");
+    }
+
+    /// The Soroban 80-2 question on EVM: disarming clears a pending sweep, like a loosening does.
+    function test_r81_5_disarmingClearsAPendingSweep() public {
+        _guard(AD, 0);
+        _createAd("ad-2", 10);
+        _guard("ad-2", 0);
+        bytes memory sw = abi.encodeCall(ProofBridgeCustodyAccount.sweep, (address(adToken), owner, 10));
+        bytes memory disarm = abi.encodeCall(CustodyGuardRail.disarmGuardRail, ("ad-2"));
+        vm.startPrank(owner);
+        account.schedule(ACCOUNT, address(account), 0, sw);
+        account.schedule(_adKey("ad-2"), address(account), 0, disarm);
+        vm.warp(block.timestamp + DELAY);
+        account.disarmGuardRail("ad-2");
+        vm.stopPrank();
+        assertEq(account.scheduled(ACCOUNT, ProofBridgeCustodyAccount.sweep.selector).readyAt, 0, "cleared");
+    }
+
+    /// M8 and M7: raising only the account limit's refill is a loosening; re-sending the same limit is not.
+    function test_r81_5_theAccountLimitIsLooserOnEitherNumberOnly() public {
+        bytes32 token = _b32(address(adToken));
+        _exec2(address(module), abi.encodeCall(module.setAccountLimit, (token, 5_000, 10)));
+        _guard(AD, 0);
+        _expectNotScheduled2(address(module), abi.encodeCall(module.setAccountLimit, (token, 5_000, 11)));
+        _exec2(address(module), abi.encodeCall(module.setAccountLimit, (token, 5_000, 10)));
+    }
+
+    /// M16: a schedule is not usable a second before it matures.
+    function test_r81_5_aScheduleIsNotUsableBeforeItMatures() public {
+        _guard(AD, 0);
+        bytes memory w = abi.encodeCall(IAdManager.withdrawFromAd, (AD, 5, owner));
+        vm.prank(owner);
+        account.schedule(_adKey(AD), address(adManager), 0, w);
+        vm.warp(block.timestamp + DELAY - 1);
+        _expectNotScheduled(w);
+        vm.warp(block.timestamp + 1);
+        _exec(w);
+    }
+
+    /// M29: changing the rail settles the old bucket first, so it can't hand back a full allowance.
+    function test_r81_5_changingTheRailKeepsWhatWasSpent() public {
+        _guardWithRate(AD, 10_000, 1_000, 1);
+        _exec(abi.encodeCall(IAdManager.withdrawFromAd, (AD, 900, owner)));
+        _guardWithRate(AD, 10_000, 900, 1); // a tightening: instant
+        vm.prank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__VolumeExceeded.selector);
+        account.execute(address(adManager), 0, abi.encodeCall(IAdManager.withdrawFromAd, (AD, 101, owner)));
+        _exec(abi.encodeCall(IAdManager.withdrawFromAd, (AD, 100, owner)));
+    }
+
+    /// M30: an account-wide schedule is usable for the shortest window across guarded ads.
+    function test_r81_5_anAccountScheduleUsesTheShortestWindow() public {
+        _guard(AD, 0);
+        _createAd("ad-2", 10);
+        CustodyGuardRail.GuardRail memory shortWindow = _rail(0, DELAY);
+        shortWindow.window = 2 hours;
+        _setRail("ad-2", shortWindow);
+        bytes memory sw = abi.encodeCall(ProofBridgeCustodyAccount.sweep, (address(adToken), owner, 10));
+        vm.prank(owner);
+        account.schedule(ACCOUNT, address(account), 0, sw);
+        CustodyGuardRail.Schedule memory sc = account.scheduled(ACCOUNT, ProofBridgeCustodyAccount.sweep.selector);
+        assertEq(sc.expiresAt - sc.readyAt, 2 hours);
+    }
+
+    /// 81-6: a shorter window shortens what is pending too, so an owner can expire a stale announcement sooner.
+    function test_r81_6_aShorterWindowShortensPendingSchedules() public {
+        _guard(AD, 0);
+        bytes memory w = abi.encodeCall(IAdManager.withdrawFromAd, (AD, 5, owner));
+        bytes memory sw = abi.encodeCall(ProofBridgeCustodyAccount.sweep, (address(adToken), owner, 1));
+        vm.startPrank(owner);
+        account.schedule(_adKey(AD), address(adManager), 0, w);
+        account.schedule(ACCOUNT, address(account), 0, sw);
+        vm.stopPrank();
+        CustodyGuardRail.GuardRail memory r = _rail(0, DELAY);
+        r.window = 2 hours;
+        _setRail(AD, r); // a tightening: instant
+        CustodyGuardRail.Schedule memory ad = account.scheduled(_adKey(AD), IAdManager.withdrawFromAd.selector);
+        CustodyGuardRail.Schedule memory acct = account.scheduled(ACCOUNT, ProofBridgeCustodyAccount.sweep.selector);
+        assertEq(ad.expiresAt - ad.readyAt, 2 hours, "the ad's schedule");
+        assertEq(acct.expiresAt - acct.readyAt, 2 hours, "the account's schedule");
+        vm.warp(block.timestamp + DELAY + 2 hours);
+        _expectNotScheduled(w); // expired under the new window
+    }
+
+    /// 81-7: a closed, empty ad has nothing left to extract, so taking its rail off is instant. That frees its slot
+    /// in the roster of 16 without waiting out a delay; an open ad, or an escrow the account doesn't pin, still waits.
+    function test_r81_7_disarmingAClosedEmptyAdIsInstant() public {
+        _createAd("dead", 10);
+        _guard("dead", 0);
+        vm.startPrank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__AdStillOpen.selector);
+        account.disarmClosedAd(adManager, "dead");
+        bytes memory close = abi.encodeCall(IAdManager.closeAd, ("dead", owner));
+        account.schedule(_adKey("dead"), address(adManager), 0, close);
+        vm.warp(block.timestamp + DELAY);
+        account.execute(address(adManager), 0, close);
+        IAdManager notPinned = IAdManager(address(new Sink()));
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.disarmClosedAd(notPinned, "dead");
+        account.disarmClosedAd(adManager, "dead");
+        vm.stopPrank();
+        assertFalse(account.guardRail("dead").armed);
+        assertEq(account.guardedAds().length, 0);
+    }
+
+    /// 81-4 (R1): a guard rail is bounded, so neither a stolen key nor a slip can freeze an ad: a delay of at most
+    /// 30 days and a window of at least an hour. Inside the bounds, arming and tightening stay instant.
+    function test_r81_4_aGuardRailIsBoundedSoItCannotFreezeTheAd() public {
+        uint64 maxDelay = account.MAX_GUARD_DELAY();
+        uint64 minWindow = account.MIN_GUARD_WINDOW();
+        assertEq(maxDelay, 30 days);
+        assertEq(minWindow, 1 hours);
+        CustodyGuardRail.GuardRail memory r = _rail(0, maxDelay + 1);
+        vm.startPrank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__OutOfBounds.selector);
+        account.setGuardRail(AD, r);
+        r = _rail(0, DELAY);
+        r.window = minWindow - 1;
+        vm.expectRevert(CustodyGuardRail.GuardRail__OutOfBounds.selector);
+        account.setGuardRail(AD, r);
+
+        // At the bounds: armed, then tightened to them at once.
+        account.setGuardRail(AD, _rail(0, DELAY));
+        r = _rail(0, maxDelay);
+        r.window = minWindow;
+        account.setGuardRail(AD, r);
+        assertEq(account.guardRail(AD).rail.delay, maxDelay);
+        // One second past them is refused even as a "tightening".
+        r.delay = maxDelay + 1;
+        vm.expectRevert(CustodyGuardRail.GuardRail__OutOfBounds.selector);
+        account.setGuardRail(AD, r);
+        r.delay = maxDelay;
+        r.window = minWindow - 1;
+        vm.expectRevert(CustodyGuardRail.GuardRail__OutOfBounds.selector);
+        account.setGuardRail(AD, r);
+        // Nor can such a change be announced: a schedule that could never be spent only misleads a watcher.
+        r = _rail(0, maxDelay + 1);
+        vm.expectRevert(CustodyGuardRail.GuardRail__OutOfBounds.selector);
+        account.schedule(_adKey(AD), address(account), 0, abi.encodeCall(CustodyGuardRail.setGuardRail, (AD, r)));
+        vm.stopPrank();
+    }
+
     function test_a5_badSettingsAndTooManyGuardedAdsAreRefused() public {
         vm.startPrank(owner);
         vm.expectRevert(CustodyGuardRail.GuardRail__BadGuardRail.selector);
@@ -365,9 +572,10 @@ contract CustodyGuardRailTest is Test {
         adToken.mint(address(account), 10);
         vm.deal(address(account), 10);
         vm.startPrank(owner);
-        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        // R3: a token is no target the account knows, so the call is refused outright; `sweep` is the way out.
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
         account.execute(address(adToken), 0, abi.encodeCall(IERC20.transfer, (thief, 10)));
-        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
         account.execute(address(adToken), 0, abi.encodeCall(IERC20.approve, (thief, 10)));
         vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
         account.execute(thief, 10, "");
@@ -384,6 +592,203 @@ contract CustodyGuardRailTest is Test {
         account.sweep(address(adToken), owner, 10);
         vm.stopPrank();
         assertEq(adToken.balanceOf(address(account)), 0);
+    }
+
+    /// 81-1: native value leaving a guarded account always needs its own schedule, whatever selector it rides on,
+    /// on an armed ad and on an unarmed one alike.
+    function test_r81_1_nativeValueOnAnEscrowShapedCallStillWaits() public {
+        _guard(AD, 100);
+        _createAd("unarmed", 10);
+        vm.deal(address(account), 5 ether);
+        Sink sink = new Sink();
+        bytes memory withdrawShaped = abi.encodeCall(IAdManager.withdrawFromAd, (AD, 0, owner));
+        bytes memory lockShaped = abi.encodeCall(IAdManager.lockForOrder, (_order(AD, 1, 99), uint32(0)));
+        bytes memory unarmedShaped = abi.encodeCall(IAdManager.withdrawFromAd, ("unarmed", 0, owner));
+        vm.startPrank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        account.execute(address(sink), 5 ether, withdrawShaped);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        account.execute(address(sink), 1 ether, lockShaped);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        account.execute(address(sink), 1 ether, unarmedShaped);
+
+        // Announced as native value leaving the account (the account scope), it runs once, after the delay.
+        account.schedule(ACCOUNT, address(sink), 5 ether, withdrawShaped);
+        vm.warp(block.timestamp + DELAY);
+        account.execute(address(sink), 5 ether, withdrawShaped);
+        vm.stopPrank();
+        assertEq(address(sink).balance, 5 ether);
+    }
+
+    /// R3: while any ad is guarded, an owner call is an allowlist. A target the account doesn't know, or a function
+    /// it doesn't list, is refused; this is what closes the token calls a blocklist misses (81-b2).
+    function test_r3_whileGuardedAnUnlistedCallIsRefused() public {
+        Sink sink = new Sink();
+        // Unguarded: the account is a plain account, as before.
+        _exec2(address(sink), abi.encodeWithSignature("transferAndCall(address,uint256,bytes)", thief, 1, ""));
+        _guard(AD, 0);
+        vm.startPrank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.execute(
+            address(sink), 0, abi.encodeWithSignature("transferAndCall(address,uint256,bytes)", thief, 1, "")
+        );
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.execute(address(sink), 0, abi.encodeWithSignature("send(address,uint256,bytes)", thief, 1, ""));
+        // An escrow function the list doesn't name.
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.execute(address(adManager), 0, abi.encodeCall(IAdManager.setFeeBps, (0, 0)));
+        // The dispute module's permissionless claims pay only their own recipient: called from the wallet, not here.
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.execute(address(sink), 0, abi.encodeWithSignature("claim(address)", address(account)));
+        // A per-ad selector on a target that isn't a pinned escrow.
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.execute(address(sink), 0, abi.encodeCall(IAdManager.withdrawFromAd, (AD, 1, thief)));
+        // A module function the list doesn't name.
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.execute(address(module), 0, abi.encodeWithSignature("someNewSetter(uint256)", 1));
+        // And it can't be announced either: a schedule that could never be spent would only mislead a watcher.
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.schedule(ACCOUNT, address(adToken), 0, abi.encodeCall(IERC20.transfer, (thief, 10)));
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.schedule(_adKey(AD), address(sink), 0, abi.encodeCall(IAdManager.withdrawFromAd, (AD, 1, thief)));
+        vm.stopPrank();
+    }
+
+    /// R3: the protective calls stay instant while guarded.
+    function test_r3_protectiveCallsStayInstantWhileGuarded() public {
+        bytes32 agentId = _b32(makeAddr("pod"));
+        _exec2(address(module), abi.encodeCall(module.setAccountLimit, (_b32(address(adToken)), 5_000, 10)));
+        _exec2(address(module), abi.encodeCall(module.setAgentPolicy, (agentId, _policy())));
+        _guard(AD, 0);
+        _exec(abi.encodeCall(IAdManager.haltSettlement, ()));
+        assertTrue(adManager.halted(address(account)));
+        _exec2(address(module), abi.encodeCall(module.revokeAgent, (agentId)));
+        assertTrue(module.isRevoked(address(account), agentId));
+    }
+
+    /// R3, parity with Soroban's `instant_escrow_calls`: the escrow calls that pay nobody but their own parties pass
+    /// the gate at once while guarded. Here they are refused by the escrow for their own reasons (no such order),
+    /// never by the allowlist.
+    function test_r3_theInstantEscrowCallsPassTheGate() public {
+        _guard(AD, 0);
+        IAdManager.OrderParams memory p = _order(AD, 1, 1);
+        bytes[] memory calls = new bytes[](13);
+        calls[0] = abi.encodeCall(IAdManager.createAd, ("x", address(adToken), 1, ORDER_CHAIN_ID, bytes32(0), signer));
+        calls[1] = abi.encodeCall(IAdManager.fundAd, (AD, 0));
+        calls[2] = abi.encodeCall(IAdManager.dispute, (p, bytes32(0)));
+        calls[3] = abi.encodeCall(IAdManager.respondToDispute, (p, bytes32(0)));
+        calls[4] = abi.encodeCall(IAdManager.finalizeDispute, (p));
+        calls[5] = abi.encodeCall(IAdManager.claimCancel, (p));
+        calls[6] = abi.encodeCall(IAdManager.finalizeCancel, (p));
+        calls[7] = abi.encodeCall(IAdManager.cancelNeverLocked, (p, bytes32(0), bytes32(0), bytes("")));
+        calls[8] = abi.encodeCall(IAdManager.repinOrder, (p));
+        calls[9] = abi.encodeCall(IAdManager.unlock, (p, bytes32(0), bytes32(0), bytes(""), bytes("")));
+        calls[10] = abi.encodeCall(IAdManager.presentSettled, (p, bytes32(0), bytes("")));
+        calls[11] = abi.encodeCall(IAdManager.recordSettled, (p));
+        calls[12] = abi.encodeWithSignature("claim(address,address)", address(account), address(adToken));
+        for (uint256 i = 0; i < calls.length; ++i) {
+            vm.prank(owner);
+            try account.execute(address(adManager), 0, calls[i]) {}
+            catch (bytes memory err) {
+                assertTrue(bytes4(err) != CustodyGuardRail.GuardRail__NotAllowed.selector, vm.toString(i));
+                assertTrue(bytes4(err) != CustodyGuardRail.GuardRail__NotScheduled.selector, vm.toString(i));
+            }
+        }
+    }
+
+    /// 79-b2: the account answers a dispute filed against its ad, as the ad's maker, against the real dispute
+    /// module; while guarded the answer is protective, so it is instant. (The Soroban twin is 80-1.)
+    function test_r79_b2_theAccountAnswersADisputeAsTheAdsMaker() public {
+        DisputeManager dm = new DisputeManager(admin, adManager.i_wNativeToken());
+        vm.startPrank(admin);
+        dm.setEscrow(address(adManager), true);
+        dm.setArbiter(makeAddr("arbiter"));
+        dm.setProtocolFeePool(makeAddr("fee-pool"));
+        dm.setDisputeParams(ORDER_CHAIN_ID, Dispute.Params(1 hours, 0.01 ether));
+        adManager.setDisputeManager(IDisputeManager(address(dm)));
+        vm.stopPrank();
+
+        IAdManager.OrderParams memory p = _order(AD, 1_000, 7);
+        vm.prank(owner);
+        bytes32 h = abi.decode(
+            account.execute(address(adManager), 0, abi.encodeCall(IAdManager.lockForOrder, (p, uint32(0)))), (bytes32)
+        );
+        address bridger = address(uint160(uint256(p.orderRecipient))); // the bridger's party on the ad chain
+        vm.deal(bridger, 1 ether);
+        vm.prank(bridger);
+        adManager.dispute{value: 0.01 ether}(p, bytes32("evidence"));
+
+        _guard(AD, 0);
+        vm.expectEmit(address(dm));
+        emit DisputeManager.DisputeResponded(h, address(account), bytes32("answer"));
+        _exec(abi.encodeCall(IAdManager.respondToDispute, (p, bytes32("answer"))));
+    }
+
+    /// 81-2: the dispute module's own credit claims are announced and waited out, like the escrow's `claimTo`.
+    function test_r81_2_theDisputeModulesClaimsWait() public {
+        _guard(AD, 0);
+        Sink dm = new Sink();
+        bytes memory claim = abi.encodeWithSignature("claimTo(address)", owner);
+        bytes memory claimToken = abi.encodeWithSignature("claimTokenTo(address,address)", address(adToken), owner);
+        _expectNotScheduled2(address(dm), claim);
+        _expectNotScheduled2(address(dm), claimToken);
+        vm.startPrank(owner);
+        account.schedule(ACCOUNT, address(dm), 0, claim);
+        account.schedule(ACCOUNT, address(dm), 0, claimToken);
+        vm.warp(block.timestamp + DELAY);
+        account.execute(address(dm), 0, claim);
+        account.execute(address(dm), 0, claimToken);
+        vm.stopPrank();
+    }
+
+    /// R2 (81-b1): while guarded, undoing a halt waits, and so does re-pointing a guarded ad's settlement signer:
+    /// either lets a thief settle trades the owner stopped, or settle them under a key the thief holds. Halting
+    /// stays instant; an unguarded ad's signer moves at once.
+    function test_r2_resumeAndAGuardedAdsSignerWait() public {
+        bytes32 next = bytes32(uint256(0xbeef));
+        keys.set(next, true);
+        keys.approve(next, _b32(address(account)), true);
+        _createAd("unarmed", 10);
+        _guard(AD, 0);
+
+        _exec(abi.encodeCall(IAdManager.haltSettlement, ()));
+        bytes memory resume = abi.encodeCall(IAdManager.resumeSettlement, ());
+        _expectNotScheduled(resume);
+        bytes memory repoint = abi.encodeCall(IAdManager.setSettlementSigner, (AD, next));
+        _expectNotScheduled(repoint);
+        _exec(abi.encodeCall(IAdManager.setSettlementSigner, ("unarmed", next)));
+
+        vm.startPrank(owner);
+        account.schedule(ACCOUNT, address(adManager), 0, resume);
+        account.schedule(_adKey(AD), address(adManager), 0, repoint);
+        vm.warp(block.timestamp + DELAY);
+        account.execute(address(adManager), 0, resume);
+        account.execute(address(adManager), 0, repoint);
+        vm.stopPrank();
+        assertFalse(adManager.halted(address(account)));
+    }
+
+    /// 81-3: a nomination made before arming doesn't survive it (else the nominee takes the account with no
+    /// announcement), and standing a nomination down is protective, so it stays instant while guarded.
+    function test_r81_3_armingDropsAPendingNominationAndCancellingIsInstant() public {
+        vm.prank(owner);
+        account.transferOwnership(thief);
+        _guard(AD, 0);
+        assertEq(account.pendingOwner(), address(0), "arming dropped the nomination");
+        vm.prank(thief);
+        vm.expectRevert(ProofBridgeCustodyAccount.CustodyAccount__NotPendingOwner.selector);
+        account.acceptOwnership();
+
+        // A nomination made under the rail (scheduled), then stood down at once.
+        bytes memory nominate = abi.encodeCall(ProofBridgeCustodyAccount.transferOwnership, (thief));
+        vm.startPrank(owner);
+        account.schedule(ACCOUNT, address(account), 0, nominate);
+        vm.warp(block.timestamp + DELAY);
+        account.transferOwnership(thief);
+        assertEq(account.pendingOwner(), thief);
+        account.transferOwnership(address(0));
+        vm.stopPrank();
+        assertEq(account.pendingOwner(), address(0), "cancelled with no schedule");
     }
 
     function test_a5_ownershipWaitsWhileGuarded() public {
@@ -496,7 +901,7 @@ contract CustodyGuardRailTest is Test {
 
     function _accountWithSkimEscrow() internal returns (ProofBridgeCustodyAccount acct, SkimEscrow skim, BondTaker dm) {
         dm = new BondTaker(IERC20(address(adToken)), 777);
-        skim = new SkimEscrow(address(dm));
+        skim = new SkimEscrow(address(dm), address(adToken));
         address[] memory targets = new address[](1);
         targets[0] = address(skim);
         vm.prank(owner);

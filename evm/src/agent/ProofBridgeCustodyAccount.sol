@@ -13,6 +13,7 @@ interface IAgentPolicyDirect {
     function onInstall(bytes calldata data) external;
     function authorizeDirect(bytes32 agentId, bytes calldata callData) external;
     function isTargetPinned(address account, address target) external view returns (bool);
+    function isTypeInstalled(address account, uint256 moduleTypeId) external view returns (bool);
 }
 
 /**
@@ -65,9 +66,8 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient, CustodyGuardRail
     /// @notice A funding call left the account holding a different balance than it started with.
     error CustodyAccount__FundsLeft(address token);
 
-    modifier onlyOwner() override {
+    function _checkOwner() internal view override {
         if (msg.sender != owner) revert CustodyAccount__NotOwner();
-        _;
     }
 
     constructor(IAgentPolicyDirect module_, address factory_) {
@@ -108,13 +108,16 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient, CustodyGuardRail
         _payDone(adToken, before);
     }
 
-    /// @notice Add liquidity to one of this account's ads from the owner's wallet, as `createAdFunded`.
-    function fundAdFunded(IAdManager adManager, string calldata adId, address adToken, uint256 amount)
+    /// @notice Add liquidity to one of this account's ads from the owner's wallet, as `createAdFunded`. The token is
+    ///         the ad's own, read from the escrow (81-8).
+    function fundAdFunded(IAdManager adManager, string calldata adId, uint256 amount)
         external
         payable
         onlyOwner
         nonReentrant
     {
+        _requirePinned(adManager);
+        (,, address adToken,,,,,,) = adManager.ads(adId);
         uint256 before = _payIn(adManager, adToken, amount, address(adManager));
         adManager.fundAd{value: msg.value}(adId, amount);
         _payDone(adToken, before);
@@ -190,19 +193,22 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient, CustodyGuardRail
         emit AgentExecuted(agentId, target, bytes4(data));
     }
 
-    /// @notice ERC-7579's question, answered for the one module this account mounts: the policy module reads it
-    ///         to confirm its hook half is in place.
+    /// @notice ERC-7579's question, answered for the one module this account mounts from the module's own record:
+    ///         the policy module reads it to confirm its hook half is in place.
     function isModuleInstalled(uint256 moduleTypeId, address module_, bytes calldata) external view returns (bool) {
-        return module_ == address(module) && (moduleTypeId == MODULE_TYPE_VALIDATOR || moduleTypeId == MODULE_TYPE_HOOK);
+        if (module_ != address(module)) return false;
+        if (moduleTypeId != MODULE_TYPE_VALIDATOR && moduleTypeId != MODULE_TYPE_HOOK) return false;
+        return module.isTypeInstalled(address(this), moduleTypeId);
     }
 
     /*//////////////////////////////////////////////////////////////
                                  OWNERSHIP
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Two steps. While any ad is guarded, starting a transfer needs a matured schedule for this call.
+    /// @notice Two steps. While any ad is guarded, starting a transfer needs a matured schedule for this call;
+    ///         standing one down (`newOwner` zero) is protective, so it is instant.
     function transferOwnership(address newOwner) external onlyOwner {
-        _gateSelf(this.transferOwnership.selector);
+        if (newOwner != address(0)) _gateSelf(this.transferOwnership.selector);
         pendingOwner = newOwner;
         emit OwnershipTransferStarted(owner, newOwner);
     }
@@ -226,9 +232,7 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient, CustodyGuardRail
         private
         returns (uint256 before)
     {
-        if (!module.isTargetPinned(address(this), address(adManager))) {
-            revert CustodyAccount__NotPinned(address(adManager));
-        }
+        _requirePinned(adManager);
         if (token.isNative()) {
             if (msg.value != amount) revert CustodyAccount__ValueMismatch(msg.value, amount);
             return address(this).balance - msg.value;
@@ -237,6 +241,12 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient, CustodyGuardRail
         before = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(owner, address(this), amount);
         IERC20(token).forceApprove(spender, amount);
+    }
+
+    function _requirePinned(IAdManager adManager) private view {
+        if (!module.isTargetPinned(address(this), address(adManager))) {
+            revert CustodyAccount__NotPinned(address(adManager));
+        }
     }
 
     /// @dev Nothing stays behind. The escrow or dispute module pulls exactly the approved amount, which spends the
@@ -261,6 +271,14 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient, CustodyGuardRail
 
     function _policyModule() internal view override returns (IAgentPolicyAdmin) {
         return IAgentPolicyAdmin(address(module));
+    }
+
+    /// @dev A nomination made before the rail was armed would complete with no announcement (81-3).
+    function _onFirstGuard() internal override {
+        if (pendingOwner != address(0)) {
+            pendingOwner = address(0);
+            emit OwnershipTransferStarted(owner, address(0));
+        }
     }
 
     function _sweepSelector() internal pure override returns (bytes4) {
