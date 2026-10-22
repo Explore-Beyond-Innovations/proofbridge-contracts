@@ -530,7 +530,7 @@ contract CustodyGuardRailTest is Test {
         address thief = makeAddr("p2-thief");
 
         vm.startPrank(owner);
-        vm.expectRevert(CustodyGuardRail.GuardRail__LastGuardRail.selector);
+        vm.expectRevert(CustodyGuardRail.GuardRail__DisarmLowersTimelock.selector);
         account.disarmClosedAd(adManager, "dead");
         assertTrue(account.guardRail("dead").armed);
         vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
@@ -555,6 +555,97 @@ contract CustodyGuardRailTest is Test {
         vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
         account.sweep(address(adToken), owner, 1);
         vm.stopPrank();
+    }
+
+    /// P3-81-a: "dead" closed the honest way, under a 30-day rail (announced and waited out).
+    function _closedAd(CustodyGuardRail.GuardRail memory rail) internal {
+        _createAd("dead", 10);
+        _setRail("dead", rail);
+        bytes memory close = abi.encodeCall(IAdManager.closeAd, ("dead", owner));
+        vm.startPrank(owner);
+        account.schedule(_adKey("dead"), address(adManager), 0, close);
+        vm.warp(block.timestamp + rail.delay);
+        account.execute(address(adManager), 0, close);
+        vm.stopPrank();
+    }
+
+    /// P3-81-a: arming a made-up ad is instant, so it pads the roster. The closed ad still can't come off at once
+    /// when the ghost's 1-second delay would become the account's, and the resting funds still wait 30 days.
+    function test_p3_81_a_aGhostAdCannotLowerTheTimelock() public {
+        _closedAd(_rail(0, 30 days));
+        adToken.mint(address(account), 1000);
+        address thief = makeAddr("p3-thief");
+        vm.startPrank(owner);
+        account.setGuardRail("ghost-not-an-ad", _rail(0, 1));
+        vm.expectRevert(CustodyGuardRail.GuardRail__DisarmLowersTimelock.selector);
+        account.disarmClosedAd(adManager, "dead");
+        bytes memory sw = abi.encodeCall(ProofBridgeCustodyAccount.sweep, (address(adToken), thief, 1000));
+        account.schedule(ACCOUNT, address(account), 0, sw);
+        assertEq(
+            account.scheduled(ACCOUNT, ProofBridgeCustodyAccount.sweep.selector).readyAt, block.timestamp + 30 days
+        );
+        vm.warp(block.timestamp + 1);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        account.sweep(address(adToken), thief, 1000);
+        vm.stopPrank();
+        assertEq(adToken.balanceOf(thief), 0);
+    }
+
+    /// P3-81-a: two real ads. The closed one holds the longest delay, or the shortest window: refused.
+    function test_p3_81_a_aClosedAdHoldingTheTightestTimelockIsRefused() public {
+        _guard(AD, 0); // the open ad: DELAY, WINDOW
+        _closedAd(_rail(0, 30 days));
+        vm.prank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__DisarmLowersTimelock.selector);
+        account.disarmClosedAd(adManager, "dead");
+        assertTrue(account.guardRail("dead").armed);
+    }
+
+    function test_p3_81_a_aClosedAdHoldingTheShortestWindowIsRefused() public {
+        _guard(AD, 0); // the open ad: DELAY, WINDOW
+        CustodyGuardRail.GuardRail memory r = _rail(0, DELAY);
+        r.window = 1 hours;
+        _closedAd(r);
+        vm.prank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__DisarmLowersTimelock.selector);
+        account.disarmClosedAd(adManager, "dead");
+        assertTrue(account.guardRail("dead").armed);
+    }
+
+    /// P3-81-a: a closed ad that holds neither the longest delay nor the shortest window comes off at once.
+    function test_p3_81_a_aClosedAdThatLoosensNothingDisarmsAtOnce() public {
+        CustodyGuardRail.GuardRail memory open = _rail(0, 2 hours);
+        open.window = 1 hours;
+        _setRail(AD, open);
+        _closedAd(_rail(0, DELAY)); // 1 hour, WINDOW
+        vm.prank(owner);
+        account.disarmClosedAd(adManager, "dead");
+        assertFalse(account.guardRail("dead").armed);
+        assertEq(account.guardedAds().length, 1);
+    }
+
+    /// P3-81-a: the views the Policy tab reads agree with the check: a refused disarm loosens the view's timelock, an
+    /// allowed one doesn't.
+    function test_p3_81_a_theTimelockViewsAgreeWithTheCheck() public {
+        (uint64 noneDelay, uint64 noneWindow) = account.accountTimelock();
+        assertEq(noneDelay, 0);
+        assertEq(noneWindow, type(uint64).max);
+        _guard(AD, 0); // DELAY, WINDOW
+        _closedAd(_rail(0, 30 days));
+        (uint64 d, uint64 w) = account.accountTimelock();
+        (uint64 dw, uint64 ww) = account.accountTimelockWithout("dead");
+        assertEq(d, 30 days);
+        assertTrue(dw < d || ww > w, "refused: the view shows the loosening");
+        vm.prank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__DisarmLowersTimelock.selector);
+        account.disarmClosedAd(adManager, "dead");
+        // Raise the open ad to 30 days too: now nothing loosens, and the disarm goes through.
+        _setRail(AD, _rail(0, 30 days));
+        (d, w) = account.accountTimelock();
+        (dw, ww) = account.accountTimelockWithout("dead");
+        assertFalse(dw < d || ww > w, "allowed: the view shows no loosening");
+        vm.prank(owner);
+        account.disarmClosedAd(adManager, "dead");
     }
 
     /// P2-81-b: a closed ad that isn't this account's is refused, even on a pinned escrow.

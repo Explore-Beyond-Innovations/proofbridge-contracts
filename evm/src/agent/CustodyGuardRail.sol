@@ -137,8 +137,9 @@ abstract contract CustodyGuardRail {
     /// @notice R3: while any ad is guarded, a call the allowlist doesn't name.
     error GuardRail__NotAllowed();
     error GuardRail__AdStillOpen();
-    /// P2-81-a: the last guarded ad's rail comes off only through its schedule; an empty roster ends the account-wide gate.
-    error GuardRail__LastGuardRail();
+    /// P3-81-a: an instant closed-ad disarm that would lower the account's delay or shorten its window (the last ad
+    /// always would); it comes off through its schedule instead.
+    error GuardRail__DisarmLowersTimelock();
 
     modifier onlyOwner() {
         _checkOwner();
@@ -225,7 +226,11 @@ abstract contract CustodyGuardRail {
         (address maker, bool open,,,,,, uint256 balance, uint256 locked) = adManager.ads(adId);
         if (maker != address(this)) revert GuardRail__NotAllowed();
         if (open || balance != 0 || locked != 0) revert GuardRail__AdStillOpen();
-        if (_guarded.length == 1) revert GuardRail__LastGuardRail();
+        // P3-81-a: never at once if the account's delay drops or its window grows (always so for the last ad); arming is
+        // instant and unchecked, so the roster's size proves nothing
+        (uint64 delay, uint64 window) = _accountTimelock();
+        (uint64 delayAfter, uint64 windowAfter) = _accountTimelockWithout(key);
+        if (delayAfter < delay || windowAfter > window) revert GuardRail__DisarmLowersTimelock();
         _disarm(key, adId);
     }
 
@@ -293,6 +298,16 @@ abstract contract CustodyGuardRail {
 
     function guardedAds() external view returns (bytes32[] memory) {
         return _guarded;
+    }
+
+    /// @notice The account-wide (longest delay, shortest window); (0, max) with nothing guarded.
+    function accountTimelock() external view returns (uint64 delay, uint64 window) {
+        return _accountTimelock();
+    }
+
+    /// @notice The same with `adId` left out: `disarmClosedAd` refuses when its delay is lower or its window longer.
+    function accountTimelockWithout(string calldata adId) external view returns (uint64 delay, uint64 window) {
+        return _accountTimelockWithout(keccak256(bytes(adId)));
     }
 
     function scheduled(bytes32 scope, bytes4 action) external view returns (Schedule memory) {
@@ -454,8 +469,14 @@ abstract contract CustodyGuardRail {
 
     /// @dev The longest delay and the shortest window across guarded ads.
     function _accountTimelock() private view returns (uint64 delay, uint64 window) {
+        return _accountTimelockWithout(bytes32(0));
+    }
+
+    /// The same, leaving one ad out (an ad key is a hash, never zero).
+    function _accountTimelockWithout(bytes32 skip) private view returns (uint64 delay, uint64 window) {
         window = type(uint64).max;
         for (uint256 i = 0; i < _guarded.length; ++i) {
+            if (_guarded[i] == skip) continue;
             GuardRail storage r = _guards[_guarded[i]].rail;
             if (r.delay > delay) delay = r.delay;
             if (r.window < window) window = r.window;
