@@ -183,9 +183,13 @@ abstract contract CustodyGuardRail {
         if (loosening) {
             _clearSchedules(key);
         } else {
-            // A pending change waits the new, longer delay (Soroban 49S-1).
+            // A pending change waits the new, longer delay (Soroban 49S-1), and is usable only for the new, shorter
+            // window (81-6).
             if (rail.delay > adDelayBefore) _restamp(key, nowTs + rail.delay);
             if (rail.delay > accountDelayBefore) _restamp(ACCOUNT_SCOPE, nowTs + rail.delay);
+            _clampWindow(key, rail.window);
+            (, uint64 accountWindow) = _accountTimelock();
+            _clampWindow(ACCOUNT_SCOPE, accountWindow);
         }
         emit GuardRailSet(key, adId, true, rail.threshold, rail.delay, rail.window);
     }
@@ -425,6 +429,15 @@ abstract contract CustodyGuardRail {
                 s.expiresAt += notBefore - s.readyAt;
                 s.readyAt = notBefore;
             }
+        }
+    }
+
+    function _clampWindow(bytes32 scope, uint64 window) private {
+        bytes4[16] memory actions = scope == ACCOUNT_SCOPE ? _accountActions() : _adActions();
+        for (uint256 i = 0; i < actions.length; ++i) {
+            if (actions[i] == bytes4(0)) break;
+            Schedule storage s = _schedules[_slot(scope, actions[i])];
+            if (s.readyAt != 0 && s.expiresAt > s.readyAt + window) s.expiresAt = s.readyAt + window;
         }
     }
 

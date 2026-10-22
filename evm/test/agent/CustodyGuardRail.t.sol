@@ -439,6 +439,26 @@ contract CustodyGuardRailTest is Test {
         assertEq(sc.expiresAt - sc.readyAt, 2 hours);
     }
 
+    /// 81-6: a shorter window shortens what is pending too, so an owner can expire a stale announcement sooner.
+    function test_r81_6_aShorterWindowShortensPendingSchedules() public {
+        _guard(AD, 0);
+        bytes memory w = abi.encodeCall(IAdManager.withdrawFromAd, (AD, 5, owner));
+        bytes memory sw = abi.encodeCall(ProofBridgeCustodyAccount.sweep, (address(adToken), owner, 1));
+        vm.startPrank(owner);
+        account.schedule(_adKey(AD), address(adManager), 0, w);
+        account.schedule(ACCOUNT, address(account), 0, sw);
+        vm.stopPrank();
+        CustodyGuardRail.GuardRail memory r = _rail(0, DELAY);
+        r.window = 2 hours;
+        _setRail(AD, r); // a tightening: instant
+        CustodyGuardRail.Schedule memory ad = account.scheduled(_adKey(AD), IAdManager.withdrawFromAd.selector);
+        CustodyGuardRail.Schedule memory acct = account.scheduled(ACCOUNT, ProofBridgeCustodyAccount.sweep.selector);
+        assertEq(ad.expiresAt - ad.readyAt, 2 hours, "the ad's schedule");
+        assertEq(acct.expiresAt - acct.readyAt, 2 hours, "the account's schedule");
+        vm.warp(block.timestamp + DELAY + 2 hours);
+        _expectNotScheduled(w); // expired under the new window
+    }
+
     /// 81-4 (R1): a guard rail is bounded, so neither a stolen key nor a slip can freeze an ad: a delay of at most
     /// 30 days and a window of at least an hour. Inside the bounds, arming and tightening stay instant.
     function test_r81_4_aGuardRailIsBoundedSoItCannotFreezeTheAd() public {
