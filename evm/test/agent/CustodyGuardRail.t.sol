@@ -411,6 +411,22 @@ contract CustodyGuardRailTest is Test {
         assertEq(account.scheduled(ACCOUNT, ProofBridgeCustodyAccount.sweep.selector).readyAt, 0, "cleared");
     }
 
+    /// The Soroban 80-2 question on EVM: disarming clears a pending sweep, like a loosening does.
+    function test_r81_5_disarmingClearsAPendingSweep() public {
+        _guard(AD, 0);
+        _createAd("ad-2", 10);
+        _guard("ad-2", 0);
+        bytes memory sw = abi.encodeCall(ProofBridgeCustodyAccount.sweep, (address(adToken), owner, 10));
+        bytes memory disarm = abi.encodeCall(CustodyGuardRail.disarmGuardRail, ("ad-2"));
+        vm.startPrank(owner);
+        account.schedule(ACCOUNT, address(account), 0, sw);
+        account.schedule(_adKey("ad-2"), address(account), 0, disarm);
+        vm.warp(block.timestamp + DELAY);
+        account.disarmGuardRail("ad-2");
+        vm.stopPrank();
+        assertEq(account.scheduled(ACCOUNT, ProofBridgeCustodyAccount.sweep.selector).readyAt, 0, "cleared");
+    }
+
     /// M8 and M7: raising only the account limit's refill is a loosening; re-sending the same limit is not.
     function test_r81_5_theAccountLimitIsLooserOnEitherNumberOnly() public {
         bytes32 token = _b32(address(adToken));
