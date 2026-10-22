@@ -56,6 +56,11 @@ contract BondTaker {
 
 /// Plan 46 on the EVM custody account: funds pass from the owner's wallet to the escrow in one call and never
 /// stay; the owner's guard rail (A5); the parity fixes (A6). Real `AdManager` throughout, except the stubs above.
+/// A contract that takes any call and any value: where a drain would land.
+contract Sink {
+    fallback() external payable {}
+}
+
 contract CustodyGuardRailTest is Test {
     using AddressCast for address;
 
@@ -384,6 +389,32 @@ contract CustodyGuardRailTest is Test {
         account.sweep(address(adToken), owner, 10);
         vm.stopPrank();
         assertEq(adToken.balanceOf(address(account)), 0);
+    }
+
+    /// 81-1: native value leaving a guarded account always needs its own schedule, whatever selector it rides on,
+    /// on an armed ad and on an unarmed one alike.
+    function test_r81_1_nativeValueOnAnEscrowShapedCallStillWaits() public {
+        _guard(AD, 100);
+        _createAd("unarmed", 10);
+        vm.deal(address(account), 5 ether);
+        Sink sink = new Sink();
+        bytes memory withdrawShaped = abi.encodeCall(IAdManager.withdrawFromAd, (AD, 0, owner));
+        bytes memory lockShaped = abi.encodeCall(IAdManager.lockForOrder, (_order(AD, 1, 99), uint32(0)));
+        bytes memory unarmedShaped = abi.encodeCall(IAdManager.withdrawFromAd, ("unarmed", 0, owner));
+        vm.startPrank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        account.execute(address(sink), 5 ether, withdrawShaped);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        account.execute(address(sink), 1 ether, lockShaped);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        account.execute(address(sink), 1 ether, unarmedShaped);
+
+        // Announced as native value leaving the account (the account scope), it runs once, after the delay.
+        account.schedule(ACCOUNT, address(sink), 5 ether, withdrawShaped);
+        vm.warp(block.timestamp + DELAY);
+        account.execute(address(sink), 5 ether, withdrawShaped);
+        vm.stopPrank();
+        assertEq(address(sink).balance, 5 ether);
     }
 
     function test_a5_ownershipWaitsWhileGuarded() public {

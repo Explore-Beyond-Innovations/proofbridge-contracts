@@ -244,11 +244,7 @@ abstract contract CustodyGuardRail {
 
     function _gateAdCall(bytes32 adKey, bytes4 action, address target, uint256 value, bytes calldata data) private {
         Guard storage g = _guards[adKey];
-        if (!g.armed) {
-            // Value riding on an escrow call is still value leaving the account.
-            if (value != 0 && _guarded.length != 0) _spend(ACCOUNT_SCOPE, NATIVE_OUT, target, value, data);
-            return;
-        }
+        if (!g.armed) return;
         uint256 amount = _amountOf(action, data);
         if (action == CLOSE || amount > g.rail.threshold) {
             _spend(adKey, action, target, value, data);
@@ -294,6 +290,9 @@ abstract contract CustodyGuardRail {
         view
         returns (bytes4 action, bytes32 adKey)
     {
+        // Value first: native leaving the account is one action whatever selector it rides on (81-1). None of the
+        // per-ad escrow calls is payable, so an escrow call with value is no per-ad action.
+        if (value != 0) return (NATIVE_OUT, bytes32(0));
         action = data.length >= 4 ? bytes4(data[:4]) : bytes4(0);
         if (action == WITHDRAW) {
             (string memory adId,,) = abi.decode(data[4:], (string, uint256, address));
@@ -313,7 +312,6 @@ abstract contract CustodyGuardRail {
             string memory adId = abi.decode(data[4:], (string));
             return (action, keccak256(bytes(adId)));
         }
-        if (value != 0) action = NATIVE_OUT;
     }
 
     function _amountOf(bytes4 action, bytes calldata data) private pure returns (uint256) {
