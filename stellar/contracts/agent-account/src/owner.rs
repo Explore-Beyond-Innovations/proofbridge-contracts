@@ -84,26 +84,28 @@ pub fn to_i128(amount: u128) -> Result<i128, AccountError> {
     i128::try_from(amount).map_err(|_| AccountError::BadArgs)
 }
 
-/// `amount` of `token` in from the owner, approved on to `payee`, then `f` (the escrow call that
-/// pulls it). The account's balance of `token` must end where it started.
-pub fn pay_through<F: FnOnce(&Env)>(
+/// 80-b2: `create_ad` / `fund_ad` as one `call_with`: `amount` of `token` in from the owner, the escrow's pull of
+/// exactly that approved, and the same balance check every other owner call gets.
+pub fn pay_and_call(
     env: &Env,
     owner: &Address,
-    token: &Address,
+    escrow: &Address,
+    fn_name: &str,
+    args: Vec<Val>,
+    token: Address,
     amount: u128,
-    payee: &Address,
-    f: F,
 ) -> Result<(), AccountError> {
     let me = env.current_contract_address();
-    let client = TokenClient::new(env, token);
-    let before = client.balance(&me);
-    let amount = to_i128(amount)?;
-    client.transfer(owner, &me, &amount);
-    env.authorize_as_current_contract(vec![env, transfer_approval(env, token, &me, payee, amount)]);
-    f(env);
-    if client.balance(&me) != before {
-        return Err(AccountError::FundsLeft);
-    }
+    let pull = transfer_approval(env, &token, &me, escrow, to_i128(amount)?);
+    call_with(
+        env,
+        owner,
+        escrow,
+        &Symbol::new(env, fn_name),
+        args,
+        Some((token, amount)),
+        vec![env, pull],
+    )?;
     Ok(())
 }
 

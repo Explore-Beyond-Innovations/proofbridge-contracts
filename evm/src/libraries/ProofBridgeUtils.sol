@@ -90,6 +90,9 @@ library ProofBridgeUtils {
         if (params.amount == 0) revert IEscrow.Escrow__ZeroAmount();
         if (params.bridger == bytes32(0)) revert IAdManager.AdManager__BridgerZero();
         if (params.orderRecipient == bytes32(0)) revert IAdManager.AdManager__RecipientZero();
+        if (params.orderRecipient == params.adCreator || params.orderRecipient == params.adSettlementSigner) {
+            revert IAdManager.AdManager__RecipientIsMaker();
+        }
         AddressCast.assertEvmAddress(params.orderRecipient);
         DecimalScaling.assertInRange(params.orderDecimals);
         DecimalScaling.assertInRange(params.adDecimals);

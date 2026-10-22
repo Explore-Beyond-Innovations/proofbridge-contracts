@@ -505,6 +505,7 @@ contract TimelockTest is Test {
         p.amount = 1;
         p.bridger = bytes32(uint256(uint160(address(this))));
         p.adRecipient = bytes32(uint256(1));
+        p.orderRecipient = bytes32(uint256(2)); // 643-b1: a real recipient, so the fee is what's refused
         p.lpFeeBps = 101;
         vm.expectRevert(IOrderPortal.OrderPortal__InvalidFee.selector);
         portal.createOrder(p);

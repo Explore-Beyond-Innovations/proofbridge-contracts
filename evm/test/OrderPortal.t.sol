@@ -262,6 +262,34 @@ contract OrderPortalTest is Test {
         portal.createOrder(p);
     }
 
+    // 643-b1: the order's recipient is checked at the source, before the bridger's deposit lands
+    function test_643b1_createOrder_rejects_zeroOrderRecipient() public {
+        test_setTokenRoute_setsAndEmits_whenSupported();
+        IOrderPortal.OrderParams memory p = _defaultParams();
+        p.orderRecipient = bytes32(0);
+        vm.prank(bridger);
+        vm.expectRevert(IOrderPortal.OrderPortal__RecipientZero.selector);
+        portal.createOrder(p);
+    }
+
+    function test_643b1_createOrder_rejects_recipientIsTheMakerOrItsSigner() public {
+        test_setTokenRoute_setsAndEmits_whenSupported();
+        IOrderPortal.OrderParams memory p = _defaultParams();
+        // 83-1: a signer distinct from the creator, so only the creator half can refuse this one
+        p.adSettlementSigner = _b32(address(0x5157));
+        p.orderRecipient = p.adCreator;
+        vm.prank(bridger);
+        vm.expectRevert(IOrderPortal.OrderPortal__RecipientIsMaker.selector);
+        portal.createOrder(p);
+
+        p = _defaultParams();
+        p.adSettlementSigner = _b32(address(0x5157));
+        p.orderRecipient = p.adSettlementSigner;
+        vm.prank(bridger);
+        vm.expectRevert(IOrderPortal.OrderPortal__RecipientIsMaker.selector);
+        portal.createOrder(p);
+    }
+
     /*//////////////////////////////////////////////////////////////
                  createOrder: rejects when dstChain unsupported
     //////////////////////////////////////////////////////////////*/

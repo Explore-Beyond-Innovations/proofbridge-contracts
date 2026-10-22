@@ -57,6 +57,10 @@ interface IOrderPortal is IEscrow {
     error OrderPortal__BridgerMustBeSender();
     /// @notice #586: an order fee share above 1% (the ad chain could never lock it).
     error OrderPortal__InvalidFee();
+    /// @notice 643-b1: the order pays nobody on the ad chain.
+    error OrderPortal__RecipientZero();
+    /// @notice 643-b1: the order pays the ad's maker or its settlement signer, which collapses the dispute roles.
+    error OrderPortal__RecipientIsMaker();
 
     function createOrder(OrderParams calldata params) external payable returns (bytes32 orderHash);
     /// @notice The maker's co-signed settlement: `Open` only, until `deadline − claimStagger` (the

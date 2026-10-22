@@ -236,6 +236,11 @@ contract OrderPortal is EscrowBase, IOrderPortal {
         if (params.bridger != msg.sender.toBytes32()) revert OrderPortal__BridgerMustBeSender();
         if (params.adRecipient == bytes32(0)) revert Escrow__ZeroAddress();
         params.adRecipient.assertEvmAddress();
+        // 643-b1: the relayer's R1/R2 at the source, so a direct createOrder can't land a deposit no lock will take
+        if (params.orderRecipient == bytes32(0)) revert OrderPortal__RecipientZero();
+        if (params.orderRecipient == params.adCreator || params.orderRecipient == params.adSettlementSigner) {
+            revert OrderPortal__RecipientIsMaker();
+        }
         ProofBridgeUtils.checkWidths(params.amount, block.chainid, params.adChainId, params.deadline);
         // Both signed decimals are checked here so a bad route fails at create time, not at unlock.
         ProofBridgeUtils.assertInRange(params.orderDecimals);

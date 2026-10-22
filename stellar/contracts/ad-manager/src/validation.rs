@@ -50,6 +50,12 @@ pub fn validate_order(env: &Env, ad: &Ad, params: &OrderParams) -> Result<(), Ad
         return Err(AdManagerError::RecipientZero);
     }
     let _ = token::bytes32_to_account_address(env, &params.order_recipient)?;
+    // 643-b1: never the ad's maker or its settlement signer, as the order portal refuses at create
+    if params.order_recipient == params.ad_creator
+        || params.order_recipient == params.ad_settlement_signer
+    {
+        return Err(AdManagerError::RecipientIsMaker);
+    }
 
     let chain_info =
         storage::get_chain(env, params.order_chain_id).ok_or(AdManagerError::ChainNotSupported)?;

@@ -71,7 +71,33 @@ export function redact(text: string): string {
   return text.replace(/\bS[A-Z2-7]{55}\b/g, (m) => (StrKey.isValidEd25519SecretSeed(m) ? "S…[redacted]" : m));
 }
 
+/** A fresh localnet's RPC can simulate before its ledger snapshot is complete; the same call passes a moment later. */
+export const isSnapshotRace = (text: string): boolean => /not present in the snapshot/i.test(text);
+
+/**
+ * Runs `run`, again up to `attempts` times while it fails with the snapshot race. The simulation failed before
+ * anything was sent, so a retry can't submit twice. Any other failure is thrown at once.
+ */
+export function withSnapshotRetry<T>(run: () => T, sleep: (ms: number) => void, attempts = 5): T {
+  for (let i = 1; ; i++) {
+    try {
+      return run();
+    } catch (err) {
+      const e = err as { message?: string; stderr?: unknown };
+      const text = `${e.message ?? ""} ${typeof e.stderr === "string" ? e.stderr : ""}`;
+      if (i >= attempts || !isSnapshotRace(text)) throw err;
+      sleep(1_000 * i);
+    }
+  }
+}
+
+const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
 function exec(args: string[]): string {
+  return withSnapshotRetry(() => execOnce(args), sleepSync);
+}
+
+function execOnce(args: string[]): string {
   try {
     return execFileSync("stellar", args, {
       encoding: "utf8",

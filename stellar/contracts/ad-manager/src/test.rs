@@ -664,6 +664,26 @@ mod validation_tests {
         });
     }
 
+    // 643-b1: an order paying the maker (or its settlement signer) is refused at lock too
+    #[test]
+    fn test_643b1_validate_order_recipient_is_the_maker_or_its_signer() {
+        let env = setup_validation_env();
+        env.as_contract(&env.register(AdManagerContract, ()), || {
+            let (ad, mut params) = valid_ad_and_params(&env);
+            params.order_recipient = params.ad_creator.clone();
+            setup_chain_and_route(&env, &params);
+            assert_eq!(
+                validation::validate_order(&env, &ad, &params),
+                Err(AdManagerError::RecipientIsMaker)
+            );
+            params.order_recipient = params.ad_settlement_signer.clone();
+            assert_eq!(
+                validation::validate_order(&env, &ad, &params),
+                Err(AdManagerError::RecipientIsMaker)
+            );
+        });
+    }
+
     #[test]
     fn test_validate_order_chain_not_supported() {
         let env = setup_validation_env();
