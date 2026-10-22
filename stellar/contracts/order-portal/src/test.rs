@@ -245,6 +245,8 @@ mod validation_tests {
         let env = Env::default();
         env.as_contract(&env.register(OrderPortalContract, ()), || {
             let mut params = valid_params(&env);
+            // 83-1: a signer distinct from the creator, so only the creator half can refuse this one
+            params.ad_settlement_signer = make_bytes32(&env, 0x5E);
             params.order_recipient = params.ad_creator.clone();
             setup_chain_and_route(&env, &params);
             assert_eq!(

@@ -648,6 +648,8 @@ contract AdManagerTest is Test {
     function test_643b1_lock_rejects_recipientIsTheMakerOrItsSigner() public {
         test_fundAd_makerOnly();
         IAdManager.OrderParams memory p = _defaultParams(lastAdId);
+        // 83-1: a signer distinct from the creator, so only the creator half can refuse this one
+        p.adSettlementSigner = bytes32(uint256(uint160(address(0x5157))));
         p.orderRecipient = p.adCreator;
         vm.prank(maker);
         vm.expectRevert(IAdManager.AdManager__RecipientIsMaker.selector);

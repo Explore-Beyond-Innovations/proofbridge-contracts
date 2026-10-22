@@ -275,6 +275,8 @@ contract OrderPortalTest is Test {
     function test_643b1_createOrder_rejects_recipientIsTheMakerOrItsSigner() public {
         test_setTokenRoute_setsAndEmits_whenSupported();
         IOrderPortal.OrderParams memory p = _defaultParams();
+        // 83-1: a signer distinct from the creator, so only the creator half can refuse this one
+        p.adSettlementSigner = _b32(address(0x5157));
         p.orderRecipient = p.adCreator;
         vm.prank(bridger);
         vm.expectRevert(IOrderPortal.OrderPortal__RecipientIsMaker.selector);
