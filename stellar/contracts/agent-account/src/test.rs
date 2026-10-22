@@ -2518,10 +2518,10 @@ fn t52_a_schedule_authorizes_exactly_what_it_named() {
 fn t52_a_schedule_expires() {
     let f = fixture();
     let to = Address::generate(&f.env);
-    guard(&f, 0, 3_600, 600);
+    guard(&f, 0, 3_600, 3_600);
     schedule_withdraw(&f, 1, &to);
 
-    f.env.ledger().set_timestamp(T0 + 3_600 + 600);
+    f.env.ledger().set_timestamp(T0 + 3_600 + 3_600);
     expect_err(
         owner_check(&f, &withdraw_ctx(&f, 1, &to)),
         AccountError::NotScheduled,
@@ -2823,7 +2823,7 @@ fn t52_guardrail_input_is_validated() {
     );
     // And only the ad's extractive selectors can be scheduled on an ad: not a protective call,
     // and not an account-wide one.
-    guard(&f, 0, 1, 1);
+    guard(&f, 0, 1, 3_600);
     for name in ["halt_settlement", "upgrade", "set_policy"] {
         assert_eq!(
             f.client
@@ -3172,7 +3172,7 @@ fn d6_account_schedules_take_the_strictest_guardrail() {
             "{name} is per ad"
         );
     }
-    guard(&f, 0, 86_400, 600);
+    guard(&f, 0, 86_400, 3_600);
     f.client.set_guard_rail(
         &String::from_str(&f.env, "ad-2"),
         &Some(GuardRail {
@@ -3192,7 +3192,7 @@ fn d6_account_schedules_take_the_strictest_guardrail() {
     f.client.schedule(&Scope::Account, &up, &one);
     let s = f.client.scheduled(&Scope::Account, &up).unwrap();
     assert_eq!(s.ready_at, T0 + 86_400);
-    assert_eq!(s.expires_at, T0 + 86_400 + 600);
+    assert_eq!(s.expires_at, T0 + 86_400 + 3_600);
 
     f.client.cancel(&Scope::Account, &up);
     assert!(f.client.scheduled(&Scope::Account, &up).is_none());
@@ -3634,7 +3634,7 @@ fn c33_set_guard_rail_refuses_an_archived_row() {
             &Some(GuardRail {
                 threshold: u128::MAX,
                 delay: 1,
-                window: 1,
+                window: 3_600,
                 rate: Limit {
                     capacity: 1,
                     refill_per_second: 1,
@@ -5914,5 +5914,70 @@ fn p46_resuming_and_repointing_the_signer_wait_out_the_delay() {
         run(&resume, &resume_args),
         Err(Ok(AccountError::NotScheduled)),
         "single use"
+    );
+}
+
+/// R1 (plan 46 review pass 1): tightening is instant, so it is bounded. A delay over 30 days or a
+/// window under an hour would freeze the ad (removing the rail waits out the current delay), and
+/// is refused, whether arming or tightening. The bounds themselves are accepted.
+#[test]
+fn p46_a_guard_rail_cannot_freeze_the_ad() {
+    let f = fixture();
+    let day = 86_400;
+    let set = |delay: u64, window: u64| {
+        f.client.try_set_guard_rail(
+            &ad(&f.env),
+            &Some(GuardRail {
+                threshold: 0,
+                delay,
+                window,
+                rate: Limit {
+                    capacity: u128::MAX / 2,
+                    refill_per_second: 1,
+                },
+                bucket: Bucket {
+                    level: 0,
+                    last_ts: 0,
+                },
+            }),
+        )
+    };
+    assert_eq!(
+        set(30 * day + 1, day),
+        Err(Ok(AccountError::GuardRailOutOfBounds))
+    );
+    assert_eq!(
+        set(3_600, 3_599),
+        Err(Ok(AccountError::GuardRailOutOfBounds))
+    );
+    assert!(set(3_600, 3_600).is_ok(), "the shortest window");
+    // Tightening from there: a longer delay is instant, up to the bound and not past it.
+    assert!(set(30 * day, 3_600).is_ok(), "the longest delay");
+    assert_eq!(
+        set(1_000 * 365 * day, 3_600),
+        Err(Ok(AccountError::GuardRailOutOfBounds))
+    );
+    assert_eq!(f.client.guard_rail(&ad(&f.env)).unwrap().delay, 30 * day);
+    // A change that could never be made can't be announced either.
+    let frozen = Some(GuardRail {
+        threshold: 0,
+        delay: 3_600,
+        window: 1,
+        rate: Limit {
+            capacity: 1,
+            refill_per_second: 1,
+        },
+        bucket: Bucket {
+            level: 0,
+            last_ts: 0,
+        },
+    });
+    assert_eq!(
+        f.client.try_schedule(
+            &ad_scope(&f.env),
+            &sym_of(&f.env, "set_guard_rail"),
+            &guard_args(&f.env, &frozen),
+        ),
+        Err(Ok(AccountError::GuardRailOutOfBounds))
     );
 }

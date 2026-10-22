@@ -21,6 +21,24 @@ pub const MAX_AD_SCOPE: u32 = 16;
 /// share, so one policy means the same on both chains. 512 so the largest policy's `PolicySet`
 /// (12,712 bytes) fits the network's 16,384-byte event limit; at 1,024 it did not.
 pub const MAX_AD_ID_BYTES: u32 = 512;
+
+/// R1: the longest delay and the shortest window a guard rail may have. Tightening is instant, so
+/// an unbounded one (a 1,000-year delay, a 1-second window) would freeze the ad for good: removing
+/// the rail waits out the current delay. Thirty days is long enough for any cool-off; an hour is
+/// long enough to make a matured call.
+pub const MAX_GUARD_DELAY: u64 = 30 * 86_400;
+pub const MIN_GUARD_WINDOW: u64 = 3_600;
+
+pub fn check_guard_bounds(g: &GuardRail) -> Result<(), AccountError> {
+    // A zero is a mis-set field before it is an out-of-range one.
+    if g.delay == 0 || g.window == 0 {
+        return Err(AccountError::BadGuardRail);
+    }
+    if g.delay > MAX_GUARD_DELAY || g.window < MIN_GUARD_WINDOW {
+        return Err(AccountError::GuardRailOutOfBounds);
+    }
+    Ok(())
+}
 /// The latest `valid_until` a policy may name: the EVM module's 48-bit bound, kept on both chains.
 pub const MAX_VALID_UNTIL: u64 = 1 << 48;
 /// Guarded ads per account. The roster lives in the instance, which is loaded on every call, so it

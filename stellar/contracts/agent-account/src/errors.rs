@@ -71,4 +71,8 @@ pub enum AccountError {
     /// reached as the account; funds at rest leave through `sweep`), and, while any ad is guarded,
     /// any escrow function not on the account's list.
     FunctionNotAllowed = 27,
+    /// R1: a guard rail's delay is over `MAX_GUARD_DELAY` (30 days) or its window under
+    /// `MIN_GUARD_WINDOW` (1 hour). Tightening is instant, so an unbounded one would freeze the ad:
+    /// removing the rail waits out the current delay.
+    GuardRailOutOfBounds = 28,
 }

@@ -49,7 +49,8 @@ pub use errors::AccountError;
 pub use escrow::settlement_signer_of;
 pub use policy::{
     lock_for_order, AccountVolume, AgentId, AgentPolicy, Schedule, Scope, MAX_AD_ID_BYTES,
-    MAX_AD_SCOPE, MAX_TARGETS, MAX_VALID_UNTIL, MAX_WHITELIST_TOKENS, SCHEMA_VERSION,
+    MAX_AD_SCOPE, MAX_GUARD_DELAY, MAX_TARGETS, MAX_VALID_UNTIL, MAX_WHITELIST_TOKENS,
+    MIN_GUARD_WINDOW, SCHEMA_VERSION,
 };
 
 #[contract]
@@ -267,6 +268,9 @@ impl AgentAccount {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
         let now = env.ledger().timestamp();
+        if let Some(g) = &guard_rail {
+            policy::check_guard_bounds(g)?;
+        }
         let current = policy::get_guard_rail(&env, &ad_id);
         // On the roster with no row is archived, not unarmed: refuse, as the owner path does (C-33).
         if current.is_none() && policy::is_guarded(&env, &ad_id) {
@@ -410,6 +414,10 @@ impl AgentAccount {
                         .get(1)
                         .and_then(|v| Option::<GuardRail>::try_from_val(&env, &v).ok())
                         .ok_or(AccountError::BadArgs)?;
+                    // R1: a change that could never be made can't be announced either.
+                    if let Some(next) = &g {
+                        policy::check_guard_bounds(next)?;
+                    }
                     args = args::guard_rail_args(&env, ad_id, &g);
                 }
                 let g = guard_rail_for_schedule(&env, ad_id)?;
