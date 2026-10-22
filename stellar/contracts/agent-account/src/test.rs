@@ -6232,12 +6232,81 @@ fn p46_a_closed_ads_rail_comes_off_at_once() {
     );
 }
 
+/// P2-80-a: the last guarded ad's rail never comes off instantly, closed or not. An empty roster ends
+/// the account-wide gate, so a stolen owner key could disarm it and sweep what rests in the account.
+#[test]
+fn p46_p2_the_last_guarded_ad_keeps_the_account_gated() {
+    let e = escrow_fixture();
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    arm(&e, &client);
+    let withdraw = Symbol::new(&e.env, "withdraw_from_ad");
+    let withdraw_args = vec![
+        &e.env,
+        e.ad_id.to_val(),
+        5_000_000_u128.into_val(&e.env),
+        e.owner.to_val(),
+    ];
+    client.schedule(&Scope::Ad(e.ad_id.clone()), &withdraw, &withdraw_args);
+    e.env.ledger().set_timestamp(T0 + 3_600);
+    client.call(
+        &e.ad_manager,
+        &withdraw,
+        &withdraw_args,
+        &None,
+        &Vec::new(&e.env),
+    );
+    let close = Symbol::new(&e.env, "close_ad");
+    let close_args = vec![&e.env, e.ad_id.to_val(), e.owner.to_val()];
+    client.schedule(&Scope::Ad(e.ad_id.clone()), &close, &close_args);
+    e.env.ledger().set_timestamp(T0 + 7_200);
+    client.call(&e.ad_manager, &close, &close_args, &None, &Vec::new(&e.env));
+    let (token, tc) = token_of(&e);
+    tc.mint(&e.account, &777_i128);
+    let thief = Address::generate(&e.env);
+
+    assert_eq!(
+        client.try_disarm_closed_ad(&e.ad_manager, &e.ad_id),
+        Err(Ok(AccountError::LastGuardRail)),
+        "the last rail waits out its delay"
+    );
+    assert!(client.guarded_ads().contains(&e.ad_id));
+    assert_eq!(
+        client.try_sweep(&token, &thief, &777_u128),
+        Err(Ok(AccountError::NotScheduled)),
+        "funds at rest still wait"
+    );
+    assert_eq!(tc.balance(&thief), 0);
+}
+
+/// P2-80-a: with another ad still guarded, a closed ad's rail comes off at once and the account stays
+/// gated.
+#[test]
+fn p46_p2_a_closed_ad_disarms_at_once_while_another_ad_is_guarded() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let other = String::from_str(&f.env, "other");
+    f.client
+        .set_guard_rail(&other, &f.client.guard_rail(&ad(&f.env)));
+    StubEscrowClient::new(&f.env, &f.target).set_ad_shape(&f.account, &false, &0, &0);
+    f.client.disarm_closed_ad(&f.target, &ad(&f.env));
+    assert!(f.client.guard_rail(&ad(&f.env)).is_none());
+    assert_eq!(f.client.guarded_ads(), vec![&f.env, other]);
+    assert_eq!(
+        f.client.try_sweep(&f.target, &f.owner, &1_u128),
+        Err(Ok(AccountError::NotScheduled))
+    );
+}
+
 /// 81-7: "closed" is every field at once. A closed-looking ad still holding a balance, or with
 /// something locked, isn't closed. (The real escrow can't produce either, so the stub does.)
 #[test]
 fn p46_a_closed_ad_holds_nothing_and_locks_nothing() {
     let f = fixture();
     guard(&f, 0, 3_600, 86_400);
+    let other = String::from_str(&f.env, "other");
+    f.client
+        .set_guard_rail(&other, &f.client.guard_rail(&ad(&f.env)));
     let stub = StubEscrowClient::new(&f.env, &f.target);
     for (balance, locked) in [(1_u128, 0_u128), (0, 1)] {
         stub.set_ad_shape(&f.account, &false, &balance, &locked);
