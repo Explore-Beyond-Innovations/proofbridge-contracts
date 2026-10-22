@@ -213,10 +213,11 @@ pub fn spend(
 /// than let through), and those pass at once, because delaying a protective action only helps
 /// whoever stole the key. A token's own functions are never reached (80-3).
 ///
-/// **Not gated on `targets`.** An earlier version only ran this when the called contract was a
-/// pinned escrow, which `set_targets` — owner-only and instant — could simply point elsewhere,
-/// removing the guard without touching it. The selector and the ad are what matter; an unrelated
-/// contract that happens to share a name is only ever refused for an ad this owner guarded.
+/// **Keyed on the selector and the ad, not the target.** An earlier version only ran this when the
+/// called contract was a pinned escrow, which `set_targets` could point elsewhere, removing the
+/// guard without touching it. Since plan 46 `call` puts the target pin in front of this (only a
+/// pinned contract is reached at all, and adding one is scheduled while guarded), and this judges
+/// what is called on it.
 ///
 /// Like the agent path, this **writes**: spending a schedule removes it, and a sub-threshold
 /// withdrawal spends the bucket.
