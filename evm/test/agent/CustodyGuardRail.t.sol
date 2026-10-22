@@ -23,6 +23,9 @@ import {CustodyAccountFactory} from "src/agent/CustodyAccountFactory.sol";
 import {MockVerifier} from "../mocks/MockVerifier.sol";
 import {MockKeyRegistry} from "../mocks/MockKeyRegistry.sol";
 import {MockRootVerifier} from "../mocks/MockRootVerifier.sol";
+import {DisputeManager} from "src/DisputeManager.sol";
+import {IDisputeManager} from "src/interfaces/IDisputeManager.sol";
+import {Dispute} from "src/libraries/Dispute.sol";
 
 /// An escrow that doesn't take what it is paid, and a dispute module that takes a bond from the filer: the two
 /// cases the real `AdManager` can't produce for the pass-through's own checks.
@@ -675,6 +678,34 @@ contract CustodyGuardRailTest is Test {
                 assertTrue(bytes4(err) != CustodyGuardRail.GuardRail__NotScheduled.selector, vm.toString(i));
             }
         }
+    }
+
+    /// 79-b2: the account answers a dispute filed against its ad, as the ad's maker, against the real dispute
+    /// module; while guarded the answer is protective, so it is instant. (The Soroban twin is 80-1.)
+    function test_r79_b2_theAccountAnswersADisputeAsTheAdsMaker() public {
+        DisputeManager dm = new DisputeManager(admin, adManager.i_wNativeToken());
+        vm.startPrank(admin);
+        dm.setEscrow(address(adManager), true);
+        dm.setArbiter(makeAddr("arbiter"));
+        dm.setProtocolFeePool(makeAddr("fee-pool"));
+        dm.setDisputeParams(ORDER_CHAIN_ID, Dispute.Params(1 hours, 0.01 ether));
+        adManager.setDisputeManager(IDisputeManager(address(dm)));
+        vm.stopPrank();
+
+        IAdManager.OrderParams memory p = _order(AD, 1_000, 7);
+        vm.prank(owner);
+        bytes32 h = abi.decode(
+            account.execute(address(adManager), 0, abi.encodeCall(IAdManager.lockForOrder, (p, uint32(0)))), (bytes32)
+        );
+        address bridger = address(uint160(uint256(p.orderRecipient))); // the bridger's party on the ad chain
+        vm.deal(bridger, 1 ether);
+        vm.prank(bridger);
+        adManager.dispute{value: 0.01 ether}(p, bytes32("evidence"));
+
+        _guard(AD, 0);
+        vm.expectEmit(address(dm));
+        emit DisputeManager.DisputeResponded(h, address(account), bytes32("answer"));
+        _exec(abi.encodeCall(IAdManager.respondToDispute, (p, bytes32("answer"))));
     }
 
     /// 81-2: the dispute module's own credit claims are announced and waited out, like the escrow's `claimTo`.
