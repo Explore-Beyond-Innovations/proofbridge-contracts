@@ -504,11 +504,11 @@ contract CustodyGuardRailTest is Test {
         assertEq(minWindow, 1 hours);
         CustodyGuardRail.GuardRail memory r = _rail(0, maxDelay + 1);
         vm.startPrank(owner);
-        vm.expectRevert(CustodyGuardRail.GuardRail__DelayTooLong.selector);
+        vm.expectRevert(CustodyGuardRail.GuardRail__OutOfBounds.selector);
         account.setGuardRail(AD, r);
         r = _rail(0, DELAY);
         r.window = minWindow - 1;
-        vm.expectRevert(CustodyGuardRail.GuardRail__WindowTooShort.selector);
+        vm.expectRevert(CustodyGuardRail.GuardRail__OutOfBounds.selector);
         account.setGuardRail(AD, r);
 
         // At the bounds: armed, then tightened to them at once.
@@ -519,12 +519,16 @@ contract CustodyGuardRailTest is Test {
         assertEq(account.guardRail(AD).rail.delay, maxDelay);
         // One second past them is refused even as a "tightening".
         r.delay = maxDelay + 1;
-        vm.expectRevert(CustodyGuardRail.GuardRail__DelayTooLong.selector);
+        vm.expectRevert(CustodyGuardRail.GuardRail__OutOfBounds.selector);
         account.setGuardRail(AD, r);
         r.delay = maxDelay;
         r.window = minWindow - 1;
-        vm.expectRevert(CustodyGuardRail.GuardRail__WindowTooShort.selector);
+        vm.expectRevert(CustodyGuardRail.GuardRail__OutOfBounds.selector);
         account.setGuardRail(AD, r);
+        // Nor can such a change be announced: a schedule that could never be spent only misleads a watcher.
+        r = _rail(0, maxDelay + 1);
+        vm.expectRevert(CustodyGuardRail.GuardRail__OutOfBounds.selector);
+        account.schedule(_adKey(AD), address(account), 0, abi.encodeCall(CustodyGuardRail.setGuardRail, (AD, r)));
         vm.stopPrank();
     }
 

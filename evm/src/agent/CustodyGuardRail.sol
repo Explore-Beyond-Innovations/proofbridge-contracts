@@ -130,8 +130,8 @@ abstract contract CustodyGuardRail {
     error GuardRail__ScopeMismatch();
     error GuardRail__VolumeExceeded();
     error GuardRail__SelfCall();
-    error GuardRail__DelayTooLong();
-    error GuardRail__WindowTooShort();
+    /// @notice R1: a delay over `MAX_GUARD_DELAY` or a window under `MIN_GUARD_WINDOW` (Soroban `GuardRailOutOfBounds`).
+    error GuardRail__OutOfBounds();
     /// @notice R3: while any ad is guarded, a call the allowlist doesn't name.
     error GuardRail__NotAllowed();
     error GuardRail__AdStillOpen();
@@ -162,8 +162,7 @@ abstract contract CustodyGuardRail {
         if (rail.capacity > type(uint128).max || rail.refillPerSecond > type(uint128).max) {
             revert GuardRail__BadGuardRail();
         }
-        if (rail.delay > MAX_GUARD_DELAY) revert GuardRail__DelayTooLong();
-        if (rail.window < MIN_GUARD_WINDOW) revert GuardRail__WindowTooShort();
+        _requireInBounds(rail.delay, rail.window);
         bytes32 key = keccak256(bytes(adId));
         Guard storage g = _guards[key];
         uint64 nowTs = uint64(block.timestamp);
@@ -247,6 +246,10 @@ abstract contract CustodyGuardRail {
         // A schedule that could never be spent would still publish an event a watcher reads as a pending call.
         Kind kind = _kindOf(action, adKey, target, data);
         if (kind != Kind.Delayed && kind != Kind.PerAd) revert GuardRail__NotAllowed();
+        if (target == address(this) && action == this.setGuardRail.selector) {
+            (, GuardRail memory next) = abi.decode(data[4:], (string, GuardRail));
+            _requireInBounds(next.delay, next.window);
+        }
         uint64 delay;
         uint64 window;
         if (scope == ACCOUNT_SCOPE) {
@@ -456,6 +459,10 @@ abstract contract CustodyGuardRail {
                 s.readyAt = notBefore;
             }
         }
+    }
+
+    function _requireInBounds(uint64 delay, uint64 window) private pure {
+        if (delay > MAX_GUARD_DELAY || window < MIN_GUARD_WINDOW) revert GuardRail__OutOfBounds();
     }
 
     function _clampWindow(bytes32 scope, uint64 window) private {
