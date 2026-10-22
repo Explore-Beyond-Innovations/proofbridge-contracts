@@ -985,7 +985,7 @@ async function isAgentPolicyCodec(address: string, signer: ethers.Wallet): Promi
 }
 
 /** The module a recorded CustodyAccountFactory mounts, or a named error when the address answers as no factory. */
-async function factoryModuleOf(address: string, signer: ethers.Signer, outPath: string): Promise<string> {
+async function factoryModuleOf(address: string, signer: ethers.Wallet, outPath: string): Promise<string> {
   try {
     const factory = attachContract(address, "CustodyAccountFactory", "CustodyAccountFactory", signer);
     const impl = attachContract(await factory.implementation(), "ProofBridgeCustodyAccount", "ProofBridgeCustodyAccount", signer);
