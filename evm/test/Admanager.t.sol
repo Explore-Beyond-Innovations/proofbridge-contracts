@@ -644,6 +644,22 @@ contract AdManagerTest is Test {
         adManager.lockForOrder(p, 0);
     }
 
+    // 643-b1: an order paying the maker (or its settlement signer) is refused at lock too
+    function test_643b1_lock_rejects_recipientIsTheMakerOrItsSigner() public {
+        test_fundAd_makerOnly();
+        IAdManager.OrderParams memory p = _defaultParams(lastAdId);
+        p.orderRecipient = p.adCreator;
+        vm.prank(maker);
+        vm.expectRevert(IAdManager.AdManager__RecipientIsMaker.selector);
+        adManager.lockForOrder(p, 0);
+        // a signer distinct from the creator; the recipient check runs before the signer-match check
+        p.adSettlementSigner = bytes32(uint256(uint160(address(0x5157))));
+        p.orderRecipient = p.adSettlementSigner;
+        vm.prank(maker);
+        vm.expectRevert(IAdManager.AdManager__RecipientIsMaker.selector);
+        adManager.lockForOrder(p, 0);
+    }
+
     // ─────────────────────────────────────────────────────────────
     // lockForOrder: rejects orderRecipient with dirty upper 12 bytes
     // ─────────────────────────────────────────────────────────────

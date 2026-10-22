@@ -225,6 +225,42 @@ mod validation_tests {
         });
     }
 
+    // 643-b1: the order's recipient is checked at the source, before the bridger's deposit lands
+    #[test]
+    fn test_643b1_validate_order_zero_order_recipient() {
+        let env = Env::default();
+        env.as_contract(&env.register(OrderPortalContract, ()), || {
+            let mut params = valid_params(&env);
+            params.order_recipient = zero_bytes32(&env);
+            setup_chain_and_route(&env, &params);
+            assert_eq!(
+                validation::validate_order(&env, &params),
+                Err(OrderPortalError::RecipientZero)
+            );
+        });
+    }
+
+    #[test]
+    fn test_643b1_validate_order_recipient_is_the_maker_or_its_signer() {
+        let env = Env::default();
+        env.as_contract(&env.register(OrderPortalContract, ()), || {
+            let mut params = valid_params(&env);
+            params.order_recipient = params.ad_creator.clone();
+            setup_chain_and_route(&env, &params);
+            assert_eq!(
+                validation::validate_order(&env, &params),
+                Err(OrderPortalError::RecipientIsMaker)
+            );
+            let mut params = valid_params(&env);
+            params.ad_settlement_signer = make_bytes32(&env, 0x5E);
+            params.order_recipient = params.ad_settlement_signer.clone();
+            assert_eq!(
+                validation::validate_order(&env, &params),
+                Err(OrderPortalError::RecipientIsMaker)
+            );
+        });
+    }
+
     #[test]
     fn test_validate_order_chain_not_supported() {
         let env = Env::default();

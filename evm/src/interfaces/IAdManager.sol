@@ -130,6 +130,8 @@ interface IAdManager is IEscrow {
     error AdManager__ActiveLocks();
     error AdManager__BridgerZero();
     error AdManager__RecipientZero();
+    /// @notice 643-b1: the order pays the ad's maker or its settlement signer (the dispute roles would collapse).
+    error AdManager__RecipientIsMaker();
     error AdManager__UsedAdId();
     error AdManager__OrderPortalMismatch(bytes32 expected, bytes32 provided);
     error AdManager__OrderChainMismatch(uint256 expected, uint256 provided);

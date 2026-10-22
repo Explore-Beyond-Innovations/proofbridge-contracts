@@ -154,6 +154,10 @@ pub enum OrderPortalError {
     TimelockExpired = 114,
     /// #586: a brake on what the proposal would re-enable was pulled after it was proposed.
     TimelockCancelledByBrake = 115,
+    /// 643-b1: the order pays nobody on the ad chain.
+    RecipientZero = 116,
+    /// 643-b1: the order pays the ad's maker or its settlement signer, which collapses the dispute roles.
+    RecipientIsMaker = 117,
 }
 
 /// The shared escrow code reports an opaque reason; this is where it becomes this contract's own

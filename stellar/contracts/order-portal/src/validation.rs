@@ -17,7 +17,7 @@ use crate::types::OrderParams;
 ///
 /// Checks:
 /// 1. Amount > 0
-/// 2. Ad recipient is non-zero
+/// 2. Ad recipient is non-zero; the order recipient is non-zero and isn't the maker or its signer
 /// 3. Destination chain is supported
 /// 4. AdManager matches chain configuration
 /// 5. Token route exists and matches
@@ -38,6 +38,16 @@ pub fn validate_order(env: &Env, params: &OrderParams) -> Result<(), OrderPortal
         return Err(OrderPortalError::InvalidAdRecipient);
     }
     let _ = token::bytes32_to_account_address(env, &params.ad_recipient)?;
+
+    // 643-b1: the relayer's R1/R2 at the source, so a direct create_order can't land a deposit no lock will take
+    if auth::is_zero_bytes32(&params.order_recipient) {
+        return Err(OrderPortalError::RecipientZero);
+    }
+    if params.order_recipient == params.ad_creator
+        || params.order_recipient == params.ad_settlement_signer
+    {
+        return Err(OrderPortalError::RecipientIsMaker);
+    }
 
     // Decimal range checks (both sides must be within supported bounds).
     decimal_scaling::assert_in_range(params.order_decimals).map_err(Fault::from)?;
