@@ -6094,3 +6094,30 @@ fn p46_fund_ad_refuses_a_token_that_isnt_the_ads() {
     );
     assert_eq!(liquidity(&e), 5_000_000);
 }
+
+/// 81-6 parity: a shorter window is a tightening, and applies to what is pending. Each pending row
+/// on the ad, and each account-wide row when the account's window shrinks, expires no later than
+/// its open time plus the new window. A row is never lengthened.
+#[test]
+fn p46_a_shorter_window_clamps_pending_schedules() {
+    let f = fixture();
+    let day = 86_400;
+    guard(&f, 0, 3_600, 7 * day);
+    let (up, _) = schedule_one_of_each(&f);
+    assert_eq!(clocks(&f, &up)[1], (T0 + 3_600, T0 + 3_600 + 7 * day));
+    guard(&f, 0, 3_600, day);
+    let want = (T0 + 3_600, T0 + 3_600 + day);
+    assert_eq!(
+        clocks(&f, &up),
+        [want; 4],
+        "every row now closes a day after it opens"
+    );
+    // A row whose own close is already sooner keeps it.
+    f.env.ledger().set_timestamp(T0 + 10);
+    f.client
+        .schedule(&Scope::Account, &up, &vec![&f.env, b32(&f.env, 9).to_val()]);
+    let short = f.client.scheduled(&Scope::Account, &up).unwrap();
+    assert_eq!(short.expires_at, T0 + 10 + 3_600 + day);
+    guard(&f, 0, 3_600, day);
+    assert_eq!(f.client.scheduled(&Scope::Account, &up).unwrap(), short);
+}

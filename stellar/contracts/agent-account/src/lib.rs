@@ -328,10 +328,12 @@ impl AgentAccount {
                     },
                     ..g
                 };
-                // The delays pending rows were timed under, read before this write changes them.
+                // The delays and windows pending rows were timed under, read before this write
+                // changes them.
                 let ad_delay_before = current.as_ref().map(|c| c.delay).unwrap_or(0);
-                let account_delay_before =
-                    policy::account_timelock(&env).map(|(d, _)| d).unwrap_or(0);
+                let ad_window_before = current.as_ref().map(|c| c.window).unwrap_or(u64::MAX);
+                let (account_delay_before, account_window_before) =
+                    policy::account_timelock(&env).unwrap_or((0, u64::MAX));
                 policy::put_guard_rail(&env, &ad_id, &armed)?;
                 // Settings the schedules were made under are gone, so the schedules go with them.
                 if loosening {
@@ -345,6 +347,15 @@ impl AgentAccount {
                     }
                     if armed.delay > account_delay_before {
                         policy::restamp(&env, &Scope::Account, now + armed.delay);
+                    }
+                    // 81-6: and closes within the NEW window, after any restamp moved it.
+                    if armed.window < ad_window_before {
+                        policy::clamp_windows(&env, &Scope::Ad(ad_id.clone()), armed.window);
+                    }
+                    if let Ok((_, w)) = policy::account_timelock(&env) {
+                        if w < account_window_before {
+                            policy::clamp_windows(&env, &Scope::Account, w);
+                        }
                     }
                 }
                 events::GuardRailSet {

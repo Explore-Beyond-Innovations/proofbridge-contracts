@@ -378,6 +378,20 @@ pub fn restamp(env: &Env, scope: &Scope, not_before: u64) {
     }
 }
 
+/// 81-6: a shorter window applies to what is pending. Every row in `scope` expires no later than
+/// its open time plus `window`; a row already closing sooner keeps its time, and none is lengthened.
+pub fn clamp_windows(env: &Env, scope: &Scope, window: u64) {
+    for a in actions_for(env, scope) {
+        if let Some(mut s) = get_schedule(env, scope, &a) {
+            let latest = s.ready_at.saturating_add(window);
+            if s.expires_at > latest {
+                s.expires_at = latest;
+                set_schedule(env, scope, &a, &s);
+            }
+        }
+    }
+}
+
 /// Account-wide changes that go through the timelock while any ad is guarded (D6).
 pub fn act_upgrade(env: &Env) -> Symbol {
     Symbol::new(env, "upgrade")
