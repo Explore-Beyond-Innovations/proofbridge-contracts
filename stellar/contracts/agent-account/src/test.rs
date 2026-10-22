@@ -3988,6 +3988,8 @@ fn c9_every_owner_only_entry_point_refuses_a_non_owner() {
         "policy",
         "is_revoked",
         "account_volume",
+        "account_timelock",
+        "account_timelock_without",
         "schema_version",
     ];
     let mut listed: std::collections::BTreeSet<std::string::String> = views
