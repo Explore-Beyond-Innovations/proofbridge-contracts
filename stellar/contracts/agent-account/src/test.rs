@@ -5417,3 +5417,151 @@ fn p46_a_malformed_lock_is_bad_args_before_any_reach_check() {
         AccountError::BadArgs,
     );
 }
+
+// ---------------------------------------------------------------------------
+// plan 46 review pass 1: the maker account's side of a dispute, against the real dispute manager
+// ---------------------------------------------------------------------------
+
+/// The escrow fixture with the real dispute manager wired in, an order locked on the account's ad,
+/// and the bridger's dispute filed against it. Returns (dispute manager, the order's params, its
+/// hash).
+fn disputed_order(e: &Escrow) -> (Address, OrderParams, BytesN<32>) {
+    let admin = Address::generate(&e.env);
+    let dm = e.env.register(dispute_manager::DisputeManagerContract, ());
+    let dmc = dispute_manager::DisputeManagerContractClient::new(&e.env, &dm);
+    let (token, tc) = token_of(e);
+    dmc.initialize(&admin, &token);
+    dmc.set_escrow(&e.ad_manager, &true);
+    dmc.set_arbiter(&Address::generate(&e.env));
+    dmc.set_protocol_fee_pool(&Address::generate(&e.env));
+    dmc.set_dispute_params(
+        &e.order_chain_id,
+        &proofbridge_core::types::DisputeParams {
+            challenge_period: 3_600,
+            bond_floor: 1_000,
+        },
+    );
+    let am = ad_manager::AdManagerContractClient::new(&e.env, &e.ad_manager);
+    am.set_dispute_manager(&dm);
+
+    let p = escrow_params(e, 400_000);
+    let order_hash: BytesN<32> = e.env.invoke_contract(
+        &e.ad_manager,
+        &Symbol::new(&e.env, "lock_for_order"),
+        vec![&e.env, p.clone().into_val(&e.env), 0u32.into_val(&e.env)],
+    );
+    let bridger =
+        proofbridge_core::token::bytes32_to_account_address(&e.env, &p.order_recipient).unwrap();
+    tc.mint(&bridger, &1_000_000_i128);
+    // the bridger authorizes the module's nested pull of its bond
+    e.env.mock_all_auths_allowing_non_root_auth();
+    am.dispute(&p, &bridger, &b32(&e.env, 0xE1));
+    (dm, p, order_hash)
+}
+
+/// 80-1: the maker account answers a dispute through `call`. The dispute manager asks the responder
+/// itself to authorize (`record_response`), which the account isn't the direct caller of, so the
+/// account pre-approves exactly that call: rooted, nothing nested, this account as the responder,
+/// for the escrow being called. With real authorization, end to end.
+#[test]
+fn p46_a_maker_account_answers_a_dispute_through_call() {
+    let e = escrow_fixture();
+    let (dm, p, order_hash) = disputed_order(&e);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    let respond = Symbol::new(&e.env, "respond_to_dispute");
+    let evidence = b32(&e.env, 0xE2);
+    let args = vec![
+        &e.env,
+        p.clone().into_val(&e.env),
+        e.account.to_val(),
+        evidence.to_val(),
+    ];
+    let approval_for = |escrow: &Address, responder: &Address| {
+        vec![
+            &e.env,
+            InvokerContractAuthEntry::Contract(soroban_sdk::auth::SubContractInvocation {
+                context: ContractContext {
+                    contract: dm.clone(),
+                    fn_name: Symbol::new(&e.env, "record_response"),
+                    args: vec![
+                        &e.env,
+                        escrow.to_val(),
+                        order_hash.to_val(),
+                        responder.to_val(),
+                        evidence.to_val(),
+                    ],
+                },
+                sub_invocations: Vec::new(&e.env),
+            }),
+        ]
+    };
+    let exp = e.env.ledger().sequence() + 100;
+    let owner_auth = |nonce: i64, approvals: &Vec<InvokerContractAuthEntry>| {
+        let inv = invocation(
+            &e.account,
+            "call",
+            std::vec![
+                sc_val(&e.env, e.ad_manager.to_val()),
+                sc_val(&e.env, respond.to_val()),
+                sc_val(&e.env, args.to_val()),
+                sc_val(&e.env, Option::<(Address, u128)>::None.into_val(&e.env)),
+                sc_val(&e.env, approvals.to_val()),
+            ],
+        );
+        entry(&e.owner, inv, nonce, exp, ScVal::Void, Creds::V2)
+    };
+
+    // No approval: the host refuses the responder's nested authorization.
+    let none: Vec<InvokerContractAuthEntry> = Vec::new(&e.env);
+    e.env.set_auths(&[owner_auth(31, &none)]);
+    assert!(client
+        .try_call(&e.ad_manager, &respond, &args, &None, &none)
+        .is_err());
+
+    // An approval naming someone else as the responder, or another escrow, is the account's to
+    // refuse.
+    // ...or one carrying a nested call (a transfer from the account riding on the answer).
+    let (token, _) = token_of(&e);
+    let mut with_child = approval_for(&e.ad_manager, &e.account);
+    if let InvokerContractAuthEntry::Contract(mut inv) = with_child.get(0).unwrap() {
+        inv.sub_invocations = vec![
+            &e.env,
+            InvokerContractAuthEntry::Contract(soroban_sdk::auth::SubContractInvocation {
+                context: ContractContext {
+                    contract: token.clone(),
+                    fn_name: Symbol::new(&e.env, "transfer"),
+                    args: vec![
+                        &e.env,
+                        e.account.to_val(),
+                        dm.to_val(),
+                        1_i128.into_val(&e.env),
+                    ],
+                },
+                sub_invocations: Vec::new(&e.env),
+            }),
+        ];
+        with_child.set(0, InvokerContractAuthEntry::Contract(inv));
+    }
+    for (nonce, wrong) in [
+        (32, approval_for(&e.ad_manager, &e.owner)),
+        (34, approval_for(&Address::generate(&e.env), &e.account)),
+        (35, with_child),
+    ] {
+        e.env.set_auths(&[owner_auth(nonce, &wrong)]);
+        assert_eq!(
+            call_err(client.try_call(&e.ad_manager, &respond, &args, &None, &wrong)),
+            Some(AccountError::BadApproval)
+        );
+    }
+
+    let right = approval_for(&e.ad_manager, &e.account);
+    e.env.set_auths(&[owner_auth(33, &right)]);
+    client.call(&e.ad_manager, &respond, &args, &None, &right);
+    let d = dispute_manager::DisputeManagerContractClient::new(&e.env, &dm)
+        .get_dispute(&order_hash)
+        .expect("the dispute is open");
+    assert_eq!(
+        d.responder_evidence, evidence,
+        "the maker's answer is recorded"
+    );
+}

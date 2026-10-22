@@ -100,7 +100,7 @@ pub fn call_with(
     let me = env.current_contract_address();
     let mut tokens: Vec<Address> = Vec::new(env);
     for a in approvals.iter() {
-        approved_tokens(env, &me, &a, true, &mut tokens)?;
+        approved_tokens(env, &me, target, &a, true, &mut tokens)?;
     }
     if let Some((t, _)) = &pay {
         if !tokens.contains(t) {
@@ -126,12 +126,18 @@ pub fn call_with(
     Ok(ret)
 }
 
-/// An approval is a token `transfer` from this account with nothing nested, or (at the root) an
-/// `open_dispute` whose nested calls are only such transfers. Anything else, an `approve` above all
-/// (an allowance outlives the call), is refused. Collects the tokens the transfers name.
+/// An approval is one of:
+///   - a token `transfer` from this account, with nothing nested;
+///   - at the root, an `open_dispute` whose nested calls are only such transfers;
+///   - at the root, a `record_response` with nothing nested, this account as the responder, for
+///     the escrow being called (80-1: the dispute manager asks the responder itself to authorize).
+///
+/// Anything else, an `approve` above all (an allowance outlives the call), is refused. Collects the
+/// tokens the transfers name.
 fn approved_tokens(
     env: &Env,
     me: &Address,
+    target: &Address,
     entry: &InvokerContractAuthEntry,
     root: bool,
     tokens: &mut Vec<Address>,
@@ -156,7 +162,20 @@ fn approved_tokens(
     }
     if root && c.fn_name == Symbol::new(env, "open_dispute") {
         for s in inv.sub_invocations.iter() {
-            approved_tokens(env, me, &s, false, tokens)?;
+            approved_tokens(env, me, target, &s, false, tokens)?;
+        }
+        return Ok(());
+    }
+    // `record_response(escrow, order_hash, responder, evidence)`: moves nothing.
+    if root && c.fn_name == Symbol::new(env, "record_response") {
+        let addr = |i: u32| {
+            c.args
+                .get(i)
+                .and_then(|v| Address::try_from_val(env, &v).ok())
+                .ok_or(AccountError::BadApproval)
+        };
+        if !inv.sub_invocations.is_empty() || addr(0)? != *target || addr(2)? != *me {
+            return Err(AccountError::BadApproval);
         }
         return Ok(());
     }

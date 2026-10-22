@@ -63,7 +63,8 @@ pub enum AccountError {
     /// Plan 46 D2: an owner call left the account holding a different balance of a token it touched.
     /// The account forwards what the owner pays in and never keeps or releases funds at rest.
     FundsLeft = 25,
-    /// Plan 46: an approval passed to `call` is not a token `transfer` from this account, or an
-    /// `open_dispute` whose nested calls are only such transfers.
+    /// Plan 46: an approval passed to `call` is not a token `transfer` from this account, an
+    /// `open_dispute` whose nested calls are only such transfers, or this account's own
+    /// `record_response` for the escrow being called.
     BadApproval = 26,
 }
