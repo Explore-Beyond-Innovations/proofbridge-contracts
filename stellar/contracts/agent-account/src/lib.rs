@@ -642,9 +642,7 @@ impl AgentAccount {
             ad_recipient.to_val(),
             settlement_signer.to_val(),
         ];
-        owner::pay_through(&env, &owner, &token, amount, &ad_manager, |env| {
-            env.invoke_contract::<()>(&ad_manager, &Symbol::new(env, "create_ad"), args);
-        })
+        owner::pay_and_call(&env, &owner, &ad_manager, "create_ad", args, token, amount)
     }
 
     /// Owner-only. Adds liquidity to one of this account's ads, from the owner's wallet in this one
@@ -666,9 +664,7 @@ impl AgentAccount {
             &owner::ad_token_of(&env, &ad_manager, &ad_id)?,
         )?;
         let args: Vec<Val> = vec![&env, ad_id.to_val(), amount.into_val(&env)];
-        owner::pay_through(&env, &owner, &token, amount, &ad_manager, |env| {
-            env.invoke_contract::<()>(&ad_manager, &Symbol::new(env, "fund_ad"), args);
-        })
+        owner::pay_and_call(&env, &owner, &ad_manager, "fund_ad", args, token, amount)
     }
 
     /// Owner-only. Any other call on a pinned escrow as this account: withdraw, close, a manual
