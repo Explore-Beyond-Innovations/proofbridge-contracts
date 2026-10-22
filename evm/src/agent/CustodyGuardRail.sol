@@ -43,8 +43,9 @@ interface IAgentPolicyAdmin {
  *           | --- | --- | --- |
  *           | any | native value | delayed (`NATIVE_OUT`) |
  *           | a pinned escrow | `withdrawFromAd`, `closeAd`, `lockForOrder` | per ad (above) |
+ *           | a pinned escrow | `setSettlementSigner` | per ad: always announced on a guarded ad (R2) |
  *           | a pinned escrow | `haltSettlement`, `dispute`, `respondToDispute` | instant |
- *           | a pinned escrow | `claimTo(token, to)` | delayed |
+ *           | a pinned escrow | `claimTo(token, to)`, `resumeSettlement` (R2) | delayed |
  *           | any | the dispute module's `claimTo(to)`, `claimTokenTo(token, to)` | delayed |
  *           | the policy module | `revokeAgent`, `clearTrustedForwarder`, unpinning, a lower account limit | instant |
  *           | the policy module | any other policy write, pinning, a higher limit, install, uninstall, forwarder, gas budget, tally reset | delayed |
@@ -95,6 +96,7 @@ abstract contract CustodyGuardRail {
     bytes4 internal constant WITHDRAW = IAdManager.withdrawFromAd.selector;
     bytes4 internal constant CLOSE = IAdManager.closeAd.selector;
     bytes4 internal constant LOCK = IAdManager.lockForOrder.selector;
+    bytes4 internal constant SET_SIGNER = IAdManager.setSettlementSigner.selector;
     bytes4 internal constant DM_CLAIM_TO = bytes4(keccak256("claimTo(address)"));
     bytes4 internal constant DM_CLAIM_TOKEN_TO = bytes4(keccak256("claimTokenTo(address,address)"));
 
@@ -282,7 +284,8 @@ abstract contract CustodyGuardRail {
         Guard storage g = _guards[adKey];
         if (!g.armed) return;
         uint256 amount = _amountOf(action, data);
-        if (action == CLOSE || amount > g.rail.threshold) {
+        // R2: re-pointing a guarded ad's settlement signer is always announced, like a close.
+        if (action == CLOSE || action == SET_SIGNER || amount > g.rail.threshold) {
             _spend(adKey, action, target, value, data);
             return;
         }
@@ -304,7 +307,8 @@ abstract contract CustodyGuardRail {
         if (target == address(m)) return _moduleKind(m, action, data);
         if (!m.isTargetPinned(address(this), target)) return Kind.Refused;
         if (adKey != bytes32(0)) return Kind.PerAd;
-        if (action == IEscrow.claimTo.selector) return Kind.Delayed;
+        // R2: undoing a halt waits; halting itself is instant.
+        if (action == IEscrow.claimTo.selector || action == IAdManager.resumeSettlement.selector) return Kind.Delayed;
         if (
             action == IAdManager.haltSettlement.selector || action == IAdManager.dispute.selector
                 || action == IAdManager.respondToDispute.selector
@@ -356,6 +360,10 @@ abstract contract CustodyGuardRail {
         }
         if (action == CLOSE) {
             (string memory adId,) = abi.decode(data[4:], (string, address));
+            return (action, keccak256(bytes(adId)));
+        }
+        if (action == SET_SIGNER) {
+            (string memory adId,) = abi.decode(data[4:], (string, bytes32));
             return (action, keccak256(bytes(adId)));
         }
         if (action == LOCK) {
@@ -436,6 +444,7 @@ abstract contract CustodyGuardRail {
         a[2] = LOCK;
         a[3] = this.setGuardRail.selector;
         a[4] = this.disarmGuardRail.selector;
+        a[5] = SET_SIGNER;
     }
 
     function _accountActions() private pure returns (bytes4[16] memory a) {
@@ -454,6 +463,7 @@ abstract contract CustodyGuardRail {
         a[11] = IAgentPolicyAdmin.resetAgentTally.selector;
         a[12] = _sweepSelector();
         a[13] = _transferOwnershipSelector();
+        a[14] = IAdManager.resumeSettlement.selector;
     }
 
     function _sweepSelector() internal pure virtual returns (bytes4);

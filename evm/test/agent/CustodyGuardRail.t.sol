@@ -511,6 +511,33 @@ contract CustodyGuardRailTest is Test {
         vm.stopPrank();
     }
 
+    /// R2 (81-b1): while guarded, undoing a halt waits, and so does re-pointing a guarded ad's settlement signer:
+    /// either lets a thief settle trades the owner stopped, or settle them under a key the thief holds. Halting
+    /// stays instant; an unguarded ad's signer moves at once.
+    function test_r2_resumeAndAGuardedAdsSignerWait() public {
+        bytes32 next = bytes32(uint256(0xbeef));
+        keys.set(next, true);
+        keys.approve(next, _b32(address(account)), true);
+        _createAd("unarmed", 10);
+        _guard(AD, 0);
+
+        _exec(abi.encodeCall(IAdManager.haltSettlement, ()));
+        bytes memory resume = abi.encodeCall(IAdManager.resumeSettlement, ());
+        _expectNotScheduled(resume);
+        bytes memory repoint = abi.encodeCall(IAdManager.setSettlementSigner, (AD, next));
+        _expectNotScheduled(repoint);
+        _exec(abi.encodeCall(IAdManager.setSettlementSigner, ("unarmed", next)));
+
+        vm.startPrank(owner);
+        account.schedule(ACCOUNT, address(adManager), 0, resume);
+        account.schedule(_adKey(AD), address(adManager), 0, repoint);
+        vm.warp(block.timestamp + DELAY);
+        account.execute(address(adManager), 0, resume);
+        account.execute(address(adManager), 0, repoint);
+        vm.stopPrank();
+        assertFalse(adManager.halted(address(account)));
+    }
+
     function test_a5_ownershipWaitsWhileGuarded() public {
         _guard(AD, 0);
         vm.prank(owner);
