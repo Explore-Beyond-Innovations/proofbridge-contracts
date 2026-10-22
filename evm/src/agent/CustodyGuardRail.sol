@@ -137,7 +137,7 @@ abstract contract CustodyGuardRail {
     /// @notice R3: while any ad is guarded, a call the allowlist doesn't name.
     error GuardRail__NotAllowed();
     error GuardRail__AdStillOpen();
-    /// P3-81-a: an instant closed-ad disarm that would lower the account's delay or shorten its window (the last ad
+    /// P3-81-a: an instant closed-ad disarm that would lower the account's delay or lengthen its window (the last ad
     /// always would); it comes off through its schedule instead.
     error GuardRail__DisarmLowersTimelock();
 
