@@ -211,6 +211,19 @@ contract CustodyAccountTest is Test {
         module.authorizeDirect(agentId, _execute(address(adManager), _lock(_order(AD, 100, 10))));
     }
 
+    /// 79-1: the account reports what the module has installed, not a fixed yes: an owner who uninstalls the hook
+    /// half leaves only the validator, and uninstalling both leaves neither.
+    function test_theAccountReportsTheModuleTypesActuallyInstalled() public {
+        assertTrue(account.isModuleInstalled(1, address(module), ""), "validator mounted");
+        assertTrue(account.isModuleInstalled(4, address(module), ""), "hook mounted");
+        assertFalse(account.isModuleInstalled(4, makeAddr("other-module"), ""), "another module is not ours");
+        _asOwner(address(module), abi.encodeCall(module.onUninstall, (abi.encode(uint256(4)))));
+        assertTrue(account.isModuleInstalled(1, address(module), ""), "the validator stays");
+        assertFalse(account.isModuleInstalled(4, address(module), ""), "the hook is gone");
+        _asOwner(address(module), abi.encodeCall(module.onUninstall, (abi.encode(uint256(1)))));
+        assertFalse(account.isModuleInstalled(1, address(module), ""), "neither is left");
+    }
+
     /*//////////////////////////////////////////////////////////////
                                THE OWNER
     //////////////////////////////////////////////////////////////*/

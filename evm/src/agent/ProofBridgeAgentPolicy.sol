@@ -340,6 +340,11 @@ contract ProofBridgeAgentPolicy is IValidator, IHook, IAgentPolicyCodecErrors {
         return _installedTypes[smartAccount] != 0;
     }
 
+    /// @notice Whether `smartAccount` has this module installed as `moduleTypeId` (the custody account's 7579 view).
+    function isTypeInstalled(address smartAccount, uint256 moduleTypeId) external view returns (bool) {
+        return _installedTypes[smartAccount] & _typeBit(moduleTypeId) != 0;
+    }
+
     /**
      * @notice Install one of the two types on the calling account.
      * @param data the module type id, and for the validator an optional `address[]` of escrows to

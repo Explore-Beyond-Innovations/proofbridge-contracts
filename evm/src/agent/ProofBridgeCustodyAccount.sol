@@ -13,6 +13,7 @@ interface IAgentPolicyDirect {
     function onInstall(bytes calldata data) external;
     function authorizeDirect(bytes32 agentId, bytes calldata callData) external;
     function isTargetPinned(address account, address target) external view returns (bool);
+    function isTypeInstalled(address account, uint256 moduleTypeId) external view returns (bool);
 }
 
 /**
@@ -190,10 +191,12 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient, CustodyGuardRail
         emit AgentExecuted(agentId, target, bytes4(data));
     }
 
-    /// @notice ERC-7579's question, answered for the one module this account mounts: the policy module reads it
-    ///         to confirm its hook half is in place.
+    /// @notice ERC-7579's question, answered for the one module this account mounts from the module's own record:
+    ///         the policy module reads it to confirm its hook half is in place.
     function isModuleInstalled(uint256 moduleTypeId, address module_, bytes calldata) external view returns (bool) {
-        return module_ == address(module) && (moduleTypeId == MODULE_TYPE_VALIDATOR || moduleTypeId == MODULE_TYPE_HOOK);
+        if (module_ != address(module)) return false;
+        if (moduleTypeId != MODULE_TYPE_VALIDATOR && moduleTypeId != MODULE_TYPE_HOOK) return false;
+        return module.isTypeInstalled(address(this), moduleTypeId);
     }
 
     /*//////////////////////////////////////////////////////////////
