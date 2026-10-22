@@ -5565,3 +5565,52 @@ fn p46_a_maker_account_answers_a_dispute_through_call() {
         "the maker's answer is recorded"
     );
 }
+
+fn sweep_args(f: &Fixture) -> Vec<Val> {
+    vec![
+        &f.env,
+        Address::generate(&f.env).to_val(),
+        f.owner.to_val(),
+        1_000_u128.into_val(&f.env),
+    ]
+}
+
+/// 80-2, 49S-1 for funds at rest: a pending sweep waits a raised delay like every other account-wide
+/// change, or a stolen key's 1-hour sweep lands after the owner arms a 7-day guard.
+#[test]
+fn p46_a_pending_sweep_waits_a_raised_delay() {
+    let f = fixture();
+    let sweep = sym_of(&f.env, "sweep");
+    guard(&f, 0, 3_600, 7 * 86_400);
+    f.client.schedule(&Scope::Account, &sweep, &sweep_args(&f));
+    assert_eq!(
+        f.client
+            .scheduled(&Scope::Account, &sweep)
+            .unwrap()
+            .ready_at,
+        T0 + 3_600
+    );
+    guard(&f, 0, 7 * 86_400, 7 * 86_400);
+    assert_eq!(
+        f.client
+            .scheduled(&Scope::Account, &sweep)
+            .unwrap()
+            .ready_at,
+        T0 + 7 * 86_400,
+        "the pending sweep waits the new delay"
+    );
+}
+
+/// 80-2: disarming clears a pending sweep with every other schedule, so a re-armed account can't be
+/// emptied by a row made under settings that are gone.
+#[test]
+fn p46_disarming_clears_a_pending_sweep() {
+    let f = fixture();
+    let sweep = sym_of(&f.env, "sweep");
+    guard(&f, 0, 3_600, 86_400);
+    f.client.schedule(&Scope::Account, &sweep, &sweep_args(&f));
+    schedule_guard(&f, &None);
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    f.client.set_guard_rail(&ad(&f.env), &None);
+    assert!(f.client.scheduled(&Scope::Account, &sweep).is_none());
+}

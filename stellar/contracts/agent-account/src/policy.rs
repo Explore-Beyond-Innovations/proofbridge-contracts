@@ -326,7 +326,7 @@ pub fn clear_schedule(env: &Env, scope: &Scope, action: &Symbol) {
 }
 
 /// The actions a scope can schedule.
-pub fn actions_for(env: &Env, scope: &Scope) -> [Symbol; 4] {
+pub fn actions_for(env: &Env, scope: &Scope) -> Vec<Symbol> {
     match scope {
         Scope::Ad(_) => ad_actions(env),
         Scope::Account => account_actions(env),
@@ -383,8 +383,9 @@ pub fn act_sweep(env: &Env) -> Symbol {
 }
 
 /// The per-ad calls an owner announces on a guarded ad.
-pub fn ad_actions(env: &Env) -> [Symbol; 4] {
-    [
+pub fn ad_actions(env: &Env) -> Vec<Symbol> {
+    soroban_sdk::vec![
+        env,
         withdraw_from_ad(env),
         close_ad(env),
         lock_for_order(env),
@@ -392,12 +393,16 @@ pub fn ad_actions(env: &Env) -> [Symbol; 4] {
     ]
 }
 
-pub fn account_actions(env: &Env) -> [Symbol; 4] {
-    [
+/// Every account-wide schedule, so a raised delay restamps each and a disarm or loosening clears
+/// each (80-2: `sweep` among them, the one way out for funds at rest).
+pub fn account_actions(env: &Env) -> Vec<Symbol> {
+    soroban_sdk::vec![
+        env,
         act_upgrade(env),
         act_set_policy(env),
         act_set_account_limit(env),
         act_set_targets(env),
+        act_sweep(env),
     ]
 }
 
