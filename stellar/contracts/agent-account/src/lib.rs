@@ -1,7 +1,9 @@
 //! AgentAccount — a maker's Soroban custom account (2.1c, #325).
 //!
 //! The account is the ad's maker on the AdManager escrow and an authorization gateway: it never
-//! holds funds between calls (plan 46). Two parties act through it:
+//! holds what the owner pays in (plan 46). Funds can still come to rest in it, a withdrawal or close
+//! paid to the account itself, a refunded dispute bond, a claimed credit, and leave only through
+//! `sweep`, timed while any ad is guarded. Two parties act through it:
 //!   - the **owner** (any `Address`, G or C, never this account) calls the account's own
 //!     functions with ordinary transactions: the configuration setters, and the ad actions
 //!     `create_ad` / `fund_ad` / `call` / `sweep` (owner.rs). Money the owner pays in goes from the

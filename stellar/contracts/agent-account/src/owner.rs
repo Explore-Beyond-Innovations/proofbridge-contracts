@@ -1,8 +1,9 @@
 //! The owner's ad actions (plan 46): what `create_ad`, `fund_ad`, `call` and `sweep` share.
 //!
-//! The account is the ad's maker and an authorization gateway; it never holds funds between calls.
-//! Money the owner pays in (a deposit, a top-up, a dispute bond) comes from the owner's wallet and
-//! goes on to the escrow in the same call. The escrow pulls it *from the account*, a call the
+//! The account is the ad's maker and an authorization gateway; it never holds what the owner pays
+//! in. Money the owner pays in (a deposit, a top-up, a dispute bond) comes from the owner's wallet
+//! and goes on to the escrow in the same call. (Funds can still come to rest here, a payout to the
+//! account or a refunded bond; they leave through `sweep`.) The escrow pulls it *from the account*, a call the
 //! account doesn't make itself, so the host asks the account to authorize it: the account
 //! pre-approves exactly that transfer (`authorize_as_current_contract`), and nothing else. Every
 //! touched token's balance is checked unchanged afterwards.

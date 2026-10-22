@@ -60,8 +60,9 @@ pub enum AccountError {
     /// Plan 46: `AccountSig::Owner` is no longer accepted. The owner acts through the account's own
     /// functions (`create_ad`, `fund_ad`, `call`, `sweep`), which every wallet can sign.
     OwnerPathRetired = 24,
-    /// Plan 46 D2: an owner call left the account holding a different balance of a token it touched.
-    /// The account forwards what the owner pays in and never keeps or releases funds at rest.
+    /// Plan 46 D2: an owner call left the account holding a different balance of a token it touched
+    /// (one its payment or an approval named). The account forwards what the owner pays in, and an
+    /// approval can't release funds at rest; those leave through `sweep`.
     FundsLeft = 25,
     /// Plan 46: an approval passed to `call` is not a token `transfer` from this account, an
     /// `open_dispute` whose nested calls are only such transfers, or this account's own
