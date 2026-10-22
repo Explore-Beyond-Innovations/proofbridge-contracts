@@ -71,6 +71,11 @@ pub fn decode_ad_call(
         arity(args, 2)?;
         arg::<Option<GuardRail>>(env, args, 1)?;
         Ok((arg(env, args, 0)?, 0))
+    } else if *action == policy::set_settlement_signer(env) {
+        // (ad_id, identity), as the escrow takes them.
+        arity(args, 2)?;
+        arg::<BytesN<32>>(env, args, 1)?;
+        Ok((arg(env, args, 0)?, 0))
     } else {
         Err(AccountError::ActionNotAllowed)
     }
@@ -88,12 +93,26 @@ pub fn check_account_call(env: &Env, action: &Symbol, args: &Vec<Val>) -> Result
         arity(args, 2)?;
         arg::<BytesN<32>>(env, args, 0)?;
         arg::<Limit>(env, args, 1)?;
+    } else if *action == policy::act_resume_settlement(env) {
+        // (maker), as the escrow takes it.
+        arity(args, 1)?;
+        arg::<Address>(env, args, 0)?;
+    } else if *action == policy::act_sweep(env) {
+        // (token, to, amount), as `sweep` takes them.
+        arity(args, 3)?;
+        arg::<Address>(env, args, 0)?;
+        arg::<Address>(env, args, 1)?;
+        arg::<u128>(env, args, 2)?;
     } else if *action == policy::act_set_policy(env) {
         // (agent_id, allowed_action, ad_tokens, order_tokens, valid_until, settlement_signer,
         // ad_scope), as `set_policy` takes them.
         arity(args, 7)?;
         let at = |i: u32| args.get(i).ok_or(AccountError::BadArgs);
-        arg::<BytesN<32>>(env, args, 0)?;
+        // `set_policy` refuses an all-zero agent id, so a schedule for one could never be spent.
+        let agent: BytesN<32> = arg(env, args, 0)?;
+        if agent == BytesN::from_array(env, &[0u8; 32]) {
+            return Err(AccountError::BadPolicy);
+        }
         arg::<Symbol>(env, args, 1)?;
         typed_vec::<TokenLimit>(env, &at(2)?)?;
         typed_vec::<BytesN<32>>(env, &at(3)?)?;

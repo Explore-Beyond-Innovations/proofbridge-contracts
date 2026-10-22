@@ -76,19 +76,27 @@ pub fn check_contract_call(
     // lock is for, before how much, before how much lately. A lock with two faults is refused for
     // the earlier one on every implementation, so the runtime's pre-flight reason is the chain's.
     //
-    // ---- reach ----
-    // `ad_creator` is the ad's maker, i.e. this account, always (the EVM escrow
-    // reverts NotMaker; the Stellar one does not check, so the account does).
+    // Every field the checks read is decoded first, so a malformed lock is `BadArgs` before any
+    // reach check, as the EVM module refuses an undecodable one first (plan 46 D11).
     let ad_creator: BytesN<32> = field(env, &lock, "ad_creator")?;
+    let settlement_signer = settlement_signer_of(env, &lock)?;
+    let ad_chain_token: BytesN<32> = field(env, &lock, "ad_chain_token")?;
+    let order_chain_token: BytesN<32> = field(env, &lock, "order_chain_token")?;
+    let ad_id: String = field(env, &lock, "ad_id")?;
+    let amount: u128 = field(env, &lock, "amount")?;
+    let order_decimals: u32 = field(env, &lock, "order_decimals")?;
+    let ad_decimals: u32 = field(env, &lock, "ad_decimals")?;
+
+    // ---- reach ----
+    // `ad_creator` is the ad's maker, i.e. this account, always. Both escrows enforce it now too;
+    // the account keeps its own check.
     if ad_creator != proofbridge_core::eip712::contract_address_to_bytes32(env) {
         return Err(AccountError::SettlementSignerMismatch);
     }
-    if settlement_signer_of(env, &lock)? != policy.settlement_signer {
+    if settlement_signer != policy.settlement_signer {
         return Err(AccountError::SettlementSignerMismatch);
     }
 
-    let ad_chain_token: BytesN<32> = field(env, &lock, "ad_chain_token")?;
-    let order_chain_token: BytesN<32> = field(env, &lock, "order_chain_token")?;
     // The ad-chain token must be an ad token (its row is the list, as on the EVM); the order-chain
     // token must be an order token. A token listed only in the other list is a miss.
     let token_limit =
@@ -97,7 +105,6 @@ pub fn check_contract_call(
         return Err(AccountError::TokenNotAllowed);
     }
 
-    let ad_id: String = field(env, &lock, "ad_id")?;
     if !policy::ad_in_scope(policy, &ad_id) {
         return Err(AccountError::AdNotAllowed);
     }
@@ -108,9 +115,6 @@ pub fn check_contract_call(
     // one number cannot be right for two assets of different value — 1,000,000 units is a few
     // cents of XLM and a few hundred dollars of wETH. Decimal scaling cannot fix that: it converts
     // units, and what differs here is worth, which nothing on chain knows.
-    let amount: u128 = field(env, &lock, "amount")?;
-    let order_decimals: u32 = field(env, &lock, "order_decimals")?;
-    let ad_decimals: u32 = field(env, &lock, "ad_decimals")?;
     let ad_amount = proofbridge_core::decimal_scaling::scale(amount, order_decimals, ad_decimals)
         .map_err(|_| AccountError::BadArgs)?;
     // A zero lock is refused here as it is by the EVM module and the relayer's check. The escrow
@@ -202,30 +206,55 @@ pub fn spend(
     Ok(())
 }
 
-/// The owner path's half of `check_contract_call` (2.1e).
+/// The guard rail on the owner's escrow calls (2.1e; since plan 46 run by `call`, not `__check_auth`).
 /// Instant to protect, slow to extract. Three calls move the maker's money out of reach and are
-/// constrained on a guarded ad; everything else the owner does — `set_settlement_signer`, funding,
-/// creating ads, and the token sub-contexts those spawn — passes exactly as before, because
-/// delaying a protective action only helps whoever stole the key.
+/// constrained on a guarded ad. While any ad is guarded, the rest must be on
+/// `policy::instant_escrow_calls` (R3: an allowlist, so an unclassified function is refused rather
+/// than let through), and those pass at once, because delaying a protective action only helps
+/// whoever stole the key. A token's own functions are never reached (80-3).
 ///
-/// **Not gated on `targets`.** An earlier version only ran this when the called contract was a
-/// pinned escrow, which `set_targets` — owner-only and instant — could simply point elsewhere,
-/// removing the guard without touching it. The selector and the ad are what matter; an unrelated
-/// contract that happens to share a name is only ever refused for an ad this owner guarded.
+/// **Keyed on the selector and the ad, not the target.** An earlier version only ran this when the
+/// called contract was a pinned escrow, which `set_targets` could point elsewhere, removing the
+/// guard without touching it. Since plan 46 `call` puts the target pin in front of this (only a
+/// pinned contract is reached at all, and adding one is scheduled while guarded), and this judges
+/// what is called on it.
 ///
 /// Like the agent path, this **writes**: spending a schedule removes it, and a sub-threshold
 /// withdrawal spends the bucket.
-pub fn check_owner_call(env: &Env, c: &ContractContext) -> Result<(), AccountError> {
+pub fn check_owner_call(env: &Env, fn_name: &Symbol, args: &Vec<Val>) -> Result<(), AccountError> {
+    // 80-3: no token is reached as the account, whatever the targets say.
+    if policy::is_token_function(env, fn_name) {
+        return Err(AccountError::FunctionNotAllowed);
+    }
+    // R2: resuming settlement waits out the account's delay while any ad is guarded.
+    if *fn_name == policy::act_resume_settlement(env) {
+        crate::args::check_account_call(env, fn_name, args)?;
+        if policy::any_guarded(env) {
+            return spend(
+                env,
+                &policy::Scope::Account,
+                fn_name,
+                args,
+                env.ledger().timestamp(),
+            );
+        }
+        return Ok(());
+    }
     let withdraw = policy::withdraw_from_ad(env);
     let close = policy::close_ad(env);
     let lock = policy::lock_for_order(env);
-    if c.fn_name != withdraw && c.fn_name != close && c.fn_name != lock {
+    let repoint = policy::set_settlement_signer(env);
+    if *fn_name != withdraw && *fn_name != close && *fn_name != lock && *fn_name != repoint {
+        // R3: while any ad is guarded, only the escrow functions the account has classified.
+        if policy::any_guarded(env) && !policy::instant_escrow_calls(env).contains(fn_name) {
+            return Err(AccountError::FunctionNotAllowed);
+        }
         return Ok(());
     }
 
     // Decoded in the call's full shape, the same decode `schedule` runs. Fail closed on anything
     // that does not decode: an extractive call the account cannot read is one it cannot judge.
-    let (ad_id, amount) = crate::args::decode_ad_call(env, &c.fn_name, &c.args)?;
+    let (ad_id, amount) = crate::args::decode_ad_call(env, fn_name, args)?;
 
     if !policy::is_guarded(env, &ad_id) {
         // Unguarded: every ad today, and a per-maker choice (design 02 §2.8). Absence means
@@ -240,7 +269,8 @@ pub fn check_owner_call(env: &Env, c: &ContractContext) -> Result<(), AccountErr
 
     // `close_ad` carries no amount and empties the ad, and the balance is unreadable without
     // re-entering the escrow that is calling us, so no threshold can gate it: always announced.
-    let announced = if c.fn_name == close {
+    // Re-pointing the signer moves no amount either (R2).
+    let announced = if *fn_name == close || *fn_name == repoint {
         true
     } else {
         amount > g.threshold
@@ -248,7 +278,7 @@ pub fn check_owner_call(env: &Env, c: &ContractContext) -> Result<(), AccountErr
 
     if announced {
         // Bound to the exact call: the amount and destination, or the exact order (C-32).
-        return spend(env, &policy::Scope::Ad(ad_id), &c.fn_name, &c.args, now);
+        return spend(env, &policy::Scope::Ad(ad_id), fn_name, args, now);
     }
 
     // Under the threshold, and still bounded: the bucket is what makes design 02 §2.8's residual a

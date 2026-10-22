@@ -21,6 +21,26 @@ pub const MAX_AD_SCOPE: u32 = 16;
 /// share, so one policy means the same on both chains. 512 so the largest policy's `PolicySet`
 /// (12,712 bytes) fits the network's 16,384-byte event limit; at 1,024 it did not.
 pub const MAX_AD_ID_BYTES: u32 = 512;
+
+/// R1: the longest delay and the shortest window a guard rail may have. Tightening is instant, so
+/// an unbounded one (a 1,000-year delay, a 1-second window) would freeze the ad for good: removing
+/// the rail waits out the current delay. Thirty days is long enough for any cool-off; an hour is
+/// long enough to make a matured call.
+pub const MAX_GUARD_DELAY: u64 = 30 * 86_400;
+pub const MIN_GUARD_WINDOW: u64 = 3_600;
+
+pub fn check_guard_bounds(g: &GuardRail) -> Result<(), AccountError> {
+    // A zero is a mis-set field before it is an out-of-range one.
+    if g.delay == 0 || g.window == 0 {
+        return Err(AccountError::BadGuardRail);
+    }
+    if g.delay > MAX_GUARD_DELAY || g.window < MIN_GUARD_WINDOW {
+        return Err(AccountError::GuardRailOutOfBounds);
+    }
+    Ok(())
+}
+/// The latest `valid_until` a policy may name: the EVM module's 48-bit bound, kept on both chains.
+pub const MAX_VALID_UNTIL: u64 = 1 << 48;
 /// Guarded ads per account. The roster lives in the instance, which is loaded on every call, so it
 /// is bounded for the same reason the token lists are.
 pub const MAX_GUARDED_ADS: u32 = 16;
@@ -234,13 +254,21 @@ pub fn any_guarded(env: &Env) -> bool {
 /// The delay and window an account-wide change must honour: the longest delay and the shortest
 /// window across every guarded ad, so no one ad's brake can be stepped around through the account.
 pub fn account_timelock(env: &Env) -> Result<(u64, u64), AccountError> {
-    let roster = guarded_ads(env);
-    if roster.is_empty() {
+    if guarded_ads(env).is_empty() {
         return Err(AccountError::NoGuardRail);
     }
+    timelock_without(env, None)
+}
+
+/// P3-80-a: (longest delay, shortest window) across the guarded ads, leaving `skip` out; (0, u64::MAX)
+/// when none is left. `disarm_closed_ad` and the timelock views read this one function.
+pub fn timelock_without(env: &Env, skip: Option<&String>) -> Result<(u64, u64), AccountError> {
     let mut delay = 0u64;
     let mut window = u64::MAX;
-    for ad in roster.iter() {
+    for ad in guarded_ads(env).iter() {
+        if skip == Some(&ad) {
+            continue;
+        }
         let g = get_guard_rail(env, &ad).ok_or(AccountError::GuardRailArchived)?;
         delay = delay.max(g.delay);
         window = window.min(g.window);
@@ -324,7 +352,7 @@ pub fn clear_schedule(env: &Env, scope: &Scope, action: &Symbol) {
 }
 
 /// The actions a scope can schedule.
-pub fn actions_for(env: &Env, scope: &Scope) -> [Symbol; 4] {
+pub fn actions_for(env: &Env, scope: &Scope) -> Vec<Symbol> {
     match scope {
         Scope::Ad(_) => ad_actions(env),
         Scope::Account => account_actions(env),
@@ -358,6 +386,20 @@ pub fn restamp(env: &Env, scope: &Scope, not_before: u64) {
     }
 }
 
+/// 81-6: a shorter window applies to what is pending. Every row in `scope` expires no later than
+/// its open time plus `window`; a row already closing sooner keeps its time, and none is lengthened.
+pub fn clamp_windows(env: &Env, scope: &Scope, window: u64) {
+    for a in actions_for(env, scope) {
+        if let Some(mut s) = get_schedule(env, scope, &a) {
+            let latest = s.ready_at.saturating_add(window);
+            if s.expires_at > latest {
+                s.expires_at = latest;
+                set_schedule(env, scope, &a, &s);
+            }
+        }
+    }
+}
+
 /// Account-wide changes that go through the timelock while any ad is guarded (D6).
 pub fn act_upgrade(env: &Env) -> Symbol {
     Symbol::new(env, "upgrade")
@@ -375,22 +417,45 @@ pub fn act_set_targets(env: &Env) -> Symbol {
     Symbol::new(env, "set_targets")
 }
 
+/// Plan 46 D8: funds at rest (a refunded bond, a claimed credit) leave only through `sweep`.
+pub fn act_sweep(env: &Env) -> Symbol {
+    Symbol::new(env, "sweep")
+}
+
+/// R2: re-pointing an ad's settlement signer waits out that ad's delay (a signer the thief holds
+/// settles trades against them), and resuming settlement waits out the account's (it turns
+/// settlement back on after the owner halted). Halting stays instant.
+pub fn set_settlement_signer(env: &Env) -> Symbol {
+    Symbol::new(env, "set_settlement_signer")
+}
+
+pub fn act_resume_settlement(env: &Env) -> Symbol {
+    Symbol::new(env, "resume_settlement")
+}
+
 /// The per-ad calls an owner announces on a guarded ad.
-pub fn ad_actions(env: &Env) -> [Symbol; 4] {
-    [
+pub fn ad_actions(env: &Env) -> Vec<Symbol> {
+    soroban_sdk::vec![
+        env,
         withdraw_from_ad(env),
         close_ad(env),
         lock_for_order(env),
         set_guard_rail(env),
+        set_settlement_signer(env),
     ]
 }
 
-pub fn account_actions(env: &Env) -> [Symbol; 4] {
-    [
+/// Every account-wide schedule, so a raised delay restamps each and a disarm or loosening clears
+/// each (80-2: `sweep` among them, the one way out for funds at rest).
+pub fn account_actions(env: &Env) -> Vec<Symbol> {
+    soroban_sdk::vec![
+        env,
         act_upgrade(env),
         act_set_policy(env),
         act_set_account_limit(env),
         act_set_targets(env),
+        act_sweep(env),
+        act_resume_settlement(env),
     ]
 }
 
@@ -492,6 +557,54 @@ pub fn close_ad(env: &Env) -> Symbol {
 /// Loosening or disarming a guard_rail: extractive, because it increases what the key can take.
 pub fn set_guard_rail(env: &Env) -> Symbol {
     Symbol::new(env, "set_guard_rail")
+}
+
+/// R3 (plan 46 review pass 1): while any ad is guarded, `call` reaches only escrow functions on
+/// this list or the timed ones (`ad_actions`, plus `resume_settlement`, R2). Each is classified;
+/// anything else is refused, so a stolen key can't reach a function nobody judged.
+///
+/// None of these lets the caller name where funds go. Each moves them only into the escrow, back to
+/// the ad's liquidity, or to an address fixed by the hash-bound order or the dispute record:
+///
+/// | function | why it's instant |
+/// | --- | --- |
+/// | `create_ad`, `fund_ad` | money goes in, from the owner's wallet |
+/// | `halt_settlement` | the incident response: it stops settlement, moves nothing |
+/// | `dispute`, `respond_to_dispute` | the maker's side of a dispute; the bond is paid in, the answer moves nothing |
+/// | `finalize_dispute` | pays per the ruling: the order's `order_recipient` (hash-bound) on a forfeit, the bond back to its filer or to the fee pool |
+/// | `claim_cancel`, `repin_order` | move nothing |
+/// | `finalize_cancel`, `cancel_never_locked` | release the lock back to the ad's liquidity |
+/// | `unlock`, `present_settled`, `record_settled` | pay the order's `order_recipient`, fixed in its hash, by proof |
+/// | `claim(recipient, token)` | pays `recipient` its own credit, nothing else; the caller can't name a destination. EVM's `claimTo(token, to)`, which can, is delayed there; Stellar's escrow has no such function |
+pub fn instant_escrow_calls(env: &Env) -> Vec<Symbol> {
+    let mut v = Vec::new(env);
+    for name in [
+        "create_ad",
+        "fund_ad",
+        "halt_settlement",
+        "dispute",
+        "respond_to_dispute",
+        "finalize_dispute",
+        "claim_cancel",
+        "finalize_cancel",
+        "cancel_never_locked",
+        "repin_order",
+        "unlock",
+        "present_settled",
+        "record_settled",
+        "claim",
+    ] {
+        v.push_back(Symbol::new(env, name));
+    }
+    v
+}
+
+/// 80-3: a token's own functions, never reached as the account through `call`, so funds at rest
+/// leave only through `sweep` (timed while guarded).
+pub fn is_token_function(env: &Env, fn_name: &Symbol) -> bool {
+    ["transfer", "transfer_from", "approve", "burn", "burn_from"]
+        .iter()
+        .any(|n| *fn_name == Symbol::new(env, n))
 }
 
 /// The account-wide row. Absence means *unconfigured* and refuses the lock; it never means
@@ -660,7 +773,10 @@ pub fn validate(env: &Env, policy: &AgentPolicy) -> Result<(), AccountError> {
     if proofbridge_core::auth::is_zero_bytes32(&policy.settlement_signer) {
         return Err(AccountError::BadPolicy);
     }
-    if policy.valid_until != 0 && policy.valid_until <= env.ledger().timestamp() {
+    // Past, or beyond the 48 bits the EVM module can carry (plan 46 D11: one bound on both chains).
+    if policy.valid_until != 0
+        && (policy.valid_until <= env.ledger().timestamp() || policy.valid_until > MAX_VALID_UNTIL)
+    {
         return Err(AccountError::BadPolicy);
     }
 

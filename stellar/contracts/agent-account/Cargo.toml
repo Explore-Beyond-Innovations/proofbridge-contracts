@@ -16,6 +16,7 @@ proofbridge-core = { workspace = true }
 soroban-sdk = { workspace = true, features = ["testutils", "alloc"] }
 ad-manager = { path = "../ad-manager", features = ["testutils"] }
 merkle-manager = { path = "../merkle-manager", features = ["testutils"] }
+dispute-manager = { path = "../dispute-manager", features = ["testutils"] }
 test-token = { path = "../test-token", features = ["testutils"] }
 ed25519-dalek = { workspace = true }
 k256 = { version = "0.13", features = ["ecdsa"] }
