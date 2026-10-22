@@ -387,7 +387,7 @@ impl AgentAccount {
     /// pinned escrow, this account's, not open, empty and with nothing locked: a dead ad has nothing
     /// left to extract, so its rail only holds the roster (16 ads at most) and the account-wide delay.
     /// Its schedules go with it, as on any disarm. A live ad's rail, and any whose removal would lower
-    /// the account-wide delay or shorten its window (P3-80-a; the last guarded ad always does), still
+    /// the account-wide delay or lengthen its window (P3-80-a; the last guarded ad always does), still
     /// come off only through `set_guard_rail(None)`.
     pub fn disarm_closed_ad(env: Env, escrow: Address, ad_id: String) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
@@ -399,7 +399,7 @@ impl AgentAccount {
         if !owner::is_closed_ad(&env, &escrow, &ad_id)? {
             return Err(AccountError::AdNotClosed);
         }
-        // P3-80-a: never at once if it lowers the account's delay or shortens its window (the last ad
+        // P3-80-a: never at once if it lowers the account's delay or lengthens its window (the last ad
         // always does); arming is instant and unchecked, so the roster's size proves nothing
         let (delay, window) = policy::timelock_without(&env, None)?;
         let (delay_after, window_after) = policy::timelock_without(&env, Some(&ad_id))?;
