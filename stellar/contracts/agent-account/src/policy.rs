@@ -268,6 +268,21 @@ pub fn account_timelock(env: &Env) -> Result<(u64, u64), AccountError> {
     Ok((delay, window))
 }
 
+/// P3-80-a: whether taking `ad_id` off the roster keeps the account's timelock as it is: another ad
+/// still holds a delay at least as long and a window at least as short. The last ad never does.
+pub fn timelock_holds_without(env: &Env, ad_id: &String) -> Result<bool, AccountError> {
+    let (delay, window) = account_timelock(env)?;
+    let mut held = (false, false);
+    for other in guarded_ads(env).iter() {
+        if other == *ad_id {
+            continue;
+        }
+        let g = get_guard_rail(env, &other).ok_or(AccountError::GuardRailArchived)?;
+        held = (held.0 || g.delay >= delay, held.1 || g.window <= window);
+    }
+    Ok(held.0 && held.1)
+}
+
 pub fn get_guard_rail(env: &Env, ad_id: &String) -> Option<GuardRail> {
     env.storage()
         .persistent()

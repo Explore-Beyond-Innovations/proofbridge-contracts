@@ -79,7 +79,8 @@ pub enum AccountError {
     /// 81-7: `disarm_closed_ad` on an ad that isn't closed: on the named escrow it isn't this
     /// account's, or is still open, holds a balance or has something locked.
     AdNotClosed = 29,
-    /// P2-80-a: `disarm_closed_ad` on the last guarded ad. An empty roster ends the account-wide gate,
-    /// so the last rail comes off only through `set_guard_rail(None)` and its schedule.
-    LastGuardRail = 30,
+    /// P3-80-a: `disarm_closed_ad` would lower the account-wide delay or shorten its window (the last
+    /// guarded ad, or the one holding the longest delay or shortest window). It comes off through
+    /// `set_guard_rail(None)` and its schedule instead.
+    DisarmLowersTimelock = 30,
 }

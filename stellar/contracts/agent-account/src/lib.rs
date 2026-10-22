@@ -386,8 +386,9 @@ impl AgentAccount {
     /// Owner-only. 81-7: take the rail off an ad this account closed, at once. The ad must be on a
     /// pinned escrow, this account's, not open, empty and with nothing locked: a dead ad has nothing
     /// left to extract, so its rail only holds the roster (16 ads at most) and the account-wide delay.
-    /// Its schedules go with it, as on any disarm. A live ad's rail, and the last guarded ad's (P2-80-a:
-    /// the account-wide gate ends with the roster), still come off only through `set_guard_rail(None)`.
+    /// Its schedules go with it, as on any disarm. A live ad's rail, and any whose removal would lower
+    /// the account-wide delay or shorten its window (P3-80-a; the last guarded ad always does), still
+    /// come off only through `set_guard_rail(None)`.
     pub fn disarm_closed_ad(env: Env, escrow: Address, ad_id: String) -> Result<(), AccountError> {
         policy::get_owner(&env).require_auth();
         proofbridge_core::ttl::extend_instance(&env);
@@ -398,9 +399,10 @@ impl AgentAccount {
         if !owner::is_closed_ad(&env, &escrow, &ad_id)? {
             return Err(AccountError::AdNotClosed);
         }
-        // P2-80-a: the last rail keeps its delay; an empty roster would ungate sweep and the rest at once
-        if policy::guarded_ads(&env).len() == 1 {
-            return Err(AccountError::LastGuardRail);
+        // P3-80-a: never at once if it lowers the account's delay or shortens its window (the last ad
+        // always does); arming is instant and unchecked, so the roster's size proves nothing
+        if !policy::timelock_holds_without(&env, &ad_id)? {
+            return Err(AccountError::DisarmLowersTimelock);
         }
         policy::remove_guard_rail(&env, &ad_id);
         policy::clear_all_schedules(&env, &ad_id);
