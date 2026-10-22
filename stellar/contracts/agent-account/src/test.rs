@@ -5648,6 +5648,61 @@ fn p46_disarming_clears_a_pending_sweep() {
     assert!(f.client.scheduled(&Scope::Account, &sweep).is_none());
 }
 
+/// P2-80-b (N15): a pending resume is an account-wide change like the rest: it waits a raised delay,
+/// and a disarm clears it.
+#[test]
+fn p46_p2_a_pending_resume_waits_a_raised_delay_and_a_disarm_clears_it() {
+    let f = fixture();
+    let resume = sym_of(&f.env, "resume_settlement");
+    let resume_args = vec![&f.env, f.account.to_val()];
+    guard(&f, 0, 3_600, 7 * 86_400);
+    f.client.schedule(&Scope::Account, &resume, &resume_args);
+    guard(&f, 0, 7 * 86_400, 7 * 86_400);
+    assert_eq!(
+        f.client
+            .scheduled(&Scope::Account, &resume)
+            .unwrap()
+            .ready_at,
+        T0 + 7 * 86_400,
+        "the pending resume waits the new delay"
+    );
+    schedule_guard(&f, &None);
+    f.env.ledger().set_timestamp(T0 + 7 * 86_400);
+    f.client.set_guard_rail(&ad(&f.env), &None);
+    assert!(f.client.scheduled(&Scope::Account, &resume).is_none());
+}
+
+/// P2-80-b (N19): a shorter window closes pending rows no later than their open time plus it, and
+/// never lengthens a row that already closes sooner.
+#[test]
+fn p46_p2_clamping_never_lengthens_a_row() {
+    let f = fixture();
+    let short = sym_of(&f.env, "sweep");
+    let long = sym_of(&f.env, "upgrade");
+    let c = BytesN::from_array(&f.env, &[7; 32]);
+    f.env.as_contract(&f.account, || {
+        let row = |expires_at| policy::Schedule {
+            commitment: c.clone(),
+            ready_at: T0,
+            expires_at,
+        };
+        policy::set_schedule(&f.env, &Scope::Account, &short, &row(T0 + 600));
+        policy::set_schedule(&f.env, &Scope::Account, &long, &row(T0 + 86_400));
+        policy::clamp_windows(&f.env, &Scope::Account, 3_600);
+        let at = |a| {
+            policy::get_schedule(&f.env, &Scope::Account, a)
+                .unwrap()
+                .expires_at
+        };
+        assert_eq!(at(&short), T0 + 600, "a row closing sooner keeps its time");
+        assert_eq!(
+            at(&long),
+            T0 + 3_600,
+            "a longer row closes within the new window"
+        );
+    });
+}
+
 /// An `open_dispute` approval as the escrow would make it: filed by this account against the escrow
 /// being called, with `subs` nested under it.
 fn open_dispute_approval(
@@ -6232,12 +6287,81 @@ fn p46_a_closed_ads_rail_comes_off_at_once() {
     );
 }
 
+/// P2-80-a: the last guarded ad's rail never comes off instantly, closed or not. An empty roster ends
+/// the account-wide gate, so a stolen owner key could disarm it and sweep what rests in the account.
+#[test]
+fn p46_p2_the_last_guarded_ad_keeps_the_account_gated() {
+    let e = escrow_fixture();
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    arm(&e, &client);
+    let withdraw = Symbol::new(&e.env, "withdraw_from_ad");
+    let withdraw_args = vec![
+        &e.env,
+        e.ad_id.to_val(),
+        5_000_000_u128.into_val(&e.env),
+        e.owner.to_val(),
+    ];
+    client.schedule(&Scope::Ad(e.ad_id.clone()), &withdraw, &withdraw_args);
+    e.env.ledger().set_timestamp(T0 + 3_600);
+    client.call(
+        &e.ad_manager,
+        &withdraw,
+        &withdraw_args,
+        &None,
+        &Vec::new(&e.env),
+    );
+    let close = Symbol::new(&e.env, "close_ad");
+    let close_args = vec![&e.env, e.ad_id.to_val(), e.owner.to_val()];
+    client.schedule(&Scope::Ad(e.ad_id.clone()), &close, &close_args);
+    e.env.ledger().set_timestamp(T0 + 7_200);
+    client.call(&e.ad_manager, &close, &close_args, &None, &Vec::new(&e.env));
+    let (token, tc) = token_of(&e);
+    tc.mint(&e.account, &777_i128);
+    let thief = Address::generate(&e.env);
+
+    assert_eq!(
+        client.try_disarm_closed_ad(&e.ad_manager, &e.ad_id),
+        Err(Ok(AccountError::LastGuardRail)),
+        "the last rail waits out its delay"
+    );
+    assert!(client.guarded_ads().contains(&e.ad_id));
+    assert_eq!(
+        client.try_sweep(&token, &thief, &777_u128),
+        Err(Ok(AccountError::NotScheduled)),
+        "funds at rest still wait"
+    );
+    assert_eq!(tc.balance(&thief), 0);
+}
+
+/// P2-80-a: with another ad still guarded, a closed ad's rail comes off at once and the account stays
+/// gated.
+#[test]
+fn p46_p2_a_closed_ad_disarms_at_once_while_another_ad_is_guarded() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let other = String::from_str(&f.env, "other");
+    f.client
+        .set_guard_rail(&other, &f.client.guard_rail(&ad(&f.env)));
+    StubEscrowClient::new(&f.env, &f.target).set_ad_shape(&f.account, &false, &0, &0);
+    f.client.disarm_closed_ad(&f.target, &ad(&f.env));
+    assert!(f.client.guard_rail(&ad(&f.env)).is_none());
+    assert_eq!(f.client.guarded_ads(), vec![&f.env, other]);
+    assert_eq!(
+        f.client.try_sweep(&f.target, &f.owner, &1_u128),
+        Err(Ok(AccountError::NotScheduled))
+    );
+}
+
 /// 81-7: "closed" is every field at once. A closed-looking ad still holding a balance, or with
 /// something locked, isn't closed. (The real escrow can't produce either, so the stub does.)
 #[test]
 fn p46_a_closed_ad_holds_nothing_and_locks_nothing() {
     let f = fixture();
     guard(&f, 0, 3_600, 86_400);
+    let other = String::from_str(&f.env, "other");
+    f.client
+        .set_guard_rail(&other, &f.client.guard_rail(&ad(&f.env)));
     let stub = StubEscrowClient::new(&f.env, &f.target);
     for (balance, locked) in [(1_u128, 0_u128), (0, 1)] {
         stub.set_ad_shape(&f.account, &false, &balance, &locked);
