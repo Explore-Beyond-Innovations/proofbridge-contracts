@@ -208,9 +208,10 @@ pub fn spend(
 
 /// The guard rail on the owner's escrow calls (2.1e; since plan 46 run by `call`, not `__check_auth`).
 /// Instant to protect, slow to extract. Three calls move the maker's money out of reach and are
-/// constrained on a guarded ad; everything else the owner does — `set_settlement_signer`, funding,
-/// creating ads, and the token sub-contexts those spawn — passes exactly as before, because
-/// delaying a protective action only helps whoever stole the key.
+/// constrained on a guarded ad. While any ad is guarded, the rest must be on
+/// `policy::instant_escrow_calls` (R3: an allowlist, so an unclassified function is refused rather
+/// than let through), and those pass at once, because delaying a protective action only helps
+/// whoever stole the key. A token's own functions are never reached (80-3).
 ///
 /// **Not gated on `targets`.** An earlier version only ran this when the called contract was a
 /// pinned escrow, which `set_targets` — owner-only and instant — could simply point elsewhere,
@@ -220,10 +221,18 @@ pub fn spend(
 /// Like the agent path, this **writes**: spending a schedule removes it, and a sub-threshold
 /// withdrawal spends the bucket.
 pub fn check_owner_call(env: &Env, fn_name: &Symbol, args: &Vec<Val>) -> Result<(), AccountError> {
+    // 80-3: no token is reached as the account, whatever the targets say.
+    if policy::is_token_function(env, fn_name) {
+        return Err(AccountError::FunctionNotAllowed);
+    }
     let withdraw = policy::withdraw_from_ad(env);
     let close = policy::close_ad(env);
     let lock = policy::lock_for_order(env);
     if *fn_name != withdraw && *fn_name != close && *fn_name != lock {
+        // R3: while any ad is guarded, only the escrow functions the account has classified.
+        if policy::any_guarded(env) && !policy::instant_escrow_calls(env).contains(fn_name) {
+            return Err(AccountError::FunctionNotAllowed);
+        }
         return Ok(());
     }
 

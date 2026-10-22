@@ -5735,3 +5735,129 @@ fn p46_fund_ad_reaches_pinned_targets_only() {
         Err(Ok(AccountError::TargetNotAllowed))
     );
 }
+
+fn arm(e: &Escrow, client: &AgentAccountClient) {
+    client.set_guard_rail(
+        &e.ad_id,
+        &Some(GuardRail {
+            threshold: 0,
+            delay: 3_600,
+            window: 86_400,
+            rate: Limit {
+                capacity: 1,
+                refill_per_second: 1,
+            },
+            bucket: Bucket {
+                level: 0,
+                last_ts: 0,
+            },
+        }),
+    );
+}
+
+/// 80-3: no token is reached as the account through `call`, whatever the targets say. With a token
+/// pinned (a misconfiguration the target list allows), its transfer, approve and burn functions are
+/// refused, so funds at rest still leave only through `sweep`.
+#[test]
+fn p46_call_never_reaches_a_token_function_even_on_a_pinned_token() {
+    let e = escrow_fixture();
+    let (token, tc) = token_of(&e);
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    client.set_targets(&vec![&e.env, e.ad_manager.clone(), token.clone()]);
+    let held = tc.balance(&e.account);
+    let thief = Address::generate(&e.env);
+    for (name, args) in [
+        (
+            "transfer",
+            vec![
+                &e.env,
+                e.account.to_val(),
+                thief.to_val(),
+                1_i128.into_val(&e.env),
+            ],
+        ),
+        (
+            "transfer_from",
+            vec![
+                &e.env,
+                e.account.to_val(),
+                e.account.to_val(),
+                thief.to_val(),
+                1_i128.into_val(&e.env),
+            ],
+        ),
+        (
+            "approve",
+            vec![
+                &e.env,
+                e.account.to_val(),
+                thief.to_val(),
+                1_i128.into_val(&e.env),
+                1_000_u32.into_val(&e.env),
+            ],
+        ),
+        (
+            "burn",
+            vec![&e.env, e.account.to_val(), 1_i128.into_val(&e.env)],
+        ),
+        (
+            "burn_from",
+            vec![
+                &e.env,
+                e.account.to_val(),
+                e.account.to_val(),
+                1_i128.into_val(&e.env),
+            ],
+        ),
+    ] {
+        let r = client.try_call(
+            &token,
+            &Symbol::new(&e.env, name),
+            &args,
+            &None,
+            &Vec::new(&e.env),
+        );
+        assert_eq!(
+            call_err(r),
+            Some(AccountError::FunctionNotAllowed),
+            "{name}"
+        );
+    }
+    assert_eq!(tc.balance(&e.account), held);
+}
+
+/// R3 (plan 46 review pass 1): while any ad is guarded, `call` reaches only the escrow functions the
+/// account knows. A protective one passes at once; anything not on the list is refused, so a stolen
+/// key can't reach a function nobody classified.
+#[test]
+fn p46_a_guarded_account_calls_only_known_escrow_functions() {
+    let e = escrow_fixture();
+    let client = AgentAccountClient::new(&e.env, &e.account);
+    e.env.mock_all_auths_allowing_non_root_auth();
+    let unknown = Symbol::new(&e.env, "set_fee_bps");
+    let unknown_args = vec![&e.env, 1_u32.into_val(&e.env), 1_u32.into_val(&e.env)];
+    let none = Vec::new(&e.env);
+    // Unguarded: the account doesn't judge it (the escrow refuses it, as it isn't the admin).
+    assert_ne!(
+        call_err(client.try_call(&e.ad_manager, &unknown, &unknown_args, &None, &none)),
+        Some(AccountError::FunctionNotAllowed)
+    );
+    arm(&e, &client);
+    assert_eq!(
+        call_err(client.try_call(&e.ad_manager, &unknown, &unknown_args, &None, &none)),
+        Some(AccountError::FunctionNotAllowed)
+    );
+    // Halting is the incident response: never delayed, never refused.
+    client.call(
+        &e.ad_manager,
+        &Symbol::new(&e.env, "halt_settlement"),
+        &vec![&e.env, e.account.to_val()],
+        &None,
+        &none,
+    );
+    let halt = ad_manager::AdManagerContractClient::new(&e.env, &e.ad_manager)
+        .halt_of(&e.account)
+        .unwrap();
+    assert!(halt.halted);
+}

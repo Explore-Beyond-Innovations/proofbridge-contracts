@@ -506,6 +506,52 @@ pub fn set_guard_rail(env: &Env) -> Symbol {
     Symbol::new(env, "set_guard_rail")
 }
 
+/// R3 (plan 46 review pass 1): while any ad is guarded, `call` reaches only escrow functions on
+/// this list or the extractive ones (`ad_actions`, timed by the guard rail). Each is classified;
+/// anything else is refused, so a stolen key can't reach a function nobody judged.
+///
+/// | function | why it's instant |
+/// | --- | --- |
+/// | `create_ad`, `fund_ad` | money goes in, from the owner's wallet |
+/// | `halt_settlement` | the incident response: it stops settlement |
+/// | `resume_settlement`, `set_settlement_signer` | protective or neutral today (R2 times them) |
+/// | `dispute`, `respond_to_dispute`, `finalize_dispute` | the maker's side of a dispute; the bond is paid in |
+/// | `claim_cancel`, `finalize_cancel`, `cancel_never_locked`, `repin_order` | an order's own rules decide who is paid |
+/// | `unlock`, `present_settled`, `record_settled` | settlement steps, paid by proof |
+/// | `claim` | pays only the credited recipient |
+pub fn instant_escrow_calls(env: &Env) -> Vec<Symbol> {
+    let mut v = Vec::new(env);
+    for name in [
+        "create_ad",
+        "fund_ad",
+        "halt_settlement",
+        "resume_settlement",
+        "set_settlement_signer",
+        "dispute",
+        "respond_to_dispute",
+        "finalize_dispute",
+        "claim_cancel",
+        "finalize_cancel",
+        "cancel_never_locked",
+        "repin_order",
+        "unlock",
+        "present_settled",
+        "record_settled",
+        "claim",
+    ] {
+        v.push_back(Symbol::new(env, name));
+    }
+    v
+}
+
+/// 80-3: a token's own functions, never reached as the account through `call`, so funds at rest
+/// leave only through `sweep` (timed while guarded).
+pub fn is_token_function(env: &Env, fn_name: &Symbol) -> bool {
+    ["transfer", "transfer_from", "approve", "burn", "burn_from"]
+        .iter()
+        .any(|n| *fn_name == Symbol::new(env, n))
+}
+
 /// The account-wide row. Absence means *unconfigured* and refuses the lock; it never means
 /// unlimited (2.3h: absence must not read as permission).
 #[contracttype]

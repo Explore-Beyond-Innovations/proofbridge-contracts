@@ -67,4 +67,8 @@ pub enum AccountError {
     /// `open_dispute` whose nested calls are only such transfers, or this account's own
     /// `record_response` for the escrow being called.
     BadApproval = 26,
+    /// `call` named a function the account doesn't make: a token's own functions always (no token is
+    /// reached as the account; funds at rest leave through `sweep`), and, while any ad is guarded,
+    /// any escrow function not on the account's list.
+    FunctionNotAllowed = 27,
 }
