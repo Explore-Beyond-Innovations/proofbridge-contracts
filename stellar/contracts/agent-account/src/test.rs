@@ -1712,6 +1712,8 @@ impl StubEscrow {
     pub fn close_ad(_env: Env, _ad_id: String, _to: Address) {}
     pub fn lock_for_order(_env: Env, _params: Map<Symbol, Val>, _slot: u32) {}
     pub fn set_settlement_signer(_env: Env, _ad_id: String, _signer: BytesN<32>) {}
+    pub fn halt_settlement(_env: Env, _maker: Address) {}
+    pub fn resume_settlement(_env: Env, _maker: Address) {}
     /// Takes nothing: an escrow that doesn't pull what the account paid in.
     pub fn fund_ad(_env: Env, _ad_id: String, _amount: u128) {}
 }
@@ -2560,20 +2562,17 @@ fn t52_protective_actions_are_never_delayed_on_a_guarded_ad() {
     let f = fixture();
     guard(&f, 0, 86_400, 86_400);
 
-    // Lever 3: re-point the ad's settlement identity, through the escrow.
-    let repoint = vec![
+    // Halting settlement, through the escrow: the incident response. (Re-pointing the settlement
+    // identity and resuming were here too; since R2 they wait out the delay.)
+    let halt = vec![
         &f.env,
         Context::Contract(ContractContext {
             contract: f.target.clone(),
-            fn_name: Symbol::new(&f.env, "set_settlement_signer"),
-            args: vec![
-                &f.env,
-                ad(&f.env).into_val(&f.env),
-                f.signer.into_val(&f.env),
-            ],
+            fn_name: Symbol::new(&f.env, "halt_settlement"),
+            args: vec![&f.env, f.account.to_val()],
         }),
     ];
-    owner_check(&f, &repoint).expect("re-pointing is protective");
+    owner_check(&f, &halt).expect("halting is protective");
 
     // Lever 1 is a call on the account itself, so it never reaches the context loop — but it must
     // still work with a guardrail armed.
@@ -2825,7 +2824,7 @@ fn t52_guardrail_input_is_validated() {
     // And only the ad's extractive selectors can be scheduled on an ad: not a protective call,
     // and not an account-wide one.
     guard(&f, 0, 1, 1);
-    for name in ["set_settlement_signer", "upgrade", "set_policy"] {
+    for name in ["halt_settlement", "upgrade", "set_policy"] {
         assert_eq!(
             f.client
                 .try_schedule(&ad_scope(&f.env), &Symbol::new(&f.env, name), &vec![&f.env],),
@@ -4557,12 +4556,13 @@ fn a_maximal_set_policy_schedule_fits_the_event_limit() {
 }
 
 /// The next-largest event: an owner lock carries the whole order. A guarded ad's id is bounded by
-/// the 250-byte ledger-key limit (`Schedule(Ad(id), "withdraw_from_ad")` is the longest key, 128
-/// bytes plus the id, XDR-padded to 4), so 120 bytes is the longest id that can be armed at all.
+/// the 250-byte ledger-key limit: `Schedule(Ad(id), "set_settlement_signer")` is the longest key
+/// since R2 (136 bytes plus the id, XDR-padded to 4), so 112 bytes is the longest id that can be
+/// armed at all, and a longer one fails closed. (Ad ids are 36-byte UUIDs.)
 #[test]
 fn a_lock_schedule_on_the_longest_schedulable_ad_id_fits_the_event_limit() {
     let f = fixture();
-    let long = "y".repeat(120);
+    let long = "y".repeat(112);
     let ad_id = String::from_str(&f.env, &long);
     f.client.set_guard_rail(&ad_id, &Some(rail(0, 1_000)));
     let mut order = params(&f);
@@ -4575,7 +4575,7 @@ fn a_lock_schedule_on_the_longest_schedulable_ad_id_fits_the_event_limit() {
     );
     let r = f.env.cost_estimate().resources();
     std::println!(
-        "lock on a 120-byte ad id: Scheduled event {} bytes (limit 16384)",
+        "lock on a 112-byte ad id: Scheduled event {} bytes (limit 16384)",
         r.contract_events_size_bytes
     );
     assert!(r.contract_events_size_bytes <= 16_384);
@@ -5860,4 +5860,59 @@ fn p46_a_guarded_account_calls_only_known_escrow_functions() {
         .halt_of(&e.account)
         .unwrap();
     assert!(halt.halted);
+}
+
+/// R2 (plan 46 review pass 1): on a guarded ad, re-pointing its settlement signer and resuming
+/// settlement wait out the delay. Either is a drain path for a stolen key (a signer it holds, or
+/// settlement turned back on after the owner halted), so neither may skip the guard. Halting stays
+/// instant.
+#[test]
+fn p46_resuming_and_repointing_the_signer_wait_out_the_delay() {
+    let f = fixture();
+    guard(&f, 0, 3_600, 86_400);
+    let none = Vec::new(&f.env);
+    let repoint = Symbol::new(&f.env, "set_settlement_signer");
+    let repoint_args = vec![&f.env, ad(&f.env).to_val(), b32(&f.env, 0x4f).to_val()];
+    let resume = Symbol::new(&f.env, "resume_settlement");
+    let resume_args = vec![&f.env, f.account.to_val()];
+    let run = |name: &Symbol, args: &Vec<Val>| {
+        f.client
+            .try_call(&f.target, name, args, &None, &none)
+            .map(|_| ())
+    };
+    assert_eq!(
+        run(&repoint, &repoint_args),
+        Err(Ok(AccountError::NotScheduled))
+    );
+    assert_eq!(
+        run(&resume, &resume_args),
+        Err(Ok(AccountError::NotScheduled))
+    );
+    f.client.call(
+        &f.target,
+        &Symbol::new(&f.env, "halt_settlement"),
+        &vec![&f.env, f.account.to_val()],
+        &None,
+        &none,
+    );
+
+    f.client
+        .schedule(&ad_scope(&f.env), &repoint, &repoint_args);
+    f.client.schedule(&Scope::Account, &resume, &resume_args);
+    assert_eq!(
+        run(&repoint, &repoint_args),
+        Err(Ok(AccountError::NotScheduled)),
+        "not matured"
+    );
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    // A schedule names the exact call: another signer isn't covered.
+    let other = vec![&f.env, ad(&f.env).to_val(), b32(&f.env, 0x50).to_val()];
+    assert_eq!(run(&repoint, &other), Err(Ok(AccountError::NotScheduled)));
+    assert_eq!(run(&repoint, &repoint_args), Ok(()));
+    assert_eq!(run(&resume, &resume_args), Ok(()));
+    assert_eq!(
+        run(&resume, &resume_args),
+        Err(Ok(AccountError::NotScheduled)),
+        "single use"
+    );
 }

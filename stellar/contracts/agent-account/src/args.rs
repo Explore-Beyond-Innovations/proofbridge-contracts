@@ -71,6 +71,11 @@ pub fn decode_ad_call(
         arity(args, 2)?;
         arg::<Option<GuardRail>>(env, args, 1)?;
         Ok((arg(env, args, 0)?, 0))
+    } else if *action == policy::set_settlement_signer(env) {
+        // (ad_id, identity), as the escrow takes them.
+        arity(args, 2)?;
+        arg::<BytesN<32>>(env, args, 1)?;
+        Ok((arg(env, args, 0)?, 0))
     } else {
         Err(AccountError::ActionNotAllowed)
     }
@@ -88,6 +93,10 @@ pub fn check_account_call(env: &Env, action: &Symbol, args: &Vec<Val>) -> Result
         arity(args, 2)?;
         arg::<BytesN<32>>(env, args, 0)?;
         arg::<Limit>(env, args, 1)?;
+    } else if *action == policy::act_resume_settlement(env) {
+        // (maker), as the escrow takes it.
+        arity(args, 1)?;
+        arg::<Address>(env, args, 0)?;
     } else if *action == policy::act_sweep(env) {
         // (token, to, amount), as `sweep` takes them.
         arity(args, 3)?;

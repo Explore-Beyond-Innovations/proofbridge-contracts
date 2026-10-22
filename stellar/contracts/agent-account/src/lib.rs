@@ -373,11 +373,12 @@ impl AgentAccount {
     /// argument list of that call, in call order; only `args_commitment(args)` is stored, and the
     /// call must match it. Per scope:
     ///   - `Ad(ad_id)`: `withdraw_from_ad [ad_id, amount, to]`, `close_ad [ad_id, to]`,
-    ///     `lock_for_order [order]`, `set_guard_rail [ad_id, Option<GuardRail>]`; timed by that
-    ///     ad's guardrail.
-    ///   - `Account`: `upgrade [new_wasm_hash]`, and the loosening `set_policy` /
-    ///     `set_account_limit` / `set_targets` with their own arguments; timed by the longest delay
-    ///     and shortest window across every guarded ad (D6).
+    ///     `lock_for_order [order]`, `set_guard_rail [ad_id, Option<GuardRail>]`,
+    ///     `set_settlement_signer [ad_id, identity]` (R2); timed by that ad's guardrail.
+    ///   - `Account`: `upgrade [new_wasm_hash]`, `sweep [token, to, amount]`,
+    ///     `resume_settlement [maker]` (R2), and the loosening `set_policy` / `set_account_limit` /
+    ///     `set_targets` with their own arguments; timed by the longest delay and shortest window
+    ///     across every guarded ad (D6).
     ///
     /// The args must have the call's shape (`BadArgs`) and, on an ad, name that ad
     /// (`ScopeMismatch`). `set_guard_rail` is committed with its bucket zeroed (live state the

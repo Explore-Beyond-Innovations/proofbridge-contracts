@@ -382,6 +382,17 @@ pub fn act_sweep(env: &Env) -> Symbol {
     Symbol::new(env, "sweep")
 }
 
+/// R2: re-pointing an ad's settlement signer waits out that ad's delay (a signer the thief holds
+/// settles trades against them), and resuming settlement waits out the account's (it turns
+/// settlement back on after the owner halted). Halting stays instant.
+pub fn set_settlement_signer(env: &Env) -> Symbol {
+    Symbol::new(env, "set_settlement_signer")
+}
+
+pub fn act_resume_settlement(env: &Env) -> Symbol {
+    Symbol::new(env, "resume_settlement")
+}
+
 /// The per-ad calls an owner announces on a guarded ad.
 pub fn ad_actions(env: &Env) -> Vec<Symbol> {
     soroban_sdk::vec![
@@ -390,6 +401,7 @@ pub fn ad_actions(env: &Env) -> Vec<Symbol> {
         close_ad(env),
         lock_for_order(env),
         set_guard_rail(env),
+        set_settlement_signer(env),
     ]
 }
 
@@ -403,6 +415,7 @@ pub fn account_actions(env: &Env) -> Vec<Symbol> {
         act_set_account_limit(env),
         act_set_targets(env),
         act_sweep(env),
+        act_resume_settlement(env),
     ]
 }
 
@@ -507,14 +520,13 @@ pub fn set_guard_rail(env: &Env) -> Symbol {
 }
 
 /// R3 (plan 46 review pass 1): while any ad is guarded, `call` reaches only escrow functions on
-/// this list or the extractive ones (`ad_actions`, timed by the guard rail). Each is classified;
+/// this list or the timed ones (`ad_actions`, plus `resume_settlement`, R2). Each is classified;
 /// anything else is refused, so a stolen key can't reach a function nobody judged.
 ///
 /// | function | why it's instant |
 /// | --- | --- |
 /// | `create_ad`, `fund_ad` | money goes in, from the owner's wallet |
 /// | `halt_settlement` | the incident response: it stops settlement |
-/// | `resume_settlement`, `set_settlement_signer` | protective or neutral today (R2 times them) |
 /// | `dispute`, `respond_to_dispute`, `finalize_dispute` | the maker's side of a dispute; the bond is paid in |
 /// | `claim_cancel`, `finalize_cancel`, `cancel_never_locked`, `repin_order` | an order's own rules decide who is paid |
 /// | `unlock`, `present_settled`, `record_settled` | settlement steps, paid by proof |
@@ -525,8 +537,6 @@ pub fn instant_escrow_calls(env: &Env) -> Vec<Symbol> {
         "create_ad",
         "fund_ad",
         "halt_settlement",
-        "resume_settlement",
-        "set_settlement_signer",
         "dispute",
         "respond_to_dispute",
         "finalize_dispute",

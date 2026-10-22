@@ -225,10 +225,25 @@ pub fn check_owner_call(env: &Env, fn_name: &Symbol, args: &Vec<Val>) -> Result<
     if policy::is_token_function(env, fn_name) {
         return Err(AccountError::FunctionNotAllowed);
     }
+    // R2: resuming settlement waits out the account's delay while any ad is guarded.
+    if *fn_name == policy::act_resume_settlement(env) {
+        crate::args::check_account_call(env, fn_name, args)?;
+        if policy::any_guarded(env) {
+            return spend(
+                env,
+                &policy::Scope::Account,
+                fn_name,
+                args,
+                env.ledger().timestamp(),
+            );
+        }
+        return Ok(());
+    }
     let withdraw = policy::withdraw_from_ad(env);
     let close = policy::close_ad(env);
     let lock = policy::lock_for_order(env);
-    if *fn_name != withdraw && *fn_name != close && *fn_name != lock {
+    let repoint = policy::set_settlement_signer(env);
+    if *fn_name != withdraw && *fn_name != close && *fn_name != lock && *fn_name != repoint {
         // R3: while any ad is guarded, only the escrow functions the account has classified.
         if policy::any_guarded(env) && !policy::instant_escrow_calls(env).contains(fn_name) {
             return Err(AccountError::FunctionNotAllowed);
@@ -253,7 +268,8 @@ pub fn check_owner_call(env: &Env, fn_name: &Symbol, args: &Vec<Val>) -> Result<
 
     // `close_ad` carries no amount and empties the ad, and the balance is unreadable without
     // re-entering the escrow that is calling us, so no threshold can gate it: always announced.
-    let announced = if *fn_name == close {
+    // Re-pointing the signer moves no amount either (R2).
+    let announced = if *fn_name == close || *fn_name == repoint {
         true
     } else {
         amount > g.threshold
