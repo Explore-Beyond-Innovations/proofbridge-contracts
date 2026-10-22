@@ -66,9 +66,8 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient, CustodyGuardRail
     /// @notice A funding call left the account holding a different balance than it started with.
     error CustodyAccount__FundsLeft(address token);
 
-    modifier onlyOwner() override {
+    function _checkOwner() internal view override {
         if (msg.sender != owner) revert CustodyAccount__NotOwner();
-        _;
     }
 
     constructor(IAgentPolicyDirect module_, address factory_) {

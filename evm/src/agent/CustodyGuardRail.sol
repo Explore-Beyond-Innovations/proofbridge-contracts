@@ -136,7 +136,13 @@ abstract contract CustodyGuardRail {
     error GuardRail__NotAllowed();
     error GuardRail__AdStillOpen();
 
-    modifier onlyOwner() virtual;
+    modifier onlyOwner() {
+        _checkOwner();
+        _;
+    }
+
+    /// @dev Reverts unless the caller is the account's owner (a virtual function: solc deprecates virtual modifiers).
+    function _checkOwner() internal view virtual;
 
     function _policyModule() internal view virtual returns (IAgentPolicyAdmin);
 
