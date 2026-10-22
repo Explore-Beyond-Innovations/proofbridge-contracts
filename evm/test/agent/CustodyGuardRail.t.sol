@@ -349,6 +349,39 @@ contract CustodyGuardRailTest is Test {
         _exec(w);
     }
 
+    /// 81-4 (R1): a guard rail is bounded, so neither a stolen key nor a slip can freeze an ad: a delay of at most
+    /// 30 days and a window of at least an hour. Inside the bounds, arming and tightening stay instant.
+    function test_r81_4_aGuardRailIsBoundedSoItCannotFreezeTheAd() public {
+        uint64 maxDelay = account.MAX_GUARD_DELAY();
+        uint64 minWindow = account.MIN_GUARD_WINDOW();
+        assertEq(maxDelay, 30 days);
+        assertEq(minWindow, 1 hours);
+        CustodyGuardRail.GuardRail memory r = _rail(0, maxDelay + 1);
+        vm.startPrank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__DelayTooLong.selector);
+        account.setGuardRail(AD, r);
+        r = _rail(0, DELAY);
+        r.window = minWindow - 1;
+        vm.expectRevert(CustodyGuardRail.GuardRail__WindowTooShort.selector);
+        account.setGuardRail(AD, r);
+
+        // At the bounds: armed, then tightened to them at once.
+        account.setGuardRail(AD, _rail(0, DELAY));
+        r = _rail(0, maxDelay);
+        r.window = minWindow;
+        account.setGuardRail(AD, r);
+        assertEq(account.guardRail(AD).rail.delay, maxDelay);
+        // One second past them is refused even as a "tightening".
+        r.delay = maxDelay + 1;
+        vm.expectRevert(CustodyGuardRail.GuardRail__DelayTooLong.selector);
+        account.setGuardRail(AD, r);
+        r.delay = maxDelay;
+        r.window = minWindow - 1;
+        vm.expectRevert(CustodyGuardRail.GuardRail__WindowTooShort.selector);
+        account.setGuardRail(AD, r);
+        vm.stopPrank();
+    }
+
     function test_a5_badSettingsAndTooManyGuardedAdsAreRefused() public {
         vm.startPrank(owner);
         vm.expectRevert(CustodyGuardRail.GuardRail__BadGuardRail.selector);

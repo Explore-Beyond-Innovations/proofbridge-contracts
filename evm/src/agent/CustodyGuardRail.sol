@@ -71,6 +71,10 @@ abstract contract CustodyGuardRail {
     /// @notice The scope of account-wide schedules; an ad's scope is `keccak256(bytes(adId))`.
     bytes32 public constant ACCOUNT_SCOPE = bytes32(0);
     uint256 public constant MAX_GUARDED_ADS = 16;
+    /// @notice R1 (81-4): the bounds a guard rail must sit inside, on both chains. Unbounded, a "tightening" to a
+    ///         centuries-long delay or a one-second window would freeze the ad, since removing the rail waits it out.
+    uint64 public constant MAX_GUARD_DELAY = 30 days;
+    uint64 public constant MIN_GUARD_WINDOW = 1 hours;
     /// @notice The action of a call that sends native value out of the account.
     bytes4 public constant NATIVE_OUT = 0xffffffff;
 
@@ -101,6 +105,8 @@ abstract contract CustodyGuardRail {
     error GuardRail__ScopeMismatch();
     error GuardRail__VolumeExceeded();
     error GuardRail__SelfCall();
+    error GuardRail__DelayTooLong();
+    error GuardRail__WindowTooShort();
 
     modifier onlyOwner() virtual;
 
@@ -112,7 +118,8 @@ abstract contract CustodyGuardRail {
 
     /**
      * @notice Arm or change an ad's guard rail. Arming and tightening are instant; a loosening needs a matured
-     *         schedule for exactly this call, and clears the ad's and the account's pending schedules.
+     *         schedule for exactly this call, and clears the ad's and the account's pending schedules. The delay is
+     *         at most `MAX_GUARD_DELAY` and the window at least `MIN_GUARD_WINDOW`.
      */
     function setGuardRail(string calldata adId, GuardRail calldata rail) external onlyOwner {
         if (rail.delay == 0 || rail.window == 0 || rail.capacity == 0 || rail.refillPerSecond == 0) {
@@ -121,6 +128,8 @@ abstract contract CustodyGuardRail {
         if (rail.capacity > type(uint128).max || rail.refillPerSecond > type(uint128).max) {
             revert GuardRail__BadGuardRail();
         }
+        if (rail.delay > MAX_GUARD_DELAY) revert GuardRail__DelayTooLong();
+        if (rail.window < MIN_GUARD_WINDOW) revert GuardRail__WindowTooShort();
         bytes32 key = keccak256(bytes(adId));
         Guard storage g = _guards[key];
         uint64 nowTs = uint64(block.timestamp);
