@@ -349,6 +349,96 @@ contract CustodyGuardRailTest is Test {
         _exec(w);
     }
 
+    /*//////////////////////////////////////////////////////////////
+          81-5: THE RULES NO TEST PINNED (each red under its mutation)
+    //////////////////////////////////////////////////////////////*/
+
+    /// M11: a shorter delay is a loosening, so it waits out the current one.
+    function test_r81_5_aShorterDelayIsALoosening() public {
+        _setRail(AD, _rail(0, DELAY * 2));
+        vm.prank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        account.setGuardRail(AD, _rail(0, DELAY));
+    }
+
+    /// M13: a longer delay restamps a pending account-wide schedule (a sweep), not only the ad's own.
+    function test_r81_5_aLongerDelayRestampsAPendingSweep() public {
+        _guard(AD, 0);
+        adToken.mint(address(account), 10);
+        bytes memory sw = abi.encodeCall(ProofBridgeCustodyAccount.sweep, (address(adToken), owner, 10));
+        vm.prank(owner);
+        account.schedule(ACCOUNT, address(account), 0, sw);
+        _setRail(AD, _rail(0, DELAY * 3));
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        account.sweep(address(adToken), owner, 10);
+        vm.warp(block.timestamp + DELAY * 2);
+        vm.prank(owner);
+        account.sweep(address(adToken), owner, 10);
+    }
+
+    /// M14: a loosening clears the account-wide schedules too: the settings they were made under are gone.
+    function test_r81_5_aLooseningClearsAPendingSweep() public {
+        _guard(AD, 0);
+        bytes memory sw = abi.encodeCall(ProofBridgeCustodyAccount.sweep, (address(adToken), owner, 10));
+        CustodyGuardRail.GuardRail memory looser = _rail(50, DELAY);
+        bytes memory loosen = abi.encodeCall(CustodyGuardRail.setGuardRail, (AD, looser));
+        vm.startPrank(owner);
+        account.schedule(ACCOUNT, address(account), 0, sw);
+        account.schedule(_adKey(AD), address(account), 0, loosen);
+        vm.warp(block.timestamp + DELAY);
+        account.setGuardRail(AD, looser);
+        vm.stopPrank();
+        assertEq(account.scheduled(ACCOUNT, ProofBridgeCustodyAccount.sweep.selector).readyAt, 0, "cleared");
+    }
+
+    /// M8 and M7: raising only the account limit's refill is a loosening; re-sending the same limit is not.
+    function test_r81_5_theAccountLimitIsLooserOnEitherNumberOnly() public {
+        bytes32 token = _b32(address(adToken));
+        _exec2(address(module), abi.encodeCall(module.setAccountLimit, (token, 5_000, 10)));
+        _guard(AD, 0);
+        _expectNotScheduled2(address(module), abi.encodeCall(module.setAccountLimit, (token, 5_000, 11)));
+        _exec2(address(module), abi.encodeCall(module.setAccountLimit, (token, 5_000, 10)));
+    }
+
+    /// M16: a schedule is not usable a second before it matures.
+    function test_r81_5_aScheduleIsNotUsableBeforeItMatures() public {
+        _guard(AD, 0);
+        bytes memory w = abi.encodeCall(IAdManager.withdrawFromAd, (AD, 5, owner));
+        vm.prank(owner);
+        account.schedule(_adKey(AD), address(adManager), 0, w);
+        vm.warp(block.timestamp + DELAY - 1);
+        _expectNotScheduled(w);
+        vm.warp(block.timestamp + 1);
+        _exec(w);
+    }
+
+    /// M29: changing the rail settles the old bucket first, so it can't hand back a full allowance.
+    function test_r81_5_changingTheRailKeepsWhatWasSpent() public {
+        _guardWithRate(AD, 10_000, 1_000, 1);
+        _exec(abi.encodeCall(IAdManager.withdrawFromAd, (AD, 900, owner)));
+        _guardWithRate(AD, 10_000, 900, 1); // a tightening: instant
+        vm.prank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__VolumeExceeded.selector);
+        account.execute(address(adManager), 0, abi.encodeCall(IAdManager.withdrawFromAd, (AD, 101, owner)));
+        _exec(abi.encodeCall(IAdManager.withdrawFromAd, (AD, 100, owner)));
+    }
+
+    /// M30: an account-wide schedule is usable for the shortest window across guarded ads.
+    function test_r81_5_anAccountScheduleUsesTheShortestWindow() public {
+        _guard(AD, 0);
+        _createAd("ad-2", 10);
+        CustodyGuardRail.GuardRail memory shortWindow = _rail(0, DELAY);
+        shortWindow.window = 2 hours;
+        _setRail("ad-2", shortWindow);
+        bytes memory sw = abi.encodeCall(ProofBridgeCustodyAccount.sweep, (address(adToken), owner, 10));
+        vm.prank(owner);
+        account.schedule(ACCOUNT, address(account), 0, sw);
+        CustodyGuardRail.Schedule memory sc = account.scheduled(ACCOUNT, ProofBridgeCustodyAccount.sweep.selector);
+        assertEq(sc.expiresAt - sc.readyAt, 2 hours);
+    }
+
     /// 81-4 (R1): a guard rail is bounded, so neither a stolen key nor a slip can freeze an ad: a delay of at most
     /// 30 days and a window of at least an hour. Inside the bounds, arming and tightening stay instant.
     function test_r81_4_aGuardRailIsBoundedSoItCannotFreezeTheAd() public {
