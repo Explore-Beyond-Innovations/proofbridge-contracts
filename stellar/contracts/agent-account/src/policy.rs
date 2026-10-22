@@ -555,14 +555,19 @@ pub fn set_guard_rail(env: &Env) -> Symbol {
 /// this list or the timed ones (`ad_actions`, plus `resume_settlement`, R2). Each is classified;
 /// anything else is refused, so a stolen key can't reach a function nobody judged.
 ///
+/// None of these lets the caller name where funds go. Each moves them only into the escrow, back to
+/// the ad's liquidity, or to an address fixed by the hash-bound order or the dispute record:
+///
 /// | function | why it's instant |
 /// | --- | --- |
 /// | `create_ad`, `fund_ad` | money goes in, from the owner's wallet |
-/// | `halt_settlement` | the incident response: it stops settlement |
-/// | `dispute`, `respond_to_dispute`, `finalize_dispute` | the maker's side of a dispute; the bond is paid in |
-/// | `claim_cancel`, `finalize_cancel`, `cancel_never_locked`, `repin_order` | an order's own rules decide who is paid |
-/// | `unlock`, `present_settled`, `record_settled` | settlement steps, paid by proof |
-/// | `claim` | pays only the credited recipient |
+/// | `halt_settlement` | the incident response: it stops settlement, moves nothing |
+/// | `dispute`, `respond_to_dispute` | the maker's side of a dispute; the bond is paid in, the answer moves nothing |
+/// | `finalize_dispute` | pays per the ruling: the order's `order_recipient` (hash-bound) on a forfeit, the bond back to its filer or to the fee pool |
+/// | `claim_cancel`, `repin_order` | move nothing |
+/// | `finalize_cancel`, `cancel_never_locked` | release the lock back to the ad's liquidity |
+/// | `unlock`, `present_settled`, `record_settled` | pay the order's `order_recipient`, fixed in its hash, by proof |
+/// | `claim(recipient, token)` | pays `recipient` its own credit, nothing else; the caller can't name a destination. EVM's `claimTo(token, to)`, which can, is delayed there; Stellar's escrow has no such function |
 pub fn instant_escrow_calls(env: &Env) -> Vec<Symbol> {
     let mut v = Vec::new(env);
     for name in [
