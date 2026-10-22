@@ -538,6 +538,29 @@ contract CustodyGuardRailTest is Test {
         assertFalse(adManager.halted(address(account)));
     }
 
+    /// 81-3: a nomination made before arming doesn't survive it (else the nominee takes the account with no
+    /// announcement), and standing a nomination down is protective, so it stays instant while guarded.
+    function test_r81_3_armingDropsAPendingNominationAndCancellingIsInstant() public {
+        vm.prank(owner);
+        account.transferOwnership(thief);
+        _guard(AD, 0);
+        assertEq(account.pendingOwner(), address(0), "arming dropped the nomination");
+        vm.prank(thief);
+        vm.expectRevert(ProofBridgeCustodyAccount.CustodyAccount__NotPendingOwner.selector);
+        account.acceptOwnership();
+
+        // A nomination made under the rail (scheduled), then stood down at once.
+        bytes memory nominate = abi.encodeCall(ProofBridgeCustodyAccount.transferOwnership, (thief));
+        vm.startPrank(owner);
+        account.schedule(ACCOUNT, address(account), 0, nominate);
+        vm.warp(block.timestamp + DELAY);
+        account.transferOwnership(thief);
+        assertEq(account.pendingOwner(), thief);
+        account.transferOwnership(address(0));
+        vm.stopPrank();
+        assertEq(account.pendingOwner(), address(0), "cancelled with no schedule");
+    }
+
     function test_a5_ownershipWaitsWhileGuarded() public {
         _guard(AD, 0);
         vm.prank(owner);

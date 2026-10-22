@@ -173,6 +173,7 @@ abstract contract CustodyGuardRail {
             level = settled > rail.capacity ? rail.capacity : settled;
         } else {
             if (_guarded.length >= MAX_GUARDED_ADS) revert GuardRail__BadGuardRail();
+            if (_guarded.length == 0) _onFirstGuard();
             _guarded.push(key);
         }
         g.rail = rail;
@@ -465,6 +466,9 @@ abstract contract CustodyGuardRail {
         a[13] = _transferOwnershipSelector();
         a[14] = IAdManager.resumeSettlement.selector;
     }
+
+    /// @dev The account is about to become guarded: whatever was pending under no rail must not survive it (81-3).
+    function _onFirstGuard() internal virtual;
 
     function _sweepSelector() internal pure virtual returns (bytes4);
     function _transferOwnershipSelector() internal pure virtual returns (bytes4);

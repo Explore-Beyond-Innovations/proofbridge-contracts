@@ -203,9 +203,10 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient, CustodyGuardRail
                                  OWNERSHIP
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Two steps. While any ad is guarded, starting a transfer needs a matured schedule for this call.
+    /// @notice Two steps. While any ad is guarded, starting a transfer needs a matured schedule for this call;
+    ///         standing one down (`newOwner` zero) is protective, so it is instant.
     function transferOwnership(address newOwner) external onlyOwner {
-        _gateSelf(this.transferOwnership.selector);
+        if (newOwner != address(0)) _gateSelf(this.transferOwnership.selector);
         pendingOwner = newOwner;
         emit OwnershipTransferStarted(owner, newOwner);
     }
@@ -264,6 +265,14 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient, CustodyGuardRail
 
     function _policyModule() internal view override returns (IAgentPolicyAdmin) {
         return IAgentPolicyAdmin(address(module));
+    }
+
+    /// @dev A nomination made before the rail was armed would complete with no announcement (81-3).
+    function _onFirstGuard() internal override {
+        if (pendingOwner != address(0)) {
+            pendingOwner = address(0);
+            emit OwnershipTransferStarted(owner, address(0));
+        }
     }
 
     function _sweepSelector() internal pure override returns (bytes4) {
