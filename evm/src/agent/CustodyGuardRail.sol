@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IAdManager} from "../interfaces/IAdManager.sol";
 import {IEscrow} from "../interfaces/IEscrow.sol";
 import {DecimalScaling} from "../libraries/DecimalScaling.sol";
@@ -18,6 +17,9 @@ interface IAgentPolicyAdmin {
     function onInstall(bytes calldata data) external;
     function onUninstall(bytes calldata data) external;
     function accountLimit(address account, bytes32 token) external view returns (AgentRateLimit.Limit memory);
+    function revokeAgent(bytes32 agentId) external;
+    function clearTrustedForwarder() external;
+    function isTargetPinned(address account, address target) external view returns (bool);
 }
 
 /**
@@ -33,13 +35,25 @@ interface IAgentPolicyAdmin {
  *         - **Per ad**: a withdraw above `threshold`, any close, and a manual lock above `threshold` need a matured
  *           schedule; below the threshold they spend a refilling bucket, so the unannounced flow is a rate, not
  *           the balance.
- *         - **Account-wide, while any ad is guarded**: moving funds out of the account (a token transfer, approval
- *           or transfer-from, native value, an escrow `claimTo`, `sweep`), any agent-policy write, a loosened
- *           account limit, a new pinned target, the module's install and uninstall, a trusted forwarder, a gas
- *           budget or tally reset, and an ownership transfer. Timed by the longest delay and the shortest window
- *           across guarded ads.
- *         - **Never delayed**: revoking an agent, unpinning a target, lowering an account limit, arming or
- *           tightening a guard rail. Delaying a protective action only helps whoever stole the key.
+ *         - **Account-wide, while any ad is guarded, owner calls are an allowlist (R3)**: every `execute` call
+ *           is one of the rows below, or it is refused (`GuardRail__NotAllowed`). A blocklist can't be complete:
+ *           tokens add ways to move funds (`transferAndCall`, ERC-777 `send`, DAI `push`/`move`).
+ *
+ *           | target | call | while guarded |
+ *           | --- | --- | --- |
+ *           | any | native value | delayed (`NATIVE_OUT`) |
+ *           | a pinned escrow | `withdrawFromAd`, `closeAd`, `lockForOrder` | per ad (above) |
+ *           | a pinned escrow | `haltSettlement`, `dispute`, `respondToDispute` | instant |
+ *           | a pinned escrow | `claimTo(token, to)` | delayed |
+ *           | any | the dispute module's `claimTo(to)`, `claimTokenTo(token, to)` | delayed |
+ *           | the policy module | `revokeAgent`, `clearTrustedForwarder`, unpinning, a lower account limit | instant |
+ *           | the policy module | any other policy write, pinning, a higher limit, install, uninstall, forwarder, gas budget, tally reset | delayed |
+ *           | this account | `sweep`, `transferOwnership` | delayed |
+ *           | anything else | | refused |
+ *
+ *           Delayed calls are timed by the longest delay and the shortest window across guarded ads.
+ *         - **Never delayed**: the protective rows above, and arming or tightening a guard rail. Delaying a
+ *           protective action only helps whoever stole the key.
  *
  *         Unlike Soroban, every agent-policy write is delayed while guarded, tightening included: deciding
  *         "tighter" needs the policy module's stored rows, and the module has no room left under EIP-170.
@@ -81,7 +95,16 @@ abstract contract CustodyGuardRail {
     bytes4 internal constant WITHDRAW = IAdManager.withdrawFromAd.selector;
     bytes4 internal constant CLOSE = IAdManager.closeAd.selector;
     bytes4 internal constant LOCK = IAdManager.lockForOrder.selector;
-    bytes4 internal constant INCREASE_ALLOWANCE = bytes4(keccak256("increaseAllowance(address,uint256)"));
+    bytes4 internal constant DM_CLAIM_TO = bytes4(keccak256("claimTo(address)"));
+    bytes4 internal constant DM_CLAIM_TOKEN_TO = bytes4(keccak256("claimTokenTo(address,address)"));
+
+    /// @dev How the allowlist treats a call while any ad is guarded (R3).
+    enum Kind {
+        Refused,
+        Instant,
+        PerAd,
+        Delayed
+    }
 
     mapping(bytes32 adKey => Guard) internal _guards;
     bytes32[] internal _guarded;
@@ -107,6 +130,8 @@ abstract contract CustodyGuardRail {
     error GuardRail__SelfCall();
     error GuardRail__DelayTooLong();
     error GuardRail__WindowTooShort();
+    /// @notice R3: while any ad is guarded, a call the allowlist doesn't name.
+    error GuardRail__NotAllowed();
 
     modifier onlyOwner() virtual;
 
@@ -186,6 +211,9 @@ abstract contract CustodyGuardRail {
      */
     function schedule(bytes32 scope, address target, uint256 value, bytes calldata data) external onlyOwner {
         (bytes4 action, bytes32 adKey) = _actionOf(target, value, data);
+        // A schedule that could never be spent would still publish an event a watcher reads as a pending call.
+        Kind kind = _kindOf(action, adKey, target, data);
+        if (kind != Kind.Delayed && kind != Kind.PerAd) revert GuardRail__NotAllowed();
         uint64 delay;
         uint64 window;
         if (scope == ACCOUNT_SCOPE) {
@@ -237,13 +265,12 @@ abstract contract CustodyGuardRail {
     ///      here before it runs.
     function _gate(address target, uint256 value, bytes calldata data) internal {
         if (target == address(this)) revert GuardRail__SelfCall();
+        if (_guarded.length == 0) return; // nothing guarded: a plain account
         (bytes4 action, bytes32 adKey) = _actionOf(target, value, data);
-        if (adKey != bytes32(0)) {
-            _gateAdCall(adKey, action, target, value, data);
-            return;
-        }
-        if (_guarded.length == 0 || !_isAccountGated(action, target, data)) return;
-        _spend(ACCOUNT_SCOPE, action, target, value, data);
+        Kind kind = _kindOf(action, adKey, target, data);
+        if (kind == Kind.Refused) revert GuardRail__NotAllowed();
+        if (kind == Kind.PerAd) _gateAdCall(adKey, action, target, value, data);
+        else if (kind == Kind.Delayed) _spend(ACCOUNT_SCOPE, action, target, value, data);
     }
 
     /// @dev For the account's own owner functions that are account-wide extractive (`sweep`, `transferOwnership`).
@@ -265,31 +292,51 @@ abstract contract CustodyGuardRail {
         g.bucket = next;
     }
 
-    /// @dev Whether an account-wide action needs its schedule while guarded.
-    function _isAccountGated(bytes4 action, address target, bytes calldata data) private view returns (bool) {
+    /// @dev The allowlist (R3): what a call is while any ad is guarded. `adKey` is set only for the per-ad selectors.
+    function _kindOf(bytes4 action, bytes32 adKey, address target, bytes calldata data) private view returns (Kind) {
+        if (action == NATIVE_OUT) return Kind.Delayed;
+        if (action == DM_CLAIM_TO || action == DM_CLAIM_TOKEN_TO) return Kind.Delayed;
+        if (target == address(this)) {
+            if (adKey != bytes32(0)) return Kind.PerAd; // setGuardRail / disarmGuardRail (schedules only)
+            return action == _sweepSelector() || action == _transferOwnershipSelector() ? Kind.Delayed : Kind.Refused;
+        }
+        IAgentPolicyAdmin m = _policyModule();
+        if (target == address(m)) return _moduleKind(m, action, data);
+        if (!m.isTargetPinned(address(this), target)) return Kind.Refused;
+        if (adKey != bytes32(0)) return Kind.PerAd;
+        if (action == IEscrow.claimTo.selector) return Kind.Delayed;
         if (
-            action == NATIVE_OUT || action == IERC20.transfer.selector || action == IERC20.approve.selector
-                || action == IERC20.transferFrom.selector || action == INCREASE_ALLOWANCE
-                || action == IEscrow.claimTo.selector
-        ) return true;
-        if (target != address(_policyModule())) return false;
+            action == IAdManager.haltSettlement.selector || action == IAdManager.dispute.selector
+                || action == IAdManager.respondToDispute.selector
+        ) return Kind.Instant;
+        return Kind.Refused;
+    }
+
+    function _moduleKind(IAgentPolicyAdmin m, bytes4 action, bytes calldata data) private view returns (Kind) {
+        if (
+            action == IAgentPolicyAdmin.revokeAgent.selector
+                || action == IAgentPolicyAdmin.clearTrustedForwarder.selector
+        ) {
+            return Kind.Instant;
+        }
         if (
             action == IAgentPolicyAdmin.setAgentPolicy.selector || action == IAgentPolicyAdmin.onInstall.selector
                 || action == IAgentPolicyAdmin.onUninstall.selector
                 || action == IAgentPolicyAdmin.setTrustedForwarder.selector
                 || action == IAgentPolicyAdmin.setAgentGasBudget.selector
                 || action == IAgentPolicyAdmin.resetAgentTally.selector
-        ) return true;
+        ) return Kind.Delayed;
         if (action == IAgentPolicyAdmin.setTargets.selector) {
             (, bool allowed) = abi.decode(data[4:], (address[], bool));
-            return allowed; // unpinning is protective
+            return allowed ? Kind.Delayed : Kind.Instant; // unpinning is protective
         }
         if (action == IAgentPolicyAdmin.setAccountLimit.selector) {
             (bytes32 token, uint256 capacity, uint256 refill) = abi.decode(data[4:], (bytes32, uint256, uint256));
-            AgentRateLimit.Limit memory cur = _policyModule().accountLimit(address(this), token);
-            return cur.capacity == 0 || capacity > cur.capacity || refill > cur.refillPerSecond;
+            AgentRateLimit.Limit memory cur = m.accountLimit(address(this), token);
+            bool looser = cur.capacity == 0 || capacity > cur.capacity || refill > cur.refillPerSecond;
+            return looser ? Kind.Delayed : Kind.Instant;
         }
-        return false; // revokeAgent, clearTrustedForwarder: protective
+        return Kind.Refused;
     }
 
     /// @dev The action a call is, and the ad it names for a per-ad action (zero otherwise). Malformed escrow
@@ -392,22 +439,21 @@ abstract contract CustodyGuardRail {
     }
 
     function _accountActions() private pure returns (bytes4[16] memory a) {
+        // Every Delayed row of the allowlist, so a longer delay restamps it and a loosening clears it.
         a[0] = NATIVE_OUT;
-        a[1] = IERC20.transfer.selector;
-        a[2] = IERC20.approve.selector;
-        a[3] = IERC20.transferFrom.selector;
-        a[4] = INCREASE_ALLOWANCE;
-        a[5] = IEscrow.claimTo.selector;
-        a[6] = IAgentPolicyAdmin.setAgentPolicy.selector;
-        a[7] = IAgentPolicyAdmin.setTargets.selector;
-        a[8] = IAgentPolicyAdmin.setAccountLimit.selector;
-        a[9] = IAgentPolicyAdmin.onInstall.selector;
-        a[10] = IAgentPolicyAdmin.onUninstall.selector;
-        a[11] = IAgentPolicyAdmin.setTrustedForwarder.selector;
-        a[12] = IAgentPolicyAdmin.setAgentGasBudget.selector;
-        a[13] = IAgentPolicyAdmin.resetAgentTally.selector;
-        a[14] = _sweepSelector();
-        a[15] = _transferOwnershipSelector();
+        a[1] = IEscrow.claimTo.selector;
+        a[2] = DM_CLAIM_TO;
+        a[3] = DM_CLAIM_TOKEN_TO;
+        a[4] = IAgentPolicyAdmin.setAgentPolicy.selector;
+        a[5] = IAgentPolicyAdmin.setTargets.selector;
+        a[6] = IAgentPolicyAdmin.setAccountLimit.selector;
+        a[7] = IAgentPolicyAdmin.onInstall.selector;
+        a[8] = IAgentPolicyAdmin.onUninstall.selector;
+        a[9] = IAgentPolicyAdmin.setTrustedForwarder.selector;
+        a[10] = IAgentPolicyAdmin.setAgentGasBudget.selector;
+        a[11] = IAgentPolicyAdmin.resetAgentTally.selector;
+        a[12] = _sweepSelector();
+        a[13] = _transferOwnershipSelector();
     }
 
     function _sweepSelector() internal pure virtual returns (bytes4);

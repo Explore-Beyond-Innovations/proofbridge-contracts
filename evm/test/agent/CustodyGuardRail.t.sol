@@ -403,9 +403,10 @@ contract CustodyGuardRailTest is Test {
         adToken.mint(address(account), 10);
         vm.deal(address(account), 10);
         vm.startPrank(owner);
-        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        // R3: a token is no target the account knows, so the call is refused outright; `sweep` is the way out.
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
         account.execute(address(adToken), 0, abi.encodeCall(IERC20.transfer, (thief, 10)));
-        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
         account.execute(address(adToken), 0, abi.encodeCall(IERC20.approve, (thief, 10)));
         vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
         account.execute(thief, 10, "");
@@ -448,6 +449,66 @@ contract CustodyGuardRailTest is Test {
         account.execute(address(sink), 5 ether, withdrawShaped);
         vm.stopPrank();
         assertEq(address(sink).balance, 5 ether);
+    }
+
+    /// R3: while any ad is guarded, an owner call is an allowlist. A target the account doesn't know, or a function
+    /// it doesn't list, is refused; this is what closes the token calls a blocklist misses (81-b2).
+    function test_r3_whileGuardedAnUnlistedCallIsRefused() public {
+        Sink sink = new Sink();
+        // Unguarded: the account is a plain account, as before.
+        _exec2(address(sink), abi.encodeWithSignature("transferAndCall(address,uint256,bytes)", thief, 1, ""));
+        _guard(AD, 0);
+        vm.startPrank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.execute(
+            address(sink), 0, abi.encodeWithSignature("transferAndCall(address,uint256,bytes)", thief, 1, "")
+        );
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.execute(address(sink), 0, abi.encodeWithSignature("send(address,uint256,bytes)", thief, 1, ""));
+        // An escrow function the list doesn't name (the wrappers fund ads, not execute).
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.execute(address(adManager), 0, abi.encodeCall(IAdManager.fundAd, (AD, 1)));
+        // A per-ad selector on a target that isn't a pinned escrow.
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.execute(address(sink), 0, abi.encodeCall(IAdManager.withdrawFromAd, (AD, 1, thief)));
+        // A module function the list doesn't name.
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.execute(address(module), 0, abi.encodeWithSignature("someNewSetter(uint256)", 1));
+        // And it can't be announced either: a schedule that could never be spent would only mislead a watcher.
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.schedule(ACCOUNT, address(adToken), 0, abi.encodeCall(IERC20.transfer, (thief, 10)));
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotAllowed.selector);
+        account.schedule(_adKey(AD), address(sink), 0, abi.encodeCall(IAdManager.withdrawFromAd, (AD, 1, thief)));
+        vm.stopPrank();
+    }
+
+    /// R3: the protective calls stay instant while guarded.
+    function test_r3_protectiveCallsStayInstantWhileGuarded() public {
+        bytes32 agentId = _b32(makeAddr("pod"));
+        _exec2(address(module), abi.encodeCall(module.setAccountLimit, (_b32(address(adToken)), 5_000, 10)));
+        _exec2(address(module), abi.encodeCall(module.setAgentPolicy, (agentId, _policy())));
+        _guard(AD, 0);
+        _exec(abi.encodeCall(IAdManager.haltSettlement, ()));
+        assertTrue(adManager.halted(address(account)));
+        _exec2(address(module), abi.encodeCall(module.revokeAgent, (agentId)));
+        assertTrue(module.isRevoked(address(account), agentId));
+    }
+
+    /// 81-2: the dispute module's own credit claims are announced and waited out, like the escrow's `claimTo`.
+    function test_r81_2_theDisputeModulesClaimsWait() public {
+        _guard(AD, 0);
+        Sink dm = new Sink();
+        bytes memory claim = abi.encodeWithSignature("claimTo(address)", owner);
+        bytes memory claimToken = abi.encodeWithSignature("claimTokenTo(address,address)", address(adToken), owner);
+        _expectNotScheduled2(address(dm), claim);
+        _expectNotScheduled2(address(dm), claimToken);
+        vm.startPrank(owner);
+        account.schedule(ACCOUNT, address(dm), 0, claim);
+        account.schedule(ACCOUNT, address(dm), 0, claimToken);
+        vm.warp(block.timestamp + DELAY);
+        account.execute(address(dm), 0, claim);
+        account.execute(address(dm), 0, claimToken);
+        vm.stopPrank();
     }
 
     function test_a5_ownershipWaitsWhileGuarded() public {
