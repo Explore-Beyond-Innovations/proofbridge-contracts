@@ -109,13 +109,16 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient, CustodyGuardRail
         _payDone(adToken, before);
     }
 
-    /// @notice Add liquidity to one of this account's ads from the owner's wallet, as `createAdFunded`.
-    function fundAdFunded(IAdManager adManager, string calldata adId, address adToken, uint256 amount)
+    /// @notice Add liquidity to one of this account's ads from the owner's wallet, as `createAdFunded`. The token is
+    ///         the ad's own, read from the escrow (81-8).
+    function fundAdFunded(IAdManager adManager, string calldata adId, uint256 amount)
         external
         payable
         onlyOwner
         nonReentrant
     {
+        _requirePinned(adManager);
+        (,, address adToken,,,,,,) = adManager.ads(adId);
         uint256 before = _payIn(adManager, adToken, amount, address(adManager));
         adManager.fundAd{value: msg.value}(adId, amount);
         _payDone(adToken, before);
@@ -230,9 +233,7 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient, CustodyGuardRail
         private
         returns (uint256 before)
     {
-        if (!module.isTargetPinned(address(this), address(adManager))) {
-            revert CustodyAccount__NotPinned(address(adManager));
-        }
+        _requirePinned(adManager);
         if (token.isNative()) {
             if (msg.value != amount) revert CustodyAccount__ValueMismatch(msg.value, amount);
             return address(this).balance - msg.value;
@@ -241,6 +242,12 @@ contract ProofBridgeCustodyAccount is ReentrancyGuardTransient, CustodyGuardRail
         before = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(owner, address(this), amount);
         IERC20(token).forceApprove(spender, amount);
+    }
+
+    function _requirePinned(IAdManager adManager) private view {
+        if (!module.isTargetPinned(address(this), address(adManager))) {
+            revert CustodyAccount__NotPinned(address(adManager));
+        }
     }
 
     /// @dev Nothing stays behind. The escrow or dispute module pulls exactly the approved amount, which spends the

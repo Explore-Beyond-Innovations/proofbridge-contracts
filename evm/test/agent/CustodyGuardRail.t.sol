@@ -28,9 +28,19 @@ import {MockRootVerifier} from "../mocks/MockRootVerifier.sol";
 /// cases the real `AdManager` can't produce for the pass-through's own checks.
 contract SkimEscrow {
     address public disputeManager;
+    address internal token;
 
-    constructor(address dm) {
+    constructor(address dm, address t) {
         disputeManager = dm;
+        token = t;
+    }
+
+    function ads(string calldata)
+        external
+        view
+        returns (address, bool, address, uint256, bytes32, bytes32, bytes32, uint256, uint256)
+    {
+        return (msg.sender, true, token, 0, bytes32(0), bytes32(0), bytes32(0), 0, 0);
     }
 
     function fundAd(string calldata, uint256) external payable {}
@@ -136,7 +146,7 @@ contract CustodyGuardRailTest is Test {
 
     function test_a4_fundAdFundedTopsUpTheSameWay() public {
         vm.prank(owner);
-        account.fundAdFunded(adManager, AD, address(adToken), 1_000);
+        account.fundAdFunded(adManager, AD, 1_000);
         assertEq(adManager.availableLiquidity(AD), AD_FUNDS + 1_000);
         assertEq(adToken.balanceOf(address(account)), 0);
         assertEq(adToken.allowance(address(account), address(adManager)), 0);
@@ -149,6 +159,11 @@ contract CustodyGuardRailTest is Test {
         );
         assertEq(adManager.availableLiquidity("native-ad"), 1 ether);
         assertEq(address(account).balance, 0);
+        // 81-8: a top-up reads the ad's own token, so a native ad's value rides on the call the same way.
+        vm.prank(owner);
+        account.fundAdFunded{value: 1 ether}(adManager, "native-ad", 1 ether);
+        assertEq(adManager.availableLiquidity("native-ad"), 2 ether);
+        assertEq(address(account).balance, 0);
 
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ProofBridgeCustodyAccount.CustodyAccount__ValueMismatch.selector, 1, 2));
@@ -160,12 +175,12 @@ contract CustodyGuardRailTest is Test {
     function test_a4_onlyTheOwnerFundsAndOnlyAPinnedEscrow() public {
         vm.prank(thief);
         vm.expectRevert(ProofBridgeCustodyAccount.CustodyAccount__NotOwner.selector);
-        account.fundAdFunded(adManager, AD, address(adToken), 1);
+        account.fundAdFunded(adManager, AD, 1);
 
         address other = makeAddr("not-pinned");
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ProofBridgeCustodyAccount.CustodyAccount__NotPinned.selector, other));
-        account.fundAdFunded(IAdManager(other), AD, address(adToken), 1);
+        account.fundAdFunded(IAdManager(other), AD, 1);
     }
 
     /// The pass-through's own check: an escrow that doesn't take what was paid in leaves funds in the account,
@@ -176,7 +191,7 @@ contract CustodyGuardRailTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(ProofBridgeCustodyAccount.CustodyAccount__FundsLeft.selector, address(adToken))
         );
-        acct.fundAdFunded(IAdManager(address(skim)), AD, address(adToken), 500);
+        acct.fundAdFunded(IAdManager(address(skim)), AD, 500);
         assertEq(adToken.balanceOf(address(acct)), 0);
     }
 
@@ -802,7 +817,7 @@ contract CustodyGuardRailTest is Test {
 
     function _accountWithSkimEscrow() internal returns (ProofBridgeCustodyAccount acct, SkimEscrow skim, BondTaker dm) {
         dm = new BondTaker(IERC20(address(adToken)), 777);
-        skim = new SkimEscrow(address(dm));
+        skim = new SkimEscrow(address(dm), address(adToken));
         address[] memory targets = new address[](1);
         targets[0] = address(skim);
         vm.prank(owner);
