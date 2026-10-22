@@ -498,6 +498,7 @@ contract CustodyGuardRailTest is Test {
     function test_r81_7_disarmingAClosedEmptyAdIsInstant() public {
         _createAd("dead", 10);
         _guard("dead", 0);
+        _guard(AD, 0); // P2-81-a: not the last guarded ad
         vm.startPrank(owner);
         vm.expectRevert(CustodyGuardRail.GuardRail__AdStillOpen.selector);
         account.disarmClosedAd(adManager, "dead");
@@ -511,7 +512,49 @@ contract CustodyGuardRailTest is Test {
         account.disarmClosedAd(adManager, "dead");
         vm.stopPrank();
         assertFalse(account.guardRail("dead").armed);
-        assertEq(account.guardedAds().length, 0);
+        assertEq(account.guardedAds().length, 1);
+    }
+
+    /// P2-81-a: the last guarded ad's rail never comes off at once, closed or not. An empty roster ends the
+    /// account-wide gate, so a stolen owner key could disarm it and sweep what rests in the account.
+    function test_p2_81_a_theLastGuardedAdKeepsTheAccountGated() public {
+        _createAd("dead", 10);
+        _guard("dead", 0);
+        bytes memory close = abi.encodeCall(IAdManager.closeAd, ("dead", owner));
+        vm.startPrank(owner);
+        account.schedule(_adKey("dead"), address(adManager), 0, close);
+        vm.warp(block.timestamp + DELAY);
+        account.execute(address(adManager), 0, close);
+        vm.stopPrank();
+        vm.deal(address(account), 3 ether);
+        address thief = makeAddr("p2-thief");
+
+        vm.startPrank(owner);
+        vm.expectRevert(CustodyGuardRail.GuardRail__LastGuardRail.selector);
+        account.disarmClosedAd(adManager, "dead");
+        assertTrue(account.guardRail("dead").armed);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        account.sweep(AddressCast.NATIVE_TOKEN_ADDRESS, thief, 3 ether);
+        vm.stopPrank();
+        assertEq(thief.balance, 0);
+    }
+
+    /// P2-81-a: with another ad still guarded, a closed ad's rail comes off at once and the account stays gated.
+    function test_p2_81_a_aClosedAdDisarmsAtOnceWhileAnotherIsGuarded() public {
+        _createAd("dead", 10);
+        _guard("dead", 0);
+        _guard(AD, 0);
+        bytes memory close = abi.encodeCall(IAdManager.closeAd, ("dead", owner));
+        vm.startPrank(owner);
+        account.schedule(_adKey("dead"), address(adManager), 0, close);
+        vm.warp(block.timestamp + DELAY);
+        account.execute(address(adManager), 0, close);
+        account.disarmClosedAd(adManager, "dead");
+        assertFalse(account.guardRail("dead").armed);
+        assertEq(account.guardedAds().length, 1);
+        vm.expectRevert(CustodyGuardRail.GuardRail__NotScheduled.selector);
+        account.sweep(address(adToken), owner, 1);
+        vm.stopPrank();
     }
 
     /// 81-4 (R1): a guard rail is bounded, so neither a stolen key nor a slip can freeze an ad: a delay of at most
