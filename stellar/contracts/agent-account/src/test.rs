@@ -5648,6 +5648,61 @@ fn p46_disarming_clears_a_pending_sweep() {
     assert!(f.client.scheduled(&Scope::Account, &sweep).is_none());
 }
 
+/// P2-80-b (N15): a pending resume is an account-wide change like the rest: it waits a raised delay,
+/// and a disarm clears it.
+#[test]
+fn p46_p2_a_pending_resume_waits_a_raised_delay_and_a_disarm_clears_it() {
+    let f = fixture();
+    let resume = sym_of(&f.env, "resume_settlement");
+    let resume_args = vec![&f.env, f.account.to_val()];
+    guard(&f, 0, 3_600, 7 * 86_400);
+    f.client.schedule(&Scope::Account, &resume, &resume_args);
+    guard(&f, 0, 7 * 86_400, 7 * 86_400);
+    assert_eq!(
+        f.client
+            .scheduled(&Scope::Account, &resume)
+            .unwrap()
+            .ready_at,
+        T0 + 7 * 86_400,
+        "the pending resume waits the new delay"
+    );
+    schedule_guard(&f, &None);
+    f.env.ledger().set_timestamp(T0 + 7 * 86_400);
+    f.client.set_guard_rail(&ad(&f.env), &None);
+    assert!(f.client.scheduled(&Scope::Account, &resume).is_none());
+}
+
+/// P2-80-b (N19): a shorter window closes pending rows no later than their open time plus it, and
+/// never lengthens a row that already closes sooner.
+#[test]
+fn p46_p2_clamping_never_lengthens_a_row() {
+    let f = fixture();
+    let short = sym_of(&f.env, "sweep");
+    let long = sym_of(&f.env, "upgrade");
+    let c = BytesN::from_array(&f.env, &[7; 32]);
+    f.env.as_contract(&f.account, || {
+        let row = |expires_at| policy::Schedule {
+            commitment: c.clone(),
+            ready_at: T0,
+            expires_at,
+        };
+        policy::set_schedule(&f.env, &Scope::Account, &short, &row(T0 + 600));
+        policy::set_schedule(&f.env, &Scope::Account, &long, &row(T0 + 86_400));
+        policy::clamp_windows(&f.env, &Scope::Account, 3_600);
+        let at = |a| {
+            policy::get_schedule(&f.env, &Scope::Account, a)
+                .unwrap()
+                .expires_at
+        };
+        assert_eq!(at(&short), T0 + 600, "a row closing sooner keeps its time");
+        assert_eq!(
+            at(&long),
+            T0 + 3_600,
+            "a longer row closes within the new window"
+        );
+    });
+}
+
 /// An `open_dispute` approval as the escrow would make it: filed by this account against the escrow
 /// being called, with `subs` nested under it.
 fn open_dispute_approval(
