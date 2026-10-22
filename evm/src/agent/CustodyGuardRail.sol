@@ -34,7 +34,8 @@ interface IAgentPolicyAdmin {
  *
  *         - **Per ad**: a withdraw above `threshold`, any close, and a manual lock above `threshold` need a matured
  *           schedule; below the threshold they spend a refilling bucket, so the unannounced flow is a rate, not
- *           the balance.
+ *           the balance. The owner's calls only: an agent's locks (`executeAsAgent`) draw from its policy's
+ *           buckets, never this one (81-b4).
  *         - **Account-wide, while any ad is guarded, owner calls are an allowlist (R3)**: every `execute` call
  *           is one of the rows below, or it is refused (`GuardRail__NotAllowed`). A blocklist can't be complete:
  *           tokens add ways to move funds (`transferAndCall`, ERC-777 `send`, DAI `push`/`move`).
