@@ -1008,6 +1008,9 @@ impl AdManagerContract {
         // "who may file" and "who gets paid" cannot drift apart.
         let ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
         Self::require_party(&env, &filer, &ad.maker, &params.order_recipient)?;
+        // p117: the filer signs here, at the root, so a wallet's simulation can record the module's
+        // nested auth and the bond's transfer under it.
+        filer.require_auth();
         // The deadline is vouched for by the hash the caller had to reproduce; the module cannot do
         // that itself, which is why filing starts here.
         // #586: the order's token and ad-chain amount, which a route's token bond is priced in.
@@ -1048,6 +1051,8 @@ impl AdManagerContract {
         Self::require_status(&env, &order_hash, Status::Disputed)?;
         let ad = storage::get_ad(&env, &params.ad_id).ok_or(AdManagerError::AdNotFound)?;
         Self::require_party(&env, &responder, &ad.maker, &params.order_recipient)?;
+        // p117: signed at the root, as `dispute`'s filer is.
+        responder.require_auth();
         ops::record_response(
             &env,
             &env.current_contract_address(),
