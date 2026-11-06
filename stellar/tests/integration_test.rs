@@ -11629,7 +11629,11 @@ fn test_p117_dispute_files_under_strict_root_auth_recording() {
         .ad_manager
         .try_dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
     std::println!("p117 strict-root dispute: {:?}", r);
-    assert!(r.is_ok(), "dispute failed under strict root recording: {:?}", r);
+    assert!(
+        r.is_ok(),
+        "dispute failed under strict root recording: {:?}",
+        r
+    );
 }
 
 #[test]
@@ -11656,5 +11660,9 @@ fn test_p117_respond_under_strict_root_auth_recording() {
         .ad_manager
         .try_respond_to_dispute(&p, &bridger, &evidence(&s, 0x11));
     std::println!("p117 strict-root respond: {:?}", r);
-    assert!(r.is_ok(), "respond failed under strict root recording: {:?}", r);
+    assert!(
+        r.is_ok(),
+        "respond failed under strict root recording: {:?}",
+        r
+    );
 }
