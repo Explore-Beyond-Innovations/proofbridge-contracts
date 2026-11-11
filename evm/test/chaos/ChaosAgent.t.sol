@@ -137,7 +137,9 @@ contract ChaosAgentTest is CustodyAccountTest {
 
         // Drain at the per-order cap: the bucket runs dry and the next lock is refused before the escrow.
         uint256 landed;
-        while (module.agentBucket(address(account), agentId, _b32(address(adToken))).level >= MAX_PER_ORDER) {
+        while (
+            landed < 10 && module.agentBucket(address(account), agentId, _b32(address(adToken))).level >= MAX_PER_ORDER
+        ) {
             _agentLock(MAX_PER_ORDER, 10 + landed);
             ++landed;
         }
