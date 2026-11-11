@@ -11616,3 +11616,53 @@ fn test_586_a_fee_change_before_the_lock_refunds_the_bridger() {
         "no fee was taken"
     );
 }
+
+// p117: a wallet's simulation records auth in strict root mode (stellar-rpc's default `record`,
+// which `prepareTransaction` uses). The filer's auth must be reachable from the root call.
+#[test]
+fn test_p117_dispute_files_under_strict_root_auth_recording() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let params = locked_ad_order(&s);
+    s.env.mock_all_auths();
+    let r = s
+        .ad_manager
+        .try_dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    std::println!("p117 strict-root dispute: {:?}", r);
+    assert!(
+        r.is_ok(),
+        "dispute failed under strict root recording: {:?}",
+        r
+    );
+}
+
+#[test]
+fn test_p117_dispute_files_with_non_root_auth_allowed() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let params = locked_ad_order(&s);
+    let r = s
+        .ad_manager
+        .try_dispute(&params, &filer, &bytes32_to_bytesn(&s.env, &[0xEE; 32]));
+    std::println!("p117 non-root-allowed dispute: {:?}", r);
+    assert!(r.is_ok());
+}
+
+#[test]
+fn test_p117_respond_under_strict_root_auth_recording() {
+    let s = setup();
+    let (_dm, _arbiter, filer) = wire_dispute_manager(&s);
+    let p = locked_ad_order(&s);
+    s.ad_manager.dispute(&p, &filer, &evidence(&s, 0xEE));
+    s.env.mock_all_auths();
+    let bridger = account_addr(&s, &s.tp.order_recipient);
+    let r = s
+        .ad_manager
+        .try_respond_to_dispute(&p, &bridger, &evidence(&s, 0x11));
+    std::println!("p117 strict-root respond: {:?}", r);
+    assert!(
+        r.is_ok(),
+        "respond failed under strict root recording: {:?}",
+        r
+    );
+}
