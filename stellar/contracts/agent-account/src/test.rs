@@ -6527,3 +6527,5 @@ fn p46_a_closed_ad_holds_nothing_and_locks_nothing() {
     f.client.disarm_closed_ad(&f.target, &ad(&f.env));
     assert!(f.client.guard_rail(&ad(&f.env)).is_none());
 }
+
+mod chaos;

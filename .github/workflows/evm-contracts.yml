@@ -143,6 +143,12 @@ jobs:
         run: forge test -vvv --no-match-contract Invariant
         id: test
 
+      # The chaos pack (CHAOS.md) as its own named check: C1–C8, the EVM half. The script fails on a
+      # suite that stops matching, since forge exits 0 on zero matches.
+      - name: Chaos pack (EVM)
+        run: ../scripts/chaos.sh evm
+        id: chaos
+
       # The agent module's storage layout is load-bearing and invisible: an account-first mapping
       # compiles, passes every functional test, and produces a module no bundler will carry. This
       # runs the real ERC-4337 validation rules over it.

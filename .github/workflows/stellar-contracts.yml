@@ -213,6 +213,12 @@ jobs:
         run: cargo test --test integration_test -- --nocapture
         working-directory: stellar
 
+      # The chaos pack (CHAOS.md) as its own named check: C1–C8, the Soroban half. The script fails
+      # unless each cargo run passes exactly the tests it names, since cargo exits 0 on zero matches.
+      - name: Chaos pack (Stellar)
+        run: ../scripts/chaos.sh stellar
+        working-directory: stellar
+
       - name: Unlock compute-cost baseline gate (1.6c)
         run: |
           set -o pipefail
