@@ -9,3 +9,4 @@ paths-ignore:
   - stellar/lib/*/src/test.rs
   - stellar/lib/*/src/*_test.rs
   - stellar/tests/**
+  - stellar/contracts/*/src/test/**
